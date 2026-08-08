@@ -6,3 +6,6 @@
 *
 !.gitignore
 !golden-principles.md
+!superpowers/
+!superpowers/specs/
+!superpowers/specs/2026-08-08-openkb-local-knowledge-graph-desktop-design.md
