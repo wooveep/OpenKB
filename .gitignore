@@ -30,3 +30,10 @@ examples/docs/
 # Shipped inside the wheel via hatchling `artifacts`, never committed to git.
 /openkb/web/
 web/
+
+.graphify*
+graphify-out/
+openkb/graphify-out/
+frontend/graphify-out/
+.gitnexus/
+.superpowers/
