@@ -106,3 +106,22 @@ MODEL_CALL_MIGRATION_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX model_attempts_call_idx ON model_attempts(call_id, attempt)
     """,
 )
+
+
+RECOVERY_RUN_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE recovery_runs (
+        recovery_run_id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES import_jobs(job_id) ON DELETE CASCADE,
+        stage_run_id TEXT NOT NULL REFERENCES stage_runs(stage_run_id) ON DELETE CASCADE,
+        model_override TEXT,
+        initial_timeout_seconds REAL,
+        status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
+        started_at TEXT NOT NULL,
+        completed_at TEXT
+    )
+    """,
+    """
+    CREATE INDEX recovery_runs_job_idx ON recovery_runs(job_id, started_at DESC)
+    """,
+)

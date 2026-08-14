@@ -9,7 +9,7 @@ use crate::engine_wire::{
 pub use crate::engine_wire::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, BridgeResult,
     CancelResult, EngineHealth, ImportControlResult, ImportJobsResult, InspectKnowledgeBaseResult,
-    KnowledgeBaseActivationResult, TextDocumentImportResult,
+    KnowledgeBaseActivationResult, RecoveryOverride, TextDocumentImportResult,
 };
 use serde_json::{json, Value};
 use std::{
@@ -217,6 +217,27 @@ impl EngineSupervisor {
             BridgeError::new(
                 "invalid_engine_response",
                 format!("Engine import resume response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn recover_import_job(
+        &self,
+        job_id: String,
+        recovery_override: RecoveryOverride,
+        request_id: String,
+    ) -> BridgeResult<TextDocumentImportResult> {
+        self.ensure_started()?;
+        let value = self.request_started_with_timeout(
+            "workbench.recover_import_job",
+            json!({ "job_id": job_id, "recovery_override": recovery_override }),
+            Some(request_id),
+            IMPORT_REQUEST_TIMEOUT,
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine import recovery response has an invalid shape: {error}"),
             )
         })
     }

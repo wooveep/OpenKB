@@ -53,6 +53,7 @@ class ImportJobState:
     source: Path
     status: str
     stage_ids: dict[str, str]
+    recovery_run_id: str | None = None
 
 
 class DesktopImportStore:
@@ -177,6 +178,10 @@ class DesktopImportStore:
                 FROM import_jobs
                 JOIN import_job_runtime ON import_job_runtime.job_id = import_jobs.job_id
                 WHERE import_job_runtime.status = 'recoverable'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM quarantined_documents
+                        WHERE quarantined_documents.job_id = import_jobs.job_id
+                    )
                 ORDER BY import_jobs.created_at
                 """
             ).fetchall()
@@ -195,7 +200,8 @@ class DesktopImportStore:
                     source_documents.display_name, source_documents.source_format,
                     source_documents.asset_sha256, source_documents.availability,
                     (SELECT COUNT(*) FROM evidence_refs
-                     WHERE evidence_refs.document_id = source_documents.document_id)
+                     WHERE evidence_refs.document_id = source_documents.document_id),
+                    import_jobs.source_path
                 FROM import_jobs
                 LEFT JOIN import_job_runtime ON import_job_runtime.job_id = import_jobs.job_id
                 LEFT JOIN source_documents ON source_documents.document_id = import_jobs.document_id
@@ -217,7 +223,8 @@ class DesktopImportStore:
                     source_documents.display_name, source_documents.source_format,
                     source_documents.asset_sha256, source_documents.availability,
                     (SELECT COUNT(*) FROM evidence_refs
-                     WHERE evidence_refs.document_id = source_documents.document_id)
+                     WHERE evidence_refs.document_id = source_documents.document_id),
+                    import_jobs.source_path
                 FROM import_jobs
                 LEFT JOIN import_job_runtime ON import_job_runtime.job_id = import_jobs.job_id
                 LEFT JOIN source_documents ON source_documents.document_id = import_jobs.document_id
@@ -443,6 +450,10 @@ class DesktopImportStore:
                     self._complete_job_in(
                         connection, state.job_id, search_stage_id, existing.document_id, now
                     )
+                    self._complete_recovery_in(connection, state, now)
+                    connection.execute(
+                        "DELETE FROM quarantined_documents WHERE job_id = ?", (state.job_id,)
+                    )
                     connection.commit()
                     return existing, True
                 connection.execute(
@@ -505,6 +516,10 @@ class DesktopImportStore:
                     [(evidence_id, document_id, block.text) for evidence_id, block in evidence],
                 )
                 self._complete_job_in(connection, state.job_id, search_stage_id, document_id, now)
+                self._complete_recovery_in(connection, state, now)
+                connection.execute(
+                    "DELETE FROM quarantined_documents WHERE job_id = ?", (state.job_id,)
+                )
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -687,6 +702,21 @@ class DesktopImportStore:
             WHERE job_id = ?
             """,
             (now, job_id),
+        )
+
+    @staticmethod
+    def _complete_recovery_in(
+        connection: sqlite3.Connection, state: ImportJobState, now: str
+    ) -> None:
+        if state.recovery_run_id is None:
+            return
+        connection.execute(
+            """
+            UPDATE recovery_runs
+            SET status = 'completed', completed_at = ?
+            WHERE recovery_run_id = ?
+            """,
+            (now, state.recovery_run_id),
         )
 
     def _job_state_in(

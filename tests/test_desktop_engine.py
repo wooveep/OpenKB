@@ -300,7 +300,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 4,
+            "schema_version": 5,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -402,7 +402,7 @@ def test_engine_uses_the_configured_model_gateway_for_imports(tmp_path):
         io.BytesIO(),
         io.BytesIO(),
         workspace=workspace,
-        model_gateway_factory=lambda _kb_dir: DesktopModelGateway(timeout_transport),
+        model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(timeout_transport),
     )
     server._handshake_complete = True
     request = DesktopRequest(
@@ -421,6 +421,64 @@ def test_engine_uses_the_configured_model_gateway_for_imports(tmp_path):
     )
     assert history["jobs"][0]["job"]["status"] == "quarantined"
     assert history["jobs"][0]["quarantine"]["error_code"] == "model_timeout"
+
+
+def test_engine_recovers_a_quarantined_import_with_a_run_scoped_override(tmp_path):
+    """The Bridge forwards a recovery override only to the selected recovery run."""
+    desktop_kb = tmp_path / "desktop-kb"
+    source = tmp_path / "recover.txt"
+    source.write_text("Recover only this document.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(desktop_kb)
+    overrides = []
+
+    def model_gateway_factory(_kb_dir, override=None):
+        overrides.append(override)
+        if override is None:
+            return DesktopModelGateway(lambda *_args: (_ for _ in ()).throw(TimeoutError()))
+        return DesktopModelGateway(lambda *_args: "Recovered")
+
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        workspace=workspace,
+        model_gateway_factory=model_gateway_factory,
+    )
+    server._handshake_complete = True
+    with pytest.raises(DesktopImportError, match="response timeout"):
+        server._dispatch(
+            DesktopRequest(
+                request_id="import",
+                method="workbench.import_text_document",
+                params={"source_path": str(source)},
+            ),
+            cancel_event=None,
+        )
+    job_id = server._dispatch(
+        DesktopRequest(request_id="history", method="workbench.import_jobs", params={}),
+        cancel_event=None,
+    )["jobs"][0]["job"]["job_id"]
+
+    recovered = server._dispatch(
+        DesktopRequest(
+            request_id="recover",
+            method="workbench.recover_import_job",
+            params={
+                "job_id": job_id,
+                "recovery_override": {
+                    "model": "test/recovery-model",
+                    "initialTimeoutSeconds": 30,
+                },
+            },
+        ),
+        cancel_event=None,
+    )
+
+    assert recovered["job"]["status"] == "completed"
+    assert recovered["quarantine"] is None
+    assert overrides[0] is None
+    assert overrides[1].model == "test/recovery-model"
+    assert overrides[1].initial_timeout_seconds == 30
 
 
 def test_open_starts_recovery_from_the_latest_verified_checkpoint(tmp_path):

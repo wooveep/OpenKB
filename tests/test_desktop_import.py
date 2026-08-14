@@ -9,7 +9,12 @@ from hashlib import sha256
 import pytest
 
 from openkb import desktop_import_runner
-from openkb.desktop_import import DesktopImportControl, DesktopImportError, DesktopTextImportService
+from openkb.desktop_import import (
+    DesktopImportControl,
+    DesktopImportError,
+    DesktopRecoveryOverride,
+    DesktopTextImportService,
+)
 from openkb.desktop_import_store import DesktopImportStore
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
@@ -157,6 +162,133 @@ def test_model_failure_is_quarantined_with_safe_attempt_history(tmp_path):
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM evidence_fts").fetchone() == (0,)
+
+
+def test_manual_recovery_reuses_verified_stages_and_records_its_override(tmp_path, monkeypatch):
+    """A quarantined model stage resumes without rebuilding raw, IR, or evidence work."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "recover.txt"
+    source.write_text("# Recovery\n\nKeep verified artifacts.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+
+    def timeout(*_args, **_kwargs):
+        raise TimeoutError()
+
+    with pytest.raises(DesktopImportError, match="response timeout"):
+        DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(timeout)).import_text(
+            source
+        )
+
+    DesktopKnowledgeBaseRuntime().open(kb_dir)
+    persisted = DesktopTextImportService(kb_dir).list_import_jobs()["jobs"][0]
+    job_id = persisted["job"]["job_id"]
+    assert persisted["job"]["status"] == "quarantined"
+    assert persisted["job"]["source_name"] == "recover.txt"
+    assert persisted["quarantine"]["stage"] == "model_analysis"
+    assert len(persisted["model_calls"][0]["attempts"]) == 4
+
+    source.unlink()
+    monkeypatch.setattr(
+        desktop_import_runner,
+        "build_document_ir",
+        lambda *_args, **_kwargs: pytest.fail("recovery rebuilt Document IR"),
+    )
+    monkeypatch.setattr(
+        desktop_import_runner,
+        "build_evidence",
+        lambda *_args, **_kwargs: pytest.fail("recovery rebuilt evidence"),
+    )
+    recovered = DesktopTextImportService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(
+            lambda *_args: "Recovered summary.", initial_timeout_seconds=30
+        ),
+    ).recover_text(
+        job_id,
+        DesktopRecoveryOverride(model="test/recovery-model", initial_timeout_seconds=30),
+    )
+
+    assert recovered.job.status == "completed"
+    assert recovered.quarantine is None
+    assert recovered.document.availability == "available"
+    assert [call.status for call in recovered.model_calls] == ["failed", "completed"]
+    assert recovered.model_calls[-1].attempts[0].timeout_seconds == 30
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM quarantined_documents").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT model_override, initial_timeout_seconds, status FROM recovery_runs"
+        ).fetchone() == ("test/recovery-model", 30.0, "completed")
+        assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (1,)
+
+
+def test_cancelled_manual_recovery_can_be_retried(tmp_path):
+    """Cancelling a recovery keeps its quarantined document manually recoverable."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "retry-after-cancel.txt"
+    source.write_text("Keep checkpoints after a cancelled recovery.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+
+    def timeout(*_args, **_kwargs):
+        raise TimeoutError()
+
+    with pytest.raises(DesktopImportError):
+        DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(timeout)).import_text(
+            source
+        )
+    job_id = DesktopTextImportService(kb_dir).list_import_jobs()["jobs"][0]["job"]["job_id"]
+
+    control = DesktopImportControl()
+    control.request_cancel()
+    with pytest.raises(DesktopImportError) as error:
+        DesktopTextImportService(
+            kb_dir,
+            control=control,
+            model_gateway=DesktopModelGateway(lambda *_args: "not called"),
+        ).recover_text(job_id, DesktopRecoveryOverride())
+
+    assert error.value.code == "import_cancelled"
+    cancelled = DesktopTextImportService(kb_dir).task(job_id)
+    assert cancelled.job.status == "quarantined"
+    assert cancelled.quarantine is not None
+
+    recovered = DesktopTextImportService(
+        kb_dir, model_gateway=DesktopModelGateway(lambda *_args: "Recovered after cancel.")
+    ).recover_text(job_id, DesktopRecoveryOverride())
+
+    assert recovered.job.status == "completed"
+    assert recovered.quarantine is None
+
+
+def test_recovery_with_an_invalid_raw_checkpoint_stays_quarantined(tmp_path):
+    """Checkpoint validation blocks recovery before an invalid document reaches retrieval."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "damaged.txt"
+    source.write_text("Do not publish an invalid recovery.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+
+    def timeout(*_args, **_kwargs):
+        raise TimeoutError()
+
+    with pytest.raises(DesktopImportError):
+        DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(timeout)).import_text(
+            source
+        )
+    job_id = DesktopTextImportService(kb_dir).list_import_jobs()["jobs"][0]["job"]["job_id"]
+    next((kb_dir / "raw").iterdir()).write_text("tampered", encoding="utf-8")
+
+    with pytest.raises(DesktopImportError) as error:
+        DesktopTextImportService(
+            kb_dir, model_gateway=DesktopModelGateway(lambda *_args: "never used")
+        ).recover_text(job_id, DesktopRecoveryOverride())
+
+    assert error.value.code == "raw_asset_integrity_failed"
+    task = DesktopTextImportService(kb_dir).task(job_id)
+    assert task.job.status == "quarantined"
+    assert task.quarantine is not None
+    assert task.quarantine.stage == "raw_asset"
+    assert task.quarantine.error_code == "raw_asset_integrity_failed"
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)
 
 
 def test_open_recovers_an_interrupted_job_without_exposing_a_partial_document(tmp_path):

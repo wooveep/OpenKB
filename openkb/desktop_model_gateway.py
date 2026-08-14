@@ -165,10 +165,14 @@ class DesktopModelGateway:
         *,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        initial_timeout_seconds: float = INITIAL_RESPONSE_TIMEOUT_SECONDS,
     ) -> None:
+        if not 0 < initial_timeout_seconds <= MODEL_CALL_DEADLINE_SECONDS:
+            raise ValueError("Initial model response timeout must be between 0 and 60 seconds.")
         self._transport = transport
         self._clock = clock
         self._sleep = sleep
+        self._initial_timeout_seconds = initial_timeout_seconds
 
     def analyze(
         self, request: DesktopModelRequest, *, on_event: ModelEventCallback
@@ -180,7 +184,7 @@ class DesktopModelGateway:
             remaining = _remaining_seconds(started_at, self._clock())
             if remaining <= 0:
                 raise self._deadline_error(call_id, attempt_index, on_event)
-            scheduled_timeout = INITIAL_RESPONSE_TIMEOUT_SECONDS + (
+            scheduled_timeout = self._initial_timeout_seconds + (
                 attempt_index * RETRY_TIMEOUT_INCREMENT_SECONDS
             )
             timeout_seconds = min(scheduled_timeout, remaining)
@@ -202,7 +206,7 @@ class DesktopModelGateway:
                     raise self._deadline_error(call_id, attempt_index + 1, on_event) from error
                 if failure.retryable and attempt_index < MAX_AUTOMATIC_RETRIES:
                     next_timeout = min(
-                        INITIAL_RESPONSE_TIMEOUT_SECONDS
+                        self._initial_timeout_seconds
                         + ((attempt_index + 1) * RETRY_TIMEOUT_INCREMENT_SECONDS),
                         remaining,
                     )

@@ -7,14 +7,18 @@ from pathlib import Path
 import yaml
 
 from openkb.config import LlmCredentialBundle, load_config, resolve_credential_bundle
+from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_model_gateway import (
+    INITIAL_RESPONSE_TIMEOUT_SECONDS,
     DesktopModelGateway,
     DesktopModelRequest,
     DesktopModelTransportError,
 )
 
 
-def desktop_model_gateway_for(kb_dir: Path) -> DesktopModelGateway | None:
+def desktop_model_gateway_for(
+    kb_dir: Path, override: DesktopRecoveryOverride | None = None
+) -> DesktopModelGateway | None:
     """Build the live gateway when this Desktop KB has opted into a model config.
 
     Fresh Desktop knowledge bases can still establish local retrieval before the
@@ -26,14 +30,33 @@ def desktop_model_gateway_for(kb_dir: Path) -> DesktopModelGateway | None:
     config_path = resolved / ".openkb" / "config.yaml"
     try:
         bundle = resolve_credential_bundle(resolved)
+    except (OSError, TypeError, ValueError, yaml.YAMLError):
+        bundle = LlmCredentialBundle()
+    try:
         config = load_config(config_path)
     except (OSError, TypeError, ValueError, yaml.YAMLError):
-        return DesktopModelGateway(
-            DesktopLiteLLMTransport(model=None, bundle=LlmCredentialBundle())
-        )
-    if bundle.api_key is None and not config_path.exists():
+        return _gateway_for(override.model if override is not None else None, bundle, override)
+    model = (
+        override.model
+        if override is not None and override.model is not None
+        else config.get("model")
+    )
+    if bundle.api_key is None and not config_path.exists() and override is None:
         return None
-    return DesktopModelGateway(DesktopLiteLLMTransport(model=config.get("model"), bundle=bundle))
+    return _gateway_for(model, bundle, override)
+
+
+def _gateway_for(
+    model: object, bundle: LlmCredentialBundle, override: DesktopRecoveryOverride | None
+) -> DesktopModelGateway:
+    timeout = (
+        override.initial_timeout_seconds
+        if override is not None and override.initial_timeout_seconds is not None
+        else INITIAL_RESPONSE_TIMEOUT_SECONDS
+    )
+    return DesktopModelGateway(
+        DesktopLiteLLMTransport(model=model, bundle=bundle), initial_timeout_seconds=timeout
+    )
 
 
 class DesktopLiteLLMTransport:

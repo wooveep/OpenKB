@@ -24,7 +24,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 4
+    assert first.knowledge_base.schema_version == 5
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
@@ -35,6 +35,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
             (2,),
             (3,),
             (4,),
+            (5,),
         ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
@@ -73,6 +74,8 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
         connection.execute("DROP TABLE model_attempts")
         connection.execute("DROP TABLE model_calls")
         connection.execute("DROP TABLE quarantined_documents")
+        connection.execute("DROP TABLE recovery_runs")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 5")
         connection.execute("DELETE FROM schema_migrations WHERE version = 4")
         connection.execute("DELETE FROM schema_migrations WHERE version = 3")
         connection.execute(
@@ -107,6 +110,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
             (2,),
             (3,),
             (4,),
+            (5,),
         ]
         assert connection.execute(
             "SELECT status FROM import_job_runtime WHERE job_id = 'legacy-job'"
@@ -136,6 +140,8 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
         connection.execute("DROP TABLE model_attempts")
         connection.execute("DROP TABLE model_calls")
         connection.execute("DROP TABLE quarantined_documents")
+        connection.execute("DROP TABLE recovery_runs")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 5")
         connection.execute("DELETE FROM schema_migrations WHERE version = 4")
         connection.execute(
             "DELETE FROM stage_run_runtime WHERE job_id = ? AND stage_run_id = ?",

@@ -1,6 +1,7 @@
 import {
   BookOpen,
   CheckCircle2,
+  CircleAlert,
   ClipboardCheck,
   FileText,
   FolderOpen,
@@ -26,11 +27,13 @@ import { LanguageToggle } from "@/lib/language"
 import { ThemeToggle } from "@/lib/theme"
 import { cn } from "@/lib/utils"
 import { useDesktopBridge } from "./bridge-context"
+import { FailedDocumentsDialog } from "./FailedDocumentsDialog"
 import { DesktopBridgeError } from "./contracts"
 import type {
   DesktopImportTask,
   DesktopImportStageProgressEvent,
   DesktopKnowledgeBase,
+  DesktopRecoveryOverride,
 } from "./contracts"
 
 type WorkspaceSection = "overview" | "documents" | "answers" | "knowledge" | "review" | "settings"
@@ -84,6 +87,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
   const [importTasks, setImportTasks] = useState<DesktopImportTask[]>([])
+  const [failedDocumentsOpen, setFailedDocumentsOpen] = useState(false)
   const [controllingJobId, setControllingJobId] = useState<string | null>(null)
   const [liveImportStage, setLiveImportStage] = useState<
     DesktopImportStageProgressEvent["data"] | null
@@ -246,6 +250,27 @@ export default function DesktopKnowledgeBaseWorkspace() {
     }
   }
 
+  const recoverImportJob = async (jobId: string, recoveryOverride: DesktopRecoveryOverride) => {
+    setControllingJobId(jobId)
+    setImportError(null)
+    const requestId = nextRequestId()
+    activeImportRequest.current = requestId
+    setLiveImportStage(null)
+    try {
+      await bridge.recoverImportJob(jobId, recoveryOverride, requestId)
+    } catch (error) {
+      if (!isImportControlError(error)) {
+        setImportError(error instanceof Error ? error.message : String(error))
+      }
+    } finally {
+      if (activeImportRequest.current === requestId) activeImportRequest.current = null
+      await refreshActiveKnowledgeBase()
+      setControllingJobId(null)
+    }
+  }
+
+  const failedDocumentCount = importTasks.filter((task) => task.job.status === "quarantined").length
+
   return (
     <div className="min-h-screen bg-background text-foreground" data-testid="desktop-workbench">
       <header className="flex min-h-16 items-center justify-between gap-3 border-b border-border/70 bg-background/85 px-4 backdrop-blur md:px-6">
@@ -298,6 +323,21 @@ export default function DesktopKnowledgeBaseWorkspace() {
             ))}
           </nav>
           <div className="mt-6 border-t border-border/70 pt-4">
+            <Button
+              className="w-full justify-start"
+              size="sm"
+              variant="outline"
+              disabled={knowledgeBase === null}
+              onClick={() => setFailedDocumentsOpen(true)}
+            >
+              <CircleAlert className="size-4" />
+              {t("desktop.knowledgeBases.failedDocuments")}
+              {failedDocumentCount ? (
+                <span className="ml-auto rounded-full bg-destructive/10 px-1.5 py-0.5 text-xs text-destructive">
+                  {failedDocumentCount}
+                </span>
+              ) : null}
+            </Button>
             <Button className="w-full justify-start" size="sm" onClick={() => beginSelection("create")}>
               <Plus className="size-4" />
               {t("desktop.knowledgeBases.create")}
@@ -418,6 +458,13 @@ export default function DesktopKnowledgeBaseWorkspace() {
           </form>
         </DialogContent>
       </Dialog>
+      <FailedDocumentsDialog
+        open={failedDocumentsOpen}
+        tasks={importTasks}
+        recoveringJobId={controllingJobId}
+        onOpenChange={setFailedDocumentsOpen}
+        onRecover={(jobId, override) => void recoverImportJob(jobId, override)}
+      />
     </div>
   )
 }

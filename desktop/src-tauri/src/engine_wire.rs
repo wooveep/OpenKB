@@ -225,6 +225,8 @@ pub struct ImportedDocument {
 pub struct ImportJob {
     #[serde(alias = "job_id")]
     pub job_id: String,
+    #[serde(alias = "source_name")]
+    pub source_name: String,
     pub status: ImportJobStatus,
     pub progress: ImportProgress,
     #[serde(alias = "document_id")]
@@ -297,6 +299,13 @@ pub struct QuarantinedDocument {
     pub suggested_action: String,
     #[serde(alias = "attempt_count")]
     pub attempt_count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryOverride {
+    pub model: Option<String>,
+    pub initial_timeout_seconds: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 from openkb.desktop_import_model_ledger import model_details_for_job
 from openkb.desktop_import_types import (
@@ -19,16 +20,22 @@ def task_from_row(
     job_id = str(row[0])
     stages = stages_for_job(connection, job_id, stage_order_sql)
     model_calls, quarantine = model_details_for_job(connection, job_id)
+    runtime_status = str(row[1])
+    if runtime_status == "running":
+        # A manual recovery leaves the old quarantine record in place until it
+        # publishes atomically, but it should appear as active work while running.
+        quarantine = None
     job = DesktopImportJob(
         job_id=job_id,
-        status="quarantined" if quarantine is not None else str(row[1]),
+        source_name=Path(str(row[10])).name,
+        status="quarantined" if quarantine is not None else runtime_status,
         progress=int(str(row[2])),
         document_id=str(row[3]) if row[3] is not None else None,
         deduplicated=any(
             stage.stage == "document_ir" and stage.status == "skipped" for stage in stages
         ),
     )
-    document = document_from_row(row[4:]) if row[4] is not None else None
+    document = document_from_row(row[4:10]) if row[4] is not None else None
     return DesktopImportTask(
         job=job,
         document=document,

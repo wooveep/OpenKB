@@ -16,6 +16,7 @@ from openkb.desktop_import_types import (
     DesktopModelAttempt,
     DesktopModelCall,
     DesktopQuarantinedDocument,
+    DesktopRecoveryOverride,
     DesktopStageRun,
     DesktopTextImportResult,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "DesktopModelAttempt",
     "DesktopModelCall",
     "DesktopQuarantinedDocument",
+    "DesktopRecoveryOverride",
     "DesktopStageRun",
     "DesktopTextImportResult",
     "DesktopTextImportService",

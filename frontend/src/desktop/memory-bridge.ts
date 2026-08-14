@@ -10,6 +10,7 @@ import type {
   DesktopKnowledgeBaseActivation,
   DesktopKnowledgeBaseInspection,
   DesktopImportTask,
+  DesktopRecoveryOverride,
   DesktopTextDocumentImport,
 } from "./contracts"
 
@@ -136,6 +137,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
       },
       job: {
         jobId,
+        sourceName: name,
         status: "completed",
         progress: 100,
         documentId,
@@ -188,6 +190,39 @@ export class MemoryDesktopBridge implements DesktopBridge {
     return this.importTextDocument(`resumed-${jobId}.txt`, requestId)
   }
 
+  async recoverImportJob(
+    jobId: string,
+    recoveryOverride: DesktopRecoveryOverride,
+    requestId: string,
+  ): Promise<DesktopTextDocumentImport> {
+    void recoveryOverride
+    void requestId
+    const task = this.importJobResults.find((item) => item.job.jobId === jobId)
+    if (!task) throw new Error("This import task no longer exists.")
+    const document = task.document ?? {
+      documentId: `document-${jobId}`,
+      name: `recovered-${jobId}.txt`,
+      sourceFormat: "txt" as const,
+      rawAssetSha256: "memory-bridge",
+      evidenceCount: 1,
+      availability: "available" as const,
+    }
+    const result: DesktopTextDocumentImport = {
+      document,
+      job: { ...task.job, status: "completed", progress: 100, documentId: document.documentId },
+      stages: task.stages.map((stage) => ({
+        ...stage,
+        status: stage.status === "failed" || stage.status === "pending" ? "completed" : stage.status,
+        progress: 100,
+        errorCode: null,
+      })),
+      modelCalls: task.modelCalls,
+      quarantine: null,
+    }
+    this.importJobResults = [result, ...this.importJobResults.filter((item) => item.job.jobId !== jobId)]
+    return result
+  }
+
   async cancelImportJob(jobId: string): Promise<DesktopImportControlResult> {
     this.updateImportTask(jobId, "cancelled")
     return { jobId, accepted: true }
@@ -212,7 +247,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 4,
+      schemaVersion: 5,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []

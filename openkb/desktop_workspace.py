@@ -14,7 +14,10 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from openkb.desktop_workspace_migrations import MODEL_CALL_MIGRATION_STATEMENTS
+from openkb.desktop_workspace_migrations import (
+    MODEL_CALL_MIGRATION_STATEMENTS,
+    RECOVERY_RUN_MIGRATION_STATEMENTS,
+)
 from openkb.locks import kb_ingest_lock
 
 _STATE_DIRNAME = ".openkb"
@@ -326,6 +329,7 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
         ),
     ),
     (4, MODEL_CALL_MIGRATION_STATEMENTS),
+    (5, RECOVERY_RUN_MIGRATION_STATEMENTS),
 )
 
 

@@ -11,6 +11,7 @@ import {
   type DesktopKnowledgeBaseActivation,
   type DesktopKnowledgeBaseInspection,
   type DesktopImportJobs,
+  type DesktopRecoveryOverride,
   type DesktopTextDocumentImport,
 } from "./contracts"
 
@@ -97,6 +98,18 @@ export class TauriDesktopBridge implements DesktopBridge {
     requestId: string,
   ): Promise<DesktopTextDocumentImport> {
     return this.call<DesktopTextDocumentImport>("desktop_resume_import_job", { jobId, requestId })
+  }
+
+  async recoverImportJob(
+    jobId: string,
+    recoveryOverride: DesktopRecoveryOverride,
+    requestId: string,
+  ): Promise<DesktopTextDocumentImport> {
+    return this.call<DesktopTextDocumentImport>("desktop_recover_import_job", {
+      jobId,
+      recoveryOverride,
+      requestId,
+    })
   }
 
   async cancelImportJob(jobId: string): Promise<DesktopImportControlResult> {
@@ -191,6 +204,17 @@ class UnavailableDesktopBridge implements DesktopBridge {
 
   resumeImportJob(jobId: string, requestId: string): Promise<DesktopTextDocumentImport> {
     void jobId
+    void requestId
+    return this.unavailable()
+  }
+
+  recoverImportJob(
+    jobId: string,
+    recoveryOverride: DesktopRecoveryOverride,
+    requestId: string,
+  ): Promise<DesktopTextDocumentImport> {
+    void jobId
+    void recoveryOverride
     void requestId
     return this.unavailable()
   }

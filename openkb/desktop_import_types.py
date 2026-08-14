@@ -52,6 +52,7 @@ class DesktopImportJob:
     """The persisted task-center record for one selected source."""
 
     job_id: str
+    source_name: str
     status: str
     progress: int
     document_id: str | None
@@ -60,6 +61,7 @@ class DesktopImportJob:
     def as_dict(self) -> dict[str, object]:
         return {
             "job_id": self.job_id,
+            "source_name": self.source_name,
             "status": self.status,
             "progress": self.progress,
             "document_id": self.document_id,
@@ -143,6 +145,14 @@ class DesktopQuarantinedDocument:
             "suggested_action": self.suggested_action,
             "attempt_count": self.attempt_count,
         }
+
+
+@dataclass(frozen=True)
+class DesktopRecoveryOverride:
+    """One manual recovery's model settings, never a knowledge-base default."""
+
+    model: str | None = None
+    initial_timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True)

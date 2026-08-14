@@ -7,7 +7,8 @@ mod process_tree;
 use engine_protocol::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
     EngineHealth, EngineSupervisor, ImportControlResult, ImportJobsResult,
-    InspectKnowledgeBaseResult, KnowledgeBaseActivationResult, TextDocumentImportResult,
+    InspectKnowledgeBaseResult, KnowledgeBaseActivationResult, RecoveryOverride,
+    TextDocumentImportResult,
 };
 use process_tree::ProcessTreeJob;
 use std::sync::Arc;
@@ -145,6 +146,24 @@ async fn desktop_resume_import_job(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn desktop_recover_import_job(
+    state: State<'_, DesktopState>,
+    job_id: String,
+    recovery_override: RecoveryOverride,
+    request_id: String,
+) -> Result<TextDocumentImportResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.recover_import_job(job_id, recovery_override, request_id)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop import recovery task stopped unexpectedly: {error}"),
+    })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
 fn desktop_cancel_import_job(
     state: State<'_, DesktopState>,
     job_id: String,
@@ -208,6 +227,7 @@ fn main() {
             desktop_import_jobs,
             desktop_pause_import_job,
             desktop_resume_import_job,
+            desktop_recover_import_job,
             desktop_cancel_import_job,
             desktop_cancel,
             desktop_subscribe,

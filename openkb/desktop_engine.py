@@ -24,7 +24,8 @@ from openkb.desktop_import import (
     DesktopImportError,
     DesktopTextImportService,
 )
-from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_import_types import DesktopRecoveryOverride
+from openkb.desktop_model_gateway import MODEL_CALL_DEADLINE_SECONDS, DesktopModelGateway
 from openkb.desktop_model_transport import desktop_model_gateway_for
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
@@ -148,6 +149,7 @@ class DesktopEngineServer:
         "workbench.active_knowledge_base",
         "workbench.import_text_document",
         "workbench.resume_import_job",
+        "workbench.recover_import_job",
         "workbench.import_jobs",
     }
     _NON_CANCELABLE_MUTATION_METHODS = {
@@ -164,7 +166,9 @@ class DesktopEngineServer:
         service: DesktopWorkbenchService | None = None,
         workspace: DesktopKnowledgeBaseRuntime | None = None,
         engine_version: str | None = None,
-        model_gateway_factory: Callable[[Path], DesktopModelGateway | None] | None = None,
+        model_gateway_factory: (
+            Callable[[Path, DesktopRecoveryOverride | None], DesktopModelGateway | None] | None
+        ) = None,
     ) -> None:
         self._reader = FrameReader(input_stream)
         self._writer = FrameWriter(output_stream)
@@ -405,6 +409,21 @@ class DesktopEngineServer:
                     job_id=_required_string_param(request, "job_id"),
                 )
 
+            if request.method == "workbench.recover_import_job":
+                active = self._workspace.active()
+                if active is None:
+                    raise DesktopRequestError(
+                        "no_active_knowledge_base",
+                        "Open a Desktop Knowledge Base before recovering an import.",
+                    )
+                self._begin_workspace_mutation(request, cancel_event)
+                return self._run_import(
+                    Path(active.kb_dir),
+                    request_id=str(request.request_id),
+                    job_id=_required_string_param(request, "job_id"),
+                    recovery_override=_recovery_override_param(request),
+                )
+
             if request.method == "workbench.import_jobs":
                 active = self._workspace.active()
                 if active is None:
@@ -421,19 +440,23 @@ class DesktopEngineServer:
         request_id: str | None,
         source_path: Path | None = None,
         job_id: str | None = None,
+        recovery_override: DesktopRecoveryOverride | None = None,
     ) -> dict[str, object]:
         """Run one job while its durable state, not this worker, remains authoritative."""
         control = DesktopImportControl()
+        model_gateway = self._model_gateway_factory(kb_dir, recovery_override)
         importer = DesktopTextImportService(
             kb_dir,
             control=control,
             on_stage_progress=lambda data: self._record_import_stage(request_id, control, data),
-            model_gateway=self._model_gateway_factory(kb_dir),
+            model_gateway=model_gateway,
         )
         try:
             if source_path is not None:
                 return importer.import_text(source_path).as_dict()
             if job_id is not None:
+                if recovery_override is not None:
+                    return importer.recover_text(job_id, recovery_override).as_dict()
                 return importer.resume_text(job_id).as_dict()
             raise DesktopRequestError("invalid_params", "An import source or job is required.")
         finally:
@@ -559,6 +582,41 @@ def _required_string_param(request: DesktopRequest, key: str) -> str:
     if not isinstance(value, str) or not value:
         raise DesktopRequestError("invalid_params", f"{request.method} requires a non-empty {key}.")
     return value
+
+
+def _recovery_override_param(request: DesktopRequest) -> DesktopRecoveryOverride:
+    value = request.params.get("recovery_override", {})
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise DesktopRequestError(
+            "invalid_params", "workbench.recover_import_job recovery_override must be an object."
+        )
+    model_value = value.get("model")
+    if model_value is not None and (not isinstance(model_value, str) or not model_value.strip()):
+        raise DesktopRequestError(
+            "invalid_params", "Recovery model must be a non-empty string when provided."
+        )
+    timeout_value = (
+        value["initial_timeout_seconds"]
+        if "initial_timeout_seconds" in value
+        else value.get("initialTimeoutSeconds")
+    )
+    if timeout_value is not None and (
+        isinstance(timeout_value, bool) or not isinstance(timeout_value, (int, float))
+    ):
+        raise DesktopRequestError(
+            "invalid_params", "Recovery response timeout must be a number of seconds."
+        )
+    timeout = float(timeout_value) if timeout_value is not None else None
+    if timeout is not None and not 0 < timeout <= MODEL_CALL_DEADLINE_SECONDS:
+        raise DesktopRequestError(
+            "invalid_params", "Recovery response timeout must be between 1 and 60 seconds."
+        )
+    return DesktopRecoveryOverride(
+        model=model_value.strip() if isinstance(model_value, str) else None,
+        initial_timeout_seconds=timeout,
+    )
 
 
 def _parse_request(frame: dict[str, object]) -> DesktopRequest:

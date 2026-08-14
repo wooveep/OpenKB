@@ -57,6 +57,7 @@ export interface DesktopImportedDocument {
 
 export interface DesktopImportJob {
   jobId: string
+  sourceName: string
   status: "running" | "paused" | "cancelled" | "recoverable" | "quarantined" | "completed" | "failed"
   progress: number
   documentId: string | null
@@ -102,6 +103,12 @@ export interface DesktopQuarantinedDocument {
   reason: string
   suggestedAction: string
   attemptCount: number
+}
+
+/** Optional settings used only by one manual recovery run. */
+export interface DesktopRecoveryOverride {
+  model?: string
+  initialTimeoutSeconds?: number
 }
 
 export interface DesktopTextDocumentImport {
@@ -228,6 +235,11 @@ export interface DesktopBridge {
   importJobs(): Promise<DesktopImportJobs>
   pauseImportJob(jobId: string): Promise<DesktopImportControlResult>
   resumeImportJob(jobId: string, requestId: string): Promise<DesktopTextDocumentImport>
+  recoverImportJob(
+    jobId: string,
+    recoveryOverride: DesktopRecoveryOverride,
+    requestId: string,
+  ): Promise<DesktopTextDocumentImport>
   cancelImportJob(jobId: string): Promise<DesktopImportControlResult>
   cancel(targetRequestId: string): Promise<DesktopCancelResult>
   subscribe(listener: (event: DesktopBridgeEvent) => void): Promise<() => void>

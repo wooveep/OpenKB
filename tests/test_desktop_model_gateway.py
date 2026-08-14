@@ -8,6 +8,7 @@ import pytest
 
 from openkb import desktop_model_gateway, desktop_model_transport
 from openkb.config import LlmCredentialBundle
+from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelGateway,
@@ -137,6 +138,48 @@ def test_configured_desktop_gateway_turns_invalid_model_config_into_direct_failu
             on_event=lambda _event: None,
         )
     assert error.value.failure.code == "model_configuration_invalid"
+
+
+def test_recovery_override_uses_its_model_and_timeout_without_writing_config(tmp_path, monkeypatch):
+    """The production factory applies a recovery override only to the returned gateway."""
+    kb_dir = tmp_path / "desktop-kb"
+    config_path = kb_dir / ".openkb" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("model: default/model\n", encoding="utf-8")
+    timeouts: list[float] = []
+    models: list[object] = []
+
+    def transport(*, model, bundle):
+        models.append(model)
+
+        def call(_request, timeout_seconds):
+            timeouts.append(timeout_seconds)
+            return "Recovered"
+
+        return call
+
+    monkeypatch.setattr(
+        desktop_model_transport,
+        "resolve_credential_bundle",
+        lambda _kb_dir: LlmCredentialBundle(api_key="test-key"),
+    )
+    monkeypatch.setattr(desktop_model_transport, "DesktopLiteLLMTransport", transport)
+
+    gateway = desktop_model_transport.desktop_model_gateway_for(
+        kb_dir,
+        DesktopRecoveryOverride(model="recovery/model", initial_timeout_seconds=30),
+    )
+
+    assert gateway is not None
+    result = gateway.analyze(
+        DesktopModelRequest("document_analysis", "guide.txt", "source"),
+        on_event=lambda _event: None,
+    )
+
+    assert result.content == "Recovered"
+    assert models == ["recovery/model"]
+    assert timeouts == [30.0]
+    assert config_path.read_text(encoding="utf-8") == "model: default/model\n"
 
 
 def test_gateway_does_not_retry_authentication_or_response_format_failures():

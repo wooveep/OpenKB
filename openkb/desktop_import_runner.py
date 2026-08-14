@@ -24,9 +24,11 @@ from openkb.desktop_import_artifacts import (
     validate_text_source,
 )
 from openkb.desktop_import_model_ledger import DesktopImportModelLedger
+from openkb.desktop_import_recovery import DesktopImportRecoveryStore
 from openkb.desktop_import_store import IMPORT_STAGES, DesktopImportStore, ImportJobState
 from openkb.desktop_import_types import (
     DesktopImportTask,
+    DesktopRecoveryOverride,
     DesktopStageRun,
     DesktopTextImportResult,
 )
@@ -78,6 +80,7 @@ class DesktopTextImportService:
     ) -> None:
         self._store = DesktopImportStore(kb_dir, on_stage_progress=on_stage_progress)
         self._model_ledger = DesktopImportModelLedger(kb_dir)
+        self._recovery = DesktopImportRecoveryStore(kb_dir, on_stage_progress=on_stage_progress)
         self._control = control or DesktopImportControl()
         self._model_gateway = model_gateway
 
@@ -108,6 +111,20 @@ class DesktopTextImportService:
                 "desktop_import_failed", f"Could not resume import {job_id}: {error}"
             ) from error
 
+    def recover_text(
+        self, job_id: str, override: DesktopRecoveryOverride
+    ) -> DesktopTextImportResult:
+        """Resume a quarantined document at its failed stage using one run-only override."""
+        try:
+            with kb_ingest_lock(self._store.state_dir):
+                return self._run(self._recovery.begin(job_id, override))
+        except DesktopImportError:
+            raise
+        except (OSError, sqlite3.Error, LockException) as error:
+            raise DesktopImportError(
+                "desktop_import_failed", f"Could not recover import {job_id}: {error}"
+            ) from error
+
     def recoverable_job_ids(self) -> tuple[str, ...]:
         """Expose durable recovery work so the Engine can give each job its own control."""
         return self._store.resumable_job_ids()
@@ -129,7 +146,9 @@ class DesktopTextImportService:
 
     def _run(self, state: ImportJobState) -> DesktopTextImportResult:
         stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
-        active_stage = self._next_stage(state, stages)
+        active_stage = (
+            "raw_asset" if self._completed(stages, "raw_asset") else self._next_stage(state, stages)
+        )
         terminal_state_committed = False
         try:
             raw_bytes, text, asset_sha256, raw_path = self._raw_input(state, stages)
@@ -172,6 +191,11 @@ class DesktopTextImportService:
                 self._honor_control(state, active_stage)
                 self._store.set_stage(state, active_stage, "running", 80)
                 if self._model_gateway is None:
+                    if state.recovery_run_id is not None:
+                        raise DesktopImportError(
+                            "recovery_model_not_configured",
+                            "A configured model is required to resume model analysis.",
+                        )
                     self._store.set_stage(
                         state,
                         active_stage,
@@ -228,6 +252,7 @@ class DesktopTextImportService:
                 failure=error.failure,
                 attempt_count=error.attempt_count,
             )
+            self._recovery.mark_finished(state, "failed")
             self._store.emit_stage(
                 state,
                 active_stage,
@@ -239,6 +264,9 @@ class DesktopTextImportService:
         except DesktopImportError as error:
             if error.code not in _CONTROL_CODES and not terminal_state_committed:
                 self._store.fail_job(state, active_stage, error.code)
+                self._recovery.mark_failed(state, active_stage, error.code)
+            elif error.code == "import_cancelled":
+                self._recovery.mark_finished(state, "cancelled")
             raise
         except (OSError, sqlite3.Error, LockException) as error:
             wrapped = DesktopImportError(
@@ -246,6 +274,7 @@ class DesktopTextImportService:
             )
             if not terminal_state_committed:
                 self._store.fail_job(state, active_stage, wrapped.code)
+                self._recovery.mark_failed(state, active_stage, wrapped.code)
             raise wrapped from error
 
     def _analyze_document(self, state: ImportJobState, stage: str, text: str) -> DesktopModelResult:
