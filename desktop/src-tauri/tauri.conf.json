@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.openkb.desktop",
   "build": {
-    "beforeDevCommand": "npm --prefix ../../frontend run dev -- --host 127.0.0.1",
+    "beforeDevCommand": "npm --prefix ../frontend run dev -- --host 127.0.0.1",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "npm --prefix ../../frontend run build:desktop",
+    "beforeBuildCommand": "npm --prefix ../frontend run build:desktop",
     "frontendDist": "../../openkb/desktop-web"
   },
   "app": {
