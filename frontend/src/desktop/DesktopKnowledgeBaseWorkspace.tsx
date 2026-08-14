@@ -10,7 +10,6 @@ import {
   MessageSquare,
   Plus,
   Settings,
-  Upload,
 } from "lucide-react"
 import { useCallback, useEffect, useRef, useState, type ComponentType } from "react"
 import { useTranslation } from "react-i18next"
@@ -27,11 +26,16 @@ import { LanguageToggle } from "@/lib/language"
 import { ThemeToggle } from "@/lib/theme"
 import { cn } from "@/lib/utils"
 import { useDesktopBridge } from "./bridge-context"
+import {
+  DesktopDocumentImportPanel,
+  type DesktopImportBatchSummary,
+} from "./DesktopDocumentImportPanel"
 import { FailedDocumentsDialog } from "./FailedDocumentsDialog"
 import { DesktopBridgeError } from "./contracts"
 import type {
   DesktopImportTask,
-  DesktopImportStageProgressEvent,
+  DesktopImportSourceInspection,
+  DesktopImportSourcePicker,
   DesktopKnowledgeBase,
   DesktopRecoveryOverride,
 } from "./contracts"
@@ -70,6 +74,31 @@ function isImportControlError(error: unknown): boolean {
       || error.code === "document_quarantined")
 }
 
+function mergeImportSources(existing: string[], added: string[]): string[] {
+  const values = new Map<string, string>()
+  for (const sourcePath of [...existing, ...added]) {
+    const trimmed = sourcePath.trim()
+    if (trimmed) values.set(importSourceKey(trimmed), trimmed)
+  }
+  return [...values.values()].sort((left, right) => left.localeCompare(right))
+}
+
+function importSourceKey(sourcePath: string): string {
+  return sourcePath.trim().toLowerCase()
+}
+
+function withoutExcludedImportSources(
+  inspection: DesktopImportSourceInspection,
+  excludedSourcePaths: string[],
+): DesktopImportSourceInspection {
+  const excluded = new Set(excludedSourcePaths.map(importSourceKey))
+  return {
+    ...inspection,
+    supported: inspection.supported.filter((source) => !excluded.has(importSourceKey(source.path))),
+    unsupported: inspection.unsupported.filter((source) => !excluded.has(importSourceKey(source.path))),
+  }
+}
+
 /** The first real Desktop Workbench: one active SQLite knowledge base at a time. */
 export default function DesktopKnowledgeBaseWorkspace() {
   const { t } = useTranslation("common")
@@ -86,14 +115,18 @@ export default function DesktopKnowledgeBaseWorkspace() {
   const [importPath, setImportPath] = useState("")
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
+  const [importSources, setImportSources] = useState<string[]>([])
+  const [excludedImportSources, setExcludedImportSources] = useState<string[]>([])
+  const [importInspection, setImportInspection] = useState<DesktopImportSourceInspection | null>(null)
+  const [inspectingImportSources, setInspectingImportSources] = useState(false)
+  const [importDropActive, setImportDropActive] = useState(false)
+  const [importBatchSummary, setImportBatchSummary] = useState<DesktopImportBatchSummary | null>(null)
   const [importTasks, setImportTasks] = useState<DesktopImportTask[]>([])
   const [failedDocumentsOpen, setFailedDocumentsOpen] = useState(false)
   const [controllingJobId, setControllingJobId] = useState<string | null>(null)
-  const [liveImportStage, setLiveImportStage] = useState<
-    DesktopImportStageProgressEvent["data"] | null
-  >(null)
   const activeKnowledgeBaseRead = useRef(0)
-  const activeImportRequest = useRef<string | null>(null)
+  const importInspectionRead = useRef(0)
+  const addImportSourcesRef = useRef<(paths: string[]) => void>(() => undefined)
 
   const refreshActiveKnowledgeBase = useCallback(async () => {
     const read = activeKnowledgeBaseRead.current + 1
@@ -125,9 +158,6 @@ export default function DesktopKnowledgeBaseWorkspace() {
     void bridge
       .subscribe((event) => {
         if (event.kind === "import.stage_progress") {
-          if (event.data.requestId === activeImportRequest.current) {
-            setLiveImportStage(event.data)
-          }
           void bridge
             .importJobs()
             .then(({ jobs }) => {
@@ -173,8 +203,12 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setSubmitting(true)
     setFormError(null)
     setImportTasks([])
-    setLiveImportStage(null)
-    activeImportRequest.current = null
+    setImportSources([])
+    setExcludedImportSources([])
+    importInspectionRead.current += 1
+    setImportInspection(null)
+    setInspectingImportSources(false)
+    setImportBatchSummary(null)
     try {
       if (dialogMode === "create") {
         await bridge.createKnowledgeBase(path.trim(), name.trim() || undefined, nextRequestId())
@@ -192,59 +226,152 @@ export default function DesktopKnowledgeBaseWorkspace() {
     }
   }
 
-  const submitTextImport = async () => {
+  const inspectImportSources = useCallback(async (
+    sourcePaths: string[],
+    excludedSourcePaths = excludedImportSources,
+  ) => {
+    const read = importInspectionRead.current + 1
+    importInspectionRead.current = read
+    if (!sourcePaths.length) {
+      setImportInspection(null)
+      setInspectingImportSources(false)
+      return
+    }
+    setInspectingImportSources(true)
+    setImportError(null)
+    try {
+      const inspection = await bridge.inspectImportSources(sourcePaths, nextRequestId())
+      if (read === importInspectionRead.current) {
+        setImportInspection(withoutExcludedImportSources(inspection, excludedSourcePaths))
+      }
+    } catch (error) {
+      if (read === importInspectionRead.current) {
+        setImportInspection(null)
+        setImportError(error instanceof Error ? error.message : String(error))
+      }
+    } finally {
+      if (read === importInspectionRead.current) setInspectingImportSources(false)
+    }
+  }, [bridge, excludedImportSources])
+
+  const addImportSources = useCallback((sourcePaths: string[]) => {
+    if (importing) return
+    const nextSources = mergeImportSources(importSources, sourcePaths)
+    if (!nextSources.length) return
+    const selectedSourceKeys = new Set(sourcePaths.map(importSourceKey))
+    const nextExcludedSources = excludedImportSources.filter(
+      (sourcePath) => !selectedSourceKeys.has(importSourceKey(sourcePath)),
+    )
+    setImportSources(nextSources)
+    setExcludedImportSources(nextExcludedSources)
+    setImportBatchSummary(null)
+    void inspectImportSources(nextSources, nextExcludedSources)
+  }, [excludedImportSources, importSources, importing, inspectImportSources])
+
+  useEffect(() => {
+    addImportSourcesRef.current = addImportSources
+  }, [addImportSources])
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined
+    let disposed = false
+    void bridge
+      .subscribeImportDrops((event) => {
+        if (event.type === "enter" || event.type === "over") setImportDropActive(true)
+        if (event.type === "leave" || event.type === "drop") setImportDropActive(false)
+        if (event.type === "drop" && event.paths.length) addImportSourcesRef.current(event.paths)
+      })
+      .then((remove) => {
+        if (disposed) remove()
+        else unsubscribe = remove
+      })
+      .catch(() => undefined)
+    return () => {
+      disposed = true
+      unsubscribe?.()
+    }
+  }, [bridge])
+
+  const addManualImportSource = () => {
     if (!importPath.trim()) {
       setImportError(t("desktop.knowledgeBases.importPathRequired"))
       return
     }
+    addImportSources([importPath.trim()])
+    setImportPath("")
+  }
+
+  const chooseImportSources = async (picker: DesktopImportSourcePicker) => {
+    try {
+      addImportSources(await bridge.chooseImportSources(picker))
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const removeImportSource = (sourcePath: string) => {
+    const nextExcludedSources = mergeImportSources(excludedImportSources, [sourcePath])
+    setExcludedImportSources(nextExcludedSources)
+    importInspectionRead.current += 1
+    setImportInspection((inspection) => (
+      inspection === null ? null : withoutExcludedImportSources(inspection, nextExcludedSources)
+    ))
+  }
+
+  const submitImportBatch = async () => {
+    if (importInspection === null || !importInspection.supported.length) {
+      setImportError(t("desktop.knowledgeBases.noImportableSources"))
+      return
+    }
     setImporting(true)
     setImportError(null)
-    setLiveImportStage(null)
-    const requestId = nextRequestId()
-    activeImportRequest.current = requestId
-    try {
-      const result = await bridge.importTextDocument(importPath.trim(), requestId)
-      if (activeImportRequest.current === requestId) {
-        setImportTasks((tasks) => [result, ...tasks.filter((task) => task.job.jobId !== result.job.jobId)])
-        setLiveImportStage(null)
-      }
-      setImportPath("")
-    } catch (error) {
-      if (!isImportControlError(error)) {
-        setImportError(error instanceof Error ? error.message : String(error))
+    setImportBatchSummary(null)
+    let completed = 0
+    const failures: Array<{ name: string; reason: string }> = []
+    for (const source of importInspection.supported) {
+      const requestId = nextRequestId()
+      try {
+        const result = await bridge.importTextDocument(source.path, requestId)
+        completed += 1
+        setImportTasks((tasks) => [
+          result,
+          ...tasks.filter((task) => task.job.jobId !== result.job.jobId),
+        ])
+      } catch (error) {
+        failures.push({
+          name: source.name,
+          reason: error instanceof Error ? error.message : String(error),
+        })
       }
       try {
         setImportTasks((await bridge.importJobs()).jobs)
       } catch {
-        // The original import error is more useful than a follow-up task lookup failure.
+        // The batch summary still reports the document failure when task refresh is unavailable.
       }
-    } finally {
-      if (activeImportRequest.current === requestId) activeImportRequest.current = null
-      setImporting(false)
     }
+    setImportBatchSummary({ completed, failures })
+    setImportSources([])
+    setExcludedImportSources([])
+    setImportInspection(null)
+    setImporting(false)
   }
 
   const controlImportJob = async (jobId: string, action: ImportTaskAction) => {
     setControllingJobId(jobId)
     setImportError(null)
-    let resumeRequestId: string | null = null
     try {
       if (action === "pause") {
         await bridge.pauseImportJob(jobId)
       } else if (action === "cancel") {
         await bridge.cancelImportJob(jobId)
       } else {
-        resumeRequestId = nextRequestId()
-        activeImportRequest.current = resumeRequestId
-        setLiveImportStage(null)
-        await bridge.resumeImportJob(jobId, resumeRequestId)
+        await bridge.resumeImportJob(jobId, nextRequestId())
       }
     } catch (error) {
       if (!isImportControlError(error)) {
         setImportError(error instanceof Error ? error.message : String(error))
       }
     } finally {
-      if (activeImportRequest.current === resumeRequestId) activeImportRequest.current = null
       await refreshActiveKnowledgeBase()
       setControllingJobId(null)
     }
@@ -253,17 +380,13 @@ export default function DesktopKnowledgeBaseWorkspace() {
   const recoverImportJob = async (jobId: string, recoveryOverride: DesktopRecoveryOverride) => {
     setControllingJobId(jobId)
     setImportError(null)
-    const requestId = nextRequestId()
-    activeImportRequest.current = requestId
-    setLiveImportStage(null)
     try {
-      await bridge.recoverImportJob(jobId, recoveryOverride, requestId)
+      await bridge.recoverImportJob(jobId, recoveryOverride, nextRequestId())
     } catch (error) {
       if (!isImportControlError(error)) {
         setImportError(error instanceof Error ? error.message : String(error))
       }
     } finally {
-      if (activeImportRequest.current === requestId) activeImportRequest.current = null
       await refreshActiveKnowledgeBase()
       setControllingJobId(null)
     }
@@ -384,11 +507,18 @@ export default function DesktopKnowledgeBaseWorkspace() {
               importError={importError}
               importing={importing}
               importPath={importPath}
+              importSources={importSources}
+              importInspection={importInspection}
+              inspectingImportSources={inspectingImportSources}
+              importDropActive={importDropActive}
+              importBatchSummary={importBatchSummary}
               importTasks={importTasks}
-              liveImportStage={liveImportStage}
               controllingJobId={controllingJobId}
               onImportPathChange={setImportPath}
-              onSubmitImport={() => void submitTextImport()}
+              onAddImportPath={addManualImportSource}
+              onChooseImportSources={(picker) => void chooseImportSources(picker)}
+              onRemoveImportSource={removeImportSource}
+              onSubmitImport={() => void submitImportBatch()}
               onControlImportJob={(jobId, action) => void controlImportJob(jobId, action)}
             />
           )}
@@ -500,10 +630,17 @@ function ActiveKnowledgeBaseView({
   importError,
   importing,
   importPath,
+  importSources,
+  importInspection,
+  inspectingImportSources,
+  importDropActive,
+  importBatchSummary,
   importTasks,
-  liveImportStage,
   controllingJobId,
   onImportPathChange,
+  onAddImportPath,
+  onChooseImportSources,
+  onRemoveImportSource,
   onSubmitImport,
   onControlImportJob,
 }: {
@@ -512,10 +649,17 @@ function ActiveKnowledgeBaseView({
   importError: string | null
   importing: boolean
   importPath: string
+  importSources: string[]
+  importInspection: DesktopImportSourceInspection | null
+  inspectingImportSources: boolean
+  importDropActive: boolean
+  importBatchSummary: DesktopImportBatchSummary | null
   importTasks: DesktopImportTask[]
-  liveImportStage: DesktopImportStageProgressEvent["data"] | null
   controllingJobId: string | null
   onImportPathChange: (value: string) => void
+  onAddImportPath: () => void
+  onChooseImportSources: (picker: DesktopImportSourcePicker) => void
+  onRemoveImportSource: (path: string) => void
   onSubmitImport: () => void
   onControlImportJob: (jobId: string, action: ImportTaskAction) => void
 }) {
@@ -543,207 +687,26 @@ function ActiveKnowledgeBaseView({
         </div>
       </div>
       {section === "documents" ? (
-        <DocumentImportPanel
+        <DesktopDocumentImportPanel
           error={importError}
           importing={importing}
-          path={importPath}
+          manualPath={importPath}
+          sources={importSources}
+          inspection={importInspection}
+          inspecting={inspectingImportSources}
+          dropActive={importDropActive}
+          summary={importBatchSummary}
           tasks={importTasks}
-          liveStage={liveImportStage}
           controllingJobId={controllingJobId}
-          onPathChange={onImportPathChange}
+          onManualPathChange={onImportPathChange}
+          onAddManualPath={onAddImportPath}
+          onChooseSources={onChooseImportSources}
+          onRemoveSource={onRemoveImportSource}
           onSubmit={onSubmitImport}
           onControl={onControlImportJob}
         />
       ) : null}
     </section>
-  )
-}
-
-function DocumentImportPanel({
-  error,
-  importing,
-  path,
-  tasks,
-  liveStage,
-  controllingJobId,
-  onPathChange,
-  onSubmit,
-  onControl,
-}: {
-  error: string | null
-  importing: boolean
-  path: string
-  tasks: DesktopImportTask[]
-  liveStage: DesktopImportStageProgressEvent["data"] | null
-  controllingJobId: string | null
-  onPathChange: (value: string) => void
-  onSubmit: () => void
-  onControl: (jobId: string, action: ImportTaskAction) => void
-}) {
-  const { t } = useTranslation("common")
-  return (
-    <section className="mt-6 rounded-apple-lg border border-border/70 bg-background p-6">
-      <div className="flex items-start gap-3">
-        <div className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary">
-          <Upload className="size-4" />
-        </div>
-        <div>
-          <h2 className="font-semibold">{t("desktop.knowledgeBases.importTitle")}</h2>
-          <p className="mt-1 text-sm leading-6 text-muted-foreground">
-            {t("desktop.knowledgeBases.importDescription")}
-          </p>
-        </div>
-      </div>
-      <form
-        className="mt-5 flex flex-col gap-3 sm:flex-row"
-        onSubmit={(event) => {
-          event.preventDefault()
-          onSubmit()
-        }}
-      >
-        <label className="sr-only" htmlFor="desktop-import-txt-path">
-          {t("desktop.knowledgeBases.importPathLabel")}
-        </label>
-        <input
-          id="desktop-import-txt-path"
-          value={path}
-          onChange={(event) => onPathChange(event.target.value)}
-          placeholder={t("desktop.knowledgeBases.importPathPlaceholder")}
-          className="h-10 min-w-0 flex-1 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        />
-        <Button type="submit" disabled={importing}>
-          {importing ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
-          {t("desktop.knowledgeBases.importAction")}
-        </Button>
-      </form>
-      {error ? <p className="mt-3 text-sm text-destructive" role="alert">{error}</p> : null}
-      {liveStage ? <ImportTaskCard className="mt-5" stage={liveStage} /> : null}
-      {tasks.map((task) => (
-        <ImportTaskCard
-          key={task.job.jobId}
-          className="mt-5"
-          task={task}
-          controlling={controllingJobId === task.job.jobId}
-          onControl={onControl}
-        />
-      ))}
-    </section>
-  )
-}
-
-function ImportTaskCard({
-  className,
-  stage: liveStage,
-  task,
-  controlling = false,
-  onControl,
-}: {
-  className?: string
-  stage?: DesktopImportStageProgressEvent["data"]
-  task?: DesktopImportTask
-  controlling?: boolean
-  onControl?: (jobId: string, action: ImportTaskAction) => void
-}) {
-  const { t } = useTranslation("common")
-  const stage = liveStage
-    ?? task?.stages.find((item) => ["failed", "paused", "cancelled"].includes(item.status))
-    ?? task?.stages.find((item) => item.status === "running")
-    ?? task?.stages.at(-1)
-  if (!stage) return null
-  const jobStatus = task?.job.status ?? stage.status
-  const jobProgress = task?.job.progress ?? stage.progress
-  const modelCall = task?.modelCalls.at(-1)
-  const quarantine = task?.quarantine
-  const modelCallIsWaiting = modelCall?.status === "running" || modelCall?.status === "retry_wait"
-  return (
-    <div className={cn("rounded-xl border border-border/70 bg-muted/30 p-4", className)}>
-      <div className="flex items-center justify-between gap-3 text-sm">
-        <span className="font-medium">{t("desktop.knowledgeBases.taskCenter")}</span>
-        <span className="text-muted-foreground">{jobProgress}%</span>
-      </div>
-      <p className="mt-2 text-sm text-muted-foreground">
-        {t("desktop.knowledgeBases.stageStatus", {
-          stage: t(`desktop.knowledgeBases.importStages.${stage.stage}`),
-          status: t(`desktop.knowledgeBases.importStatuses.${stage.status}`),
-        })} · {stage.progress}%
-      </p>
-      <p className="mt-1 text-xs text-muted-foreground">
-        {t(`desktop.knowledgeBases.importStatuses.${jobStatus}`)}
-      </p>
-      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
-        <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${jobProgress}%` }} />
-      </div>
-      {modelCall ? (
-        <div className="mt-4 border-t border-border/70 pt-4 text-sm">
-          <p className="text-muted-foreground">
-            {t("desktop.knowledgeBases.modelCallStatus", {
-              status: t(`desktop.knowledgeBases.modelCallStates.${modelCall.status}`),
-              attempt: modelCall.attemptCount,
-              maximum: 4,
-            })}
-          </p>
-          {modelCallIsWaiting ? (
-            <p className="mt-1 text-muted-foreground">
-              {t("desktop.knowledgeBases.modelCallBudget", {
-                timeout: Math.ceil(modelCall.timeoutSeconds),
-                remaining: Math.ceil(modelCall.remainingSeconds),
-              })}
-            </p>
-          ) : null}
-          {modelCall.status === "retry_wait" && modelCall.nextTimeoutSeconds !== null ? (
-            <p className="mt-1 text-muted-foreground">
-              {t("desktop.knowledgeBases.modelRetrying", {
-                reason: modelCall.reason,
-                timeout: Math.ceil(modelCall.nextTimeoutSeconds),
-              })}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-      {quarantine ? (
-        <div className="mt-4 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-sm">
-          <p className="font-medium text-destructive">{t("desktop.knowledgeBases.quarantinedTitle")}</p>
-          <p className="mt-1 text-muted-foreground">{quarantine.reason}</p>
-          <p className="mt-1 text-muted-foreground">{quarantine.suggestedAction}</p>
-          <p className="mt-2 text-xs text-muted-foreground">
-            {t("desktop.knowledgeBases.quarantinedAttempts", { attempts: quarantine.attemptCount })}
-          </p>
-        </div>
-      ) : null}
-      {task && onControl ? (
-        <div className="mt-4 flex flex-wrap gap-2 border-t border-border/70 pt-4">
-          {task.job.status === "running" ? (
-            <Button size="sm" variant="outline" disabled={controlling} onClick={() => onControl(task.job.jobId, "pause")}>
-              {t("desktop.knowledgeBases.pauseImport")}
-            </Button>
-          ) : null}
-          {task.job.status === "paused" || task.job.status === "recoverable" ? (
-            <Button size="sm" disabled={controlling} onClick={() => onControl(task.job.jobId, "resume")}>
-              {controlling ? <Loader2 className="size-4 animate-spin" /> : null}
-              {t("desktop.knowledgeBases.resumeImport")}
-            </Button>
-          ) : null}
-          {task.job.status === "running" || task.job.status === "paused" || task.job.status === "recoverable" ? (
-            <Button size="sm" variant="ghost" disabled={controlling} onClick={() => onControl(task.job.jobId, "cancel")}>
-              {t("desktop.knowledgeBases.cancelImport")}
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
-      {task?.document ? (
-        <div className="mt-4 border-t border-border/70 pt-4 text-sm">
-          <p className="font-medium text-emerald-700 dark:text-emerald-300">
-            {t("desktop.knowledgeBases.availableKnowledge")}
-          </p>
-          <p className="mt-1 text-muted-foreground">
-            {t("desktop.knowledgeBases.importedDocument", {
-              name: task.document.name,
-              evidence: task.document.evidenceCount,
-            })}
-          </p>
-        </div>
-      ) : null}
-    </div>
   )
 }
 

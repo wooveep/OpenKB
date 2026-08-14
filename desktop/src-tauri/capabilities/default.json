@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Minimal capability for the OpenKB Desktop Workbench window.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

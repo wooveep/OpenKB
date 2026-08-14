@@ -6,7 +6,7 @@ mod process_tree;
 
 use engine_protocol::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
-    EngineHealth, EngineSupervisor, ImportControlResult, ImportJobsResult,
+    EngineHealth, EngineSupervisor, ImportControlResult, ImportJobsResult, ImportSourceInspection,
     InspectKnowledgeBaseResult, KnowledgeBaseActivationResult, RecoveryOverride,
     TextDocumentImportResult,
 };
@@ -90,6 +90,23 @@ async fn desktop_active_knowledge_base(
             code: "desktop_command_failed".to_owned(),
             message: format!("Desktop active knowledge-base task stopped unexpectedly: {error}"),
         })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_inspect_import_sources(
+    state: State<'_, DesktopState>,
+    source_paths: Vec<String>,
+    request_id: String,
+) -> Result<ImportSourceInspection, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.inspect_import_sources(source_paths, request_id)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop import source inspection stopped unexpectedly: {error}"),
+    })?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -195,6 +212,7 @@ fn desktop_unsubscribe(state: State<'_, DesktopState>, subscription_id: String) 
 
 fn main() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(DesktopState {
             engine: Arc::new(EngineSupervisor::default()),
             _process_tree: ProcessTreeJob::create()
@@ -223,6 +241,7 @@ fn main() {
             desktop_create_knowledge_base,
             desktop_open_knowledge_base,
             desktop_active_knowledge_base,
+            desktop_inspect_import_sources,
             desktop_import_text_document,
             desktop_import_jobs,
             desktop_pause_import_job,

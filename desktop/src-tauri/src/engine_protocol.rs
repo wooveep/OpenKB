@@ -8,8 +8,9 @@ use crate::engine_wire::{
 };
 pub use crate::engine_wire::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, BridgeResult,
-    CancelResult, EngineHealth, ImportControlResult, ImportJobsResult, InspectKnowledgeBaseResult,
-    KnowledgeBaseActivationResult, RecoveryOverride, TextDocumentImportResult,
+    CancelResult, EngineHealth, ImportControlResult, ImportJobsResult, ImportSourceInspection,
+    InspectKnowledgeBaseResult, KnowledgeBaseActivationResult, RecoveryOverride,
+    TextDocumentImportResult,
 };
 use serde_json::{json, Value};
 use std::{
@@ -162,6 +163,25 @@ impl EngineSupervisor {
             BridgeError::new(
                 "invalid_engine_response",
                 format!("Engine active knowledge-base response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn inspect_import_sources(
+        &self,
+        source_paths: Vec<String>,
+        request_id: String,
+    ) -> BridgeResult<ImportSourceInspection> {
+        self.ensure_started()?;
+        let value = self.request_started(
+            "workbench.inspect_import_sources",
+            json!({ "source_paths": source_paths }),
+            Some(request_id),
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine import source inspection response has an invalid shape: {error}"),
             )
         })
     }

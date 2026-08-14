@@ -8,6 +8,9 @@ import {
   type DesktopCancelResult,
   type DesktopEngineHealth,
   type DesktopImportControlResult,
+  type DesktopImportDropEvent,
+  type DesktopImportSourceInspection,
+  type DesktopImportSourcePicker,
   type DesktopKnowledgeBaseActivation,
   type DesktopKnowledgeBaseInspection,
   type DesktopImportJobs,
@@ -73,6 +76,39 @@ export class TauriDesktopBridge implements DesktopBridge {
 
   async activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase> {
     return this.call<DesktopActiveKnowledgeBase>("desktop_active_knowledge_base")
+  }
+
+  async inspectImportSources(
+    sourcePaths: string[],
+    requestId: string,
+  ): Promise<DesktopImportSourceInspection> {
+    return this.call<DesktopImportSourceInspection>("desktop_inspect_import_sources", {
+      sourcePaths,
+      requestId,
+    })
+  }
+
+  async chooseImportSources(picker: DesktopImportSourcePicker): Promise<string[]> {
+    const { open } = await import("@tauri-apps/plugin-dialog")
+    const selection = await open({
+      directory: picker === "directory",
+      multiple: picker === "files",
+    })
+    if (selection === null) return []
+    return Array.isArray(selection) ? selection : [selection]
+  }
+
+  async subscribeImportDrops(
+    listener: (event: DesktopImportDropEvent) => void,
+  ): Promise<() => void> {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window")
+    return getCurrentWindow().onDragDropEvent((event) => {
+      const payload = event.payload
+      listener({
+        type: payload.type,
+        paths: "paths" in payload ? payload.paths : [],
+      })
+    })
   }
 
   async importTextDocument(
@@ -184,6 +220,27 @@ class UnavailableDesktopBridge implements DesktopBridge {
   }
 
   activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase> {
+    return this.unavailable()
+  }
+
+  inspectImportSources(
+    sourcePaths: string[],
+    requestId: string,
+  ): Promise<DesktopImportSourceInspection> {
+    void sourcePaths
+    void requestId
+    return this.unavailable()
+  }
+
+  chooseImportSources(picker: DesktopImportSourcePicker): Promise<string[]> {
+    void picker
+    return this.unavailable()
+  }
+
+  subscribeImportDrops(
+    listener: (event: DesktopImportDropEvent) => void,
+  ): Promise<() => void> {
+    void listener
     return this.unavailable()
   }
 

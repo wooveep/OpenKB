@@ -99,6 +99,13 @@ pub enum ImportedDocumentAvailability {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
+pub enum ImportSourceStatus {
+    Supported,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ImportedDocumentSourceFormat {
     Txt,
 }
@@ -232,6 +239,25 @@ pub struct ImportJob {
     #[serde(alias = "document_id")]
     pub document_id: Option<String>,
     pub deduplicated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSource {
+    pub path: String,
+    pub name: String,
+    pub status: ImportSourceStatus,
+    #[serde(alias = "error_code")]
+    pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSourceInspection {
+    pub supported: Vec<ImportSource>,
+    pub unsupported: Vec<ImportSource>,
+    #[serde(alias = "supported_extensions")]
+    pub supported_extensions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

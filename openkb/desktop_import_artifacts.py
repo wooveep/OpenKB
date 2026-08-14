@@ -7,6 +7,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from openkb.desktop_import_sources import SUPPORTED_DESKTOP_IMPORT_SUFFIXES
+
 _HEADING_PATTERN = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*$")
 
 
@@ -36,7 +38,7 @@ class DocumentIRBlock:
 def validate_text_source(source_path: Path) -> Path:
     """Resolve and validate the first supported Desktop source format."""
     source = source_path.expanduser().resolve()
-    if source.suffix.lower() != ".txt":
+    if source.suffix.lower() not in SUPPORTED_DESKTOP_IMPORT_SUFFIXES:
         raise DesktopImportError(
             "unsupported_import_format", "The first Desktop import path supports TXT files only."
         )

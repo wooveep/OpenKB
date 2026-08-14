@@ -4,6 +4,9 @@ import type {
   DesktopBridgeHandshake,
   DesktopCancelResult,
   DesktopImportControlResult,
+  DesktopImportDropEvent,
+  DesktopImportSourceInspection,
+  DesktopImportSourcePicker,
   DesktopActiveKnowledgeBase,
   DesktopEngineHealth,
   DesktopKnowledgeBase,
@@ -98,6 +101,44 @@ export class MemoryDesktopBridge implements DesktopBridge {
     return { knowledgeBase: this.activeKnowledgeBaseResult }
   }
 
+  async inspectImportSources(
+    sourcePaths: string[],
+    requestId: string,
+  ): Promise<DesktopImportSourceInspection> {
+    void requestId
+    const supported = sourcePaths
+      .filter((sourcePath) => sourcePath.toLowerCase().endsWith(".txt"))
+      .sort((left, right) => left.localeCompare(right))
+      .map((sourcePath) => ({
+        path: sourcePath,
+        name: sourceName(sourcePath),
+        status: "supported" as const,
+        errorCode: null,
+      }))
+    const unsupported = sourcePaths
+      .filter((sourcePath) => !sourcePath.toLowerCase().endsWith(".txt"))
+      .sort((left, right) => left.localeCompare(right))
+      .map((sourcePath) => ({
+        path: sourcePath,
+        name: sourceName(sourcePath),
+        status: "unsupported" as const,
+        errorCode: "unsupported_import_format",
+      }))
+    return { supported, unsupported, supportedExtensions: [".txt"] }
+  }
+
+  async chooseImportSources(picker: DesktopImportSourcePicker): Promise<string[]> {
+    void picker
+    return []
+  }
+
+  async subscribeImportDrops(
+    listener: (event: DesktopImportDropEvent) => void,
+  ): Promise<() => void> {
+    void listener
+    return () => undefined
+  }
+
   async importTextDocument(
     sourcePath: string,
     requestId: string,
@@ -105,7 +146,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     if (this.activeKnowledgeBaseResult === null) {
       throw new Error("Open a Desktop Knowledge Base before importing a document.")
     }
-    const name = sourcePath.split(/[\\/]/).filter(Boolean).at(-1) || "document.txt"
+    const name = sourceName(sourcePath) || "document.txt"
     const jobId = `job-${requestId}`
     const documentId = `document-${requestId}`
     const stages = ["preflight", "raw_asset", "document_ir", "evidence", "model_analysis", "search"] as const
@@ -278,4 +319,8 @@ export class MemoryDesktopBridge implements DesktopBridge {
       }
     })
   }
+}
+
+function sourceName(sourcePath: string): string {
+  return sourcePath.split(/[\\/]/).filter(Boolean).at(-1) || ""
 }

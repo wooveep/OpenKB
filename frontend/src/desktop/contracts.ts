@@ -111,6 +111,26 @@ export interface DesktopRecoveryOverride {
   initialTimeoutSeconds?: number
 }
 
+export interface DesktopImportSource {
+  path: string
+  name: string
+  status: "supported" | "unsupported"
+  errorCode: string | null
+}
+
+export interface DesktopImportSourceInspection {
+  supported: DesktopImportSource[]
+  unsupported: DesktopImportSource[]
+  supportedExtensions: string[]
+}
+
+export type DesktopImportSourcePicker = "files" | "directory"
+
+export interface DesktopImportDropEvent {
+  type: "enter" | "over" | "drop" | "leave"
+  paths: string[]
+}
+
 export interface DesktopTextDocumentImport {
   document: DesktopImportedDocument
   job: DesktopImportJob
@@ -231,6 +251,14 @@ export interface DesktopBridge {
   ): Promise<DesktopKnowledgeBaseActivation>
   openKnowledgeBase(kbDir: string, requestId: string): Promise<DesktopKnowledgeBaseActivation>
   activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase>
+  inspectImportSources(
+    sourcePaths: string[],
+    requestId: string,
+  ): Promise<DesktopImportSourceInspection>
+  chooseImportSources(picker: DesktopImportSourcePicker): Promise<string[]>
+  subscribeImportDrops(
+    listener: (event: DesktopImportDropEvent) => void,
+  ): Promise<() => void>
   importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport>
   importJobs(): Promise<DesktopImportJobs>
   pauseImportJob(jobId: string): Promise<DesktopImportControlResult>

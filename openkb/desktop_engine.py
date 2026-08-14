@@ -24,6 +24,7 @@ from openkb.desktop_import import (
     DesktopImportError,
     DesktopTextImportService,
 )
+from openkb.desktop_import_sources import inspect_import_sources
 from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_model_gateway import MODEL_CALL_DEADLINE_SECONDS, DesktopModelGateway
 from openkb.desktop_model_transport import desktop_model_gateway_for
@@ -147,6 +148,7 @@ class DesktopEngineServer:
         "workbench.create_knowledge_base",
         "workbench.open_knowledge_base",
         "workbench.active_knowledge_base",
+        "workbench.inspect_import_sources",
         "workbench.import_text_document",
         "workbench.resume_import_job",
         "workbench.recover_import_job",
@@ -356,7 +358,18 @@ class DesktopEngineServer:
     def _dispatch_workspace_request(
         self, request: DesktopRequest, cancel_event: threading.Event | None
     ) -> dict[str, object]:
-        """Serialize workspace binding so cancellation cannot leave the UI stale."""
+        """Keep workspace binding stable while task projections stay readable."""
+        if request.method == "workbench.import_jobs":
+            active = self._workspace.active()
+            if active is None:
+                return {"jobs": []}
+            return DesktopTextImportService(Path(active.kb_dir)).list_import_jobs()
+        if request.method in {
+            "workbench.import_text_document",
+            "workbench.resume_import_job",
+            "workbench.recover_import_job",
+        }:
+            return self._dispatch_import_request(request, cancel_event)
         with self._workspace_requests_lock:
             if cancel_event is not None and cancel_event.is_set():
                 raise DesktopRequestError(
@@ -380,58 +393,50 @@ class DesktopEngineServer:
                 self._start_recoverable_imports(Path(activation.knowledge_base.kb_dir))
                 return activation.as_dict()
 
-            if request.method == "workbench.import_text_document":
-                source_path = _required_path_param(request, "source_path")
-                active = self._workspace.active()
-                if active is None:
-                    raise DesktopRequestError(
-                        "no_active_knowledge_base",
-                        "Open a Desktop Knowledge Base before importing a document.",
-                    )
-                self._begin_workspace_mutation(request, cancel_event)
-                return self._run_import(
-                    Path(active.kb_dir),
-                    request_id=str(request.request_id),
-                    source_path=Path(source_path),
-                )
-
-            if request.method == "workbench.resume_import_job":
-                active = self._workspace.active()
-                if active is None:
-                    raise DesktopRequestError(
-                        "no_active_knowledge_base",
-                        "Open a Desktop Knowledge Base before resuming an import.",
-                    )
-                self._begin_workspace_mutation(request, cancel_event)
-                return self._run_import(
-                    Path(active.kb_dir),
-                    request_id=str(request.request_id),
-                    job_id=_required_string_param(request, "job_id"),
-                )
-
-            if request.method == "workbench.recover_import_job":
-                active = self._workspace.active()
-                if active is None:
-                    raise DesktopRequestError(
-                        "no_active_knowledge_base",
-                        "Open a Desktop Knowledge Base before recovering an import.",
-                    )
-                self._begin_workspace_mutation(request, cancel_event)
-                return self._run_import(
-                    Path(active.kb_dir),
-                    request_id=str(request.request_id),
-                    job_id=_required_string_param(request, "job_id"),
-                    recovery_override=_recovery_override_param(request),
-                )
-
-            if request.method == "workbench.import_jobs":
-                active = self._workspace.active()
-                if active is None:
-                    return {"jobs": []}
-                return DesktopTextImportService(Path(active.kb_dir)).list_import_jobs()
+            if request.method == "workbench.inspect_import_sources":
+                return inspect_import_sources(
+                    Path(path) for path in _required_path_list_param(request, "source_paths")
+                ).as_dict()
 
             active = self._workspace.active()
             return {"knowledge_base": active.as_dict() if active is not None else None}
+
+    def _dispatch_import_request(
+        self, request: DesktopRequest, cancel_event: threading.Event | None
+    ) -> dict[str, object]:
+        """Run one Import Job without allowing the active KB binding to change."""
+        with self._workspace_requests_lock:
+            if cancel_event is not None and cancel_event.is_set():
+                raise DesktopRequestError(
+                    "request_cancelled", "Desktop Bridge request was cancelled."
+                )
+            active = self._workspace.active()
+            if active is None:
+                raise DesktopRequestError(
+                    "no_active_knowledge_base",
+                    "Open a Desktop Knowledge Base before importing a document.",
+                )
+            self._begin_workspace_mutation(request, cancel_event)
+            kb_dir = Path(active.kb_dir)
+
+            if request.method == "workbench.import_text_document":
+                return self._run_import(
+                    kb_dir,
+                    request_id=str(request.request_id),
+                    source_path=Path(_required_path_param(request, "source_path")),
+                )
+            if request.method == "workbench.resume_import_job":
+                return self._run_import(
+                    kb_dir,
+                    request_id=str(request.request_id),
+                    job_id=_required_string_param(request, "job_id"),
+                )
+            return self._run_import(
+                kb_dir,
+                request_id=str(request.request_id),
+                job_id=_required_string_param(request, "job_id"),
+                recovery_override=_recovery_override_param(request),
+            )
 
     def _run_import(
         self,
@@ -575,6 +580,19 @@ def _required_path_param(request: DesktopRequest, key: str) -> str:
     if not isinstance(value, str) or not value:
         raise DesktopRequestError("invalid_params", f"{request.method} requires a non-empty {key}.")
     return value
+
+
+def _required_path_list_param(request: DesktopRequest, key: str) -> tuple[str, ...]:
+    value = request.params.get(key)
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(path, str) or not path for path in value)
+    ):
+        raise DesktopRequestError(
+            "invalid_params", f"{request.method} requires a non-empty list of {key}."
+        )
+    return tuple(value)
 
 
 def _required_string_param(request: DesktopRequest, key: str) -> str:

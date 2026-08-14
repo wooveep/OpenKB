@@ -318,6 +318,113 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
     assert (desktop_kb / ".openkb" / "state.sqlite3").is_file()
 
 
+def test_engine_inspects_batch_sources_before_importing(tmp_path):
+    """The Bridge previews a selected directory without creating Import Jobs."""
+    source_directory = tmp_path / "sources"
+    source_directory.mkdir()
+    (source_directory / "note.txt").write_text("Ready.", encoding="utf-8")
+    (source_directory / "diagram.pdf").write_bytes(b"not parsed yet")
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO())
+    server._handshake_complete = True
+
+    result = server._dispatch(
+        DesktopRequest(
+            request_id="inspect-import-sources",
+            method="workbench.inspect_import_sources",
+            params={"source_paths": [str(source_directory)]},
+        ),
+        cancel_event=None,
+    )
+
+    assert [source["name"] for source in result["supported"]] == ["note.txt"]
+    assert result["unsupported"] == [
+        {
+            "path": str((source_directory / "diagram.pdf").resolve()),
+            "name": "diagram.pdf",
+            "status": "unsupported",
+            "error_code": "unsupported_import_format",
+        }
+    ]
+
+
+def test_completed_batch_document_remains_visible_while_the_next_job_runs(tmp_path):
+    """A later import must not hide an earlier Available Knowledge document."""
+    desktop_kb = tmp_path / "desktop-kb"
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("First document.", encoding="utf-8")
+    second.write_text("Second document.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(desktop_kb)
+    second_started = threading.Event()
+    release_second = threading.Event()
+
+    def analyze(request, _timeout_seconds):
+        if request.document_name == "second.txt":
+            second_started.set()
+            assert release_second.wait(timeout=1)
+        return "Analysis complete."
+
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(analyze),
+    )
+    server._handshake_complete = True
+    server._dispatch(
+        DesktopRequest(
+            request_id="first",
+            method="workbench.import_text_document",
+            params={"source_path": str(first)},
+        ),
+        cancel_event=None,
+    )
+
+    worker = threading.Thread(
+        target=server._dispatch,
+        args=(
+            DesktopRequest(
+                request_id="second",
+                method="workbench.import_text_document",
+                params={"source_path": str(second)},
+            ),
+            None,
+        ),
+    )
+    worker.start()
+    assert second_started.wait(timeout=1)
+
+    task_result: dict[str, object] = {}
+    task_ready = threading.Event()
+
+    def read_tasks() -> None:
+        task_result.update(
+            server._dispatch(
+                DesktopRequest(
+                    request_id="tasks",
+                    method="workbench.import_jobs",
+                    params={},
+                ),
+                cancel_event=None,
+            )
+        )
+        task_ready.set()
+
+    reader = threading.Thread(target=read_tasks)
+    reader.start()
+    assert task_ready.wait(timeout=1)
+    jobs = task_result["jobs"]
+    assert isinstance(jobs, list)
+    assert any(job["document"]["name"] == "first.txt" for job in jobs if job["document"])
+    assert any(job["job"]["status"] == "running" for job in jobs)
+
+    release_second.set()
+    worker.join(timeout=1)
+    reader.join(timeout=1)
+    assert not worker.is_alive()
+
+
 def test_engine_imports_txt_and_emits_durable_stage_progress(tmp_path):
     """The Bridge exposes the Desktop-native import task instead of a legacy CLI command."""
     desktop_kb = tmp_path / "desktop-kb"
