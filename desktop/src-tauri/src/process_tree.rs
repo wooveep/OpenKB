@@ -17,7 +17,10 @@ mod platform {
 
     /// Keeps the Shell and every inherited Engine worker in one kill-on-close Job.
     pub struct ProcessTreeJob {
-        handle: HANDLE,
+        // A Windows HANDLE is a process-wide value and can safely cross Tauri's
+        // command threads. Store its integer representation so DesktopState
+        // satisfies Tauri's Send + Sync boundary without an unsafe impl.
+        handle: usize,
     }
 
     impl ProcessTreeJob {
@@ -51,7 +54,9 @@ mod platform {
                     return Err(error);
                 }
 
-                Ok(Self { handle })
+                Ok(Self {
+                    handle: handle as usize,
+                })
             }
         }
     }
@@ -59,7 +64,7 @@ mod platform {
     impl Drop for ProcessTreeJob {
         fn drop(&mut self) {
             unsafe {
-                CloseHandle(self.handle);
+                CloseHandle(self.handle as HANDLE);
             }
         }
     }
