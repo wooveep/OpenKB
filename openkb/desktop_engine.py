@@ -132,6 +132,15 @@ class DesktopEngineServer:
         "engine.cancel",
         "engine.shutdown",
     }
+    _WORKSPACE_METHODS = {
+        "workbench.create_knowledge_base",
+        "workbench.open_knowledge_base",
+        "workbench.active_knowledge_base",
+    }
+    _ACTIVATION_METHODS = {
+        "workbench.create_knowledge_base",
+        "workbench.open_knowledge_base",
+    }
 
     def __init__(
         self,
@@ -146,6 +155,7 @@ class DesktopEngineServer:
         self._writer = FrameWriter(output_stream)
         self._service = service or DesktopWorkbenchService()
         self._workspace = workspace or DesktopKnowledgeBaseRuntime()
+        self._workspace_requests_lock = threading.Lock()
         self._engine_version = engine_version or __version__
         self._handshake_complete = False
         self._shutdown = threading.Event()
@@ -213,7 +223,11 @@ class DesktopEngineServer:
         completed_data: dict[str, object] = {"request_id": request.request_id, "ok": False}
         try:
             result = self._dispatch(request, cancel_event)
-            if cancel_event is not None and cancel_event.is_set():
+            if (
+                cancel_event is not None
+                and cancel_event.is_set()
+                and request.method not in self._ACTIVATION_METHODS
+            ):
                 raise DesktopRequestError(
                     "request_cancelled", "Desktop Bridge request was cancelled."
                 )
@@ -280,6 +294,9 @@ class DesktopEngineServer:
         if cancel_event is not None and cancel_event.is_set():
             raise DesktopRequestError("request_cancelled", "Desktop Bridge request was cancelled.")
 
+        if request.method in self._WORKSPACE_METHODS:
+            return self._dispatch_workspace_request(request, cancel_event)
+
         if request.method == "workbench.inspect_knowledge_base":
             kb_dir = request.params.get("kb_dir")
             if not isinstance(kb_dir, str) or not kb_dir:
@@ -298,26 +315,35 @@ class DesktopEngineServer:
                 ],
             }
 
-        if request.method == "workbench.create_knowledge_base":
-            kb_dir = _required_path_param(request, "kb_dir")
-            name = request.params.get("name")
-            if name is not None and not isinstance(name, str):
-                raise DesktopRequestError(
-                    "invalid_params", "workbench.create_knowledge_base name must be a string."
-                )
-            return self._workspace.create(Path(kb_dir), name=name).as_dict()
-
-        if request.method == "workbench.open_knowledge_base":
-            kb_dir = _required_path_param(request, "kb_dir")
-            return self._workspace.open(Path(kb_dir)).as_dict()
-
-        if request.method == "workbench.active_knowledge_base":
-            active = self._workspace.active()
-            return {"knowledge_base": active.as_dict() if active is not None else None}
-
         raise DesktopRequestError(
             "method_not_found", f"Unknown Desktop Bridge method: {request.method}"
         )
+
+    def _dispatch_workspace_request(
+        self, request: DesktopRequest, cancel_event: threading.Event | None
+    ) -> dict[str, object]:
+        """Serialize workspace binding so cancellation cannot leave the UI stale."""
+        with self._workspace_requests_lock:
+            if cancel_event is not None and cancel_event.is_set():
+                raise DesktopRequestError(
+                    "request_cancelled", "Desktop Bridge request was cancelled."
+                )
+
+            if request.method == "workbench.create_knowledge_base":
+                kb_dir = _required_path_param(request, "kb_dir")
+                name = request.params.get("name")
+                if name is not None and not isinstance(name, str):
+                    raise DesktopRequestError(
+                        "invalid_params", "workbench.create_knowledge_base name must be a string."
+                    )
+                return self._workspace.create(Path(kb_dir), name=name).as_dict()
+
+            if request.method == "workbench.open_knowledge_base":
+                kb_dir = _required_path_param(request, "kb_dir")
+                return self._workspace.open(Path(kb_dir)).as_dict()
+
+            active = self._workspace.active()
+            return {"knowledge_base": active.as_dict() if active is not None else None}
 
     def _emit_event(self, kind: str, data: dict[str, object]) -> None:
         with self._sequence_lock:

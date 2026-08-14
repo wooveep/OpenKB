@@ -97,12 +97,14 @@ pub struct DesktopKnowledgeBase {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActiveKnowledgeBaseResult {
+    #[serde(alias = "knowledge_base")]
     pub knowledge_base: Option<DesktopKnowledgeBase>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeBaseActivationResult {
+    #[serde(alias = "knowledge_base")]
     pub knowledge_base: DesktopKnowledgeBase,
     pub events: Vec<WorkbenchEvent>,
 }

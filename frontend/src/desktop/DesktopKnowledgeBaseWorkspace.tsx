@@ -130,6 +130,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
       setSection("overview")
       setDialogMode(null)
     } catch (error) {
+      await refreshActiveKnowledgeBase()
       setFormError(error instanceof Error ? error.message : String(error))
     } finally {
       setSubmitting(false)

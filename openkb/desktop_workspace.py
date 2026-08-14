@@ -174,27 +174,39 @@ class DesktopKnowledgeBaseRuntime:
         resolved = _resolve_directory(kb_dir)
         if resolved.exists() and not resolved.is_dir():
             raise DesktopKnowledgeBaseDirectoryNotEmptyError(resolved)
-        if _is_legacy_knowledge_base(resolved):
-            raise LegacyKnowledgeBaseUnsupportedError(resolved)
-        if _state_database_path(resolved).exists():
-            raise DesktopKnowledgeBaseAlreadyExistsError(resolved)
-        if resolved.exists() and any(resolved.iterdir()):
-            raise DesktopKnowledgeBaseDirectoryNotEmptyError(resolved)
 
         try:
             resolved.mkdir(parents=True, exist_ok=True)
             state_dir = _state_dir(resolved)
-            state_dir.mkdir(exist_ok=True)
-            (resolved / "raw").mkdir(exist_ok=True)
             display_name = _display_name(name, resolved)
             with kb_ingest_lock(state_dir):
-                connection = _connect(_state_database_path(resolved))
+                _require_creatable_knowledge_base(resolved)
+                database_path = _state_database_path(resolved)
                 try:
-                    _apply_migrations(connection, creating=True)
-                    _set_metadata(connection, "format", _DESKTOP_FORMAT)
-                    _set_metadata(connection, "knowledge_base_name", display_name)
-                finally:
-                    connection.close()
+                    connection: sqlite3.Connection | None = None
+                    try:
+                        connection = _connect(database_path)
+                        connection.execute("BEGIN IMMEDIATE")
+                        _apply_migrations(connection, creating=True, in_transaction=True)
+                        _set_metadata(connection, "format", _DESKTOP_FORMAT, in_transaction=True)
+                        _set_metadata(
+                            connection,
+                            "knowledge_base_name",
+                            display_name,
+                            in_transaction=True,
+                        )
+                        connection.commit()
+                    except BaseException:
+                        if connection is not None:
+                            connection.rollback()
+                        raise
+                    finally:
+                        if connection is not None:
+                            connection.close()
+                    (resolved / "raw").mkdir()
+                except BaseException:
+                    _remove_initial_database(database_path)
+                    raise
         except DesktopKnowledgeBaseError:
             raise
         except (OSError, sqlite3.Error) as error:
@@ -258,7 +270,35 @@ def _connect(database_path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _apply_migrations(connection: sqlite3.Connection, *, creating: bool) -> int:
+def _require_creatable_knowledge_base(kb_dir: Path) -> None:
+    if _is_legacy_knowledge_base(kb_dir):
+        raise LegacyKnowledgeBaseUnsupportedError(kb_dir)
+    if _state_database_path(kb_dir).exists():
+        raise DesktopKnowledgeBaseAlreadyExistsError(kb_dir)
+
+    root_entries = tuple(kb_dir.iterdir())
+    if any(entry.name != _STATE_DIRNAME for entry in root_entries):
+        raise DesktopKnowledgeBaseDirectoryNotEmptyError(kb_dir)
+
+    state_dir = _state_dir(kb_dir)
+    if not state_dir.is_dir():
+        raise DesktopKnowledgeBaseDirectoryNotEmptyError(kb_dir)
+    if any(entry.name != "ingest.lock" for entry in state_dir.iterdir()):
+        raise DesktopKnowledgeBaseDirectoryNotEmptyError(kb_dir)
+
+
+def _remove_initial_database(database_path: Path) -> None:
+    for path in (
+        database_path,
+        database_path.with_name(f"{database_path.name}-wal"),
+        database_path.with_name(f"{database_path.name}-shm"),
+    ):
+        path.unlink(missing_ok=True)
+
+
+def _apply_migrations(
+    connection: sqlite3.Connection, *, creating: bool, in_transaction: bool = False
+) -> int:
     if creating:
         applied: set[int] = set()
     else:
@@ -287,24 +327,41 @@ def _apply_migrations(connection: sqlite3.Connection, *, creating: bool) -> int:
         if version in applied:
             continue
         now = _timestamp()
-        with connection:
+        if in_transaction:
             for statement in statements:
                 connection.execute(statement)
             connection.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                 (version, now),
             )
+        else:
+            with connection:
+                for statement in statements:
+                    connection.execute(statement)
+                connection.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                    (version, now),
+                )
         applied.add(version)
     return latest
 
 
-def _set_metadata(connection: sqlite3.Connection, key: str, value: str) -> None:
-    with connection:
+def _set_metadata(
+    connection: sqlite3.Connection, key: str, value: str, *, in_transaction: bool = False
+) -> None:
+    if in_transaction:
         connection.execute(
             "INSERT INTO metadata (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+    else:
+        with connection:
+            connection.execute(
+                "INSERT INTO metadata (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
 
 
 def _metadata(connection: sqlite3.Connection, key: str) -> str | None:

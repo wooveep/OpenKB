@@ -6,8 +6,10 @@ import sqlite3
 
 import pytest
 
+from openkb import desktop_workspace
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseRuntime,
+    DesktopKnowledgeBaseStateError,
     LegacyKnowledgeBaseUnsupportedError,
 )
 
@@ -29,6 +31,9 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
         )
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key = 'knowledge_base_name'"
+        ).fetchone() == ("First knowledge base",)
 
     second_dir = tmp_path / "second"
     second = runtime.create(second_dir)
@@ -53,3 +58,22 @@ def test_opening_a_legacy_knowledge_base_is_rejected_without_creating_desktop_st
 
     assert error.value.code == "legacy_knowledge_base_unsupported"
     assert not (kb_dir / ".openkb" / "state.sqlite3").exists()
+
+
+def test_failed_initialization_leaves_a_knowledge_base_directory_reusable(tmp_path, monkeypatch):
+    """A failed first transaction does not strand a partial Desktop Knowledge Base."""
+    kb_dir = tmp_path / "retryable"
+    original_set_metadata = desktop_workspace._set_metadata
+
+    def fail_metadata(*_args, **_kwargs):
+        raise sqlite3.OperationalError("simulated metadata write failure")
+
+    monkeypatch.setattr(desktop_workspace, "_set_metadata", fail_metadata)
+    with pytest.raises(DesktopKnowledgeBaseStateError):
+        DesktopKnowledgeBaseRuntime().create(kb_dir)
+
+    assert not (kb_dir / ".openkb" / "state.sqlite3").exists()
+    assert not (kb_dir / "raw").exists()
+
+    monkeypatch.setattr(desktop_workspace, "_set_metadata", original_set_metadata)
+    assert DesktopKnowledgeBaseRuntime().create(kb_dir).knowledge_base.name == "retryable"
