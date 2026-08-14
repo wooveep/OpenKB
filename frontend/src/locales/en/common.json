@@ -118,6 +118,9 @@
       "importPathPlaceholder": "For example C:\\Users\\you\\Documents\\notes.txt",
       "importPathRequired": "Enter a TXT document path.",
       "importAction": "Import TXT",
+      "pauseImport": "Pause",
+      "resumeImport": "Resume",
+      "cancelImport": "Cancel import",
       "taskCenter": "Import task",
       "stageStatus": "{{stage}} · {{status}}",
       "importStages": {
@@ -130,6 +133,9 @@
       "importStatuses": {
         "pending": "Waiting",
         "running": "In progress",
+        "paused": "Paused",
+        "cancelled": "Cancelled",
+        "recoverable": "Ready to resume",
         "completed": "Completed",
         "failed": "Failed",
         "skipped": "Reused"

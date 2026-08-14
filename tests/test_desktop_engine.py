@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import struct
 import threading
@@ -16,7 +17,8 @@ from openkb.desktop_engine import (
     FrameReader,
     encode_frame,
 )
-from openkb.desktop_import import DesktopTextImportService
+from openkb.desktop_import import DesktopImportControl, DesktopTextImportService
+from openkb.desktop_import_store import DesktopImportStore
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 from openkb.workbench_service import DesktopWorkbenchService
 
@@ -297,7 +299,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 2,
+            "schema_version": 3,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -382,3 +384,84 @@ def test_engine_reads_persisted_import_tasks_for_the_active_knowledge_base(tmp_p
 
     assert history["jobs"][0]["job"]["job_id"] == imported.job.job_id
     assert history["jobs"][0]["document"]["availability"] == "available"
+
+
+def test_open_starts_recovery_from_the_latest_verified_checkpoint(tmp_path):
+    """Opening a KB restarts recoverable work without waiting for a user action."""
+    desktop_kb = tmp_path / "desktop-kb"
+    source = tmp_path / "recover.txt"
+    source.write_text("# Recover\n\nResume from the raw checkpoint.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(desktop_kb)
+    source_bytes = source.read_bytes()
+    asset_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    store = DesktopImportStore(desktop_kb)
+    state = store.create_job(source)
+    store.set_stage(
+        state,
+        "preflight",
+        "completed",
+        20,
+        checkpoint={"asset_sha256": asset_sha256, "raw_size": len(source_bytes)},
+    )
+    raw_path = store.write_raw_asset(asset_sha256, source_bytes)
+    store.set_stage(
+        state,
+        "raw_asset",
+        "completed",
+        35,
+        checkpoint={
+            "asset_sha256": asset_sha256,
+            "raw_path": raw_path,
+            "raw_size": len(source_bytes),
+        },
+    )
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO())
+    server._handshake_complete = True
+
+    server._dispatch(
+        DesktopRequest(
+            request_id="open",
+            method="workbench.open_knowledge_base",
+            params={"kb_dir": str(desktop_kb)},
+        ),
+        cancel_event=None,
+    )
+
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        if DesktopTextImportService(desktop_kb).task(state.job_id).job.status == "completed":
+            break
+        time.sleep(0.01)
+    assert DesktopTextImportService(desktop_kb).task(state.job_id).job.status == "completed"
+
+
+def test_engine_signals_an_active_import_without_waiting_for_workspace_lock():
+    """Pause and cancel travel through the task control, not generic request cancellation."""
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO())
+    server._handshake_complete = True
+    pause_control = DesktopImportControl()
+    cancel_control = DesktopImportControl()
+    server._import_controls["pause-job"] = pause_control
+    server._import_controls["cancel-job"] = cancel_control
+
+    paused = server._dispatch(
+        DesktopRequest(
+            request_id="pause",
+            method="workbench.pause_import_job",
+            params={"job_id": "pause-job"},
+        ),
+        cancel_event=None,
+    )
+    cancelled = server._dispatch(
+        DesktopRequest(
+            request_id="cancel",
+            method="workbench.cancel_import_job",
+            params={"job_id": "cancel-job"},
+        ),
+        cancel_event=None,
+    )
+
+    assert paused == {"job_id": "pause-job", "accepted": True}
+    assert cancelled == {"job_id": "cancel-job", "accepted": True}
+    assert pause_control.action == "paused"
+    assert cancel_control.action == "cancelled"

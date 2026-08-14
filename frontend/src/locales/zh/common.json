@@ -118,6 +118,9 @@
       "importPathPlaceholder": "例如 C:\\Users\\你\\Documents\\笔记.txt",
       "importPathRequired": "请输入 TXT 文档路径。",
       "importAction": "导入 TXT",
+      "pauseImport": "暂停",
+      "resumeImport": "继续",
+      "cancelImport": "取消导入",
       "taskCenter": "导入任务",
       "stageStatus": "{{stage}} · {{status}}",
       "importStages": {
@@ -130,6 +133,9 @@
       "importStatuses": {
         "pending": "等待中",
         "running": "进行中",
+        "paused": "已暂停",
+        "cancelled": "已取消",
+        "recoverable": "可继续",
         "completed": "已完成",
         "failed": "失败",
         "skipped": "已复用"

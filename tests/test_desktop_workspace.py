@@ -22,7 +22,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 2
+    assert first.knowledge_base.schema_version == 3
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
@@ -31,6 +31,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
         assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [
             (1,),
             (2,),
+            (3,),
         ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
@@ -54,6 +55,63 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     reopened = DesktopKnowledgeBaseRuntime().open(first_dir)
     assert reopened.knowledge_base.name == "First knowledge base"
     assert reopened.knowledge_base.last_checkpoint_at is not None
+
+
+def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
+    """An interrupted v2 job restarts at preflight rather than trusting missing evidence."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "legacy.txt"
+    source.write_text("Legacy source.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE stage_run_runtime")
+        connection.execute("DROP TABLE import_job_runtime")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 3")
+        connection.execute(
+            """
+            INSERT INTO import_jobs (
+                job_id, source_path, document_id, status, progress, error_code,
+                created_at, completed_at
+            ) VALUES ('legacy-job', ?, NULL, 'running', 75, NULL, '2026-01-01T00:00:00+00:00', NULL)
+            """,
+            (str(source),),
+        )
+        connection.executemany(
+            """
+            INSERT INTO stage_runs (
+                stage_run_id, job_id, stage, status, progress, error_code, started_at, completed_at
+            ) VALUES (?, 'legacy-job', ?, ?, ?, NULL, NULL, NULL)
+            """,
+            [
+                ("legacy-preflight", "preflight", "completed", 20),
+                ("legacy-raw", "raw_asset", "completed", 35),
+                ("legacy-ir", "document_ir", "completed", 55),
+                ("legacy-evidence", "evidence", "running", 60),
+                ("legacy-search", "search", "pending", 0),
+            ],
+        )
+
+    DesktopKnowledgeBaseRuntime().open(kb_dir)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [
+            (1,),
+            (2,),
+            (3,),
+        ]
+        assert connection.execute(
+            "SELECT status FROM import_job_runtime WHERE job_id = 'legacy-job'"
+        ).fetchone() == ("recoverable",)
+        assert connection.execute(
+            "SELECT progress FROM import_jobs WHERE job_id = 'legacy-job'"
+        ).fetchone() == (0,)
+        assert (
+            connection.execute(
+                "SELECT status, progress FROM stage_runs WHERE job_id = 'legacy-job' ORDER BY stage"
+            ).fetchall()
+            == [("pending", 0)] * 5
+        )
 
 
 def test_opening_a_legacy_knowledge_base_is_rejected_without_creating_desktop_state(kb_dir):

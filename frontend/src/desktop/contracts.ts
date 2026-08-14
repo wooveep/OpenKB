@@ -31,6 +31,11 @@ export interface DesktopCancelResult {
   requestId: string
 }
 
+export interface DesktopImportControlResult {
+  jobId: string
+  accepted: boolean
+}
+
 export interface DesktopImportStageProgressEvent {
   sequence: number
   kind: "import.stage_progress"
@@ -52,7 +57,7 @@ export interface DesktopImportedDocument {
 
 export interface DesktopImportJob {
   jobId: string
-  status: "running" | "completed" | "failed"
+  status: "running" | "paused" | "cancelled" | "recoverable" | "completed" | "failed"
   progress: number
   documentId: string | null
   deduplicated: boolean
@@ -61,7 +66,7 @@ export interface DesktopImportJob {
 export interface DesktopImportStageRun {
   stageRunId: string
   stage: "preflight" | "raw_asset" | "document_ir" | "evidence" | "search"
-  status: "pending" | "running" | "completed" | "failed" | "skipped"
+  status: "pending" | "running" | "paused" | "cancelled" | "completed" | "failed" | "skipped"
   progress: number
   errorCode: string | null
 }
@@ -184,6 +189,9 @@ export interface DesktopBridge {
   activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase>
   importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport>
   importJobs(): Promise<DesktopImportJobs>
+  pauseImportJob(jobId: string): Promise<DesktopImportControlResult>
+  resumeImportJob(jobId: string, requestId: string): Promise<DesktopTextDocumentImport>
+  cancelImportJob(jobId: string): Promise<DesktopImportControlResult>
   cancel(targetRequestId: string): Promise<DesktopCancelResult>
   subscribe(listener: (event: DesktopBridgeEvent) => void): Promise<() => void>
 }

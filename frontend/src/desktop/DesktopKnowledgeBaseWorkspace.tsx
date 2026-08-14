@@ -26,6 +26,7 @@ import { LanguageToggle } from "@/lib/language"
 import { ThemeToggle } from "@/lib/theme"
 import { cn } from "@/lib/utils"
 import { useDesktopBridge } from "./bridge-context"
+import { DesktopBridgeError } from "./contracts"
 import type {
   DesktopImportTask,
   DesktopImportStageProgressEvent,
@@ -34,6 +35,7 @@ import type {
 
 type WorkspaceSection = "overview" | "documents" | "answers" | "knowledge" | "review" | "settings"
 type DialogMode = "create" | "open"
+type ImportTaskAction = "pause" | "resume" | "cancel"
 
 const navigation: Array<{
   id: WorkspaceSection
@@ -58,6 +60,11 @@ function nextRequestId(): string {
   return `desktop-knowledge-base-${Date.now()}-${requestSequence}`
 }
 
+function isImportControlError(error: unknown): boolean {
+  return error instanceof DesktopBridgeError
+    && (error.code === "import_paused" || error.code === "import_cancelled")
+}
+
 /** The first real Desktop Workbench: one active SQLite knowledge base at a time. */
 export default function DesktopKnowledgeBaseWorkspace() {
   const { t } = useTranslation("common")
@@ -75,6 +82,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
   const [importTasks, setImportTasks] = useState<DesktopImportTask[]>([])
+  const [controllingJobId, setControllingJobId] = useState<string | null>(null)
   const [liveImportStage, setLiveImportStage] = useState<
     DesktopImportStageProgressEvent["data"] | null
   >(null)
@@ -110,11 +118,16 @@ export default function DesktopKnowledgeBaseWorkspace() {
     let disposed = false
     void bridge
       .subscribe((event) => {
-        if (
-          event.kind === "import.stage_progress" &&
-          event.data.requestId === activeImportRequest.current
-        ) {
-          setLiveImportStage(event.data)
+        if (event.kind === "import.stage_progress") {
+          if (event.data.requestId === activeImportRequest.current) {
+            setLiveImportStage(event.data)
+          }
+          void bridge
+            .importJobs()
+            .then(({ jobs }) => {
+              if (!disposed) setImportTasks(jobs)
+            })
+            .catch(() => undefined)
         }
       })
       .then((remove) => {
@@ -191,7 +204,9 @@ export default function DesktopKnowledgeBaseWorkspace() {
       }
       setImportPath("")
     } catch (error) {
-      setImportError(error instanceof Error ? error.message : String(error))
+      if (!isImportControlError(error)) {
+        setImportError(error instanceof Error ? error.message : String(error))
+      }
       try {
         setImportTasks((await bridge.importJobs()).jobs)
       } catch {
@@ -200,6 +215,32 @@ export default function DesktopKnowledgeBaseWorkspace() {
     } finally {
       if (activeImportRequest.current === requestId) activeImportRequest.current = null
       setImporting(false)
+    }
+  }
+
+  const controlImportJob = async (jobId: string, action: ImportTaskAction) => {
+    setControllingJobId(jobId)
+    setImportError(null)
+    let resumeRequestId: string | null = null
+    try {
+      if (action === "pause") {
+        await bridge.pauseImportJob(jobId)
+      } else if (action === "cancel") {
+        await bridge.cancelImportJob(jobId)
+      } else {
+        resumeRequestId = nextRequestId()
+        activeImportRequest.current = resumeRequestId
+        setLiveImportStage(null)
+        await bridge.resumeImportJob(jobId, resumeRequestId)
+      }
+    } catch (error) {
+      if (!isImportControlError(error)) {
+        setImportError(error instanceof Error ? error.message : String(error))
+      }
+    } finally {
+      if (activeImportRequest.current === resumeRequestId) activeImportRequest.current = null
+      await refreshActiveKnowledgeBase()
+      setControllingJobId(null)
     }
   }
 
@@ -303,8 +344,10 @@ export default function DesktopKnowledgeBaseWorkspace() {
               importPath={importPath}
               importTasks={importTasks}
               liveImportStage={liveImportStage}
+              controllingJobId={controllingJobId}
               onImportPathChange={setImportPath}
               onSubmitImport={() => void submitTextImport()}
+              onControlImportJob={(jobId, action) => void controlImportJob(jobId, action)}
             />
           )}
         </main>
@@ -410,8 +453,10 @@ function ActiveKnowledgeBaseView({
   importPath,
   importTasks,
   liveImportStage,
+  controllingJobId,
   onImportPathChange,
   onSubmitImport,
+  onControlImportJob,
 }: {
   knowledgeBase: DesktopKnowledgeBase
   section: WorkspaceSection
@@ -420,8 +465,10 @@ function ActiveKnowledgeBaseView({
   importPath: string
   importTasks: DesktopImportTask[]
   liveImportStage: DesktopImportStageProgressEvent["data"] | null
+  controllingJobId: string | null
   onImportPathChange: (value: string) => void
   onSubmitImport: () => void
+  onControlImportJob: (jobId: string, action: ImportTaskAction) => void
 }) {
   const { t } = useTranslation("common")
   const sectionTitle = t(`desktop.knowledgeBases.navigationItems.${section}`)
@@ -453,8 +500,10 @@ function ActiveKnowledgeBaseView({
           path={importPath}
           tasks={importTasks}
           liveStage={liveImportStage}
+          controllingJobId={controllingJobId}
           onPathChange={onImportPathChange}
           onSubmit={onSubmitImport}
+          onControl={onControlImportJob}
         />
       ) : null}
     </section>
@@ -467,16 +516,20 @@ function DocumentImportPanel({
   path,
   tasks,
   liveStage,
+  controllingJobId,
   onPathChange,
   onSubmit,
+  onControl,
 }: {
   error: string | null
   importing: boolean
   path: string
   tasks: DesktopImportTask[]
   liveStage: DesktopImportStageProgressEvent["data"] | null
+  controllingJobId: string | null
   onPathChange: (value: string) => void
   onSubmit: () => void
+  onControl: (jobId: string, action: ImportTaskAction) => void
 }) {
   const { t } = useTranslation("common")
   return (
@@ -517,7 +570,13 @@ function DocumentImportPanel({
       {error ? <p className="mt-3 text-sm text-destructive" role="alert">{error}</p> : null}
       {liveStage ? <ImportTaskCard className="mt-5" stage={liveStage} /> : null}
       {tasks.map((task) => (
-        <ImportTaskCard key={task.job.jobId} className="mt-5" task={task} />
+        <ImportTaskCard
+          key={task.job.jobId}
+          className="mt-5"
+          task={task}
+          controlling={controllingJobId === task.job.jobId}
+          onControl={onControl}
+        />
       ))}
     </section>
   )
@@ -527,15 +586,20 @@ function ImportTaskCard({
   className,
   stage: liveStage,
   task,
+  controlling = false,
+  onControl,
 }: {
   className?: string
   stage?: DesktopImportStageProgressEvent["data"]
   task?: DesktopImportTask
+  controlling?: boolean
+  onControl?: (jobId: string, action: ImportTaskAction) => void
 }) {
   const { t } = useTranslation("common")
-  const stage = liveStage ?? task?.stages.find((item) => item.status === "failed") ?? task?.stages.find(
-    (item) => item.status === "running",
-  ) ?? task?.stages.at(-1)
+  const stage = liveStage
+    ?? task?.stages.find((item) => ["failed", "paused", "cancelled"].includes(item.status))
+    ?? task?.stages.find((item) => item.status === "running")
+    ?? task?.stages.at(-1)
   if (!stage) return null
   const jobStatus = task?.job.status ?? stage.status
   const jobProgress = task?.job.progress ?? stage.progress
@@ -557,6 +621,26 @@ function ImportTaskCard({
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${jobProgress}%` }} />
       </div>
+      {task && onControl ? (
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-border/70 pt-4">
+          {task.job.status === "running" ? (
+            <Button size="sm" variant="outline" disabled={controlling} onClick={() => onControl(task.job.jobId, "pause")}>
+              {t("desktop.knowledgeBases.pauseImport")}
+            </Button>
+          ) : null}
+          {task.job.status === "paused" || task.job.status === "recoverable" ? (
+            <Button size="sm" disabled={controlling} onClick={() => onControl(task.job.jobId, "resume")}>
+              {controlling ? <Loader2 className="size-4 animate-spin" /> : null}
+              {t("desktop.knowledgeBases.resumeImport")}
+            </Button>
+          ) : null}
+          {task.job.status === "running" || task.job.status === "paused" || task.job.status === "recoverable" ? (
+            <Button size="sm" variant="ghost" disabled={controlling} onClick={() => onControl(task.job.jobId, "cancel")}>
+              {t("desktop.knowledgeBases.cancelImport")}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       {task?.document ? (
         <div className="mt-4 border-t border-border/70 pt-4 text-sm">
           <p className="font-medium text-emerald-700 dark:text-emerald-300">

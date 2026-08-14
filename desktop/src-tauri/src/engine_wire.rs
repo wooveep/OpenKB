@@ -61,6 +61,8 @@ pub enum ImportStage {
 pub enum ImportStageStatus {
     Pending,
     Running,
+    Paused,
+    Cancelled,
     Completed,
     Failed,
     Skipped,
@@ -70,6 +72,9 @@ pub enum ImportStageStatus {
 #[serde(rename_all = "lowercase")]
 pub enum ImportJobStatus {
     Running,
+    Paused,
+    Cancelled,
+    Recoverable,
     Completed,
     Failed,
 }
@@ -248,6 +253,14 @@ pub struct ImportTask {
 #[serde(rename_all = "camelCase")]
 pub struct ImportJobsResult {
     pub jobs: Vec<ImportTask>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportControlResult {
+    #[serde(alias = "job_id")]
+    pub job_id: String,
+    pub accepted: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

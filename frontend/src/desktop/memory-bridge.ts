@@ -3,6 +3,7 @@ import type {
   DesktopBridgeEvent,
   DesktopBridgeHandshake,
   DesktopCancelResult,
+  DesktopImportControlResult,
   DesktopActiveKnowledgeBase,
   DesktopEngineHealth,
   DesktopKnowledgeBase,
@@ -155,6 +156,38 @@ export class MemoryDesktopBridge implements DesktopBridge {
     return { jobs: this.importJobResults }
   }
 
+  async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {
+    this.updateImportTask(jobId, "paused")
+    return { jobId, accepted: true }
+  }
+
+  async resumeImportJob(jobId: string, requestId: string): Promise<DesktopTextDocumentImport> {
+    const task = this.importJobResults.find((item) => item.job.jobId === jobId)
+    if (task?.document) {
+      const result: DesktopTextDocumentImport = {
+        document: task.document,
+        job: { ...task.job, status: "completed", progress: 100 },
+        stages: task.stages.map((stage) => ({
+          ...stage,
+          status: "completed",
+          progress: 100,
+          errorCode: null,
+        })),
+      }
+      this.importJobResults = [
+        result,
+        ...this.importJobResults.filter((item) => item.job.jobId !== jobId),
+      ]
+      return result
+    }
+    return this.importTextDocument(`resumed-${jobId}.txt`, requestId)
+  }
+
+  async cancelImportJob(jobId: string): Promise<DesktopImportControlResult> {
+    this.updateImportTask(jobId, "cancelled")
+    return { jobId, accepted: true }
+  }
+
   async cancel(targetRequestId: string): Promise<DesktopCancelResult> {
     return { cancelled: true, requestId: targetRequestId }
   }
@@ -174,7 +207,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 2,
+      schemaVersion: 3,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []
@@ -187,5 +220,22 @@ export class MemoryDesktopBridge implements DesktopBridge {
         },
       ],
     }
+  }
+
+  private updateImportTask(jobId: string, status: "paused" | "cancelled"): void {
+    this.importJobResults = this.importJobResults.map((task) => {
+      if (task.job.jobId !== jobId) return task
+      const activeStage = task.stages.find((stage) => stage.status === "running")
+        ?? task.stages.find((stage) => stage.status === "pending")
+      return {
+        ...task,
+        job: { ...task.job, status },
+        stages: task.stages.map((stage) => (
+          stage.stageRunId === activeStage?.stageRunId
+            ? { ...stage, status, errorCode: `import_${status}` }
+            : stage
+        )),
+      }
+    })
   }
 }

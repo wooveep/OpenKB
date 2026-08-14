@@ -9,6 +9,7 @@ belong on stderr.
 from __future__ import annotations
 
 import json
+import logging
 import struct
 import sys
 import threading
@@ -17,7 +18,11 @@ from pathlib import Path
 from typing import BinaryIO
 
 from openkb import __version__
-from openkb.desktop_import import DesktopImportError, DesktopTextImportService
+from openkb.desktop_import import (
+    DesktopImportControl,
+    DesktopImportError,
+    DesktopTextImportService,
+)
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
     DesktopKnowledgeBaseRuntime,
@@ -30,6 +35,7 @@ from openkb.workbench_service import (
 
 PROTOCOL_VERSION = 1
 MAX_FRAME_BYTES = 16 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 class DesktopProtocolError(ValueError):
@@ -138,6 +144,7 @@ class DesktopEngineServer:
         "workbench.open_knowledge_base",
         "workbench.active_knowledge_base",
         "workbench.import_text_document",
+        "workbench.resume_import_job",
         "workbench.import_jobs",
     }
     _NON_CANCELABLE_MUTATION_METHODS = {
@@ -165,6 +172,7 @@ class DesktopEngineServer:
         self._shutdown = threading.Event()
         self._active_requests: dict[str, threading.Event] = {}
         self._non_cancelable_mutations: set[str] = set()
+        self._import_controls: dict[str, DesktopImportControl] = {}
         self._active_lock = threading.Lock()
         self._workers: set[threading.Thread] = set()
         self._workers_lock = threading.Lock()
@@ -305,6 +313,12 @@ class DesktopEngineServer:
         if cancel_event is not None and cancel_event.is_set():
             raise DesktopRequestError("request_cancelled", "Desktop Bridge request was cancelled.")
 
+        if request.method == "workbench.pause_import_job":
+            return self._pause_import_job(_required_string_param(request, "job_id"))
+
+        if request.method == "workbench.cancel_import_job":
+            return self._cancel_import_job(_required_string_param(request, "job_id"))
+
         if request.method in self._WORKSPACE_METHODS:
             return self._dispatch_workspace_request(request, cancel_event)
 
@@ -353,7 +367,9 @@ class DesktopEngineServer:
             if request.method == "workbench.open_knowledge_base":
                 kb_dir = _required_path_param(request, "kb_dir")
                 self._begin_workspace_mutation(request, cancel_event)
-                return self._workspace.open(Path(kb_dir)).as_dict()
+                activation = self._workspace.open(Path(kb_dir))
+                self._start_recoverable_imports(Path(activation.knowledge_base.kb_dir))
+                return activation.as_dict()
 
             if request.method == "workbench.import_text_document":
                 source_path = _required_path_param(request, "source_path")
@@ -364,13 +380,25 @@ class DesktopEngineServer:
                         "Open a Desktop Knowledge Base before importing a document.",
                     )
                 self._begin_workspace_mutation(request, cancel_event)
-                importer = DesktopTextImportService(
+                return self._run_import(
                     Path(active.kb_dir),
-                    on_stage_progress=lambda data: self._emit_event(
-                        "import.stage_progress", {"request_id": str(request.request_id), **data}
-                    ),
+                    request_id=str(request.request_id),
+                    source_path=Path(source_path),
                 )
-                return importer.import_text(Path(source_path)).as_dict()
+
+            if request.method == "workbench.resume_import_job":
+                active = self._workspace.active()
+                if active is None:
+                    raise DesktopRequestError(
+                        "no_active_knowledge_base",
+                        "Open a Desktop Knowledge Base before resuming an import.",
+                    )
+                self._begin_workspace_mutation(request, cancel_event)
+                return self._run_import(
+                    Path(active.kb_dir),
+                    request_id=str(request.request_id),
+                    job_id=_required_string_param(request, "job_id"),
+                )
 
             if request.method == "workbench.import_jobs":
                 active = self._workspace.active()
@@ -380,6 +408,93 @@ class DesktopEngineServer:
 
             active = self._workspace.active()
             return {"knowledge_base": active.as_dict() if active is not None else None}
+
+    def _run_import(
+        self,
+        kb_dir: Path,
+        *,
+        request_id: str | None,
+        source_path: Path | None = None,
+        job_id: str | None = None,
+    ) -> dict[str, object]:
+        """Run one job while its durable state, not this worker, remains authoritative."""
+        control = DesktopImportControl()
+        importer = DesktopTextImportService(
+            kb_dir,
+            control=control,
+            on_stage_progress=lambda data: self._record_import_stage(request_id, control, data),
+        )
+        try:
+            if source_path is not None:
+                return importer.import_text(source_path).as_dict()
+            if job_id is not None:
+                return importer.resume_text(job_id).as_dict()
+            raise DesktopRequestError("invalid_params", "An import source or job is required.")
+        finally:
+            self._release_import_control(control)
+
+    def _record_import_stage(
+        self,
+        request_id: str | None,
+        control: DesktopImportControl,
+        data: dict[str, object],
+    ) -> None:
+        job_id = data.get("job_id")
+        if isinstance(job_id, str):
+            with self._active_lock:
+                self._import_controls[job_id] = control
+        self._emit_event("import.stage_progress", {"request_id": request_id, **data})
+
+    def _release_import_control(self, control: DesktopImportControl) -> None:
+        with self._active_lock:
+            for job_id, active_control in tuple(self._import_controls.items()):
+                if active_control is control:
+                    del self._import_controls[job_id]
+
+    def _pause_import_job(self, job_id: str) -> dict[str, object]:
+        with self._active_lock:
+            control = self._import_controls.get(job_id)
+        if control is None:
+            raise DesktopRequestError(
+                "import_job_not_running", "Import job is not running in this Desktop Runtime."
+            )
+        control.request_pause()
+        return {"job_id": job_id, "accepted": True}
+
+    def _cancel_import_job(self, job_id: str) -> dict[str, object]:
+        with self._active_lock:
+            control = self._import_controls.get(job_id)
+        if control is not None:
+            control.request_cancel()
+            return {"job_id": job_id, "accepted": True}
+
+        active = self._workspace.active()
+        if active is None:
+            raise DesktopRequestError(
+                "no_active_knowledge_base", "Open a Desktop Knowledge Base before cancelling."
+            )
+        DesktopTextImportService(Path(active.kb_dir)).cancel_paused_job(job_id)
+        return {"job_id": job_id, "accepted": True}
+
+    def _start_recoverable_imports(self, kb_dir: Path) -> None:
+        job_ids = DesktopTextImportService(kb_dir).recoverable_job_ids()
+        if not job_ids:
+            return
+        threading.Thread(
+            target=self._resume_recoverable_imports,
+            args=(kb_dir, job_ids),
+            daemon=True,
+            name="openkb-engine-import-recovery",
+        ).start()
+
+    def _resume_recoverable_imports(self, kb_dir: Path, job_ids: tuple[str, ...]) -> None:
+        for job_id in job_ids:
+            if self._shutdown.is_set():
+                return
+            try:
+                self._run_import(kb_dir, request_id=None, job_id=job_id)
+            except (DesktopImportError, DesktopRequestError) as error:
+                logger.warning("Could not resume Desktop import job %s: %s", job_id, error)
 
     def _begin_workspace_mutation(
         self, request: DesktopRequest, cancel_event: threading.Event | None
@@ -427,6 +542,13 @@ class DesktopEngineServer:
 
 
 def _required_path_param(request: DesktopRequest, key: str) -> str:
+    value = request.params.get(key)
+    if not isinstance(value, str) or not value:
+        raise DesktopRequestError("invalid_params", f"{request.method} requires a non-empty {key}.")
+    return value
+
+
+def _required_string_param(request: DesktopRequest, key: str) -> str:
     value = request.params.get(key)
     if not isinstance(value, str) or not value:
         raise DesktopRequestError("invalid_params", f"{request.method} requires a non-empty {key}.")

@@ -7,6 +7,7 @@ import {
   type DesktopBridgeHandshake,
   type DesktopCancelResult,
   type DesktopEngineHealth,
+  type DesktopImportControlResult,
   type DesktopKnowledgeBaseActivation,
   type DesktopKnowledgeBaseInspection,
   type DesktopImportJobs,
@@ -87,6 +88,21 @@ export class TauriDesktopBridge implements DesktopBridge {
     return this.call<DesktopImportJobs>("desktop_import_jobs")
   }
 
+  async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {
+    return this.call<DesktopImportControlResult>("desktop_pause_import_job", { jobId })
+  }
+
+  async resumeImportJob(
+    jobId: string,
+    requestId: string,
+  ): Promise<DesktopTextDocumentImport> {
+    return this.call<DesktopTextDocumentImport>("desktop_resume_import_job", { jobId, requestId })
+  }
+
+  async cancelImportJob(jobId: string): Promise<DesktopImportControlResult> {
+    return this.call<DesktopImportControlResult>("desktop_cancel_import_job", { jobId })
+  }
+
   async cancel(targetRequestId: string): Promise<DesktopCancelResult> {
     return this.call<DesktopCancelResult>("desktop_cancel", { targetRequestId })
   }
@@ -165,6 +181,22 @@ class UnavailableDesktopBridge implements DesktopBridge {
   }
 
   importJobs(): Promise<DesktopImportJobs> {
+    return this.unavailable()
+  }
+
+  pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {
+    void jobId
+    return this.unavailable()
+  }
+
+  resumeImportJob(jobId: string, requestId: string): Promise<DesktopTextDocumentImport> {
+    void jobId
+    void requestId
+    return this.unavailable()
+  }
+
+  cancelImportJob(jobId: string): Promise<DesktopImportControlResult> {
+    void jobId
     return this.unavailable()
   }
 

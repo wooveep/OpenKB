@@ -8,7 +8,7 @@ use crate::engine_wire::{
 };
 pub use crate::engine_wire::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, BridgeResult,
-    CancelResult, EngineHealth, ImportJobsResult, InspectKnowledgeBaseResult,
+    CancelResult, EngineHealth, ImportControlResult, ImportJobsResult, InspectKnowledgeBaseResult,
     KnowledgeBaseActivationResult, TextDocumentImportResult,
 };
 use serde_json::{json, Value};
@@ -197,6 +197,34 @@ impl EngineSupervisor {
         })
     }
 
+    pub fn pause_import_job(&self, job_id: String) -> BridgeResult<ImportControlResult> {
+        self.import_control("workbench.pause_import_job", job_id)
+    }
+
+    pub fn resume_import_job(
+        &self,
+        job_id: String,
+        request_id: String,
+    ) -> BridgeResult<TextDocumentImportResult> {
+        self.ensure_started()?;
+        let value = self.request_started_with_timeout(
+            "workbench.resume_import_job",
+            json!({ "job_id": job_id }),
+            Some(request_id),
+            IMPORT_REQUEST_TIMEOUT,
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine import resume response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn cancel_import_job(&self, job_id: String) -> BridgeResult<ImportControlResult> {
+        self.import_control("workbench.cancel_import_job", job_id)
+    }
+
     pub fn cancel(&self, request_id: String) -> BridgeResult<CancelResult> {
         self.ensure_started()?;
         let value =
@@ -223,6 +251,17 @@ impl EngineSupervisor {
         Ok(CancelResult {
             cancelled,
             request_id: returned_request_id,
+        })
+    }
+
+    fn import_control(&self, method: &str, job_id: String) -> BridgeResult<ImportControlResult> {
+        self.ensure_started()?;
+        let value = self.request_started(method, json!({ "job_id": job_id }), None)?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine import control response has an invalid shape: {error}"),
+            )
         })
     }
 

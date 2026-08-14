@@ -257,6 +257,73 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        3,
+        (
+            """
+            CREATE TABLE import_job_runtime (
+                job_id TEXT PRIMARY KEY REFERENCES import_jobs(job_id) ON DELETE CASCADE,
+                status TEXT NOT NULL CHECK(status IN (
+                    'running', 'paused', 'cancelled', 'recoverable', 'completed', 'failed'
+                )),
+                lease_owner TEXT,
+                lease_expires_at TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            INSERT INTO import_job_runtime (
+                job_id, status, lease_owner, lease_expires_at, updated_at
+            )
+            SELECT job_id, status, NULL, NULL, created_at
+            FROM import_jobs
+            """,
+            """
+            CREATE TABLE stage_run_runtime (
+                stage_run_id TEXT PRIMARY KEY REFERENCES stage_runs(stage_run_id) ON DELETE CASCADE,
+                job_id TEXT NOT NULL REFERENCES import_jobs(job_id) ON DELETE CASCADE,
+                status TEXT NOT NULL CHECK(status IN (
+                    'pending', 'running', 'paused', 'cancelled', 'completed', 'failed', 'skipped'
+                )),
+                checkpoint_json TEXT,
+                error_code TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            INSERT INTO stage_run_runtime (
+                stage_run_id, job_id, status, checkpoint_json, error_code, updated_at
+            )
+            SELECT stage_run_id, job_id, status, NULL, error_code,
+                COALESCE(completed_at, started_at, '')
+            FROM stage_runs
+            """,
+            """
+            UPDATE import_jobs
+            SET progress = 0, error_code = NULL
+            WHERE status = 'running'
+            """,
+            """
+            UPDATE stage_runs
+            SET status = 'pending', progress = 0, error_code = NULL,
+                started_at = NULL, completed_at = NULL
+            WHERE job_id IN (SELECT job_id FROM import_jobs WHERE status = 'running')
+            """,
+            """
+            UPDATE stage_run_runtime
+            SET status = 'pending', checkpoint_json = NULL, error_code = NULL
+            WHERE job_id IN (SELECT job_id FROM import_jobs WHERE status = 'running')
+            """,
+            """
+            CREATE INDEX import_job_runtime_status_idx
+                ON import_job_runtime(status, updated_at DESC)
+            """,
+            """
+            CREATE INDEX stage_run_runtime_job_idx
+                ON stage_run_runtime(job_id, updated_at DESC)
+            """,
+        ),
+    ),
 )
 
 
@@ -510,38 +577,53 @@ def _recover_interrupted_import_jobs(connection: sqlite3.Connection) -> None:
 
     Documents and retrieval artifacts are published in their own final
     transaction, so a running job cannot own a partially available document.
-    The caller holds the KB ingest lock; a live TXT import keeps that lock from
-    job creation through publication, so reaching here means a prior owner has
-    exited or crashed.  Retaining completed stage checkpoints plus a terminal
-    failure lets a later recovery ticket resume safely without pretending the
-    task is still active.
+    The caller holds the KB ingest lock; a live worker keeps that lock from job
+    creation through publication. An expired lease is recovered as such; an
+    unexpired lease whose lock is now available is also abandoned work. Retaining
+    completed stage checkpoints turns either case into a recoverable task.
     """
     interrupted = connection.execute(
-        "SELECT 1 FROM import_jobs WHERE status = 'running' LIMIT 1"
-    ).fetchone()
-    if interrupted is None:
+        "SELECT job_id, lease_expires_at FROM import_job_runtime WHERE status = 'running'"
+    ).fetchall()
+    if not interrupted:
         return
 
     now = _timestamp()
     with connection:
-        connection.execute(
-            """
-            UPDATE stage_runs
-            SET status = 'failed', error_code = 'import_interrupted',
-                completed_at = COALESCE(completed_at, ?)
-            WHERE status IN ('pending', 'running')
-              AND job_id IN (SELECT job_id FROM import_jobs WHERE status = 'running')
-            """,
-            (now,),
-        )
-        connection.execute(
-            """
-            UPDATE import_jobs
-            SET status = 'failed', error_code = 'import_interrupted', completed_at = ?
-            WHERE status = 'running'
-            """,
-            (now,),
-        )
+        for job_id, lease_expires_at in interrupted:
+            error_code = (
+                "import_lease_expired"
+                if _lease_expired(lease_expires_at, now)
+                else "import_interrupted"
+            )
+            connection.execute(
+                """
+                UPDATE stage_run_runtime
+                SET status = CASE WHEN status = 'running' THEN 'paused' ELSE status END,
+                    error_code = CASE WHEN status = 'running' THEN ? ELSE error_code END,
+                    updated_at = ?
+                WHERE job_id = ?
+                """,
+                (error_code, now, job_id),
+            )
+            connection.execute(
+                """
+                UPDATE import_job_runtime
+                SET status = 'recoverable', lease_owner = NULL, lease_expires_at = NULL,
+                    updated_at = ?
+                WHERE job_id = ?
+                """,
+                (now, job_id),
+            )
+
+
+def _lease_expired(lease_expires_at: object, now: str) -> bool:
+    if not isinstance(lease_expires_at, str):
+        return True
+    try:
+        return dt.datetime.fromisoformat(lease_expires_at) <= dt.datetime.fromisoformat(now)
+    except (TypeError, ValueError):
+        return True
 
 
 def _set_metadata(
