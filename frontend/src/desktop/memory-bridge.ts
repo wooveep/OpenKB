@@ -108,7 +108,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
   ): Promise<DesktopImportSourceInspection> {
     void requestId
     const supported = sourcePaths
-      .filter((sourcePath) => sourcePath.toLowerCase().endsWith(".txt"))
+      .filter(isSupportedImportSource)
       .sort((left, right) => left.localeCompare(right))
       .map((sourcePath) => ({
         path: sourcePath,
@@ -117,7 +117,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
         errorCode: null,
       }))
     const unsupported = sourcePaths
-      .filter((sourcePath) => !sourcePath.toLowerCase().endsWith(".txt"))
+      .filter((sourcePath) => !isSupportedImportSource(sourcePath))
       .sort((left, right) => left.localeCompare(right))
       .map((sourcePath) => ({
         path: sourcePath,
@@ -125,7 +125,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
         status: "unsupported" as const,
         errorCode: "unsupported_import_format",
       }))
-    return { supported, unsupported, supportedExtensions: [".txt"] }
+    return { supported, unsupported, supportedExtensions: [".txt", ".md", ".markdown", ".docx"] }
   }
 
   async chooseImportSources(picker: DesktopImportSourcePicker): Promise<string[]> {
@@ -161,6 +161,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
       content,
       page,
       hasMore: false,
+      sourceImages: [],
     }
   }
 
@@ -196,7 +197,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
       document: {
         documentId,
         name,
-        sourceFormat: "txt",
+        sourceFormat: sourceFormat(sourcePath),
         rawAssetSha256: "memory-bridge",
         evidenceCount: 1,
         availability: "available",
@@ -313,7 +314,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 6,
+      schemaVersion: 7,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []
@@ -344,6 +345,16 @@ export class MemoryDesktopBridge implements DesktopBridge {
       }
     })
   }
+}
+
+function isSupportedImportSource(sourcePath: string): boolean {
+  return /\.(txt|md|markdown|docx)$/i.test(sourcePath)
+}
+
+function sourceFormat(sourcePath: string): "txt" | "markdown" | "docx" {
+  if (/\.(md|markdown)$/i.test(sourcePath)) return "markdown"
+  if (/\.docx$/i.test(sourcePath)) return "docx"
+  return "txt"
 }
 
 function sourceName(sourcePath: string): string {

@@ -157,7 +157,7 @@ class DesktopRecoveryOverride:
 
 @dataclass(frozen=True)
 class DesktopTextImportResult:
-    """The successful result of importing one TXT file."""
+    """The successful result of importing one Desktop document."""
 
     document: DesktopImportedDocument
     job: DesktopImportJob

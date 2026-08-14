@@ -1,3 +1,4 @@
+import { convertFileSrc } from "@tauri-apps/api/core"
 import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
 import {
@@ -10,7 +11,7 @@ import {
 } from "@/components/ui/dialog"
 import type { DesktopRawDocument } from "./contracts"
 
-/** Read-only view of the one integrity-checked original held in raw/. */
+/** Read-only view of the verified original plus its independently retained images. */
 export function DesktopRawDocumentDialog({
   document,
   loadingMore,
@@ -38,6 +39,34 @@ export function DesktopRawDocumentDialog({
         <pre className="min-h-0 flex-1 overflow-auto rounded-lg border border-border/70 bg-muted/30 p-4 font-mono2 text-xs leading-6 whitespace-pre-wrap">
           {document?.content}
         </pre>
+        {document?.sourceImages.length ? (
+          <section className="max-h-56 overflow-y-auto rounded-lg border border-border/70 p-3" aria-label="Source images">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              {document.sourceImages.map((image) => {
+                const source = image.filePath ? convertFileSrc(image.filePath) : ""
+                return source ? (
+                  <a
+                    key={image.sourceImageId}
+                    href={source}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block overflow-hidden rounded-md border border-border/70 bg-muted/20"
+                    title={image.altText ?? image.name}
+                  >
+                    <img
+                      src={source}
+                      alt={image.altText ?? image.name}
+                      className="h-32 w-full object-contain"
+                    />
+                    <span className="block truncate border-t border-border/70 px-2 py-1 text-xs text-muted-foreground">
+                      {image.altText ?? image.name}
+                    </span>
+                  </a>
+                ) : null
+              })}
+            </div>
+          </section>
+        ) : null}
         <DialogFooter>
           {document?.hasMore ? (
             <Button type="button" variant="outline" disabled={loadingMore} onClick={onLoadMore}>

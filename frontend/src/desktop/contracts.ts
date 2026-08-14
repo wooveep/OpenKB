@@ -140,6 +140,15 @@ export interface DesktopRawDocument {
   content: string
   page: number
   hasMore: boolean
+  sourceImages: DesktopSourceImage[]
+}
+
+export interface DesktopSourceImage {
+  sourceImageId: string
+  name: string
+  mediaType: string
+  filePath: string
+  altText: string | null
 }
 
 export interface DesktopTextDocumentImport {

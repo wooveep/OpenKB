@@ -13,7 +13,7 @@ from typing import Callable
 
 from portalocker import LockException
 
-from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
+from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock, SourceImage
 from openkb.desktop_import_queries import (
     find_available_document_in,
     stages_for_job,
@@ -23,6 +23,12 @@ from openkb.desktop_import_types import (
     DesktopImportedDocument,
     DesktopImportTask,
     DesktopStageRun,
+)
+from openkb.desktop_source_image_assets import (
+    persist_source_images,
+)
+from openkb.desktop_source_image_assets import (
+    write_source_images as write_source_image_files,
 )
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import atomic_write_bytes, kb_ingest_lock
@@ -353,11 +359,21 @@ class DesktopImportStore:
             state.job_id, DesktopStageRun(stage_run_id, stage, status, progress, error_code)
         )
 
-    def write_raw_asset(self, asset_sha256: str, content: bytes) -> str:
-        raw_relative_path = Path("raw") / f"{asset_sha256}.txt"
+    def write_raw_asset(
+        self, asset_sha256: str, content: bytes, source_suffix: str = ".txt"
+    ) -> str:
+        """Persist exactly one complete input asset under its original format suffix."""
+        suffix = source_suffix.lower()
+        if suffix not in {".txt", ".md", ".markdown", ".docx"}:
+            raise DesktopImportError("unsupported_import_format", "Unsupported raw asset suffix.")
+        raw_relative_path = Path("raw") / f"{asset_sha256}{suffix}"
         with kb_ingest_lock(self.state_dir):
             atomic_write_bytes(self.kb_dir / raw_relative_path, content)
         return raw_relative_path.as_posix()
+
+    def write_source_images(self, source_images: tuple[SourceImage, ...]) -> None:
+        """Write extracted source-image bytes before their durable IR checkpoint commits."""
+        write_source_image_files(self.kb_dir, self.state_dir, source_images)
 
     def emit_stage(
         self,
@@ -436,8 +452,11 @@ class DesktopImportStore:
         asset_sha256: str,
         raw_path: str,
         raw_size: int,
+        source_format: str,
+        raw_media_type: str,
         blocks: tuple[DocumentIRBlock, ...],
         evidence: tuple[tuple[str, DocumentIRBlock], ...],
+        source_images: tuple[SourceImage, ...],
     ) -> tuple[DesktopImportedDocument, bool]:
         now = _timestamp()
         search_stage_id = state.stage_ids["search"]
@@ -460,19 +479,19 @@ class DesktopImportStore:
                     """
                     INSERT INTO raw_assets (
                         asset_sha256, byte_size, media_type, raw_path, original_name, created_at
-                    ) VALUES (?, ?, 'text/plain', ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(asset_sha256) DO NOTHING
                     """,
-                    (asset_sha256, raw_size, raw_path, source.name, now),
+                    (asset_sha256, raw_size, raw_media_type, raw_path, source.name, now),
                 )
                 connection.execute(
                     """
                     INSERT INTO source_documents (
                         document_id, asset_sha256, display_name, source_format, availability,
                         created_at, available_at
-                    ) VALUES (?, ?, ?, 'txt', 'available', ?, ?)
+                    ) VALUES (?, ?, ?, ?, 'available', ?, ?)
                     """,
-                    (document_id, asset_sha256, source.name, now, now),
+                    (document_id, asset_sha256, source.name, source_format, now, now),
                 )
                 connection.executemany(
                     """
@@ -488,7 +507,7 @@ class DesktopImportStore:
                             block.kind,
                             block.text,
                             json.dumps(block.heading_path, ensure_ascii=False),
-                            _line_locator(block),
+                            _block_locator(block),
                         )
                         for block in blocks
                     ],
@@ -506,7 +525,7 @@ class DesktopImportStore:
                             block.block_id,
                             block.ordinal,
                             block.text,
-                            _line_locator(block),
+                            _block_locator(block),
                         )
                         for evidence_id, block in evidence
                     ],
@@ -514,6 +533,12 @@ class DesktopImportStore:
                 connection.executemany(
                     "INSERT INTO evidence_fts (evidence_id, document_id, content) VALUES (?, ?, ?)",
                     [(evidence_id, document_id, block.text) for evidence_id, block in evidence],
+                )
+                persist_source_images(
+                    connection,
+                    document_id=document_id,
+                    source_images=source_images,
+                    created_at=now,
                 )
                 self._complete_job_in(connection, state.job_id, search_stage_id, document_id, now)
                 self._complete_recovery_in(connection, state, now)
@@ -530,7 +555,7 @@ class DesktopImportStore:
             DesktopImportedDocument(
                 document_id=document_id,
                 name=source.name,
-                source_format="txt",
+                source_format=source_format,
                 raw_asset_sha256=asset_sha256,
                 evidence_count=len(evidence),
                 availability="available",
@@ -755,8 +780,9 @@ class DesktopImportStore:
             logger.debug("Desktop import stage callback failed for job %s", job_id, exc_info=True)
 
 
-def _line_locator(block: DocumentIRBlock) -> str:
-    return json.dumps({"line_start": block.line_start, "line_end": block.line_end})
+def _block_locator(block: DocumentIRBlock) -> str:
+    locator = block.locator or {"line_start": block.line_start, "line_end": block.line_end}
+    return json.dumps(locator, ensure_ascii=False)
 
 
 def _timestamp() -> str:

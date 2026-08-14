@@ -1,4 +1,4 @@
-"""TXT worker that executes or resumes durable Desktop Import Jobs."""
+"""Document worker that executes or resumes durable Desktop Import Jobs."""
 
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ from typing import Callable
 
 from portalocker import LockException
 
+from openkb.desktop_document_parsers import analysis_text, parse_structured_document
 from openkb.desktop_import_artifacts import (
     DesktopImportError,
+    SourceImage,
     build_document_ir,
     build_evidence,
     decode_text,
@@ -21,6 +23,9 @@ from openkb.desktop_import_artifacts import (
     document_ir_from_checkpoint,
     evidence_checkpoint,
     evidence_from_checkpoint,
+    source_format_for_path,
+    source_images_from_checkpoint,
+    source_media_type,
     validate_text_source,
 )
 from openkb.desktop_import_model_ledger import DesktopImportModelLedger
@@ -68,7 +73,7 @@ class DesktopImportControl:
 
 
 class DesktopTextImportService:
-    """Run one TXT Import Job while keeping stage checkpoints resumable."""
+    """Run one Desktop document Import Job while keeping stages resumable."""
 
     def __init__(
         self,
@@ -85,7 +90,7 @@ class DesktopTextImportService:
         self._model_gateway = model_gateway
 
     def import_text(self, source_path: Path) -> DesktopTextImportResult:
-        """Create and execute a brand-new TXT Import Job."""
+        """Create and execute a brand-new supported document Import Job."""
         source = validate_text_source(source_path)
         try:
             # A live worker owns the KB lock, so open-time recovery sees only a crashed owner.
@@ -151,23 +156,33 @@ class DesktopTextImportService:
         )
         terminal_state_committed = False
         try:
-            raw_bytes, text, asset_sha256, raw_path = self._raw_input(state, stages)
+            raw_bytes, text, source_format, asset_sha256, raw_path = self._raw_input(state, stages)
             stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
 
             if not self._completed(stages, "document_ir"):
                 active_stage = "document_ir"
                 self._honor_control(state, active_stage)
                 self._store.set_stage(state, active_stage, "running", 40)
-                blocks = build_document_ir(text)
+                source_images: tuple[SourceImage, ...]
+                if source_format == "txt":
+                    blocks = build_document_ir(text)
+                    source_images = ()
+                else:
+                    parsed = parse_structured_document(state.source, raw_bytes)
+                    blocks = parsed.blocks
+                    source_images = parsed.source_images
+                    self._store.write_source_images(source_images)
                 self._store.set_stage(
                     state,
                     active_stage,
                     "completed",
                     55,
-                    checkpoint=document_ir_checkpoint(blocks),
+                    checkpoint=document_ir_checkpoint(blocks, source_images),
                 )
             else:
-                blocks = document_ir_from_checkpoint(self._checkpoint(state, "document_ir"))
+                document_ir = self._checkpoint(state, "document_ir")
+                blocks = document_ir_from_checkpoint(document_ir)
+                source_images = source_images_from_checkpoint(document_ir)
 
             stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
             if not self._completed(stages, "evidence"):
@@ -204,7 +219,11 @@ class DesktopTextImportService:
                         error_code="model_analysis_not_configured",
                     )
                 else:
-                    result = self._analyze_document(state, active_stage, text)
+                    result = self._analyze_document(
+                        state,
+                        active_stage,
+                        text if source_format == "txt" else analysis_text(blocks),
+                    )
                     self._store.set_stage(
                         state,
                         active_stage,
@@ -229,8 +248,11 @@ class DesktopTextImportService:
                 asset_sha256=asset_sha256,
                 raw_path=raw_path,
                 raw_size=len(raw_bytes),
+                source_format=source_format,
+                raw_media_type=source_media_type(source_format),
                 blocks=blocks,
                 evidence=evidence,
+                source_images=source_images,
             )
             terminal_state_committed = True
             self._store.emit_stage(
@@ -305,7 +327,9 @@ class DesktopTextImportService:
 
     def _raw_input(
         self, state: ImportJobState, stages: Mapping[str, DesktopStageRun]
-    ) -> tuple[bytes, str, str, str]:
+    ) -> tuple[bytes, str, str, str, str]:
+        source_format = source_format_for_path(state.source)
+        raw_suffix = state.source.suffix.lower()
         if self._completed(stages, "raw_asset"):
             checkpoint = self._checkpoint(state, "raw_asset")
             if not isinstance(checkpoint, dict):
@@ -322,7 +346,7 @@ class DesktopTextImportService:
                 or any(character not in "0123456789abcdef" for character in expected_hash)
                 or type(expected_size) is not int
                 or expected_size < 0
-                or raw_path != f"raw/{expected_hash}.txt"
+                or raw_path != f"raw/{expected_hash}{raw_suffix}"
             ):
                 raise DesktopImportError(
                     "import_checkpoint_invalid", "Invalid raw asset checkpoint."
@@ -333,14 +357,15 @@ class DesktopTextImportService:
                 raise DesktopImportError(
                     "raw_asset_integrity_failed", "Saved raw asset fails checkpoint."
                 )
-            return raw_bytes, decode_text(raw_bytes, state.source), actual_hash, raw_path
+            text = decode_text(raw_bytes, state.source) if source_format != "docx" else ""
+            return raw_bytes, text, source_format, actual_hash, raw_path
 
         active_stage = "preflight"
         preflight_completed = self._completed(stages, active_stage)
         if not preflight_completed:
             self._honor_control(state, active_stage)
         raw_bytes = state.source.read_bytes()
-        text = decode_text(raw_bytes, state.source)
+        text = decode_text(raw_bytes, state.source) if source_format != "docx" else ""
         asset_sha256 = hashlib.sha256(raw_bytes).hexdigest()
         if not preflight_completed or not self._matches_preflight_checkpoint(
             self._checkpoint(state, active_stage), asset_sha256, len(raw_bytes)
@@ -364,7 +389,7 @@ class DesktopTextImportService:
             self._store.set_stage(state, active_stage, "completed", 35)
             self._store.complete_duplicate_job(state, duplicate.document_id)
             raise _DuplicateImport(duplicate.document_id)
-        raw_path = self._store.write_raw_asset(asset_sha256, raw_bytes)
+        raw_path = self._store.write_raw_asset(asset_sha256, raw_bytes, raw_suffix)
         self._store.set_stage(
             state,
             active_stage,
@@ -376,7 +401,7 @@ class DesktopTextImportService:
                 "raw_size": len(raw_bytes),
             },
         )
-        return raw_bytes, text, asset_sha256, raw_path
+        return raw_bytes, text, source_format, asset_sha256, raw_path
 
     def _result(
         self, job_id: str, document_id: str, *, deduplicated: bool

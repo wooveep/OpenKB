@@ -1,4 +1,4 @@
-"""Public Desktop TXT import API.
+"""Public Desktop document import API.
 
 The worker, persistence state machine, artifacts, and wire values live in
 focused modules so later format adapters can reuse the same Stage Run runtime.

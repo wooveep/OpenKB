@@ -300,7 +300,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 6,
+            "schema_version": 7,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -376,6 +376,7 @@ def test_engine_reads_a_verified_raw_document(tmp_path):
         "content": "Original reader text.",
         "page": 0,
         "has_more": False,
+        "source_images": [],
     }
 
 

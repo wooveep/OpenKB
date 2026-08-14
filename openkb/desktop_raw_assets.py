@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from openkb.desktop_import_artifacts import DesktopImportError
+from openkb.desktop_document_parsers import materialize_reader_markdown
+from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -29,6 +31,7 @@ class DesktopRawDocument:
     content: str
     page: int
     has_more: bool
+    source_images: tuple["DesktopSourceImage", ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -40,6 +43,27 @@ class DesktopRawDocument:
             "content": self.content,
             "page": self.page,
             "has_more": self.has_more,
+            "source_images": [image.as_dict() for image in self.source_images],
+        }
+
+
+@dataclass(frozen=True)
+class DesktopSourceImage:
+    """One independently saved original image available in the document reader."""
+
+    source_image_id: str
+    name: str
+    media_type: str
+    file_path: str
+    alt_text: str | None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "source_image_id": self.source_image_id,
+            "name": self.name,
+            "media_type": self.media_type,
+            "file_path": self.file_path,
+            "alt_text": self.alt_text,
         }
 
 
@@ -65,7 +89,7 @@ class DesktopRawAssetService:
         self.database_path = desktop_state_database_path(self.kb_dir)
 
     def read_document(self, document_id: str, *, page: int = 0) -> DesktopRawDocument:
-        """Return one verified TXT-reader page without exceeding the Engine frame limit."""
+        """Return one verified original-reader page without exceeding the Engine frame limit."""
         if page < 0:
             raise DesktopImportError(
                 "invalid_raw_document_page", "Original document page must be non-negative."
@@ -94,20 +118,8 @@ class DesktopRawAssetService:
                     self._quarantine(connection, record, error_code)
                     connection.commit()
                     raise DesktopImportError(error_code, _integrity_message(error_code))
-                if record.source_format != "txt":
-                    connection.rollback()
-                    raise DesktopImportError(
-                        "raw_document_reader_unsupported",
-                        "This original cannot be displayed by the current Desktop reader.",
-                    )
-                try:
-                    content = raw_bytes.decode("utf-8-sig")
-                except UnicodeDecodeError as error:
-                    self._quarantine(connection, record, "raw_asset_content_invalid")
-                    connection.commit()
-                    raise DesktopImportError(
-                        "raw_asset_content_invalid", "The saved original is not valid text."
-                    ) from error
+                content = self._reader_content(connection, record, raw_bytes)
+                source_images = self._source_images_for_document(connection, record.document_id)
                 self._mark_verified(connection, record.asset_sha256)
                 connection.commit()
             except BaseException:
@@ -125,6 +137,7 @@ class DesktopRawAssetService:
             content=content,
             page=page,
             has_more=has_more,
+            source_images=source_images,
         )
 
     def verify_available_documents(self) -> tuple[str, ...]:
@@ -200,11 +213,10 @@ class DesktopRawAssetService:
         return tuple(_record_from_row(row) for row in rows)
 
     def _validated_bytes(self, record: _RawAssetRecord) -> tuple[bytes, str | None]:
-        expected_path = f"raw/{record.asset_sha256}.txt"
-        if record.raw_path != expected_path:
+        if record.raw_path not in _expected_raw_paths(record):
             return b"", "raw_asset_path_invalid"
         try:
-            raw_bytes = (self.kb_dir / expected_path).read_bytes()
+            raw_bytes = (self.kb_dir / record.raw_path).read_bytes()
         except FileNotFoundError:
             return b"", "raw_asset_missing"
         except OSError:
@@ -214,6 +226,106 @@ class DesktopRawAssetService:
         if hashlib.sha256(raw_bytes).hexdigest() != record.asset_sha256:
             return raw_bytes, "raw_asset_hash_mismatch"
         return raw_bytes, None
+
+    def _reader_content(
+        self,
+        connection: sqlite3.Connection,
+        record: _RawAssetRecord,
+        raw_bytes: bytes,
+    ) -> str:
+        if record.source_format == "txt":
+            try:
+                return raw_bytes.decode("utf-8-sig")
+            except UnicodeDecodeError as error:
+                self._quarantine(connection, record, "raw_asset_content_invalid")
+                connection.commit()
+                raise DesktopImportError(
+                    "raw_asset_content_invalid", "The saved original is not valid text."
+                ) from error
+        if record.source_format in {"markdown", "docx"}:
+            blocks = self._document_blocks(connection, record.document_id)
+            return materialize_reader_markdown(blocks)
+        raise DesktopImportError(
+            "raw_document_reader_unsupported",
+            "This original cannot be displayed by the current Desktop reader.",
+        )
+
+    @staticmethod
+    def _document_blocks(
+        connection: sqlite3.Connection, document_id: str
+    ) -> tuple[DocumentIRBlock, ...]:
+        rows = connection.execute(
+            """
+            SELECT block_id, ordinal, kind, text, heading_path, locator_json
+            FROM document_ir_blocks
+            WHERE document_id = ?
+            ORDER BY ordinal
+            """,
+            (document_id,),
+        ).fetchall()
+        blocks: list[DocumentIRBlock] = []
+        for row in rows:
+            try:
+                heading_path = json.loads(str(row[4]))
+                locator = json.loads(str(row[5]))
+            except json.JSONDecodeError as error:
+                raise DesktopImportError(
+                    "desktop_import_state_invalid", "Document reader source structure is invalid."
+                ) from error
+            if (
+                not isinstance(heading_path, list)
+                or not all(isinstance(value, str) for value in heading_path)
+                or not isinstance(locator, dict)
+            ):
+                raise DesktopImportError(
+                    "desktop_import_state_invalid", "Document reader source structure is invalid."
+                )
+            blocks.append(
+                DocumentIRBlock(
+                    block_id=str(row[0]),
+                    ordinal=int(row[1]),
+                    kind=str(row[2]),
+                    text=str(row[3]),
+                    heading_path=tuple(heading_path),
+                    line_start=1,
+                    line_end=1,
+                    locator=locator,
+                )
+            )
+        if not blocks:
+            raise DesktopImportError(
+                "desktop_import_state_invalid", "Document reader source structure is empty."
+            )
+        return tuple(blocks)
+
+    def _source_images_for_document(
+        self, connection: sqlite3.Connection, document_id: str
+    ) -> tuple[DesktopSourceImage, ...]:
+        rows = connection.execute(
+            """
+            SELECT source_image_id, display_name, media_type, storage_path, alt_text
+            FROM source_images
+            WHERE document_id = ?
+            ORDER BY ordinal
+            """,
+            (document_id,),
+        ).fetchall()
+        images: list[DesktopSourceImage] = []
+        for row in rows:
+            storage_path = str(row[3])
+            path = self.kb_dir / storage_path
+            if not path.is_file():
+                continue
+            images.append(
+                DesktopSourceImage(
+                    source_image_id=str(row[0]),
+                    name=str(row[1]),
+                    media_type=str(row[2]),
+                    file_path=str(path.resolve()),
+                    alt_text=str(row[4]) if row[4] is not None else None,
+                )
+            )
+        return tuple(images)
 
     @staticmethod
     def _mark_verified(connection: sqlite3.Connection, asset_sha256: str) -> None:
@@ -270,6 +382,15 @@ def _record_from_row(row: tuple[object, ...]) -> _RawAssetRecord:
         lifecycle_status=str(row[7]),
         integrity_error_code=str(row[8]) if row[8] is not None else None,
     )
+
+
+def _expected_raw_paths(record: _RawAssetRecord) -> set[str]:
+    suffixes = {
+        "txt": {".txt"},
+        "markdown": {".md", ".markdown"},
+        "docx": {".docx"},
+    }.get(record.source_format, set())
+    return {f"raw/{record.asset_sha256}{suffix}" for suffix in suffixes}
 
 
 def _integrity_message(error_code: str) -> str:

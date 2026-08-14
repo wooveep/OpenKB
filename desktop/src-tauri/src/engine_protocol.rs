@@ -201,7 +201,7 @@ impl EngineSupervisor {
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(
                 "invalid_engine_response",
-                format!("Engine TXT import response has an invalid shape: {error}"),
+                format!("Engine document import response has an invalid shape: {error}"),
             )
         })
     }

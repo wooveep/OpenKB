@@ -158,3 +158,28 @@ RAW_ASSET_INTEGRITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON raw_asset_integrity(lifecycle_status, verified_at DESC)
     """,
 )
+
+
+SOURCE_IMAGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE source_images (
+        source_image_id TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL REFERENCES source_documents(document_id)
+            ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        image_sha256 TEXT NOT NULL,
+        byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+        media_type TEXT NOT NULL,
+        storage_path TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        alt_text TEXT,
+        locator_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(document_id, ordinal)
+    )
+    """,
+    """
+    CREATE INDEX source_images_document_idx
+        ON source_images(document_id, ordinal)
+    """,
+)

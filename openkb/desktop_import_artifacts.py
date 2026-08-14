@@ -1,7 +1,8 @@
-"""TXT normalization helpers shared by Desktop import stage runners."""
+"""Normalized Desktop Import artifacts shared by stage runners."""
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -10,6 +11,17 @@ from pathlib import Path
 from openkb.desktop_import_sources import SUPPORTED_DESKTOP_IMPORT_SUFFIXES
 
 _HEADING_PATTERN = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*$")
+_SOURCE_FORMATS = {
+    ".txt": "txt",
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".docx": "docx",
+}
+_SOURCE_MEDIA_TYPES = {
+    "txt": "text/plain",
+    "markdown": "text/markdown",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
 
 
 class DesktopImportError(RuntimeError):
@@ -33,31 +45,71 @@ class DocumentIRBlock:
     heading_path: tuple[str, ...]
     line_start: int
     line_end: int
+    locator: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class SourceImage:
+    """An original document image retained separately from its complete Raw Asset."""
+
+    image_id: str
+    ordinal: int
+    image_sha256: str
+    byte_size: int
+    media_type: str
+    filename: str
+    extension: str
+    alt_text: str | None
+    locator: dict[str, object]
+    content: bytes = b""
 
 
 def validate_text_source(source_path: Path) -> Path:
-    """Resolve and validate the first supported Desktop source format."""
+    """Resolve and validate a source handled by the current Desktop import path."""
     source = source_path.expanduser().resolve()
     if source.suffix.lower() not in SUPPORTED_DESKTOP_IMPORT_SUFFIXES:
         raise DesktopImportError(
-            "unsupported_import_format", "The first Desktop import path supports TXT files only."
+            "unsupported_import_format",
+            "Desktop import supports TXT, Markdown, and DOCX files.",
         )
     if not source.is_file():
-        raise DesktopImportError("import_source_not_found", f"TXT source was not found: {source}")
+        raise DesktopImportError(
+            "import_source_not_found", f"Import source was not found: {source}"
+        )
     return source
 
 
+def source_format_for_path(source: Path) -> str:
+    """Return the stable persisted source format for a validated input path."""
+    try:
+        return _SOURCE_FORMATS[source.suffix.lower()]
+    except KeyError as error:
+        raise DesktopImportError(
+            "unsupported_import_format", f"Unsupported import source: {source.name}"
+        ) from error
+
+
+def source_media_type(source_format: str) -> str:
+    """Return the persisted MIME type for one complete Raw Asset."""
+    try:
+        return _SOURCE_MEDIA_TYPES[source_format]
+    except KeyError as error:
+        raise DesktopImportError(
+            "unsupported_import_format", f"Unsupported import source format: {source_format}"
+        ) from error
+
+
 def decode_text(content: bytes, source: Path) -> str:
-    """Decode the raw asset into normalized non-empty UTF-8 text."""
+    """Decode a text-like raw asset into normalized non-empty UTF-8 text."""
     try:
         text = content.decode("utf-8-sig")
     except UnicodeDecodeError as error:
         raise DesktopImportError(
-            "invalid_text_document", f"TXT source is not valid UTF-8 text: {source.name}"
+            "invalid_text_document", f"Text source is not valid UTF-8: {source.name}"
         ) from error
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     if not text.strip():
-        raise DesktopImportError("empty_text_document", f"TXT source is empty: {source.name}")
+        raise DesktopImportError("empty_text_document", f"Text source is empty: {source.name}")
     return text
 
 
@@ -127,9 +179,11 @@ def build_evidence(
     return tuple((uuid.uuid4().hex, block) for block in blocks)
 
 
-def document_ir_checkpoint(blocks: tuple[DocumentIRBlock, ...]) -> list[dict[str, object]]:
+def document_ir_checkpoint(
+    blocks: tuple[DocumentIRBlock, ...], source_images: tuple[SourceImage, ...] = ()
+) -> list[dict[str, object]] | dict[str, object]:
     """Serialize completed conversion output for a later Stage Run resume."""
-    return [
+    block_payload = [
         {
             "block_id": block.block_id,
             "ordinal": block.ordinal,
@@ -138,18 +192,27 @@ def document_ir_checkpoint(blocks: tuple[DocumentIRBlock, ...]) -> list[dict[str
             "heading_path": list(block.heading_path),
             "line_start": block.line_start,
             "line_end": block.line_end,
+            "locator": block.locator,
         }
         for block in blocks
     ]
+    if not source_images:
+        # Preserve the first TXT checkpoint shape so old paused jobs remain resumable.
+        return block_payload
+    return {
+        "blocks": block_payload,
+        "source_images": [_source_image_checkpoint(image) for image in source_images],
+    }
 
 
 def document_ir_from_checkpoint(payload: object) -> tuple[DocumentIRBlock, ...]:
     """Rehydrate only a structurally valid persisted Document IR checkpoint."""
-    if not isinstance(payload, list):
+    block_payload = payload.get("blocks") if isinstance(payload, dict) else payload
+    if not isinstance(block_payload, list):
         raise DesktopImportError("import_checkpoint_invalid", "Document IR checkpoint is invalid.")
     blocks: list[DocumentIRBlock] = []
     block_ids: set[str] = set()
-    for expected_ordinal, item in enumerate(payload):
+    for expected_ordinal, item in enumerate(block_payload):
         if not isinstance(item, dict):
             raise DesktopImportError(
                 "import_checkpoint_invalid", "Document IR checkpoint is invalid."
@@ -161,6 +224,7 @@ def document_ir_from_checkpoint(payload: object) -> tuple[DocumentIRBlock, ...]:
         ordinal = item.get("ordinal")
         line_start = item.get("line_start")
         line_end = item.get("line_end")
+        locator = item.get("locator")
         if (
             not isinstance(block_id, str)
             or not block_id
@@ -176,6 +240,8 @@ def document_ir_from_checkpoint(payload: object) -> tuple[DocumentIRBlock, ...]:
             or type(line_end) is not int
             or line_start < 1
             or line_end < line_start
+            or (locator is not None and not isinstance(locator, dict))
+            or not _is_json_object(locator)
         ):
             raise DesktopImportError(
                 "import_checkpoint_invalid", "Document IR checkpoint is invalid."
@@ -190,11 +256,102 @@ def document_ir_from_checkpoint(payload: object) -> tuple[DocumentIRBlock, ...]:
                 heading_path=tuple(heading_path),
                 line_start=line_start,
                 line_end=line_end,
+                locator=dict(locator) if locator is not None else None,
             )
         )
     if not blocks:
         raise DesktopImportError("import_checkpoint_invalid", "Document IR checkpoint is invalid.")
     return tuple(blocks)
+
+
+def source_images_from_checkpoint(payload: object) -> tuple[SourceImage, ...]:
+    """Rehydrate retained source-image records without repeating conversion work."""
+    if not isinstance(payload, dict):
+        return ()
+    image_payload = payload.get("source_images")
+    if image_payload is None:
+        return ()
+    if not isinstance(image_payload, list):
+        raise DesktopImportError("import_checkpoint_invalid", "Source image checkpoint is invalid.")
+    images: list[SourceImage] = []
+    image_ids: set[str] = set()
+    for expected_ordinal, item in enumerate(image_payload):
+        if not isinstance(item, dict):
+            raise DesktopImportError(
+                "import_checkpoint_invalid", "Source image checkpoint is invalid."
+            )
+        image_id = item.get("image_id")
+        ordinal = item.get("ordinal")
+        image_sha256 = item.get("image_sha256")
+        byte_size = item.get("byte_size")
+        media_type = item.get("media_type")
+        filename = item.get("filename")
+        extension = item.get("extension")
+        alt_text = item.get("alt_text")
+        locator = item.get("locator")
+        if (
+            not isinstance(image_id, str)
+            or not image_id
+            or image_id in image_ids
+            or type(ordinal) is not int
+            or ordinal != expected_ordinal
+            or not isinstance(image_sha256, str)
+            or len(image_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in image_sha256)
+            or type(byte_size) is not int
+            or byte_size < 0
+            or not isinstance(media_type, str)
+            or not media_type
+            or not isinstance(filename, str)
+            or not filename
+            or not isinstance(extension, str)
+            or not extension.startswith(".")
+            or (alt_text is not None and not isinstance(alt_text, str))
+            or not isinstance(locator, dict)
+            or not _is_json_object(locator)
+        ):
+            raise DesktopImportError(
+                "import_checkpoint_invalid", "Source image checkpoint is invalid."
+            )
+        image_ids.add(image_id)
+        images.append(
+            SourceImage(
+                image_id=image_id,
+                ordinal=ordinal,
+                image_sha256=image_sha256,
+                byte_size=byte_size,
+                media_type=media_type,
+                filename=filename,
+                extension=extension,
+                alt_text=alt_text,
+                locator=dict(locator),
+            )
+        )
+    return tuple(images)
+
+
+def _source_image_checkpoint(image: SourceImage) -> dict[str, object]:
+    return {
+        "image_id": image.image_id,
+        "ordinal": image.ordinal,
+        "image_sha256": image.image_sha256,
+        "byte_size": image.byte_size,
+        "media_type": image.media_type,
+        "filename": image.filename,
+        "extension": image.extension,
+        "alt_text": image.alt_text,
+        "locator": image.locator,
+    }
+
+
+def _is_json_object(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def evidence_checkpoint(

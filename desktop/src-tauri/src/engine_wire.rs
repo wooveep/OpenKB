@@ -108,6 +108,8 @@ pub enum ImportSourceStatus {
 #[serde(rename_all = "lowercase")]
 pub enum ImportedDocumentSourceFormat {
     Txt,
+    Markdown,
+    Docx,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -243,6 +245,22 @@ pub struct RawDocument {
     pub page: u32,
     #[serde(alias = "has_more")]
     pub has_more: bool,
+    #[serde(default, alias = "source_images")]
+    pub source_images: Vec<SourceImage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceImage {
+    #[serde(alias = "source_image_id")]
+    pub source_image_id: String,
+    pub name: String,
+    #[serde(alias = "media_type")]
+    pub media_type: String,
+    #[serde(alias = "file_path")]
+    pub file_path: String,
+    #[serde(alias = "alt_text")]
+    pub alt_text: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

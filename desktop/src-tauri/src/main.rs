@@ -11,7 +11,7 @@ use engine_protocol::{
     TextDocumentImportResult,
 };
 use process_tree::ProcessTreeJob;
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use tauri::{ipc::Channel, Manager, State};
 
 struct DesktopState {
@@ -48,35 +48,43 @@ async fn desktop_inspect_knowledge_base(
 
 #[tauri::command(rename_all = "camelCase")]
 async fn desktop_create_knowledge_base(
+    app: tauri::AppHandle,
     state: State<'_, DesktopState>,
     kb_dir: String,
     name: Option<String>,
     request_id: String,
 ) -> Result<KnowledgeBaseActivationResult, BridgeError> {
     let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
+    let activation = tauri::async_runtime::spawn_blocking(move || {
         engine.create_knowledge_base(kb_dir, name, request_id)
     })
     .await
     .map_err(|error| BridgeError {
         code: "desktop_command_failed".to_owned(),
         message: format!("Desktop knowledge-base creation task stopped unexpectedly: {error}"),
-    })?
+    })?;
+    allow_source_images(&app, &activation)?;
+    Ok(activation)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn desktop_open_knowledge_base(
+    app: tauri::AppHandle,
     state: State<'_, DesktopState>,
     kb_dir: String,
     request_id: String,
 ) -> Result<KnowledgeBaseActivationResult, BridgeError> {
     let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.open_knowledge_base(kb_dir, request_id))
-        .await
-        .map_err(|error| BridgeError {
-            code: "desktop_command_failed".to_owned(),
-            message: format!("Desktop knowledge-base open task stopped unexpectedly: {error}"),
-        })?
+    let activation = tauri::async_runtime::spawn_blocking(move || {
+        engine.open_knowledge_base(kb_dir, request_id)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop knowledge-base open task stopped unexpectedly: {error}"),
+    })?;
+    allow_source_images(&app, &activation)?;
+    Ok(activation)
 }
 
 #[tauri::command]
@@ -122,7 +130,7 @@ async fn desktop_import_text_document(
     .await
     .map_err(|error| BridgeError {
         code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop TXT import task stopped unexpectedly: {error}"),
+        message: format!("Desktop document import task stopped unexpectedly: {error}"),
     })?
 }
 
@@ -226,6 +234,21 @@ fn desktop_subscribe(
 #[tauri::command(rename_all = "camelCase")]
 fn desktop_unsubscribe(state: State<'_, DesktopState>, subscription_id: String) {
     state.engine.unsubscribe(&subscription_id);
+}
+
+fn allow_source_images(
+    app: &tauri::AppHandle,
+    activation: &KnowledgeBaseActivationResult,
+) -> Result<(), BridgeError> {
+    let image_dir = Path::new(&activation.knowledge_base.kb_dir)
+        .join("derived")
+        .join("source-images");
+    app.asset_protocol_scope()
+        .allow_directory(image_dir, true)
+        .map_err(|error| BridgeError {
+            code: "desktop_source_image_scope_failed".to_owned(),
+            message: format!("Could not enable source images for this knowledge base: {error}"),
+        })
 }
 
 fn main() {

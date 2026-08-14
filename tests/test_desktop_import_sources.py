@@ -8,7 +8,7 @@ from openkb.desktop_import_sources import inspect_import_sources
 
 
 def test_source_inspection_expands_directories_deduplicates_and_sorts(tmp_path):
-    """A selection has stable TXT candidates and explicit unprocessable entries."""
+    """A selection has stable current-parser candidates and explicit rejections."""
     sources = tmp_path / "sources"
     nested = sources / "nested"
     nested.mkdir(parents=True)
@@ -22,10 +22,13 @@ def test_source_inspection_expands_directories_deduplicates_and_sorts(tmp_path):
         (sources / "zeta.txt", sources, empty, tmp_path / "missing.pdf")
     )
 
-    assert [Path(source.path).name for source in inspection.supported] == ["beta.txt", "zeta.txt"]
+    assert [Path(source.path).name for source in inspection.supported] == [
+        "alpha.md",
+        "beta.txt",
+        "zeta.txt",
+    ]
     assert [(source.name, source.error_code) for source in inspection.unsupported] == [
         ("empty", "import_directory_empty"),
         ("missing.pdf", "import_source_not_found"),
-        ("alpha.md", "unsupported_import_format"),
     ]
-    assert inspection.as_dict()["supported_extensions"] == [".txt"]
+    assert inspection.as_dict()["supported_extensions"] == [".txt", ".md", ".markdown", ".docx"]
