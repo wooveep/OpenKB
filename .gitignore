@@ -37,3 +37,5 @@ openkb/graphify-out/
 frontend/graphify-out/
 .gitnexus/
 .superpowers/
+.codegraph/
+.codex/
