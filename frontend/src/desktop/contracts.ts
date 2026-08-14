@@ -12,7 +12,9 @@ export interface DesktopEngineHealth {
   protocolVersion: number
 }
 
-export interface DesktopBridgeEvent {
+export type DesktopBridgeEvent = DesktopEngineBridgeEvent | DesktopImportStageProgressEvent
+
+export interface DesktopEngineBridgeEvent {
   sequence: number
   kind: "engine.request_started" | "engine.request_cancelled" | "engine.request_completed"
   data: DesktopEngineRequestEventData
@@ -27,6 +29,46 @@ export interface DesktopEngineRequestEventData {
 export interface DesktopCancelResult {
   cancelled: boolean
   requestId: string
+}
+
+export interface DesktopImportStageProgressEvent {
+  sequence: number
+  kind: "import.stage_progress"
+  data: DesktopImportStageRun & {
+    jobId: string
+    documentId?: string | null
+  }
+}
+
+export interface DesktopImportedDocument {
+  documentId: string
+  name: string
+  sourceFormat: string
+  rawAssetSha256: string
+  evidenceCount: number
+  availability: "available" | "failed"
+}
+
+export interface DesktopImportJob {
+  jobId: string
+  status: "running" | "completed" | "failed"
+  progress: number
+  documentId: string | null
+  deduplicated: boolean
+}
+
+export interface DesktopImportStageRun {
+  stageRunId: string
+  stage: "preflight" | "raw_asset" | "document_ir" | "evidence" | "search"
+  status: "pending" | "running" | "completed" | "failed" | "skipped"
+  progress: number
+  errorCode: string | null
+}
+
+export interface DesktopTextDocumentImport {
+  document: DesktopImportedDocument
+  job: DesktopImportJob
+  stages: DesktopImportStageRun[]
 }
 
 /** The SQLite-authoritative knowledge base currently available to the Desktop Runtime. */
@@ -129,6 +171,7 @@ export interface DesktopBridge {
   ): Promise<DesktopKnowledgeBaseActivation>
   openKnowledgeBase(kbDir: string, requestId: string): Promise<DesktopKnowledgeBaseActivation>
   activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase>
+  importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport>
   cancel(targetRequestId: string): Promise<DesktopCancelResult>
   subscribe(listener: (event: DesktopBridgeEvent) => void): Promise<() => void>
 }

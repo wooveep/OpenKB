@@ -7,6 +7,7 @@ mod process_tree;
 use engine_protocol::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
     EngineHealth, EngineSupervisor, InspectKnowledgeBaseResult, KnowledgeBaseActivationResult,
+    TextDocumentImportResult,
 };
 use process_tree::ProcessTreeJob;
 use std::sync::Arc;
@@ -91,6 +92,23 @@ async fn desktop_active_knowledge_base(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn desktop_import_text_document(
+    state: State<'_, DesktopState>,
+    source_path: String,
+    request_id: String,
+) -> Result<TextDocumentImportResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.import_text_document(source_path, request_id)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop TXT import task stopped unexpectedly: {error}"),
+    })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
 fn desktop_cancel(
     state: State<'_, DesktopState>,
     target_request_id: String,
@@ -142,6 +160,7 @@ fn main() {
             desktop_create_knowledge_base,
             desktop_open_knowledge_base,
             desktop_active_knowledge_base,
+            desktop_import_text_document,
             desktop_cancel,
             desktop_subscribe,
             desktop_unsubscribe,

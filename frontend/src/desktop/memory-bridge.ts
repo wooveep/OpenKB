@@ -8,6 +8,7 @@ import type {
   DesktopKnowledgeBase,
   DesktopKnowledgeBaseActivation,
   DesktopKnowledgeBaseInspection,
+  DesktopTextDocumentImport,
 } from "./contracts"
 
 /** In-memory Bridge for React component tests; it never touches Tauri or Python. */
@@ -93,6 +94,58 @@ export class MemoryDesktopBridge implements DesktopBridge {
     return { knowledgeBase: this.activeKnowledgeBaseResult }
   }
 
+  async importTextDocument(
+    sourcePath: string,
+    requestId: string,
+  ): Promise<DesktopTextDocumentImport> {
+    if (this.activeKnowledgeBaseResult === null) {
+      throw new Error("Open a Desktop Knowledge Base before importing a document.")
+    }
+    const name = sourcePath.split(/[\\/]/).filter(Boolean).at(-1) || "document.txt"
+    const jobId = `job-${requestId}`
+    const documentId = `document-${requestId}`
+    const stages = ["preflight", "raw_asset", "document_ir", "evidence", "search"] as const
+    for (const [index, stage] of stages.entries()) {
+      this.emit({
+        sequence: index + 1,
+        kind: "import.stage_progress",
+        data: {
+          jobId,
+          documentId: stage === "search" ? documentId : undefined,
+          stageRunId: `${jobId}-${stage}`,
+          stage,
+          status: "completed",
+          progress: (index + 1) * 20,
+          errorCode: null,
+        },
+      })
+    }
+    return {
+      document: {
+        documentId,
+        name,
+        sourceFormat: "txt",
+        rawAssetSha256: "memory-bridge",
+        evidenceCount: 1,
+        availability: "available",
+      },
+      job: {
+        jobId,
+        status: "completed",
+        progress: 100,
+        documentId,
+        deduplicated: false,
+      },
+      stages: stages.map((stage, index) => ({
+        stageRunId: `${jobId}-${stage}`,
+        stage,
+        status: "completed",
+        progress: (index + 1) * 20,
+        errorCode: null,
+      })),
+    }
+  }
+
   async cancel(targetRequestId: string): Promise<DesktopCancelResult> {
     return { cancelled: true, requestId: targetRequestId }
   }
@@ -112,7 +165,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 1,
+      schemaVersion: 2,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     return {

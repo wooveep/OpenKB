@@ -63,6 +63,8 @@ pub enum EngineEvent {
     RequestCancelled(EngineRequestEventData),
     #[serde(rename = "engine.request_completed")]
     RequestCompleted(EngineRequestEventData),
+    #[serde(rename = "import.stage_progress")]
+    ImportStageProgress(ImportStageProgressEventData),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -73,6 +75,22 @@ pub struct EngineRequestEventData {
     pub ok: Option<bool>,
     #[serde(alias = "error_code")]
     pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportStageProgressEventData {
+    #[serde(alias = "job_id")]
+    pub job_id: String,
+    #[serde(alias = "stage_run_id")]
+    pub stage_run_id: String,
+    pub stage: String,
+    pub status: String,
+    pub progress: u8,
+    #[serde(alias = "error_code")]
+    pub error_code: Option<String>,
+    #[serde(alias = "document_id")]
+    pub document_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -107,6 +125,53 @@ pub struct KnowledgeBaseActivationResult {
     #[serde(alias = "knowledge_base")]
     pub knowledge_base: DesktopKnowledgeBase,
     pub events: Vec<WorkbenchEvent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedDocument {
+    #[serde(alias = "document_id")]
+    pub document_id: String,
+    pub name: String,
+    #[serde(alias = "source_format")]
+    pub source_format: String,
+    #[serde(alias = "raw_asset_sha256")]
+    pub raw_asset_sha256: String,
+    #[serde(alias = "evidence_count")]
+    pub evidence_count: u64,
+    pub availability: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportJob {
+    #[serde(alias = "job_id")]
+    pub job_id: String,
+    pub status: String,
+    pub progress: u8,
+    #[serde(alias = "document_id")]
+    pub document_id: Option<String>,
+    pub deduplicated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportStageRun {
+    #[serde(alias = "stage_run_id")]
+    pub stage_run_id: String,
+    pub stage: String,
+    pub status: String,
+    pub progress: u8,
+    #[serde(alias = "error_code")]
+    pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextDocumentImportResult {
+    pub document: ImportedDocument,
+    pub job: ImportJob,
+    pub stages: Vec<ImportStageRun>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

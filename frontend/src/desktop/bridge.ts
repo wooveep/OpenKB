@@ -9,6 +9,7 @@ import {
   type DesktopEngineHealth,
   type DesktopKnowledgeBaseActivation,
   type DesktopKnowledgeBaseInspection,
+  type DesktopTextDocumentImport,
 } from "./contracts"
 
 let subscriptionSequence = 0
@@ -69,6 +70,16 @@ export class TauriDesktopBridge implements DesktopBridge {
 
   async activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase> {
     return this.call<DesktopActiveKnowledgeBase>("desktop_active_knowledge_base")
+  }
+
+  async importTextDocument(
+    sourcePath: string,
+    requestId: string,
+  ): Promise<DesktopTextDocumentImport> {
+    return this.call<DesktopTextDocumentImport>("desktop_import_text_document", {
+      sourcePath,
+      requestId,
+    })
   }
 
   async cancel(targetRequestId: string): Promise<DesktopCancelResult> {
@@ -139,6 +150,12 @@ class UnavailableDesktopBridge implements DesktopBridge {
   }
 
   activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase> {
+    return this.unavailable()
+  }
+
+  importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport> {
+    void sourcePath
+    void requestId
     return this.unavailable()
   }
 

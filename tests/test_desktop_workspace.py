@@ -22,13 +22,16 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 1
+    assert first.knowledge_base.schema_version == 2
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
     assert database_path.is_file()
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [
+            (1,),
+            (2,),
+        ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
         )

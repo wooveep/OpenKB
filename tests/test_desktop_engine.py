@@ -296,7 +296,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 1,
+            "schema_version": 2,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -312,3 +312,51 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         ],
     }
     assert (desktop_kb / ".openkb" / "state.sqlite3").is_file()
+
+
+def test_engine_imports_txt_and_emits_durable_stage_progress(tmp_path):
+    """The Bridge exposes the Desktop-native import task instead of a legacy CLI command."""
+    desktop_kb = tmp_path / "desktop-kb"
+    source = tmp_path / "notes.txt"
+    source.write_text("One searchable note.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(desktop_kb)
+    incoming = b"".join(
+        (
+            encode_frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "handshake",
+                    "method": "engine.handshake",
+                    "params": {"protocol_version": 1},
+                }
+            ),
+            encode_frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "import",
+                    "method": "workbench.import_text_document",
+                    "params": {"source_path": str(source)},
+                }
+            ),
+        )
+    )
+    completed = threading.Event()
+    output = RequestResponseOutput(completed, "import")
+
+    DesktopEngineServer(
+        WaitForResponseBytesIO(incoming, completed), output, workspace=workspace
+    ).serve()
+
+    frames = _decode_frames(output.getvalue())
+    responses = {frame["id"]: frame for frame in frames if "id" in frame}
+    result = responses["import"]["result"]
+    assert result["document"]["availability"] == "available"
+    assert result["job"]["status"] == "completed"
+    assert any(
+        frame.get("method") == "event"
+        and isinstance(frame.get("params"), dict)
+        and frame["params"].get("kind") == "import.stage_progress"
+        and frame["params"].get("data", {}).get("stage") == "search"
+        for frame in frames
+    )

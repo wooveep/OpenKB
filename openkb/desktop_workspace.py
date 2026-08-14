@@ -160,6 +160,103 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        2,
+        (
+            """
+            CREATE TABLE raw_assets (
+                asset_sha256 TEXT PRIMARY KEY,
+                byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+                media_type TEXT NOT NULL,
+                raw_path TEXT NOT NULL,
+                original_name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE source_documents (
+                document_id TEXT PRIMARY KEY,
+                asset_sha256 TEXT NOT NULL UNIQUE
+                    REFERENCES raw_assets(asset_sha256),
+                display_name TEXT NOT NULL,
+                source_format TEXT NOT NULL,
+                availability TEXT NOT NULL
+                    CHECK(availability IN ('available', 'failed')),
+                created_at TEXT NOT NULL,
+                available_at TEXT
+            )
+            """,
+            """
+            CREATE TABLE document_ir_blocks (
+                block_id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL REFERENCES source_documents(document_id)
+                    ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                heading_path TEXT NOT NULL,
+                locator_json TEXT NOT NULL,
+                UNIQUE(document_id, ordinal)
+            )
+            """,
+            """
+            CREATE TABLE evidence_refs (
+                evidence_id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL REFERENCES source_documents(document_id)
+                    ON DELETE CASCADE,
+                block_id TEXT NOT NULL REFERENCES document_ir_blocks(block_id)
+                    ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                text TEXT NOT NULL,
+                locator_json TEXT NOT NULL,
+                UNIQUE(document_id, ordinal)
+            )
+            """,
+            """
+            CREATE VIRTUAL TABLE evidence_fts USING fts5(
+                evidence_id UNINDEXED,
+                document_id UNINDEXED,
+                content,
+                tokenize = 'unicode61'
+            )
+            """,
+            """
+            CREATE TABLE import_jobs (
+                job_id TEXT PRIMARY KEY,
+                source_path TEXT NOT NULL,
+                document_id TEXT,
+                status TEXT NOT NULL
+                    CHECK(status IN ('running', 'completed', 'failed')),
+                progress INTEGER NOT NULL CHECK(progress BETWEEN 0 AND 100),
+                error_code TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            )
+            """,
+            """
+            CREATE TABLE stage_runs (
+                stage_run_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES import_jobs(job_id) ON DELETE CASCADE,
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL
+                    CHECK(status IN ('pending', 'running', 'completed', 'failed', 'skipped')),
+                progress INTEGER NOT NULL CHECK(progress BETWEEN 0 AND 100),
+                error_code TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                UNIQUE(job_id, stage)
+            )
+            """,
+            """
+            CREATE INDEX source_documents_available_idx
+                ON source_documents(availability, created_at DESC)
+            """,
+            """
+            CREATE INDEX import_jobs_status_idx
+                ON import_jobs(status, created_at DESC)
+            """,
+        ),
+    ),
 )
 
 
@@ -259,6 +356,16 @@ def _state_dir(kb_dir: Path) -> Path:
 
 def _state_database_path(kb_dir: Path) -> Path:
     return _state_dir(kb_dir) / _STATE_FILENAME
+
+
+def desktop_state_dir(kb_dir: Path) -> Path:
+    """Return the Desktop-owned state directory for a known knowledge base."""
+    return _state_dir(kb_dir)
+
+
+def desktop_state_database_path(kb_dir: Path) -> Path:
+    """Return the SQLite authority path for a known Desktop knowledge base."""
+    return _state_database_path(kb_dir)
 
 
 def _initialization_marker_path(kb_dir: Path) -> Path:

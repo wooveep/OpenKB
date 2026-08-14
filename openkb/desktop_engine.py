@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from openkb import __version__
+from openkb.desktop_import import DesktopImportError, DesktopTextImportService
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
     DesktopKnowledgeBaseRuntime,
@@ -136,10 +137,12 @@ class DesktopEngineServer:
         "workbench.create_knowledge_base",
         "workbench.open_knowledge_base",
         "workbench.active_knowledge_base",
+        "workbench.import_text_document",
     }
-    _ACTIVATION_METHODS = {
+    _NON_CANCELABLE_MUTATION_METHODS = {
         "workbench.create_knowledge_base",
         "workbench.open_knowledge_base",
+        "workbench.import_text_document",
     }
 
     def __init__(
@@ -160,7 +163,7 @@ class DesktopEngineServer:
         self._handshake_complete = False
         self._shutdown = threading.Event()
         self._active_requests: dict[str, threading.Event] = {}
-        self._activation_in_progress: set[str] = set()
+        self._non_cancelable_mutations: set[str] = set()
         self._active_lock = threading.Lock()
         self._workers: set[threading.Thread] = set()
         self._workers_lock = threading.Lock()
@@ -227,7 +230,7 @@ class DesktopEngineServer:
             if (
                 cancel_event is not None
                 and cancel_event.is_set()
-                and request.method not in self._ACTIVATION_METHODS
+                and request.method not in self._NON_CANCELABLE_MUTATION_METHODS
             ):
                 raise DesktopRequestError(
                     "request_cancelled", "Desktop Bridge request was cancelled."
@@ -237,7 +240,7 @@ class DesktopEngineServer:
         except DesktopRequestError as error:
             completed_data["error_code"] = error.code
             self._write_error(request.request_id, error.code, str(error))
-        except (DesktopWorkbenchError, DesktopKnowledgeBaseError) as error:
+        except (DesktopWorkbenchError, DesktopKnowledgeBaseError, DesktopImportError) as error:
             completed_data["error_code"] = error.code
             self._write_error(request.request_id, error.code, str(error))
         except Exception as error:  # Keep unexpected Engine failures behind a stable boundary.
@@ -248,7 +251,7 @@ class DesktopEngineServer:
                 with self._active_lock:
                     request_key = str(request.request_id)
                     self._active_requests.pop(request_key, None)
-                    self._activation_in_progress.discard(request_key)
+                    self._non_cancelable_mutations.discard(request_key)
             self._emit_event("engine.request_completed", completed_data)
             current = threading.current_thread()
             with self._workers_lock:
@@ -279,7 +282,7 @@ class DesktopEngineServer:
                 target_cancel_event = self._active_requests.get(target_key)
                 cancelled = (
                     target_cancel_event is not None
-                    and target_key not in self._activation_in_progress
+                    and target_key not in self._non_cancelable_mutations
                 )
             if cancelled and target_cancel_event is not None:
                 target_cancel_event.set()
@@ -343,27 +346,42 @@ class DesktopEngineServer:
                     raise DesktopRequestError(
                         "invalid_params", "workbench.create_knowledge_base name must be a string."
                     )
-                self._begin_workspace_activation(request, cancel_event)
+                self._begin_workspace_mutation(request, cancel_event)
                 return self._workspace.create(Path(kb_dir), name=name).as_dict()
 
             if request.method == "workbench.open_knowledge_base":
                 kb_dir = _required_path_param(request, "kb_dir")
-                self._begin_workspace_activation(request, cancel_event)
+                self._begin_workspace_mutation(request, cancel_event)
                 return self._workspace.open(Path(kb_dir)).as_dict()
+
+            if request.method == "workbench.import_text_document":
+                source_path = _required_path_param(request, "source_path")
+                active = self._workspace.active()
+                if active is None:
+                    raise DesktopRequestError(
+                        "no_active_knowledge_base",
+                        "Open a Desktop Knowledge Base before importing a document.",
+                    )
+                self._begin_workspace_mutation(request, cancel_event)
+                importer = DesktopTextImportService(
+                    Path(active.kb_dir),
+                    on_stage_progress=lambda data: self._emit_event("import.stage_progress", data),
+                )
+                return importer.import_text(Path(source_path)).as_dict()
 
             active = self._workspace.active()
             return {"knowledge_base": active.as_dict() if active is not None else None}
 
-    def _begin_workspace_activation(
+    def _begin_workspace_mutation(
         self, request: DesktopRequest, cancel_event: threading.Event | None
     ) -> None:
-        """Make cancellation truthful before an activation can mutate the active binding."""
+        """Make cancellation truthful before a workspace mutation can commit."""
         with self._active_lock:
             if cancel_event is not None and cancel_event.is_set():
                 raise DesktopRequestError(
                     "request_cancelled", "Desktop Bridge request was cancelled."
                 )
-            self._activation_in_progress.add(str(request.request_id))
+            self._non_cancelable_mutations.add(str(request.request_id))
 
     def _emit_event(self, kind: str, data: dict[str, object]) -> None:
         with self._sequence_lock:
