@@ -59,6 +59,7 @@ Issues = "https://github.com/VectifyAI/OpenKB/issues"
 
 [project.scripts]
 openkb = "openkb.cli:cli"
+openkb-desktop-engine = "openkb.desktop_engine:main"
 openkb-web = "openkb.api:main"
 # Backwards-compatible alias for the historical name; same entry point.
 openkb-api = "openkb.api:main"

@@ -2,17 +2,14 @@ import { useLocation } from "react-router"
 import { useTranslation } from "react-i18next"
 import { HardDrive, Cloud } from "lucide-react"
 import { getApiBase } from "@/api/client"
+import { isDesktopShell } from "@/desktop/bridge"
 
 /**
- * True only when a real desktop shell (Sub-project C: Tauri/Electron) has
- * injected `window.__OPENKB_DESKTOP__`. That shell has no OS chrome of its own,
- * so it needs the fake traffic-lights + a draggable region. In a browser tab
- * (today's only delivery) this is always false and we render a plain header —
- * no window buttons, no drag region.
+ * True only when a real Tauri desktop shell is present. That shell has no OS
+ * chrome of its own, so it needs the fake traffic-lights + a draggable region.
+ * In a browser tab this is false and we render a plain header — no window
+ * buttons, no drag region.
  */
-const isDesktopShell =
-  typeof (window as { __OPENKB_DESKTOP__?: unknown }).__OPENKB_DESKTOP__ !== "undefined"
-
 function useTitle(): string {
   const { pathname } = useLocation()
   const { t } = useTranslation("common")
@@ -61,9 +58,10 @@ function ConnectionStatus() {
 export default function TitleBar() {
   const title = useTitle()
   const heading = `OpenKB Studio${title ? ` — ${title}` : ""}`
+  const desktopShell = isDesktopShell()
 
   // Desktop shell: fake traffic-lights + a draggable title region.
-  if (isDesktopShell) {
+  if (desktopShell) {
     return (
       <div
         className="h-11 shrink-0 flex items-center px-4 select-none"

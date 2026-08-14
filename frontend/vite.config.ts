@@ -6,7 +6,7 @@ import { defineConfig } from "vite"
 // serves the built bundle from the same origin via FastAPI StaticFiles.
 // outDir MUST stay ../openkb/web — the wheel packages it from there
 // (see pyproject.toml [tool.hatch.build] artifacts).
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   base: "/",
   plugins: [react()],
   resolve: {
@@ -15,7 +15,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: "../openkb/web",
+    outDir: mode === "desktop" ? "../openkb/desktop-web" : "../openkb/web",
     emptyOutDir: true,
   },
   server: {
@@ -27,4 +27,4 @@ export default defineConfig({
       },
     },
   },
-})
+}))

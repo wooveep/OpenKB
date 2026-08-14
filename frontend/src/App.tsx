@@ -24,6 +24,8 @@ import ChatSession from "@/pages/ChatSession"
 import KbList from "@/pages/KbList"
 import KbDetail from "@/pages/KbDetail"
 import Settings from "@/pages/Settings"
+import DesktopWorkbenchRoot from "@/desktop/DesktopWorkbenchRoot"
+import { isDesktopShell } from "@/desktop/bridge"
 
 /** Remount KbDetail per KB so its page/tree state resets cleanly on nav. */
 function KbDetailRoute() {
@@ -124,11 +126,10 @@ function ConnectionDialog({
   )
 }
 
-export default function App() {
+function BrowserWorkbench() {
   const [authOpen, setAuthOpen] = useState(false)
 
-  const isDesktopShell =
-    typeof (window as { __OPENKB_DESKTOP__?: unknown }).__OPENKB_DESKTOP__ !== "undefined"
+  const desktopShell = isDesktopShell()
 
   // Register the reactive 401 handler once. Any request that 401s opens the
   // connection prompt (idempotent — repeated 401s just keep it open).
@@ -139,7 +140,7 @@ export default function App() {
   return (
     <MotionConfig reducedMotion="user">
       <div className="ambient-ground h-screen w-screen flex overflow-hidden">
-        {isDesktopShell && (
+        {desktopShell && (
           <div className="absolute top-0 inset-x-0 z-50">
             <TitleBar />
           </div>
@@ -157,7 +158,7 @@ export default function App() {
             <div
               className={cn(
                 "absolute right-3 z-40 flex items-center gap-1 rounded-full glass px-1 py-1",
-                isDesktopShell ? "top-10" : "top-2.5",
+                desktopShell ? "top-10" : "top-2.5",
               )}
             >
               <ThemeToggle className="text-muted-foreground hover:text-foreground transition-colors" />
@@ -184,4 +185,8 @@ export default function App() {
       </div>
     </MotionConfig>
   )
+}
+
+export default function App() {
+  return isDesktopShell() ? <DesktopWorkbenchRoot /> : <BrowserWorkbench />
 }

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenKB",
+  "version": "0.1.0",
+  "identifier": "com.openkb.desktop",
+  "build": {
+    "beforeDevCommand": "npm --prefix ../../frontend run dev -- --host 127.0.0.1",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": "npm --prefix ../../frontend run build:desktop",
+    "frontendDist": "../../openkb/desktop-web"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "OpenKB",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/openkb.png"]
+  }
+}

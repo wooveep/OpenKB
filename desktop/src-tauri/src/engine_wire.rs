@@ -1,0 +1,274 @@
+//! Typed wire values and framing for the private Desktop Shell ↔ Engine bridge.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::io::{Read, Write};
+
+pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+pub type BridgeResult<T> = Result<T, BridgeError>;
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeError {
+    pub code: String,
+    pub message: String,
+}
+
+impl BridgeError {
+    pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeHandshake {
+    pub protocol_version: u32,
+    pub engine_version: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineHealth {
+    pub status: EngineHealthStatus,
+    pub protocol_version: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EngineHealthStatus {
+    Ready,
+    Starting,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeEvent {
+    pub sequence: u64,
+    #[serde(flatten)]
+    pub event: EngineEvent,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum EngineEvent {
+    #[serde(rename = "engine.request_started")]
+    RequestStarted(EngineRequestEventData),
+    #[serde(rename = "engine.request_cancelled")]
+    RequestCancelled(EngineRequestEventData),
+    #[serde(rename = "engine.request_completed")]
+    RequestCompleted(EngineRequestEventData),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineRequestEventData {
+    #[serde(alias = "request_id")]
+    pub request_id: String,
+    pub ok: Option<bool>,
+    #[serde(alias = "error_code")]
+    pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelResult {
+    pub cancelled: bool,
+    pub request_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeBaseSnapshot {
+    #[serde(alias = "kb_dir")]
+    pub kb_dir: String,
+    pub inventory: KnowledgeBaseInventory,
+    pub status: KnowledgeBaseStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeBaseInventory {
+    pub documents: Vec<KnowledgeBaseDocument>,
+    #[serde(alias = "document_count")]
+    pub document_count: u64,
+    pub summaries: Vec<String>,
+    pub concepts: Vec<String>,
+    pub entities: Vec<String>,
+    pub reports: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeBaseDocument {
+    #[serde(rename = "hash")]
+    pub file_hash: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub raw_type: String,
+    #[serde(alias = "display_type")]
+    pub display_type: String,
+    pub pages: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct KnowledgeBaseDirectories {
+    pub sources: u64,
+    pub summaries: u64,
+    pub concepts: u64,
+    pub reports: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeBaseStatus {
+    pub directories: KnowledgeBaseDirectories,
+    #[serde(alias = "raw_count")]
+    pub raw_count: u64,
+    #[serde(alias = "total_indexed")]
+    pub total_indexed: u64,
+    #[serde(alias = "last_compile")]
+    pub last_compile: Option<String>,
+    #[serde(alias = "last_lint")]
+    pub last_lint: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum WorkbenchEvent {
+    #[serde(rename = "knowledge_base.inspected")]
+    KnowledgeBaseInspected(KnowledgeBaseInspectedEventData),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeBaseInspectedEventData {
+    #[serde(alias = "kb_dir")]
+    pub kb_dir: String,
+    #[serde(alias = "document_count")]
+    pub document_count: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectKnowledgeBaseResult {
+    pub snapshot: KnowledgeBaseSnapshot,
+    pub events: Vec<WorkbenchEvent>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct EngineHandshake {
+    pub(crate) protocol_version: u32,
+    pub(crate) engine_version: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct EngineHealthWire {
+    pub(crate) status: EngineHealthStatus,
+    pub(crate) protocol_version: u32,
+}
+
+pub(crate) fn parse_response(message: Value) -> BridgeResult<Value> {
+    if let Some(result) = message.get("result") {
+        return Ok(result.clone());
+    }
+    let error = message.get("error");
+    let code = error
+        .and_then(|value| value.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or("engine_request_failed");
+    let message = error
+        .and_then(|value| value.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("Python Engine returned an invalid response.");
+    Err(BridgeError::new(code, message))
+}
+
+pub(crate) fn read_frame<R: Read>(reader: &mut R) -> BridgeResult<Option<Value>> {
+    let mut prefix = [0_u8; 4];
+    if !read_exact_or_eof(reader, &mut prefix)? {
+        return Ok(None);
+    }
+    let size = u32::from_be_bytes(prefix) as usize;
+    if size > MAX_FRAME_BYTES {
+        return Err(BridgeError::new(
+            "frame_too_large",
+            format!("Desktop Bridge frame exceeds {MAX_FRAME_BYTES} bytes."),
+        ));
+    }
+    let mut body = vec![0_u8; size];
+    read_exact_or_eof(reader, &mut body)?
+        .then_some(())
+        .ok_or_else(|| {
+            BridgeError::new(
+                "truncated_frame",
+                "Desktop Bridge frame ended unexpectedly.",
+            )
+        })?;
+    let value = serde_json::from_slice::<Value>(&body).map_err(|error| {
+        BridgeError::new(
+            "invalid_frame",
+            format!("Invalid Desktop Bridge JSON frame: {error}"),
+        )
+    })?;
+    if !value.is_object() {
+        return Err(BridgeError::new(
+            "invalid_frame",
+            "Desktop Bridge frame must contain an object.",
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn read_exact_or_eof<R: Read>(reader: &mut R, buffer: &mut [u8]) -> BridgeResult<bool> {
+    let mut offset = 0;
+    while offset < buffer.len() {
+        let count = reader.read(&mut buffer[offset..]).map_err(|error| {
+            BridgeError::new(
+                "engine_unavailable",
+                format!("Could not read Engine stream: {error}"),
+            )
+        })?;
+        if count == 0 {
+            if offset == 0 {
+                return Ok(false);
+            }
+            return Err(BridgeError::new(
+                "truncated_frame",
+                "Desktop Bridge frame ended unexpectedly.",
+            ));
+        }
+        offset += count;
+    }
+    Ok(true)
+}
+
+pub(crate) fn write_frame<W: Write>(writer: &mut W, value: &Value) -> BridgeResult<()> {
+    let body = serde_json::to_vec(value).map_err(|error| {
+        BridgeError::new(
+            "invalid_frame",
+            format!("Could not encode Desktop Bridge frame: {error}"),
+        )
+    })?;
+    if body.len() > MAX_FRAME_BYTES {
+        return Err(BridgeError::new(
+            "frame_too_large",
+            format!("Desktop Bridge frame exceeds {MAX_FRAME_BYTES} bytes."),
+        ));
+    }
+    writer
+        .write_all(&(body.len() as u32).to_be_bytes())
+        .and_then(|_| writer.write_all(&body))
+        .and_then(|_| writer.flush())
+        .map_err(|error| {
+            BridgeError::new(
+                "engine_unavailable",
+                format!("Could not write Engine stream: {error}"),
+            )
+        })
+}

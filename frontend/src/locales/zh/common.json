@@ -57,5 +57,33 @@
   "connector": {
     "tooltip": "云端同步开发中 · 去 GitHub 投票表达需求",
     "vote": "想要它？去投票"
+  },
+  "desktop": {
+    "workbench": {
+      "title": "桌面工作台",
+      "detail": "OpenKB 正在启动本地引擎。文档和模型设置始终保留在此电脑中。"
+    },
+    "engine": {
+      "starting": {
+        "title": "正在启动本地引擎",
+        "detail": "桌面外壳正在完成与 OpenKB 的私有连接。"
+      },
+      "ready": {
+        "title": "本地引擎已就绪",
+        "detail": "桌面工作台现在可以安全地加载知识并开始工作。"
+      },
+      "unavailable": {
+        "title": "本地引擎暂不可用",
+        "detail": "引擎尚未就绪；可在其可用后重试。"
+      },
+      "error": {
+        "title": "本地引擎需要处理",
+        "detail": "{{message}}"
+      },
+      "version": "引擎 {{version}}",
+      "protocol": "桥接协议 {{version}}",
+      "eventSequence": "事件 {{sequence}}",
+      "retry": "重试引擎"
+    }
   }
 }

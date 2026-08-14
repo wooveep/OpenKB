@@ -57,5 +57,33 @@
   "connector": {
     "tooltip": "Cloud sync is in development · vote for it on GitHub",
     "vote": "Want it? Vote"
+  },
+  "desktop": {
+    "workbench": {
+      "title": "Desktop Workbench",
+      "detail": "OpenKB is starting its local Engine. Your documents and model settings remain on this computer."
+    },
+    "engine": {
+      "starting": {
+        "title": "Starting local Engine",
+        "detail": "The Desktop Shell is completing its private connection to OpenKB."
+      },
+      "ready": {
+        "title": "Local Engine is ready",
+        "detail": "The Desktop Workbench can now safely load knowledge and begin work."
+      },
+      "unavailable": {
+        "title": "Local Engine is unavailable",
+        "detail": "The Engine is not ready yet. Retry when it becomes available."
+      },
+      "error": {
+        "title": "Local Engine needs attention",
+        "detail": "{{message}}"
+      },
+      "version": "Engine {{version}}",
+      "protocol": "Bridge protocol {{version}}",
+      "eventSequence": "Event {{sequence}}",
+      "retry": "Retry Engine"
+    }
   }
 }
