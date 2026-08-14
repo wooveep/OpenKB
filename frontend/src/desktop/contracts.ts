@@ -29,6 +29,33 @@ export interface DesktopCancelResult {
   requestId: string
 }
 
+/** The SQLite-authoritative knowledge base currently available to the Desktop Runtime. */
+export interface DesktopKnowledgeBase {
+  kbDir: string
+  name: string
+  schemaVersion: number
+  lastCheckpointAt: string | null
+}
+
+export interface DesktopKnowledgeBaseActivatedEvent {
+  kind: "knowledge_base.activated"
+  data: {
+    kbDir: string
+    name: string
+    previousKbDir: string | null
+    checkpointed: boolean
+  }
+}
+
+export interface DesktopKnowledgeBaseActivation {
+  knowledgeBase: DesktopKnowledgeBase
+  events: DesktopKnowledgeBaseActivatedEvent[]
+}
+
+export interface DesktopActiveKnowledgeBase {
+  knowledgeBase: DesktopKnowledgeBase | null
+}
+
 export interface DesktopKnowledgeBaseSnapshot {
   kbDir: string
   inventory: DesktopKnowledgeBaseInventory
@@ -95,6 +122,13 @@ export interface DesktopBridge {
     kbDir: string,
     requestId: string,
   ): Promise<DesktopKnowledgeBaseInspection>
+  createKnowledgeBase(
+    kbDir: string,
+    name: string | undefined,
+    requestId: string,
+  ): Promise<DesktopKnowledgeBaseActivation>
+  openKnowledgeBase(kbDir: string, requestId: string): Promise<DesktopKnowledgeBaseActivation>
+  activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase>
   cancel(targetRequestId: string): Promise<DesktopCancelResult>
   subscribe(listener: (event: DesktopBridgeEvent) => void): Promise<() => void>
 }

@@ -22,7 +22,11 @@ type EngineViewState =
   | { phase: "error"; message: string; lastSequence?: number }
 
 /** The first Desktop Workbench view: a real, retryable Engine health indicator. */
-export default function DesktopStartup() {
+export default function DesktopStartup({
+  onReadyChange,
+}: {
+  onReadyChange?: (ready: boolean) => void
+}) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
   const [state, setState] = useState<EngineViewState>({ phase: "starting" })
@@ -32,25 +36,27 @@ export default function DesktopStartup() {
     try {
       const handshake = await bridge.handshake()
       const health = await bridge.health()
-      setState((current) => {
-        if (health.status === "starting") {
-          return { phase: "starting", lastSequence: current.lastSequence }
-        }
-        return {
-          phase: health.status,
-          handshake,
-          health,
-          lastSequence: current.lastSequence,
-        }
-      })
+      if (health.status === "starting") {
+        onReadyChange?.(false)
+        setState((current) => ({ phase: "starting", lastSequence: current.lastSequence }))
+        return
+      }
+      onReadyChange?.(health.status === "ready")
+      setState((current) => ({
+        phase: health.status,
+        handshake,
+        health,
+        lastSequence: current.lastSequence,
+      }))
     } catch (error) {
+      onReadyChange?.(false)
       setState((current) => ({
         phase: "error",
         message: error instanceof Error ? error.message : String(error),
         lastSequence: current.lastSequence,
       }))
     }
-  }, [bridge])
+  }, [bridge, onReadyChange])
 
   useEffect(() => {
     let active = true

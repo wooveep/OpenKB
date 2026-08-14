@@ -5,8 +5,8 @@ mod engine_wire;
 mod process_tree;
 
 use engine_protocol::{
-    BridgeError, BridgeEvent, BridgeHandshake, CancelResult, EngineHealth, EngineSupervisor,
-    InspectKnowledgeBaseResult,
+    ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
+    EngineHealth, EngineSupervisor, InspectKnowledgeBaseResult, KnowledgeBaseActivationResult,
 };
 use process_tree::ProcessTreeJob;
 use std::sync::Arc;
@@ -41,6 +41,52 @@ async fn desktop_inspect_knowledge_base(
         .map_err(|error| BridgeError {
             code: "desktop_command_failed".to_owned(),
             message: format!("Desktop inspection task stopped unexpectedly: {error}"),
+        })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_create_knowledge_base(
+    state: State<'_, DesktopState>,
+    kb_dir: String,
+    name: Option<String>,
+    request_id: String,
+) -> Result<KnowledgeBaseActivationResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.create_knowledge_base(kb_dir, name, request_id)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop knowledge-base creation task stopped unexpectedly: {error}"),
+    })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_open_knowledge_base(
+    state: State<'_, DesktopState>,
+    kb_dir: String,
+    request_id: String,
+) -> Result<KnowledgeBaseActivationResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.open_knowledge_base(kb_dir, request_id))
+        .await
+        .map_err(|error| BridgeError {
+            code: "desktop_command_failed".to_owned(),
+            message: format!("Desktop knowledge-base open task stopped unexpectedly: {error}"),
+        })?
+}
+
+#[tauri::command]
+async fn desktop_active_knowledge_base(
+    state: State<'_, DesktopState>,
+) -> Result<ActiveKnowledgeBaseResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.active_knowledge_base())
+        .await
+        .map_err(|error| BridgeError {
+            code: "desktop_command_failed".to_owned(),
+            message: format!("Desktop active knowledge-base task stopped unexpectedly: {error}"),
         })?
 }
 
@@ -93,6 +139,9 @@ fn main() {
             desktop_bridge_handshake,
             desktop_engine_health,
             desktop_inspect_knowledge_base,
+            desktop_create_knowledge_base,
+            desktop_open_knowledge_base,
+            desktop_active_knowledge_base,
             desktop_cancel,
             desktop_subscribe,
             desktop_unsubscribe,

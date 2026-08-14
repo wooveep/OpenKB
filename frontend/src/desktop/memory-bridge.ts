@@ -3,7 +3,10 @@ import type {
   DesktopBridgeEvent,
   DesktopBridgeHandshake,
   DesktopCancelResult,
+  DesktopActiveKnowledgeBase,
   DesktopEngineHealth,
+  DesktopKnowledgeBase,
+  DesktopKnowledgeBaseActivation,
   DesktopKnowledgeBaseInspection,
 } from "./contracts"
 
@@ -12,6 +15,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
   private readonly listeners = new Set<(event: DesktopBridgeEvent) => void>()
   private readonly handshakeResult: DesktopBridgeHandshake
   private readonly healthResult: DesktopEngineHealth
+  private activeKnowledgeBaseResult: DesktopKnowledgeBase | null = null
 
   constructor(
     handshakeResult: DesktopBridgeHandshake = {
@@ -68,6 +72,27 @@ export class MemoryDesktopBridge implements DesktopBridge {
     }
   }
 
+  async createKnowledgeBase(
+    kbDir: string,
+    name: string | undefined,
+    requestId: string,
+  ): Promise<DesktopKnowledgeBaseActivation> {
+    void requestId
+    return this.activate(kbDir, name || "Untitled knowledge base")
+  }
+
+  async openKnowledgeBase(
+    kbDir: string,
+    requestId: string,
+  ): Promise<DesktopKnowledgeBaseActivation> {
+    void requestId
+    return this.activate(kbDir, kbDir.split(/[\\/]/).filter(Boolean).at(-1) || "Knowledge base")
+  }
+
+  async activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase> {
+    return { knowledgeBase: this.activeKnowledgeBaseResult }
+  }
+
   async cancel(targetRequestId: string): Promise<DesktopCancelResult> {
     return { cancelled: true, requestId: targetRequestId }
   }
@@ -79,5 +104,25 @@ export class MemoryDesktopBridge implements DesktopBridge {
 
   emit(event: DesktopBridgeEvent): void {
     for (const listener of this.listeners) listener(event)
+  }
+
+  private activate(kbDir: string, name: string): DesktopKnowledgeBaseActivation {
+    const previousKbDir = this.activeKnowledgeBaseResult?.kbDir ?? null
+    const checkpointed = previousKbDir !== null && previousKbDir !== kbDir
+    this.activeKnowledgeBaseResult = {
+      kbDir,
+      name,
+      schemaVersion: 1,
+      lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
+    }
+    return {
+      knowledgeBase: this.activeKnowledgeBaseResult,
+      events: [
+        {
+          kind: "knowledge_base.activated",
+          data: { kbDir, name, previousKbDir, checkpointed },
+        },
+      ],
+    }
   }
 }

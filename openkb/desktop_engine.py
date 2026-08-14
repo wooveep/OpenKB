@@ -17,6 +17,10 @@ from pathlib import Path
 from typing import BinaryIO
 
 from openkb import __version__
+from openkb.desktop_workspace import (
+    DesktopKnowledgeBaseError,
+    DesktopKnowledgeBaseRuntime,
+)
 from openkb.workbench_service import (
     DesktopWorkbenchError,
     DesktopWorkbenchService,
@@ -135,11 +139,13 @@ class DesktopEngineServer:
         output_stream: BinaryIO,
         *,
         service: DesktopWorkbenchService | None = None,
+        workspace: DesktopKnowledgeBaseRuntime | None = None,
         engine_version: str | None = None,
     ) -> None:
         self._reader = FrameReader(input_stream)
         self._writer = FrameWriter(output_stream)
         self._service = service or DesktopWorkbenchService()
+        self._workspace = workspace or DesktopKnowledgeBaseRuntime()
         self._engine_version = engine_version or __version__
         self._handshake_complete = False
         self._shutdown = threading.Event()
@@ -216,7 +222,7 @@ class DesktopEngineServer:
         except DesktopRequestError as error:
             completed_data["error_code"] = error.code
             self._write_error(request.request_id, error.code, str(error))
-        except DesktopWorkbenchError as error:
+        except (DesktopWorkbenchError, DesktopKnowledgeBaseError) as error:
             completed_data["error_code"] = error.code
             self._write_error(request.request_id, error.code, str(error))
         except Exception as error:  # Keep unexpected Engine failures behind a stable boundary.
@@ -292,6 +298,23 @@ class DesktopEngineServer:
                 ],
             }
 
+        if request.method == "workbench.create_knowledge_base":
+            kb_dir = _required_path_param(request, "kb_dir")
+            name = request.params.get("name")
+            if name is not None and not isinstance(name, str):
+                raise DesktopRequestError(
+                    "invalid_params", "workbench.create_knowledge_base name must be a string."
+                )
+            return self._workspace.create(Path(kb_dir), name=name).as_dict()
+
+        if request.method == "workbench.open_knowledge_base":
+            kb_dir = _required_path_param(request, "kb_dir")
+            return self._workspace.open(Path(kb_dir)).as_dict()
+
+        if request.method == "workbench.active_knowledge_base":
+            active = self._workspace.active()
+            return {"knowledge_base": active.as_dict() if active is not None else None}
+
         raise DesktopRequestError(
             "method_not_found", f"Unknown Desktop Bridge method: {request.method}"
         )
@@ -328,6 +351,13 @@ class DesktopEngineServer:
                 return
             for worker in workers:
                 worker.join(timeout=1)
+
+
+def _required_path_param(request: DesktopRequest, key: str) -> str:
+    value = request.params.get(key)
+    if not isinstance(value, str) or not value:
+        raise DesktopRequestError("invalid_params", f"{request.method} requires a non-empty {key}.")
+    return value
 
 
 def _parse_request(frame: dict[str, object]) -> DesktopRequest:

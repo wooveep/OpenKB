@@ -7,8 +7,8 @@ use crate::engine_wire::{
     parse_response, read_frame, write_frame, EngineHandshake, EngineHealthWire,
 };
 pub use crate::engine_wire::{
-    BridgeError, BridgeEvent, BridgeHandshake, BridgeResult, CancelResult, EngineHealth,
-    InspectKnowledgeBaseResult,
+    ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, BridgeResult,
+    CancelResult, EngineHealth, InspectKnowledgeBaseResult, KnowledgeBaseActivationResult,
 };
 use serde_json::{json, Value};
 use std::{
@@ -110,6 +110,56 @@ impl EngineSupervisor {
             BridgeError::new(
                 "invalid_engine_response",
                 format!("Engine inspection response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn create_knowledge_base(
+        &self,
+        kb_dir: String,
+        name: Option<String>,
+        request_id: String,
+    ) -> BridgeResult<KnowledgeBaseActivationResult> {
+        self.ensure_started()?;
+        let value = self.request_started(
+            "workbench.create_knowledge_base",
+            json!({ "kb_dir": kb_dir, "name": name }),
+            Some(request_id),
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine knowledge-base creation response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn open_knowledge_base(
+        &self,
+        kb_dir: String,
+        request_id: String,
+    ) -> BridgeResult<KnowledgeBaseActivationResult> {
+        self.ensure_started()?;
+        let value = self.request_started(
+            "workbench.open_knowledge_base",
+            json!({ "kb_dir": kb_dir }),
+            Some(request_id),
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine knowledge-base open response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn active_knowledge_base(&self) -> BridgeResult<ActiveKnowledgeBaseResult> {
+        self.ensure_started()?;
+        let value = self.request_started("workbench.active_knowledge_base", json!({}), None)?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine active knowledge-base response has an invalid shape: {error}"),
             )
         })
     }

@@ -84,6 +84,41 @@
       "protocol": "桥接协议 {{version}}",
       "eventSequence": "事件 {{sequence}}",
       "retry": "重试引擎"
+    },
+    "knowledgeBases": {
+      "chooseKnowledgeBase": "选择知识库",
+      "navigation": "工作台导航",
+      "navigationItems": {
+        "overview": "总览",
+        "documents": "文档",
+        "answers": "问答",
+        "knowledge": "知识页",
+        "review": "审核",
+        "settings": "设置"
+      },
+      "create": "新建知识库",
+      "open": "打开知识库",
+      "loading": "正在读取活动知识库…",
+      "loadErrorTitle": "无法读取活动知识库",
+      "retry": "重试",
+      "emptyTitle": "从一个桌面知识库开始",
+      "emptyDescription": "创建新的 SQLite 知识库，或打开已有的桌面知识库。一个桌面运行时始终只处理一个活动知识库。",
+      "createTitle": "新建桌面知识库",
+      "createDescription": "选择一个空目录。OpenKB 会在其中创建 SQLite 权威状态和 raw 原文目录。",
+      "openTitle": "打开桌面知识库",
+      "openDescription": "选择由 OpenKB Desktop 创建的知识库目录。旧 CLI/Web 知识库不会被修改。",
+      "pathLabel": "知识库目录",
+      "pathPlaceholder": "例如 C:\\Users\\你\\Documents\\我的知识库",
+      "nameLabel": "显示名称（可选）",
+      "namePlaceholder": "默认使用目录名称",
+      "pathRequired": "请输入知识库目录。",
+      "schemaVersion": "SQLite schema",
+      "checkpoint": "最近检查点",
+      "notYet": "尚未创建",
+      "runtime": "桌面运行时",
+      "active": "当前活动",
+      "readyTitle": "{{section}}已准备好",
+      "readyDescription": "当前知识库已绑定到这个桌面运行时。后续导入、问答和知识编辑都会在这里安全进行。"
     }
   }
 }

@@ -1,0 +1,378 @@
+"""SQLite-backed Desktop Knowledge Base creation and runtime binding.
+
+The Desktop Runtime owns one active knowledge base at a time.  This module is
+deliberately narrow: it establishes the new on-disk format and checkpointing
+boundary that later import and retrieval work can build on, without teaching
+the Tauri shell about SQLite or legacy workspace files.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import sqlite3
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+
+from openkb.locks import kb_ingest_lock
+
+_STATE_DIRNAME = ".openkb"
+_STATE_FILENAME = "state.sqlite3"
+_DESKTOP_FORMAT = "openkb-desktop"
+
+
+class DesktopKnowledgeBaseError(RuntimeError):
+    """A stable domain error for Desktop Knowledge Base operations."""
+
+    code: str
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class DesktopKnowledgeBaseNotFoundError(DesktopKnowledgeBaseError):
+    """Raised when a selected directory is not a Desktop Knowledge Base."""
+
+    def __init__(self, kb_dir: Path) -> None:
+        super().__init__(
+            "desktop_knowledge_base_not_found", f"Not a Desktop Knowledge Base: {kb_dir}"
+        )
+
+
+class LegacyKnowledgeBaseUnsupportedError(DesktopKnowledgeBaseError):
+    """Raised when an old CLI/Web workspace is selected in Desktop."""
+
+    def __init__(self, kb_dir: Path) -> None:
+        super().__init__(
+            "legacy_knowledge_base_unsupported",
+            f"Legacy Knowledge Bases cannot be opened by OpenKB Desktop: {kb_dir}",
+        )
+
+
+class DesktopKnowledgeBaseAlreadyExistsError(DesktopKnowledgeBaseError):
+    """Raised when Create targets an existing Desktop Knowledge Base."""
+
+    def __init__(self, kb_dir: Path) -> None:
+        super().__init__(
+            "desktop_knowledge_base_already_exists",
+            f"A Desktop Knowledge Base already exists at: {kb_dir}",
+        )
+
+
+class DesktopKnowledgeBaseDirectoryNotEmptyError(DesktopKnowledgeBaseError):
+    """Raised when Create would mix a new knowledge base into user files."""
+
+    def __init__(self, kb_dir: Path) -> None:
+        super().__init__(
+            "desktop_knowledge_base_directory_not_empty",
+            f"Choose an empty directory for the Desktop Knowledge Base: {kb_dir}",
+        )
+
+
+class DesktopKnowledgeBaseStateError(DesktopKnowledgeBaseError):
+    """Raised when the SQLite authority database is invalid or incompatible."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("desktop_knowledge_base_state_invalid", message)
+
+
+class DesktopKnowledgeBaseMigrationError(DesktopKnowledgeBaseError):
+    """Raised when a database requires a newer Desktop release."""
+
+    def __init__(self, version: int) -> None:
+        super().__init__(
+            "desktop_knowledge_base_schema_too_new",
+            "This Desktop Knowledge Base uses schema version "
+            f"{version}, which is newer than this OpenKB Desktop release.",
+        )
+
+
+@dataclass(frozen=True)
+class DesktopKnowledgeBase:
+    """The small authority record visible while a knowledge base is active."""
+
+    kb_dir: str
+    name: str
+    schema_version: int
+    last_checkpoint_at: str | None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "kb_dir": self.kb_dir,
+            "name": self.name,
+            "schema_version": self.schema_version,
+            "last_checkpoint_at": self.last_checkpoint_at,
+        }
+
+
+@dataclass(frozen=True)
+class DesktopKnowledgeBaseActivation:
+    """One completed create/open activation with a durable switch checkpoint."""
+
+    knowledge_base: DesktopKnowledgeBase
+    previous_kb_dir: str | None
+    checkpointed: bool
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "knowledge_base": self.knowledge_base.as_dict(),
+            "events": [
+                {
+                    "kind": "knowledge_base.activated",
+                    "data": {
+                        "kb_dir": self.knowledge_base.kb_dir,
+                        "name": self.knowledge_base.name,
+                        "previous_kb_dir": self.previous_kb_dir,
+                        "checkpointed": self.checkpointed,
+                    },
+                }
+            ],
+        }
+
+
+# Each migration is intentionally additive and recorded before a newer command
+# can use its tables.  Later tickets append entries here rather than modifying
+# an already shipped migration.
+_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
+    (
+        1,
+        (
+            """
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY CHECK(version > 0),
+                applied_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE runtime_checkpoints (
+                checkpoint_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """,
+        ),
+    ),
+)
+
+
+class DesktopKnowledgeBaseRuntime:
+    """Own the one active Desktop Knowledge Base for one Python Engine."""
+
+    def __init__(self) -> None:
+        self._active: DesktopKnowledgeBase | None = None
+        self._lock = threading.RLock()
+
+    def create(self, kb_dir: Path, *, name: str | None = None) -> DesktopKnowledgeBaseActivation:
+        """Create a new SQLite-authoritative Desktop Knowledge Base and activate it."""
+        resolved = _resolve_directory(kb_dir)
+        if resolved.exists() and not resolved.is_dir():
+            raise DesktopKnowledgeBaseDirectoryNotEmptyError(resolved)
+        if _is_legacy_knowledge_base(resolved):
+            raise LegacyKnowledgeBaseUnsupportedError(resolved)
+        if _state_database_path(resolved).exists():
+            raise DesktopKnowledgeBaseAlreadyExistsError(resolved)
+        if resolved.exists() and any(resolved.iterdir()):
+            raise DesktopKnowledgeBaseDirectoryNotEmptyError(resolved)
+
+        try:
+            resolved.mkdir(parents=True, exist_ok=True)
+            state_dir = _state_dir(resolved)
+            state_dir.mkdir(exist_ok=True)
+            (resolved / "raw").mkdir(exist_ok=True)
+            display_name = _display_name(name, resolved)
+            with kb_ingest_lock(state_dir):
+                connection = _connect(_state_database_path(resolved))
+                try:
+                    _apply_migrations(connection, creating=True)
+                    _set_metadata(connection, "format", _DESKTOP_FORMAT)
+                    _set_metadata(connection, "knowledge_base_name", display_name)
+                finally:
+                    connection.close()
+        except DesktopKnowledgeBaseError:
+            raise
+        except (OSError, sqlite3.Error) as error:
+            raise DesktopKnowledgeBaseStateError(
+                f"Could not create Desktop Knowledge Base at {resolved}: {error}"
+            ) from error
+
+        return self._activate(_load_desktop_knowledge_base(resolved))
+
+    def open(self, kb_dir: Path) -> DesktopKnowledgeBaseActivation:
+        """Open an existing new-format Desktop Knowledge Base and activate it."""
+        return self._activate(_load_desktop_knowledge_base(_resolve_directory(kb_dir)))
+
+    def active(self) -> DesktopKnowledgeBase | None:
+        """Return the only knowledge base currently bound to this runtime."""
+        with self._lock:
+            return self._active
+
+    def _activate(self, target: DesktopKnowledgeBase) -> DesktopKnowledgeBaseActivation:
+        with self._lock:
+            previous = self._active
+            checkpointed = False
+            if previous is not None and previous.kb_dir != target.kb_dir:
+                _write_checkpoint(Path(previous.kb_dir), reason="knowledge_base_switched")
+                checkpointed = True
+            self._active = target
+            return DesktopKnowledgeBaseActivation(
+                knowledge_base=target,
+                previous_kb_dir=previous.kb_dir if previous is not None else None,
+                checkpointed=checkpointed,
+            )
+
+
+def _resolve_directory(kb_dir: Path) -> Path:
+    return kb_dir.expanduser().resolve()
+
+
+def _state_dir(kb_dir: Path) -> Path:
+    return kb_dir / _STATE_DIRNAME
+
+
+def _state_database_path(kb_dir: Path) -> Path:
+    return _state_dir(kb_dir) / _STATE_FILENAME
+
+
+def _is_legacy_knowledge_base(kb_dir: Path) -> bool:
+    state_dir = _state_dir(kb_dir)
+    return (state_dir / "hashes.json").is_file() or (kb_dir / "wiki").is_dir()
+
+
+def _display_name(name: str | None, kb_dir: Path) -> str:
+    if name is None:
+        return kb_dir.name
+    candidate = name.strip()
+    return candidate or kb_dir.name
+
+
+def _connect(database_path: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(database_path)
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
+def _apply_migrations(connection: sqlite3.Connection, *, creating: bool) -> int:
+    if creating:
+        applied: set[int] = set()
+    else:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+        ).fetchone()
+        if table is None:
+            raise DesktopKnowledgeBaseStateError(
+                "Desktop Knowledge Base is missing its schema migration ledger."
+            )
+        rows = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        applied = {int(row[0]) for row in rows}
+
+    latest = _MIGRATIONS[-1][0]
+    if applied and max(applied) > latest:
+        raise DesktopKnowledgeBaseMigrationError(max(applied))
+    expected_applied = set(range(1, max(applied, default=0) + 1))
+    if applied != expected_applied:
+        raise DesktopKnowledgeBaseStateError(
+            "Desktop Knowledge Base has a non-contiguous migration ledger."
+        )
+
+    for version, statements in _MIGRATIONS:
+        if version in applied:
+            continue
+        now = _timestamp()
+        with connection:
+            for statement in statements:
+                connection.execute(statement)
+            connection.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (version, now),
+            )
+        applied.add(version)
+    return latest
+
+
+def _set_metadata(connection: sqlite3.Connection, key: str, value: str) -> None:
+    with connection:
+        connection.execute(
+            "INSERT INTO metadata (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+def _metadata(connection: sqlite3.Connection, key: str) -> str | None:
+    row = connection.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
+    return str(row[0]) if row is not None else None
+
+
+def _load_desktop_knowledge_base(kb_dir: Path) -> DesktopKnowledgeBase:
+    if not kb_dir.is_dir():
+        raise DesktopKnowledgeBaseNotFoundError(kb_dir)
+    if _is_legacy_knowledge_base(kb_dir) and not _state_database_path(kb_dir).exists():
+        raise LegacyKnowledgeBaseUnsupportedError(kb_dir)
+    database_path = _state_database_path(kb_dir)
+    if not database_path.is_file():
+        raise DesktopKnowledgeBaseNotFoundError(kb_dir)
+
+    try:
+        with kb_ingest_lock(_state_dir(kb_dir)):
+            connection = _connect(database_path)
+            try:
+                schema_version = _apply_migrations(connection, creating=False)
+                if _metadata(connection, "format") != _DESKTOP_FORMAT:
+                    raise DesktopKnowledgeBaseStateError(
+                        "Selected SQLite database is not an OpenKB Desktop Knowledge Base."
+                    )
+                name = _metadata(connection, "knowledge_base_name")
+                if not name:
+                    raise DesktopKnowledgeBaseStateError(
+                        "Desktop Knowledge Base is missing its display name."
+                    )
+                row = connection.execute(
+                    "SELECT created_at FROM runtime_checkpoints ORDER BY checkpoint_id DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                connection.close()
+    except DesktopKnowledgeBaseError:
+        raise
+    except (OSError, sqlite3.Error) as error:
+        raise DesktopKnowledgeBaseStateError(
+            f"Could not open Desktop Knowledge Base at {kb_dir}: {error}"
+        ) from error
+
+    return DesktopKnowledgeBase(
+        kb_dir=str(kb_dir),
+        name=name,
+        schema_version=schema_version,
+        last_checkpoint_at=str(row[0]) if row is not None else None,
+    )
+
+
+def _write_checkpoint(kb_dir: Path, *, reason: str) -> None:
+    database_path = _state_database_path(kb_dir)
+    try:
+        with kb_ingest_lock(_state_dir(kb_dir)):
+            connection = _connect(database_path)
+            try:
+                with connection:
+                    connection.execute(
+                        "INSERT INTO runtime_checkpoints (reason, created_at) VALUES (?, ?)",
+                        (reason, _timestamp()),
+                    )
+            finally:
+                connection.close()
+    except (OSError, sqlite3.Error) as error:
+        raise DesktopKnowledgeBaseStateError(
+            f"Could not checkpoint Desktop Knowledge Base at {kb_dir}: {error}"
+        ) from error
+
+
+def _timestamp() -> str:
+    return dt.datetime.now(tz=dt.timezone.utc).isoformat()

@@ -53,6 +53,21 @@ class InspectResponseOutput(io.BytesIO):
         return size
 
 
+class RequestResponseOutput(io.BytesIO):
+    """Signal once a chosen asynchronous Desktop Bridge request has completed."""
+
+    def __init__(self, response_written: threading.Event, request_id: str) -> None:
+        super().__init__()
+        self._response_written = response_written
+        self._request_marker = f'"id":"{request_id}"'.encode()
+
+    def write(self, payload: bytes) -> int:
+        size = super().write(payload)
+        if self._request_marker in payload:
+            self._response_written.set()
+        return size
+
+
 def _decode_frames(payload: bytes) -> list[dict[str, object]]:
     reader = FrameReader(io.BytesIO(payload))
     frames: list[dict[str, object]] = []
@@ -206,3 +221,54 @@ def test_engine_cancels_an_active_caller_owned_request(kb_dir):
         "request_id": "workbench-request",
     }
     assert responses["workbench-request"]["error"]["code"] == "request_cancelled"
+
+
+def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
+    """The private Bridge exposes the new workspace format, not a legacy command path."""
+    desktop_kb = tmp_path / "desktop-kb"
+    incoming = b"".join(
+        (
+            encode_frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "handshake",
+                    "method": "engine.handshake",
+                    "params": {"protocol_version": 1},
+                }
+            ),
+            encode_frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "create",
+                    "method": "workbench.create_knowledge_base",
+                    "params": {"kb_dir": str(desktop_kb), "name": "Desktop KB"},
+                }
+            ),
+        )
+    )
+    created = threading.Event()
+    output = RequestResponseOutput(created, "create")
+
+    DesktopEngineServer(WaitForResponseBytesIO(incoming, created), output).serve()
+
+    responses = {frame["id"]: frame for frame in _decode_frames(output.getvalue()) if "id" in frame}
+    assert responses["create"]["result"] == {
+        "knowledge_base": {
+            "kb_dir": str(desktop_kb),
+            "name": "Desktop KB",
+            "schema_version": 1,
+            "last_checkpoint_at": None,
+        },
+        "events": [
+            {
+                "kind": "knowledge_base.activated",
+                "data": {
+                    "kb_dir": str(desktop_kb),
+                    "name": "Desktop KB",
+                    "previous_kb_dir": None,
+                    "checkpointed": False,
+                },
+            }
+        ],
+    }
+    assert (desktop_kb / ".openkb" / "state.sqlite3").is_file()

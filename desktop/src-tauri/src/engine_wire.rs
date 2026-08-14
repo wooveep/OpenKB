@@ -84,6 +84,31 @@ pub struct CancelResult {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DesktopKnowledgeBase {
+    #[serde(alias = "kb_dir")]
+    pub kb_dir: String,
+    pub name: String,
+    #[serde(alias = "schema_version")]
+    pub schema_version: u32,
+    #[serde(alias = "last_checkpoint_at")]
+    pub last_checkpoint_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveKnowledgeBaseResult {
+    pub knowledge_base: Option<DesktopKnowledgeBase>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeBaseActivationResult {
+    pub knowledge_base: DesktopKnowledgeBase,
+    pub events: Vec<WorkbenchEvent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KnowledgeBaseSnapshot {
     #[serde(alias = "kb_dir")]
     pub kb_dir: String,
@@ -143,6 +168,8 @@ pub struct KnowledgeBaseStatus {
 pub enum WorkbenchEvent {
     #[serde(rename = "knowledge_base.inspected")]
     KnowledgeBaseInspected(KnowledgeBaseInspectedEventData),
+    #[serde(rename = "knowledge_base.activated")]
+    KnowledgeBaseActivated(KnowledgeBaseActivatedEventData),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -152,6 +179,17 @@ pub struct KnowledgeBaseInspectedEventData {
     pub kb_dir: String,
     #[serde(alias = "document_count")]
     pub document_count: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeBaseActivatedEventData {
+    #[serde(alias = "kb_dir")]
+    pub kb_dir: String,
+    pub name: String,
+    #[serde(alias = "previous_kb_dir")]
+    pub previous_kb_dir: Option<String>,
+    pub checkpointed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

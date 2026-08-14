@@ -3,9 +3,11 @@ import {
   DesktopBridgeError,
   type DesktopBridge,
   type DesktopBridgeEvent,
+  type DesktopActiveKnowledgeBase,
   type DesktopBridgeHandshake,
   type DesktopCancelResult,
   type DesktopEngineHealth,
+  type DesktopKnowledgeBaseActivation,
   type DesktopKnowledgeBaseInspection,
 } from "./contracts"
 
@@ -41,6 +43,32 @@ export class TauriDesktopBridge implements DesktopBridge {
       kbDir,
       requestId,
     })
+  }
+
+  async createKnowledgeBase(
+    kbDir: string,
+    name: string | undefined,
+    requestId: string,
+  ): Promise<DesktopKnowledgeBaseActivation> {
+    return this.call<DesktopKnowledgeBaseActivation>("desktop_create_knowledge_base", {
+      kbDir,
+      name,
+      requestId,
+    })
+  }
+
+  async openKnowledgeBase(
+    kbDir: string,
+    requestId: string,
+  ): Promise<DesktopKnowledgeBaseActivation> {
+    return this.call<DesktopKnowledgeBaseActivation>("desktop_open_knowledge_base", {
+      kbDir,
+      requestId,
+    })
+  }
+
+  async activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase> {
+    return this.call<DesktopActiveKnowledgeBase>("desktop_active_knowledge_base")
   }
 
   async cancel(targetRequestId: string): Promise<DesktopCancelResult> {
@@ -87,6 +115,30 @@ class UnavailableDesktopBridge implements DesktopBridge {
   inspectKnowledgeBase(kbDir: string, requestId: string): Promise<DesktopKnowledgeBaseInspection> {
     void kbDir
     void requestId
+    return this.unavailable()
+  }
+
+  createKnowledgeBase(
+    kbDir: string,
+    name: string | undefined,
+    requestId: string,
+  ): Promise<DesktopKnowledgeBaseActivation> {
+    void kbDir
+    void name
+    void requestId
+    return this.unavailable()
+  }
+
+  openKnowledgeBase(
+    kbDir: string,
+    requestId: string,
+  ): Promise<DesktopKnowledgeBaseActivation> {
+    void kbDir
+    void requestId
+    return this.unavailable()
+  }
+
+  activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase> {
     return this.unavailable()
   }
 

@@ -84,6 +84,41 @@
       "protocol": "Bridge protocol {{version}}",
       "eventSequence": "Event {{sequence}}",
       "retry": "Retry Engine"
+    },
+    "knowledgeBases": {
+      "chooseKnowledgeBase": "Choose knowledge base",
+      "navigation": "Workbench navigation",
+      "navigationItems": {
+        "overview": "Overview",
+        "documents": "Documents",
+        "answers": "Answers",
+        "knowledge": "Knowledge pages",
+        "review": "Review",
+        "settings": "Settings"
+      },
+      "create": "Create knowledge base",
+      "open": "Open knowledge base",
+      "loading": "Reading the active knowledge base…",
+      "loadErrorTitle": "Could not read the active knowledge base",
+      "retry": "Retry",
+      "emptyTitle": "Start with a Desktop Knowledge Base",
+      "emptyDescription": "Create a new SQLite knowledge base or open an existing Desktop Knowledge Base. One Desktop Runtime works with one active knowledge base at a time.",
+      "createTitle": "Create Desktop Knowledge Base",
+      "createDescription": "Choose an empty directory. OpenKB will create its SQLite authority state and raw-source directory there.",
+      "openTitle": "Open Desktop Knowledge Base",
+      "openDescription": "Choose a knowledge-base directory created by OpenKB Desktop. Legacy CLI/Web knowledge bases are not modified.",
+      "pathLabel": "Knowledge-base directory",
+      "pathPlaceholder": "For example C:\\Users\\you\\Documents\\My knowledge base",
+      "nameLabel": "Display name (optional)",
+      "namePlaceholder": "Uses the directory name by default",
+      "pathRequired": "Enter a knowledge-base directory.",
+      "schemaVersion": "SQLite schema",
+      "checkpoint": "Latest checkpoint",
+      "notYet": "Not created yet",
+      "runtime": "Desktop Runtime",
+      "active": "Active now",
+      "readyTitle": "{{section}} is ready",
+      "readyDescription": "This knowledge base is bound to this Desktop Runtime. Future imports, answers, and knowledge editing will happen here safely."
     }
   }
 }
