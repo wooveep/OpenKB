@@ -107,7 +107,8 @@ export class MemoryDesktopBridge implements DesktopBridge {
     const name = sourcePath.split(/[\\/]/).filter(Boolean).at(-1) || "document.txt"
     const jobId = `job-${requestId}`
     const documentId = `document-${requestId}`
-    const stages = ["preflight", "raw_asset", "document_ir", "evidence", "search"] as const
+    const stages = ["preflight", "raw_asset", "document_ir", "evidence", "model_analysis", "search"] as const
+    const progress = [20, 35, 55, 75, 85, 100]
     for (const [index, stage] of stages.entries()) {
       this.emit({
         sequence: index + 1,
@@ -118,8 +119,8 @@ export class MemoryDesktopBridge implements DesktopBridge {
           documentId: stage === "search" ? documentId : undefined,
           stageRunId: `${jobId}-${stage}`,
           stage,
-          status: "completed",
-          progress: (index + 1) * 20,
+          status: stage === "model_analysis" ? "skipped" : "completed",
+          progress: progress[index],
           errorCode: null,
         },
       })
@@ -143,10 +144,12 @@ export class MemoryDesktopBridge implements DesktopBridge {
       stages: stages.map((stage, index) => ({
         stageRunId: `${jobId}-${stage}`,
         stage,
-        status: "completed",
-        progress: (index + 1) * 20,
+        status: stage === "model_analysis" ? "skipped" : "completed",
+        progress: progress[index],
         errorCode: null,
       })),
+      modelCalls: [],
+      quarantine: null,
     }
     this.importJobResults = [result, ...this.importJobResults]
     return result
@@ -173,6 +176,8 @@ export class MemoryDesktopBridge implements DesktopBridge {
           progress: 100,
           errorCode: null,
         })),
+        modelCalls: task.modelCalls,
+        quarantine: task.quarantine,
       }
       this.importJobResults = [
         result,
@@ -207,7 +212,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 3,
+      schemaVersion: 4,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []

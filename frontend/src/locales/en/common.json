@@ -128,6 +128,7 @@
         "raw_asset": "Saving raw asset",
         "document_ir": "Building document structure",
         "evidence": "Preparing evidence",
+        "model_analysis": "Analyzing with model",
         "search": "Publishing full-text search"
       },
       "importStatuses": {
@@ -136,12 +137,24 @@
         "paused": "Paused",
         "cancelled": "Cancelled",
         "recoverable": "Ready to resume",
+        "quarantined": "Isolated",
         "completed": "Completed",
         "failed": "Failed",
         "skipped": "Reused"
       },
       "availableKnowledge": "Available Knowledge",
       "importedDocument": "{{name}} is ready for retrieval with {{evidence}} evidence blocks.",
+      "modelCallStatus": "Model analysis · {{status}} · attempt {{attempt}} of {{maximum}}",
+      "modelCallBudget": "This request may wait up to {{timeout}}s ({{remaining}}s call budget remaining).",
+      "modelCallStates": {
+        "running": "Waiting for response",
+        "retry_wait": "Preparing retry",
+        "completed": "Completed",
+        "failed": "Failed"
+      },
+      "modelRetrying": "Retrying after: {{reason}} Next response timeout: {{timeout}}s.",
+      "quarantinedTitle": "Document isolated from Available Knowledge",
+      "quarantinedAttempts": "Automatic attempts: {{attempts}}",
       "schemaVersion": "SQLite schema",
       "checkpoint": "Latest checkpoint",
       "notYet": "Not created yet",

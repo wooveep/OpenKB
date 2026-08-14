@@ -23,11 +23,19 @@ from openkb.desktop_import_artifacts import (
     evidence_from_checkpoint,
     validate_text_source,
 )
+from openkb.desktop_import_model_ledger import DesktopImportModelLedger
 from openkb.desktop_import_store import IMPORT_STAGES, DesktopImportStore, ImportJobState
 from openkb.desktop_import_types import (
     DesktopImportTask,
     DesktopStageRun,
     DesktopTextImportResult,
+)
+from openkb.desktop_model_gateway import (
+    DesktopModelAttemptEvent,
+    DesktopModelCallError,
+    DesktopModelGateway,
+    DesktopModelRequest,
+    DesktopModelResult,
 )
 from openkb.locks import kb_ingest_lock
 
@@ -66,9 +74,12 @@ class DesktopTextImportService:
         *,
         on_stage_progress: StageProgressCallback | None = None,
         control: DesktopImportControl | None = None,
+        model_gateway: DesktopModelGateway | None = None,
     ) -> None:
         self._store = DesktopImportStore(kb_dir, on_stage_progress=on_stage_progress)
+        self._model_ledger = DesktopImportModelLedger(kb_dir)
         self._control = control or DesktopImportControl()
+        self._model_gateway = model_gateway
 
     def import_text(self, source_path: Path) -> DesktopTextImportResult:
         """Create and execute a brand-new TXT Import Job."""
@@ -155,9 +166,38 @@ class DesktopTextImportService:
             else:
                 evidence = evidence_from_checkpoint(self._checkpoint(state, "evidence"), blocks)
 
+            stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
+            if not self._completed(stages, "model_analysis"):
+                active_stage = "model_analysis"
+                self._honor_control(state, active_stage)
+                self._store.set_stage(state, active_stage, "running", 80)
+                if self._model_gateway is None:
+                    self._store.set_stage(
+                        state,
+                        active_stage,
+                        "skipped",
+                        85,
+                        error_code="model_analysis_not_configured",
+                    )
+                else:
+                    result = self._analyze_document(state, active_stage, text)
+                    self._store.set_stage(
+                        state,
+                        active_stage,
+                        "completed",
+                        85,
+                        checkpoint={
+                            "call_id": result.call_id,
+                            "attempt_count": result.attempt_count,
+                            "response_sha256": hashlib.sha256(
+                                result.content.encode("utf-8")
+                            ).hexdigest(),
+                        },
+                    )
+
             active_stage = "search"
             self._honor_control(state, active_stage)
-            self._store.set_stage(state, active_stage, "running", 80)
+            self._store.set_stage(state, active_stage, "running", 90)
             document, deduplicated = self._store.publish_document(
                 state=state,
                 source=state.source,
@@ -179,6 +219,23 @@ class DesktopTextImportService:
             return self._result(state.job_id, document.document_id, deduplicated=deduplicated)
         except _DuplicateImport as duplicate:
             return self._result(state.job_id, duplicate.document_id, deduplicated=True)
+        except DesktopModelCallError as error:
+            self._model_ledger.quarantine(
+                job_id=state.job_id,
+                stage_run_id=state.stage_ids[active_stage],
+                stage=active_stage,
+                call_id=error.call_id,
+                failure=error.failure,
+                attempt_count=error.attempt_count,
+            )
+            self._store.emit_stage(
+                state,
+                active_stage,
+                "failed",
+                100,
+                error_code=error.failure.code,
+            )
+            raise DesktopImportError("document_quarantined", error.failure.reason) from error
         except DesktopImportError as error:
             if error.code not in _CONTROL_CODES and not terminal_state_committed:
                 self._store.fail_job(state, active_stage, error.code)
@@ -190,6 +247,32 @@ class DesktopTextImportService:
             if not terminal_state_committed:
                 self._store.fail_job(state, active_stage, wrapped.code)
             raise wrapped from error
+
+    def _analyze_document(self, state: ImportJobState, stage: str, text: str) -> DesktopModelResult:
+        if self._model_gateway is None:
+            raise DesktopImportError(
+                "desktop_import_state_invalid", "Model Gateway is unavailable."
+            )
+
+        def record_attempt(event: DesktopModelAttemptEvent) -> None:
+            self._model_ledger.record_attempt(
+                job_id=state.job_id,
+                stage_run_id=state.stage_ids[stage],
+                operation="document_analysis",
+                event=event,
+            )
+            self._store.emit_stage(
+                state,
+                stage,
+                "running",
+                80,
+                error_code=event.error_code,
+            )
+
+        return self._model_gateway.analyze(
+            DesktopModelRequest("document_analysis", state.source.name, text),
+            on_event=record_attempt,
+        )
 
     def _raw_input(
         self, state: ImportJobState, stages: Mapping[str, DesktopStageRun]
@@ -274,7 +357,13 @@ class DesktopTextImportService:
             raise DesktopImportError(
                 "desktop_import_state_invalid", f"Job missing document: {job_id}."
             )
-        return DesktopTextImportResult(document=task.document, job=task.job, stages=task.stages)
+        return DesktopTextImportResult(
+            document=task.document,
+            job=task.job,
+            stages=task.stages,
+            model_calls=task.model_calls,
+            quarantine=task.quarantine,
+        )
 
     def _honor_control(self, state: ImportJobState, stage: str) -> None:
         action = self._control.action

@@ -7,6 +7,8 @@ import sqlite3
 import pytest
 
 from openkb import desktop_workspace
+from openkb.desktop_import import DesktopTextImportService
+from openkb.desktop_import_store import DesktopImportStore
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseNotFoundError,
     DesktopKnowledgeBaseRuntime,
@@ -22,7 +24,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 3
+    assert first.knowledge_base.schema_version == 4
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
@@ -32,6 +34,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
             (1,),
             (2,),
             (3,),
+            (4,),
         ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
@@ -67,6 +70,10 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
     with sqlite3.connect(database_path) as connection:
         connection.execute("DROP TABLE stage_run_runtime")
         connection.execute("DROP TABLE import_job_runtime")
+        connection.execute("DROP TABLE model_attempts")
+        connection.execute("DROP TABLE model_calls")
+        connection.execute("DROP TABLE quarantined_documents")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 4")
         connection.execute("DELETE FROM schema_migrations WHERE version = 3")
         connection.execute(
             """
@@ -99,6 +106,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
             (1,),
             (2,),
             (3,),
+            (4,),
         ]
         assert connection.execute(
             "SELECT status FROM import_job_runtime WHERE job_id = 'legacy-job'"
@@ -110,8 +118,49 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
             connection.execute(
                 "SELECT status, progress FROM stage_runs WHERE job_id = 'legacy-job' ORDER BY stage"
             ).fetchall()
-            == [("pending", 0)] * 5
+            == [("pending", 0)] * 6
         )
+
+
+def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
+    """Migration 4 fills the stage contract required by resumed legacy jobs."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "legacy-paused.txt"
+    source.write_text("Resume through the new model stage.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    store = DesktopImportStore(kb_dir)
+    state = store.create_job(source)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE model_attempts")
+        connection.execute("DROP TABLE model_calls")
+        connection.execute("DROP TABLE quarantined_documents")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 4")
+        connection.execute(
+            "DELETE FROM stage_run_runtime WHERE job_id = ? AND stage_run_id = ?",
+            (state.job_id, state.stage_ids["model_analysis"]),
+        )
+        connection.execute(
+            "DELETE FROM stage_runs WHERE job_id = ? AND stage = 'model_analysis'", (state.job_id,)
+        )
+        connection.execute(
+            "UPDATE import_job_runtime SET status = 'paused' WHERE job_id = ?", (state.job_id,)
+        )
+
+    DesktopKnowledgeBaseRuntime().open(kb_dir)
+    resumed = DesktopTextImportService(kb_dir).resume_text(state.job_id)
+
+    assert resumed.job.status == "completed"
+    assert [stage.stage for stage in resumed.stages] == [
+        "preflight",
+        "raw_asset",
+        "document_ir",
+        "evidence",
+        "model_analysis",
+        "search",
+    ]
+    assert resumed.stages[4].status == "skipped"
 
 
 def test_opening_a_legacy_knowledge_base_is_rejected_without_creating_desktop_state(kb_dir):

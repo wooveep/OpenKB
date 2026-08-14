@@ -14,16 +14,27 @@ from typing import Callable
 from portalocker import LockException
 
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
+from openkb.desktop_import_queries import (
+    find_available_document_in,
+    stages_for_job,
+    task_from_row,
+)
 from openkb.desktop_import_types import (
     DesktopImportedDocument,
-    DesktopImportJob,
     DesktopImportTask,
     DesktopStageRun,
 )
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import atomic_write_bytes, kb_ingest_lock
 
-IMPORT_STAGES = ("preflight", "raw_asset", "document_ir", "evidence", "search")
+IMPORT_STAGES = (
+    "preflight",
+    "raw_asset",
+    "document_ir",
+    "evidence",
+    "model_analysis",
+    "search",
+)
 _STAGE_ORDER_SQL = (
     "CASE stage "
     + " ".join(
@@ -191,7 +202,7 @@ class DesktopImportStore:
                 ORDER BY import_jobs.created_at DESC
                 """
             ).fetchall()
-            tasks = tuple(self._task_from_row(connection, row) for row in rows)
+            tasks = tuple(task_from_row(connection, row, _STAGE_ORDER_SQL) for row in rows)
         finally:
             connection.close()
         return {"jobs": [task.as_dict() for task in tasks]}
@@ -216,7 +227,7 @@ class DesktopImportStore:
             ).fetchone()
             if row is None:
                 raise DesktopImportError("import_job_not_found", f"Job not found: {job_id}")
-            return self._task_from_row(connection, row)
+            return task_from_row(connection, row, _STAGE_ORDER_SQL)
         finally:
             connection.close()
 
@@ -242,7 +253,7 @@ class DesktopImportStore:
     def stage_runs(self, job_id: str) -> tuple[DesktopStageRun, ...]:
         connection = self._connect()
         try:
-            return self._stages_for_job(connection, job_id)
+            return stages_for_job(connection, job_id, _STAGE_ORDER_SQL)
         finally:
             connection.close()
 
@@ -349,17 +360,18 @@ class DesktopImportStore:
         progress: int,
         *,
         document_id: str | None = None,
+        error_code: str | None = None,
     ) -> None:
         self._emit_stage(
             state.job_id,
-            DesktopStageRun(state.stage_ids[stage], stage, status, progress),
+            DesktopStageRun(state.stage_ids[stage], stage, status, progress, error_code),
             document_id=document_id,
         )
 
     def find_available_document(self, asset_sha256: str) -> DesktopImportedDocument | None:
         connection = self._connect()
         try:
-            return self._find_available_document_in(connection, asset_sha256)
+            return find_available_document_in(connection, asset_sha256)
         finally:
             connection.close()
 
@@ -426,7 +438,7 @@ class DesktopImportStore:
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                existing = self._find_available_document_in(connection, asset_sha256)
+                existing = find_available_document_in(connection, asset_sha256)
                 if existing is not None:
                     self._complete_job_in(
                         connection, state.job_id, search_stage_id, existing.document_id, now
@@ -690,68 +702,6 @@ class DesktopImportStore:
             )
         return ImportJobState(job_id=job_id, source=source, status=status, stage_ids=stage_ids)
 
-    def _task_from_row(
-        self, connection: sqlite3.Connection, row: tuple[object, ...]
-    ) -> DesktopImportTask:
-        stages = self._stages_for_job(connection, str(row[0]))
-        job = DesktopImportJob(
-            job_id=str(row[0]),
-            status=str(row[1]),
-            progress=int(str(row[2])),
-            document_id=str(row[3]) if row[3] is not None else None,
-            deduplicated=any(
-                stage.stage == "document_ir" and stage.status == "skipped" for stage in stages
-            ),
-        )
-        document = _document_from_row(row[4:]) if row[4] is not None else None
-        return DesktopImportTask(job=job, document=document, stages=stages)
-
-    def _stages_for_job(
-        self, connection: sqlite3.Connection, job_id: str
-    ) -> tuple[DesktopStageRun, ...]:
-        rows = connection.execute(
-            f"""
-            SELECT stage_run_id, stage, status, progress, error_code
-            FROM (
-                SELECT stage_runs.stage_run_id, stage_runs.stage,
-                    COALESCE(stage_run_runtime.status, stage_runs.status) AS status,
-                    stage_runs.progress,
-                    COALESCE(stage_run_runtime.error_code, stage_runs.error_code) AS error_code
-                FROM stage_runs
-                LEFT JOIN stage_run_runtime
-                    ON stage_run_runtime.stage_run_id = stage_runs.stage_run_id
-                WHERE stage_runs.job_id = ?
-            )
-            ORDER BY {_STAGE_ORDER_SQL}
-            """,
-            (job_id,),
-        ).fetchall()
-        return tuple(
-            DesktopStageRun(
-                stage_run_id=str(row[0]),
-                stage=str(row[1]),
-                status=str(row[2]),
-                progress=int(str(row[3])),
-                error_code=str(row[4]) if row[4] is not None else None,
-            )
-            for row in rows
-        )
-
-    def _find_available_document_in(
-        self, connection: sqlite3.Connection, asset_sha256: str
-    ) -> DesktopImportedDocument | None:
-        row = connection.execute(
-            """
-            SELECT document_id, display_name, source_format, asset_sha256, availability,
-                (SELECT COUNT(*) FROM evidence_refs
-                 WHERE evidence_refs.document_id = source_documents.document_id)
-            FROM source_documents
-            WHERE asset_sha256 = ? AND availability = 'available'
-            """,
-            (asset_sha256,),
-        ).fetchone()
-        return _document_from_row(row) if row is not None else None
-
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
         connection.execute("PRAGMA foreign_keys = ON")
@@ -773,17 +723,6 @@ class DesktopImportStore:
             self._on_stage_progress(data)
         except Exception:
             logger.debug("Desktop import stage callback failed for job %s", job_id, exc_info=True)
-
-
-def _document_from_row(row: tuple[object, ...]) -> DesktopImportedDocument:
-    return DesktopImportedDocument(
-        document_id=str(row[0]),
-        name=str(row[1]),
-        source_format=str(row[2]),
-        raw_asset_sha256=str(row[3]),
-        availability=str(row[4]),
-        evidence_count=int(str(row[5])),
-    )
 
 
 def _line_locator(block: DocumentIRBlock) -> str:

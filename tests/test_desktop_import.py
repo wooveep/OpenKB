@@ -11,6 +11,7 @@ import pytest
 from openkb import desktop_import_runner
 from openkb.desktop_import import DesktopImportControl, DesktopImportError, DesktopTextImportService
 from openkb.desktop_import_store import DesktopImportStore
+from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
@@ -30,7 +31,14 @@ def test_txt_import_publishes_raw_ir_evidence_and_fts_in_one_available_document(
     assert result.document.availability == "available"
     assert result.document.evidence_count == 2
     assert result.job.status == "completed"
-    assert [stage.status for stage in result.stages] == ["completed"] * 5
+    assert [stage.status for stage in result.stages] == [
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "skipped",
+        "completed",
+    ]
     assert [(event["stage"], event["status"]) for event in events] == [
         ("preflight", "running"),
         ("preflight", "completed"),
@@ -40,6 +48,8 @@ def test_txt_import_publishes_raw_ir_evidence_and_fts_in_one_available_document(
         ("document_ir", "completed"),
         ("evidence", "running"),
         ("evidence", "completed"),
+        ("model_analysis", "running"),
+        ("model_analysis", "skipped"),
         ("search", "running"),
         ("search", "completed"),
     ]
@@ -80,6 +90,7 @@ def test_duplicate_txt_reuses_the_single_available_raw_asset(tmp_path):
         "skipped",
         "skipped",
         "skipped",
+        "skipped",
     ]
     assert len(list((kb_dir / "raw").iterdir())) == 1
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
@@ -108,6 +119,44 @@ def test_failed_prepublication_stage_never_exposes_a_partial_document(tmp_path, 
         assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM evidence_fts").fetchone() == (0,)
         assert connection.execute("SELECT status FROM import_jobs").fetchone() == ("failed",)
+
+
+def test_model_failure_is_quarantined_with_safe_attempt_history(tmp_path):
+    """A terminal Model Call leaves retriable evidence visible, never published."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "slow.txt"
+    source.write_text("Model analysis must not publish after repeated timeouts.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+
+    def timeout(*_args, **_kwargs):
+        raise TimeoutError("provider detail must never be persisted: api_key=secret")
+
+    importer = DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(timeout))
+    with pytest.raises(DesktopImportError) as error:
+        importer.import_text(source)
+
+    assert error.value.code == "document_quarantined"
+    task = importer.list_import_jobs()["jobs"][0]
+    assert task["job"]["status"] == "quarantined"
+    assert task["document"] is None
+    assert task["quarantine"] == {
+        "stage_run_id": task["stages"][4]["stage_run_id"],
+        "stage": "model_analysis",
+        "error_code": "model_timeout",
+        "reason": "The model did not respond before the response timeout.",
+        "suggested_action": "Retry the document or increase its response timeout.",
+        "attempt_count": 4,
+    }
+    assert len(task["model_calls"]) == 1
+    model_call = task["model_calls"][0]
+    assert model_call["status"] == "failed"
+    assert model_call["attempt_count"] == 4
+    assert [attempt["timeout_seconds"] for attempt in model_call["attempts"]] == [20, 30, 40, 50]
+    assert "api_key" not in str(task)
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM evidence_fts").fetchone() == (0,)
 
 
 def test_open_recovers_an_interrupted_job_without_exposing_a_partial_document(tmp_path):
@@ -146,6 +195,7 @@ def test_open_recovers_an_interrupted_job_without_exposing_a_partial_document(tm
     assert [stage["status"] for stage in history[0]["stages"]] == [
         "completed",
         "completed",
+        "pending",
         "pending",
         "pending",
         "pending",
@@ -282,13 +332,21 @@ def test_paused_import_resumes_from_verified_document_ir_checkpoint(tmp_path, mo
         "completed",
         "paused",
         "pending",
+        "pending",
     ]
 
     resumed = DesktopTextImportService(kb_dir).resume_text(paused_task["job"]["job_id"])
 
     assert resumed.job.status == "completed"
     assert calls == 1
-    assert [stage.status for stage in resumed.stages] == ["completed"] * 5
+    assert [stage.status for stage in resumed.stages] == [
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "skipped",
+        "completed",
+    ]
 
 
 def test_cancelled_paused_import_never_becomes_available_knowledge(tmp_path, monkeypatch):

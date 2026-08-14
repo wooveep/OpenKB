@@ -62,7 +62,9 @@ function nextRequestId(): string {
 
 function isImportControlError(error: unknown): boolean {
   return error instanceof DesktopBridgeError
-    && (error.code === "import_paused" || error.code === "import_cancelled")
+    && (error.code === "import_paused"
+      || error.code === "import_cancelled"
+      || error.code === "document_quarantined")
 }
 
 /** The first real Desktop Workbench: one active SQLite knowledge base at a time. */
@@ -603,6 +605,9 @@ function ImportTaskCard({
   if (!stage) return null
   const jobStatus = task?.job.status ?? stage.status
   const jobProgress = task?.job.progress ?? stage.progress
+  const modelCall = task?.modelCalls.at(-1)
+  const quarantine = task?.quarantine
+  const modelCallIsWaiting = modelCall?.status === "running" || modelCall?.status === "retry_wait"
   return (
     <div className={cn("rounded-xl border border-border/70 bg-muted/30 p-4", className)}>
       <div className="flex items-center justify-between gap-3 text-sm">
@@ -621,6 +626,43 @@ function ImportTaskCard({
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${jobProgress}%` }} />
       </div>
+      {modelCall ? (
+        <div className="mt-4 border-t border-border/70 pt-4 text-sm">
+          <p className="text-muted-foreground">
+            {t("desktop.knowledgeBases.modelCallStatus", {
+              status: t(`desktop.knowledgeBases.modelCallStates.${modelCall.status}`),
+              attempt: modelCall.attemptCount,
+              maximum: 4,
+            })}
+          </p>
+          {modelCallIsWaiting ? (
+            <p className="mt-1 text-muted-foreground">
+              {t("desktop.knowledgeBases.modelCallBudget", {
+                timeout: Math.ceil(modelCall.timeoutSeconds),
+                remaining: Math.ceil(modelCall.remainingSeconds),
+              })}
+            </p>
+          ) : null}
+          {modelCall.status === "retry_wait" && modelCall.nextTimeoutSeconds !== null ? (
+            <p className="mt-1 text-muted-foreground">
+              {t("desktop.knowledgeBases.modelRetrying", {
+                reason: modelCall.reason,
+                timeout: Math.ceil(modelCall.nextTimeoutSeconds),
+              })}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+      {quarantine ? (
+        <div className="mt-4 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-sm">
+          <p className="font-medium text-destructive">{t("desktop.knowledgeBases.quarantinedTitle")}</p>
+          <p className="mt-1 text-muted-foreground">{quarantine.reason}</p>
+          <p className="mt-1 text-muted-foreground">{quarantine.suggestedAction}</p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            {t("desktop.knowledgeBases.quarantinedAttempts", { attempts: quarantine.attemptCount })}
+          </p>
+        </div>
+      ) : null}
       {task && onControl ? (
         <div className="mt-4 flex flex-wrap gap-2 border-t border-border/70 pt-4">
           {task.job.status === "running" ? (

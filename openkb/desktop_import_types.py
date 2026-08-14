@@ -68,18 +68,100 @@ class DesktopImportJob:
 
 
 @dataclass(frozen=True)
+class DesktopModelAttempt:
+    """A safe, persisted physical provider attempt for one Model Call."""
+
+    attempt: int
+    status: str
+    timeout_seconds: float
+    remaining_seconds: float
+    error_code: str | None = None
+    reason: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "attempt": self.attempt,
+            "status": self.status,
+            "timeout_seconds": self.timeout_seconds,
+            "remaining_seconds": self.remaining_seconds,
+            "error_code": self.error_code,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class DesktopModelCall:
+    """The safe task-center projection of a logical Model Call and its attempts."""
+
+    call_id: str
+    stage_run_id: str
+    operation: str
+    status: str
+    attempt_count: int
+    timeout_seconds: float
+    next_timeout_seconds: float | None
+    remaining_seconds: float
+    error_code: str | None = None
+    reason: str | None = None
+    suggested_action: str | None = None
+    attempts: tuple[DesktopModelAttempt, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "call_id": self.call_id,
+            "stage_run_id": self.stage_run_id,
+            "operation": self.operation,
+            "status": self.status,
+            "attempt_count": self.attempt_count,
+            "timeout_seconds": self.timeout_seconds,
+            "next_timeout_seconds": self.next_timeout_seconds,
+            "remaining_seconds": self.remaining_seconds,
+            "error_code": self.error_code,
+            "reason": self.reason,
+            "suggested_action": self.suggested_action,
+            "attempts": [attempt.as_dict() for attempt in self.attempts],
+        }
+
+
+@dataclass(frozen=True)
+class DesktopQuarantinedDocument:
+    """The durable, safe failure record for an unpublished document."""
+
+    stage_run_id: str
+    stage: str
+    error_code: str
+    reason: str
+    suggested_action: str
+    attempt_count: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "stage_run_id": self.stage_run_id,
+            "stage": self.stage,
+            "error_code": self.error_code,
+            "reason": self.reason,
+            "suggested_action": self.suggested_action,
+            "attempt_count": self.attempt_count,
+        }
+
+
+@dataclass(frozen=True)
 class DesktopTextImportResult:
     """The successful result of importing one TXT file."""
 
     document: DesktopImportedDocument
     job: DesktopImportJob
     stages: tuple[DesktopStageRun, ...]
+    model_calls: tuple[DesktopModelCall, ...] = ()
+    quarantine: DesktopQuarantinedDocument | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
             "document": self.document.as_dict(),
             "job": self.job.as_dict(),
             "stages": [stage.as_dict() for stage in self.stages],
+            "model_calls": [call.as_dict() for call in self.model_calls],
+            "quarantine": self.quarantine.as_dict() if self.quarantine is not None else None,
         }
 
 
@@ -90,10 +172,14 @@ class DesktopImportTask:
     job: DesktopImportJob
     document: DesktopImportedDocument | None
     stages: tuple[DesktopStageRun, ...]
+    model_calls: tuple[DesktopModelCall, ...] = ()
+    quarantine: DesktopQuarantinedDocument | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
             "job": self.job.as_dict(),
             "document": self.document.as_dict() if self.document is not None else None,
             "stages": [stage.as_dict() for stage in self.stages],
+            "model_calls": [call.as_dict() for call in self.model_calls],
+            "quarantine": self.quarantine.as_dict() if self.quarantine is not None else None,
         }

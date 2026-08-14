@@ -57,7 +57,7 @@ export interface DesktopImportedDocument {
 
 export interface DesktopImportJob {
   jobId: string
-  status: "running" | "paused" | "cancelled" | "recoverable" | "completed" | "failed"
+  status: "running" | "paused" | "cancelled" | "recoverable" | "quarantined" | "completed" | "failed"
   progress: number
   documentId: string | null
   deduplicated: boolean
@@ -65,22 +65,59 @@ export interface DesktopImportJob {
 
 export interface DesktopImportStageRun {
   stageRunId: string
-  stage: "preflight" | "raw_asset" | "document_ir" | "evidence" | "search"
+  stage: "preflight" | "raw_asset" | "document_ir" | "evidence" | "model_analysis" | "search"
   status: "pending" | "running" | "paused" | "cancelled" | "completed" | "failed" | "skipped"
   progress: number
   errorCode: string | null
+}
+
+export interface DesktopModelAttempt {
+  attempt: number
+  status: "running" | "retry_wait" | "completed" | "failed"
+  timeoutSeconds: number
+  remainingSeconds: number
+  errorCode: string | null
+  reason: string | null
+}
+
+export interface DesktopModelCall {
+  callId: string
+  stageRunId: string
+  operation: string
+  status: DesktopModelAttempt["status"]
+  attemptCount: number
+  timeoutSeconds: number
+  nextTimeoutSeconds: number | null
+  remainingSeconds: number
+  errorCode: string | null
+  reason: string | null
+  suggestedAction: string | null
+  attempts: DesktopModelAttempt[]
+}
+
+export interface DesktopQuarantinedDocument {
+  stageRunId: string
+  stage: DesktopImportStageRun["stage"]
+  errorCode: string
+  reason: string
+  suggestedAction: string
+  attemptCount: number
 }
 
 export interface DesktopTextDocumentImport {
   document: DesktopImportedDocument
   job: DesktopImportJob
   stages: DesktopImportStageRun[]
+  modelCalls: DesktopModelCall[]
+  quarantine: DesktopQuarantinedDocument | null
 }
 
 export interface DesktopImportTask {
   document: DesktopImportedDocument | null
   job: DesktopImportJob
   stages: DesktopImportStageRun[]
+  modelCalls: DesktopModelCall[]
+  quarantine: DesktopQuarantinedDocument | null
 }
 
 export interface DesktopImportJobs {

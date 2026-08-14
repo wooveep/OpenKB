@@ -17,8 +17,9 @@ from openkb.desktop_engine import (
     FrameReader,
     encode_frame,
 )
-from openkb.desktop_import import DesktopImportControl, DesktopTextImportService
+from openkb.desktop_import import DesktopImportControl, DesktopImportError, DesktopTextImportService
 from openkb.desktop_import_store import DesktopImportStore
+from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 from openkb.workbench_service import DesktopWorkbenchService
 
@@ -299,7 +300,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 3,
+            "schema_version": 4,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -384,6 +385,42 @@ def test_engine_reads_persisted_import_tasks_for_the_active_knowledge_base(tmp_p
 
     assert history["jobs"][0]["job"]["job_id"] == imported.job.job_id
     assert history["jobs"][0]["document"]["availability"] == "available"
+
+
+def test_engine_uses_the_configured_model_gateway_for_imports(tmp_path):
+    """The production import path reaches retry/quarantine behavior when configured."""
+    desktop_kb = tmp_path / "desktop-kb"
+    source = tmp_path / "slow.txt"
+    source.write_text("A model timeout must quarantine this document.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(desktop_kb)
+
+    def timeout_transport(_request, _timeout_seconds):
+        raise TimeoutError()
+
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir: DesktopModelGateway(timeout_transport),
+    )
+    server._handshake_complete = True
+    request = DesktopRequest(
+        request_id="import",
+        method="workbench.import_text_document",
+        params={"source_path": str(source)},
+    )
+
+    with pytest.raises(DesktopImportError) as error:
+        server._dispatch(request, cancel_event=None)
+
+    assert error.value.code == "document_quarantined"
+    history = server._dispatch(
+        DesktopRequest(request_id="history", method="workbench.import_jobs", params={}),
+        cancel_event=None,
+    )
+    assert history["jobs"][0]["job"]["status"] == "quarantined"
+    assert history["jobs"][0]["quarantine"]["error_code"] == "model_timeout"
 
 
 def test_open_starts_recovery_from_the_latest_verified_checkpoint(tmp_path):

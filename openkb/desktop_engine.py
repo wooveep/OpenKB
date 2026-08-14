@@ -13,6 +13,7 @@ import logging
 import struct
 import sys
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -23,6 +24,8 @@ from openkb.desktop_import import (
     DesktopImportError,
     DesktopTextImportService,
 )
+from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_model_transport import desktop_model_gateway_for
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
     DesktopKnowledgeBaseRuntime,
@@ -161,6 +164,7 @@ class DesktopEngineServer:
         service: DesktopWorkbenchService | None = None,
         workspace: DesktopKnowledgeBaseRuntime | None = None,
         engine_version: str | None = None,
+        model_gateway_factory: Callable[[Path], DesktopModelGateway | None] | None = None,
     ) -> None:
         self._reader = FrameReader(input_stream)
         self._writer = FrameWriter(output_stream)
@@ -168,6 +172,7 @@ class DesktopEngineServer:
         self._workspace = workspace or DesktopKnowledgeBaseRuntime()
         self._workspace_requests_lock = threading.Lock()
         self._engine_version = engine_version or __version__
+        self._model_gateway_factory = model_gateway_factory or desktop_model_gateway_for
         self._handshake_complete = False
         self._shutdown = threading.Event()
         self._active_requests: dict[str, threading.Event] = {}
@@ -423,6 +428,7 @@ class DesktopEngineServer:
             kb_dir,
             control=control,
             on_stage_progress=lambda data: self._record_import_stage(request_id, control, data),
+            model_gateway=self._model_gateway_factory(kb_dir),
         )
         try:
             if source_path is not None:
