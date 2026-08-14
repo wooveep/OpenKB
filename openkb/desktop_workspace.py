@@ -18,6 +18,7 @@ from openkb.locks import kb_ingest_lock
 
 _STATE_DIRNAME = ".openkb"
 _STATE_FILENAME = "state.sqlite3"
+_INITIALIZING_FILENAME = "initializing"
 _DESKTOP_FORMAT = "openkb-desktop"
 
 
@@ -174,14 +175,21 @@ class DesktopKnowledgeBaseRuntime:
         resolved = _resolve_directory(kb_dir)
         if resolved.exists() and not resolved.is_dir():
             raise DesktopKnowledgeBaseDirectoryNotEmptyError(resolved)
+        if _is_legacy_knowledge_base(resolved) and not _state_database_path(resolved).exists():
+            raise LegacyKnowledgeBaseUnsupportedError(resolved)
 
         try:
             resolved.mkdir(parents=True, exist_ok=True)
             state_dir = _state_dir(resolved)
             display_name = _display_name(name, resolved)
             with kb_ingest_lock(state_dir):
+                _recover_interrupted_initialization(resolved)
                 _require_creatable_knowledge_base(resolved)
                 database_path = _state_database_path(resolved)
+                raw_dir = resolved / "raw"
+                raw_dir.mkdir(exist_ok=True)
+                initialization_marker = _initialization_marker_path(resolved)
+                initialization_marker.touch(exist_ok=False)
                 try:
                     connection: sqlite3.Connection | None = None
                     try:
@@ -203,9 +211,10 @@ class DesktopKnowledgeBaseRuntime:
                     finally:
                         if connection is not None:
                             connection.close()
-                    (resolved / "raw").mkdir()
+                    initialization_marker.unlink()
                 except BaseException:
                     _remove_initial_database(database_path)
+                    initialization_marker.unlink(missing_ok=True)
                     raise
         except DesktopKnowledgeBaseError:
             raise
@@ -252,6 +261,10 @@ def _state_database_path(kb_dir: Path) -> Path:
     return _state_dir(kb_dir) / _STATE_FILENAME
 
 
+def _initialization_marker_path(kb_dir: Path) -> Path:
+    return _state_dir(kb_dir) / _INITIALIZING_FILENAME
+
+
 def _is_legacy_knowledge_base(kb_dir: Path) -> bool:
     state_dir = _state_dir(kb_dir)
     return (state_dir / "hashes.json").is_file() or (kb_dir / "wiki").is_dir()
@@ -271,13 +284,17 @@ def _connect(database_path: Path) -> sqlite3.Connection:
 
 
 def _require_creatable_knowledge_base(kb_dir: Path) -> None:
-    if _is_legacy_knowledge_base(kb_dir):
-        raise LegacyKnowledgeBaseUnsupportedError(kb_dir)
     if _state_database_path(kb_dir).exists():
         raise DesktopKnowledgeBaseAlreadyExistsError(kb_dir)
+    if _is_legacy_knowledge_base(kb_dir):
+        raise LegacyKnowledgeBaseUnsupportedError(kb_dir)
 
     root_entries = tuple(kb_dir.iterdir())
-    if any(entry.name != _STATE_DIRNAME for entry in root_entries):
+    if any(entry.name not in {_STATE_DIRNAME, "raw"} for entry in root_entries):
+        raise DesktopKnowledgeBaseDirectoryNotEmptyError(kb_dir)
+
+    raw_dir = kb_dir / "raw"
+    if raw_dir.exists() and (not raw_dir.is_dir() or any(raw_dir.iterdir())):
         raise DesktopKnowledgeBaseDirectoryNotEmptyError(kb_dir)
 
     state_dir = _state_dir(kb_dir)
@@ -285,6 +302,41 @@ def _require_creatable_knowledge_base(kb_dir: Path) -> None:
         raise DesktopKnowledgeBaseDirectoryNotEmptyError(kb_dir)
     if any(entry.name != "ingest.lock" for entry in state_dir.iterdir()):
         raise DesktopKnowledgeBaseDirectoryNotEmptyError(kb_dir)
+
+
+def _recover_interrupted_initialization(kb_dir: Path) -> None:
+    marker_path = _initialization_marker_path(kb_dir)
+    if not marker_path.exists():
+        return
+
+    database_path = _state_database_path(kb_dir)
+    if _is_completed_initial_database(database_path):
+        marker_path.unlink()
+        return
+
+    _remove_initial_database(database_path)
+    marker_path.unlink()
+
+
+def _is_completed_initial_database(database_path: Path) -> bool:
+    if not database_path.is_file():
+        return False
+
+    try:
+        connection = _connect(database_path)
+        try:
+            has_initial_migration = connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = 1"
+            ).fetchone()
+            return (
+                has_initial_migration is not None
+                and _metadata(connection, "format") == _DESKTOP_FORMAT
+                and bool(_metadata(connection, "knowledge_base_name"))
+            )
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return False
 
 
 def _remove_initial_database(database_path: Path) -> None:
@@ -372,14 +424,20 @@ def _metadata(connection: sqlite3.Connection, key: str) -> str | None:
 def _load_desktop_knowledge_base(kb_dir: Path) -> DesktopKnowledgeBase:
     if not kb_dir.is_dir():
         raise DesktopKnowledgeBaseNotFoundError(kb_dir)
-    if _is_legacy_knowledge_base(kb_dir) and not _state_database_path(kb_dir).exists():
-        raise LegacyKnowledgeBaseUnsupportedError(kb_dir)
     database_path = _state_database_path(kb_dir)
-    if not database_path.is_file():
+    initialization_marker = _initialization_marker_path(kb_dir)
+    if _is_legacy_knowledge_base(kb_dir) and not database_path.exists():
+        raise LegacyKnowledgeBaseUnsupportedError(kb_dir)
+    if not database_path.is_file() and not initialization_marker.exists():
         raise DesktopKnowledgeBaseNotFoundError(kb_dir)
 
     try:
         with kb_ingest_lock(_state_dir(kb_dir)):
+            _recover_interrupted_initialization(kb_dir)
+            if _is_legacy_knowledge_base(kb_dir) and not database_path.exists():
+                raise LegacyKnowledgeBaseUnsupportedError(kb_dir)
+            if not database_path.is_file():
+                raise DesktopKnowledgeBaseNotFoundError(kb_dir)
             connection = _connect(database_path)
             try:
                 schema_version = _apply_migrations(connection, creating=False)

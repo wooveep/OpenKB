@@ -10,7 +10,7 @@ import {
   Plus,
   Settings,
 } from "lucide-react"
-import { useCallback, useEffect, useState, type ComponentType } from "react"
+import { useCallback, useEffect, useRef, useState, type ComponentType } from "react"
 import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
 import {
@@ -66,38 +66,27 @@ export default function DesktopKnowledgeBaseWorkspace() {
   const [name, setName] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+  const activeKnowledgeBaseRead = useRef(0)
 
   const refreshActiveKnowledgeBase = useCallback(async () => {
+    const read = activeKnowledgeBaseRead.current + 1
+    activeKnowledgeBaseRead.current = read
     try {
       const result = await bridge.activeKnowledgeBase()
+      if (read !== activeKnowledgeBaseRead.current) return
       setKnowledgeBase(result.knowledgeBase)
       setLoadError(null)
     } catch (error) {
+      if (read !== activeKnowledgeBaseRead.current) return
       setLoadError(error instanceof Error ? error.message : String(error))
     } finally {
-      setLoading(false)
+      if (read === activeKnowledgeBaseRead.current) setLoading(false)
     }
   }, [bridge])
 
   useEffect(() => {
-    let active = true
-    void bridge
-      .activeKnowledgeBase()
-      .then((result) => {
-        if (!active) return
-        setKnowledgeBase(result.knowledgeBase)
-        setLoadError(null)
-      })
-      .catch((error) => {
-        if (active) setLoadError(error instanceof Error ? error.message : String(error))
-      })
-      .finally(() => {
-        if (active) setLoading(false)
-      })
-    return () => {
-      active = false
-    }
-  }, [bridge])
+    void Promise.resolve().then(refreshActiveKnowledgeBase)
+  }, [refreshActiveKnowledgeBase])
 
   const beginSelection = (mode: DialogMode) => {
     setDialogMode(mode)
@@ -122,11 +111,12 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setSubmitting(true)
     setFormError(null)
     try {
-      const activation =
-        dialogMode === "create"
-          ? await bridge.createKnowledgeBase(path.trim(), name.trim() || undefined, nextRequestId())
-          : await bridge.openKnowledgeBase(path.trim(), nextRequestId())
-      setKnowledgeBase(activation.knowledgeBase)
+      if (dialogMode === "create") {
+        await bridge.createKnowledgeBase(path.trim(), name.trim() || undefined, nextRequestId())
+      } else {
+        await bridge.openKnowledgeBase(path.trim(), nextRequestId())
+      }
+      await refreshActiveKnowledgeBase()
       setSection("overview")
       setDialogMode(null)
     } catch (error) {

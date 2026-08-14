@@ -160,6 +160,7 @@ class DesktopEngineServer:
         self._handshake_complete = False
         self._shutdown = threading.Event()
         self._active_requests: dict[str, threading.Event] = {}
+        self._activation_in_progress: set[str] = set()
         self._active_lock = threading.Lock()
         self._workers: set[threading.Thread] = set()
         self._workers_lock = threading.Lock()
@@ -245,7 +246,9 @@ class DesktopEngineServer:
         finally:
             if cancel_event is not None:
                 with self._active_lock:
-                    self._active_requests.pop(str(request.request_id), None)
+                    request_key = str(request.request_id)
+                    self._active_requests.pop(request_key, None)
+                    self._activation_in_progress.discard(request_key)
             self._emit_event("engine.request_completed", completed_data)
             current = threading.current_thread()
             with self._workers_lock:
@@ -272,9 +275,13 @@ class DesktopEngineServer:
             if isinstance(target, bool) or not isinstance(target, (str, int)):
                 raise DesktopRequestError("invalid_params", "engine.cancel requires a request_id.")
             with self._active_lock:
-                target_cancel_event = self._active_requests.get(str(target))
-            cancelled = target_cancel_event is not None
-            if target_cancel_event is not None:
+                target_key = str(target)
+                target_cancel_event = self._active_requests.get(target_key)
+                cancelled = (
+                    target_cancel_event is not None
+                    and target_key not in self._activation_in_progress
+                )
+            if cancelled and target_cancel_event is not None:
                 target_cancel_event.set()
                 self._emit_event("engine.request_cancelled", {"request_id": target})
             return {"cancelled": cancelled, "request_id": target}
@@ -336,14 +343,27 @@ class DesktopEngineServer:
                     raise DesktopRequestError(
                         "invalid_params", "workbench.create_knowledge_base name must be a string."
                     )
+                self._begin_workspace_activation(request, cancel_event)
                 return self._workspace.create(Path(kb_dir), name=name).as_dict()
 
             if request.method == "workbench.open_knowledge_base":
                 kb_dir = _required_path_param(request, "kb_dir")
+                self._begin_workspace_activation(request, cancel_event)
                 return self._workspace.open(Path(kb_dir)).as_dict()
 
             active = self._workspace.active()
             return {"knowledge_base": active.as_dict() if active is not None else None}
+
+    def _begin_workspace_activation(
+        self, request: DesktopRequest, cancel_event: threading.Event | None
+    ) -> None:
+        """Make cancellation truthful before an activation can mutate the active binding."""
+        with self._active_lock:
+            if cancel_event is not None and cancel_event.is_set():
+                raise DesktopRequestError(
+                    "request_cancelled", "Desktop Bridge request was cancelled."
+                )
+            self._activation_in_progress.add(str(request.request_id))
 
     def _emit_event(self, kind: str, data: dict[str, object]) -> None:
         with self._sequence_lock:

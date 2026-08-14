@@ -12,9 +12,11 @@ import pytest
 from openkb.desktop_engine import (
     DesktopEngineServer,
     DesktopProtocolError,
+    DesktopRequest,
     FrameReader,
     encode_frame,
 )
+from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 from openkb.workbench_service import DesktopWorkbenchService
 
 
@@ -221,6 +223,44 @@ def test_engine_cancels_an_active_caller_owned_request(kb_dir):
         "request_id": "workbench-request",
     }
     assert responses["workbench-request"]["error"]["code"] == "request_cancelled"
+
+
+def test_engine_does_not_report_a_started_knowledge_base_activation_as_cancelled(tmp_path):
+    """An activation that can mutate the active binding remains truthful through its reply."""
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingWorkspace(DesktopKnowledgeBaseRuntime):
+        def create(self, kb_dir, *, name=None):
+            started.set()
+            assert release.wait(timeout=1)
+            return super().create(kb_dir, name=name)
+
+    output = io.BytesIO()
+    server = DesktopEngineServer(io.BytesIO(), output, workspace=BlockingWorkspace())
+    server._handshake_complete = True
+    request = DesktopRequest(
+        request_id="create",
+        method="workbench.create_knowledge_base",
+        params={"kb_dir": str(tmp_path / "desktop-kb"), "name": "Desktop KB"},
+    )
+
+    server._start_request(request)
+    assert started.wait(timeout=1)
+    cancelled = server._dispatch(
+        DesktopRequest(
+            request_id="cancel",
+            method="engine.cancel",
+            params={"request_id": "create"},
+        ),
+        cancel_event=None,
+    )
+    assert cancelled == {"cancelled": False, "request_id": "create"}
+
+    release.set()
+    server._join_workers()
+    responses = {frame["id"]: frame for frame in _decode_frames(output.getvalue()) if "id" in frame}
+    assert "result" in responses["create"]
 
 
 def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
