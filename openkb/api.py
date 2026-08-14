@@ -416,7 +416,7 @@ def create_app() -> FastAPI:
         kb_dir = _resolve_kb(request.kb)
         try:
             outcome = workbench_service.execute(InspectKnowledgeBaseCommand(kb_dir=kb_dir))
-            return ListResponse(**outcome.snapshot.inventory)
+            return ListResponse(**outcome.snapshot.inventory.as_dict())
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -431,7 +431,7 @@ def create_app() -> FastAPI:
         kb_dir = _resolve_kb(request.kb)
         try:
             snapshot = workbench_service.inspect_knowledge_base(kb_dir)
-            return StatusResponse(**snapshot.status)
+            return StatusResponse(**snapshot.status.as_dict())
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
