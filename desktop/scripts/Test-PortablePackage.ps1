@@ -79,7 +79,9 @@ function Read-Response {
     param(
         [Parameter(Mandatory = $true)] [System.IO.Stream] $Stream,
         [Parameter(Mandatory = $true)] [string] $RequestId,
-        [Parameter(Mandatory = $true)] [System.Collections.Generic.List[object]] $Events
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[object]] $Events
     )
 
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
@@ -102,7 +104,9 @@ function Read-RequestEvent {
         [Parameter(Mandatory = $true)] [System.IO.Stream] $Stream,
         [Parameter(Mandatory = $true)] [string] $RequestId,
         [Parameter(Mandatory = $true)] [string] $Kind,
-        [Parameter(Mandatory = $true)] [System.Collections.Generic.List[object]] $Events
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[object]] $Events
     )
 
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
