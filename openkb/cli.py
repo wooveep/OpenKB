@@ -78,6 +78,11 @@ from openkb.locks import atomic_write_json, atomic_write_text, kb_ingest_lock, k
 from openkb.log import append_log
 from openkb.mutation import publish_staged_tree
 from openkb.schema import AGENTS_MD, INDEX_SEED, PAGE_CONTENT_DIRS
+from openkb.workbench_service import (
+    display_document_type,
+    read_knowledge_base_inventory,
+    read_knowledge_base_status,
+)
 
 # Suppress warnings after all imports — markitdown overrides filters at import time
 import warnings
@@ -240,12 +245,6 @@ SUPPORTED_EXTENSIONS = {
     ".csv",
 }
 
-# Map raw doc types to display types
-_TYPE_DISPLAY_MAP = {
-    "long_pdf": "pageindex",
-    "pageindex_cloud": "pageindex",
-}
-
 # Registry types that were compiled via the long-doc pipeline (tree + per-page
 # JSON source), as opposed to short docs (markdown source). Both the local
 # long-PDF type and cloud imports belong here — they share the long-doc
@@ -257,28 +256,9 @@ def _is_long_doc(meta: dict) -> bool:
     return meta.get("type") in _LONG_DOC_TYPES
 
 
-_SHORT_DOC_TYPES = {
-    "pdf",
-    "docx",
-    "md",
-    "markdown",
-    "html",
-    "htm",
-    "txt",
-    "csv",
-    "pptx",
-    "xlsx",
-    "xls",
-}
-
-
 def _display_type(raw_type: str) -> str:
     """Map a raw stored doc type to a display type string."""
-    if raw_type in _TYPE_DISPLAY_MAP:
-        return _TYPE_DISPLAY_MAP[raw_type]
-    if raw_type in _SHORT_DOC_TYPES:
-        return "short"
-    return raw_type
+    return display_document_type(raw_type)
 
 
 # ---------------------------------------------------------------------------
@@ -3627,71 +3607,13 @@ def initialize_kb(
 
 
 def get_kb_list(kb_dir: Path) -> dict[str, Any]:
-    """Return a structured inventory of the knowledge base (REST ``/list``)."""
-    openkb_dir = kb_dir / ".openkb"
-    hashes_file = openkb_dir / "hashes.json"
-    hashes = json.loads(hashes_file.read_text(encoding="utf-8")) if hashes_file.exists() else {}
-
-    documents = []
-    for file_hash, meta in hashes.items():
-        raw_type = meta.get("type", "unknown")
-        pages = meta.get("pages")
-        documents.append(
-            {
-                "hash": file_hash,
-                "name": meta.get("name", "unknown"),
-                "type": raw_type,
-                "display_type": _display_type(raw_type),
-                "pages": pages if pages not in ("", 0) else None,
-            }
-        )
-
-    summaries_dir = kb_dir / "wiki" / "summaries"
-    concepts_dir = kb_dir / "wiki" / "concepts"
-    entities_dir = kb_dir / "wiki" / "entities"
-    reports_dir = kb_dir / "wiki" / "reports"
-    return {
-        "documents": documents,
-        "document_count": len(documents),
-        "summaries": sorted(p.stem for p in summaries_dir.glob("*.md"))
-        if summaries_dir.exists()
-        else [],
-        "concepts": sorted(p.stem for p in concepts_dir.glob("*.md"))
-        if concepts_dir.exists()
-        else [],
-        "entities": sorted(p.stem for p in entities_dir.glob("*.md"))
-        if entities_dir.exists()
-        else [],
-        "reports": sorted(p.name for p in reports_dir.glob("*.md")) if reports_dir.exists() else [],
-    }
+    """Compatibility wrapper for the Desktop Workbench inventory reader."""
+    return read_knowledge_base_inventory(kb_dir)
 
 
 def get_kb_status(kb_dir: Path) -> dict[str, Any]:
-    """Return structured status for the knowledge base (REST ``/status``)."""
-    wiki_dir = kb_dir / "wiki"
-    subdirs = ["sources", "summaries", "concepts", "reports"]
-    directories = {}
-    for subdir in subdirs:
-        path = wiki_dir / subdir
-        directories[subdir] = len(list(path.glob("*.md"))) if path.exists() else 0
-
-    raw_dir = kb_dir / "raw"
-    raw_count = len([f for f in raw_dir.iterdir() if f.is_file()]) if raw_dir.exists() else 0
-
-    hashes_file = kb_dir / ".openkb" / "hashes.json"
-    hashes = json.loads(hashes_file.read_text(encoding="utf-8")) if hashes_file.exists() else {}
-
-    summaries = (
-        list((wiki_dir / "summaries").glob("*.md")) if (wiki_dir / "summaries").exists() else []
-    )
-    reports = list((wiki_dir / "reports").glob("*.md")) if (wiki_dir / "reports").exists() else []
-    return {
-        "directories": directories,
-        "raw_count": raw_count,
-        "total_indexed": len(hashes),
-        "last_compile": _newest_mtime_iso(summaries),
-        "last_lint": _newest_mtime_iso(reports),
-    }
+    """Compatibility wrapper for the Desktop Workbench status reader."""
+    return read_knowledge_base_status(kb_dir)
 
 
 def _fix_summary(files_changed: int | None, ghosts: int | None) -> str:

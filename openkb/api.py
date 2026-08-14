@@ -97,8 +97,6 @@ from openkb.api_models import (
 from openkb.api_output import output_router
 from openkb.api_pages_router import pages_router
 from openkb.cli import (
-    get_kb_list,
-    get_kb_status,
     iter_recompile,
     run_lint_report,
     run_remove_for_api,
@@ -112,6 +110,7 @@ from openkb.config import (
 )
 from openkb.log import append_log
 from openkb.watch_service import WatchRegistry
+from openkb.workbench_service import DesktopWorkbenchService, InspectKnowledgeBaseCommand
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +125,7 @@ def create_app() -> FastAPI:
     load_dotenv()
 
     registry = WatchRegistry()
+    workbench_service = DesktopWorkbenchService()
 
     # Per-KB asyncio locks for async mutation endpoints (lint/recompile).
     # kb_ingest_lock tracks reentrancy in threading.local, but the event loop
@@ -415,7 +415,8 @@ def create_app() -> FastAPI:
     ) -> ListResponse:
         kb_dir = _resolve_kb(request.kb)
         try:
-            return ListResponse(**get_kb_list(kb_dir))
+            outcome = workbench_service.execute(InspectKnowledgeBaseCommand(kb_dir=kb_dir))
+            return ListResponse(**outcome.snapshot.inventory)
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -429,7 +430,8 @@ def create_app() -> FastAPI:
     ) -> StatusResponse:
         kb_dir = _resolve_kb(request.kb)
         try:
-            return StatusResponse(**get_kb_status(kb_dir))
+            snapshot = workbench_service.inspect_knowledge_base(kb_dir)
+            return StatusResponse(**snapshot.status)
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
