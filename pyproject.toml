@@ -76,6 +76,7 @@ dev = [
     "mypy==1.15.0",
     "types-PyYAML==6.0.12.20260518",
 ]
+desktop-build = ["pyinstaller==6.22.0"]
 # The Knowledge Workbench Web UI is served by this FastAPI server. `web` is the
 # canonical extra; `api` is a backwards-compatible alias so an existing
 # `pip install "openkb[api]"` keeps working.

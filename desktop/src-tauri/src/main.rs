@@ -2,16 +2,19 @@
 
 mod engine_protocol;
 mod engine_wire;
+mod process_tree;
 
 use engine_protocol::{
     BridgeError, BridgeEvent, BridgeHandshake, CancelResult, EngineHealth, EngineSupervisor,
     InspectKnowledgeBaseResult,
 };
+use process_tree::ProcessTreeJob;
 use std::sync::Arc;
 use tauri::{ipc::Channel, Manager, State};
 
 struct DesktopState {
     engine: Arc<EngineSupervisor>,
+    _process_tree: ProcessTreeJob,
 }
 
 #[tauri::command]
@@ -67,6 +70,8 @@ fn main() {
     let app = tauri::Builder::default()
         .manage(DesktopState {
             engine: Arc::new(EngineSupervisor::default()),
+            _process_tree: ProcessTreeJob::create()
+                .expect("Could not create the OpenKB Desktop Runtime process tree"),
         })
         .setup(|app| {
             // Do not hold window creation behind a Python startup: React renders

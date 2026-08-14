@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "windows": {
+      "webviewInstallMode": {
+        "type": "fixedRuntime",
+        "path": "runtime/webview2"
+      }
+    }
+  }
+}

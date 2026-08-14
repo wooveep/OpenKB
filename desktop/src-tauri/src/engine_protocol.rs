@@ -463,6 +463,18 @@ fn engine_command() -> Command {
         return Command::new(engine_path);
     }
 
+    if let Ok(shell_path) = env::current_exe() {
+        if let Some(shell_dir) = shell_path.parent() {
+            let packaged_engine = shell_dir
+                .join("runtime")
+                .join("engine")
+                .join("OpenKBEngine.exe");
+            if packaged_engine.is_file() {
+                return Command::new(packaged_engine);
+            }
+        }
+    }
+
     let mut command = Command::new("uv");
     command
         .arg("run")
