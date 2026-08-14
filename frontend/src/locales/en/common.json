@@ -132,6 +132,11 @@
       "importBatchAction": "Import {{count}} selected",
       "importBatchComplete": "Import batch complete: {{count}} documents are available.",
       "importBatchFailures": "{{count}} documents need attention",
+      "openOriginal": "Open original",
+      "loadMoreOriginal": "Load more",
+      "originalUnavailable": "The saved original failed its integrity check and this document is excluded from answers.",
+      "originalTitle": "Original document",
+      "originalMetadata": "{{bytes}} bytes · SHA-256 {{sha256}}",
       "importSourceErrors": {
         "unsupported_import_format": "This format is not supported yet.",
         "import_directory_empty": "This folder contains no files.",

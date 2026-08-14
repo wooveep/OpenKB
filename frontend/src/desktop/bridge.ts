@@ -14,6 +14,7 @@ import {
   type DesktopKnowledgeBaseActivation,
   type DesktopKnowledgeBaseInspection,
   type DesktopImportJobs,
+  type DesktopRawDocument,
   type DesktopRecoveryOverride,
   type DesktopTextDocumentImport,
 } from "./contracts"
@@ -109,6 +110,14 @@ export class TauriDesktopBridge implements DesktopBridge {
         paths: "paths" in payload ? payload.paths : [],
       })
     })
+  }
+
+  async readRawDocument(
+    documentId: string,
+    requestId: string,
+    page = 0,
+  ): Promise<DesktopRawDocument> {
+    return this.call<DesktopRawDocument>("desktop_read_raw_document", { documentId, requestId, page })
   }
 
   async importTextDocument(
@@ -241,6 +250,12 @@ class UnavailableDesktopBridge implements DesktopBridge {
     listener: (event: DesktopImportDropEvent) => void,
   ): Promise<() => void> {
     void listener
+    return this.unavailable()
+  }
+
+  readRawDocument(documentId: string, requestId: string): Promise<DesktopRawDocument> {
+    void documentId
+    void requestId
     return this.unavailable()
   }
 

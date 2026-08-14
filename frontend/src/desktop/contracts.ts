@@ -131,6 +131,17 @@ export interface DesktopImportDropEvent {
   paths: string[]
 }
 
+export interface DesktopRawDocument {
+  documentId: string
+  name: string
+  sourceFormat: string
+  assetSha256: string
+  byteSize: number
+  content: string
+  page: number
+  hasMore: boolean
+}
+
 export interface DesktopTextDocumentImport {
   document: DesktopImportedDocument
   job: DesktopImportJob
@@ -259,6 +270,11 @@ export interface DesktopBridge {
   subscribeImportDrops(
     listener: (event: DesktopImportDropEvent) => void,
   ): Promise<() => void>
+  readRawDocument(
+    documentId: string,
+    requestId: string,
+    page?: number,
+  ): Promise<DesktopRawDocument>
   importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport>
   importJobs(): Promise<DesktopImportJobs>
   pauseImportJob(jobId: string): Promise<DesktopImportControlResult>

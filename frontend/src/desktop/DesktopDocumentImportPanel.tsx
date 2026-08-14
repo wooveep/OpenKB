@@ -41,6 +41,7 @@ export function DesktopDocumentImportPanel({
   onRemoveSource,
   onSubmit,
   onControl,
+  onOpenOriginal,
 }: {
   error: string | null
   importing: boolean
@@ -58,6 +59,7 @@ export function DesktopDocumentImportPanel({
   onRemoveSource: (path: string) => void
   onSubmit: () => void
   onControl: (jobId: string, action: ImportTaskAction) => void
+  onOpenOriginal: (documentId: string) => void
 }) {
   const { t } = useTranslation("common")
   const supportedCount = inspection?.supported.length ?? 0
@@ -177,6 +179,7 @@ export function DesktopDocumentImportPanel({
           task={task}
           controlling={controllingJobId === task.job.jobId}
           onControl={onControl}
+          onOpenOriginal={onOpenOriginal}
         />
       ))}
     </section>
@@ -257,11 +260,13 @@ function ImportTaskCard({
   task,
   controlling = false,
   onControl,
+  onOpenOriginal,
 }: {
   className?: string
   task: DesktopImportTask
   controlling?: boolean
   onControl: (jobId: string, action: ImportTaskAction) => void
+  onOpenOriginal: (documentId: string) => void
 }) {
   const { t } = useTranslation("common")
   const stage = task.stages.find((item) => ["failed", "paused", "cancelled"].includes(item.status))
@@ -345,7 +350,7 @@ function ImportTaskCard({
           </Button>
         ) : null}
       </div>
-      {task.document ? (
+      {task.document?.availability === "available" ? (
         <div className="mt-4 border-t border-border/70 pt-4 text-sm">
           <p className="font-medium text-emerald-700 dark:text-emerald-300">
             {t("desktop.knowledgeBases.availableKnowledge")}
@@ -356,6 +361,18 @@ function ImportTaskCard({
               evidence: task.document.evidenceCount,
             })}
           </p>
+          <Button
+            className="mt-3"
+            size="sm"
+            variant="outline"
+            onClick={() => onOpenOriginal(task.document!.documentId)}
+          >
+            {t("desktop.knowledgeBases.openOriginal")}
+          </Button>
+        </div>
+      ) : task.document ? (
+        <div className="mt-4 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-sm text-muted-foreground">
+          {t("desktop.knowledgeBases.originalUnavailable")}
         </div>
       ) : null}
     </div>

@@ -28,6 +28,7 @@ from openkb.desktop_import_sources import inspect_import_sources
 from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_model_gateway import MODEL_CALL_DEADLINE_SECONDS, DesktopModelGateway
 from openkb.desktop_model_transport import desktop_model_gateway_for
+from openkb.desktop_raw_assets import DesktopRawAssetService
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
     DesktopKnowledgeBaseRuntime,
@@ -153,11 +154,13 @@ class DesktopEngineServer:
         "workbench.resume_import_job",
         "workbench.recover_import_job",
         "workbench.import_jobs",
+        "workbench.read_raw_document",
     }
     _NON_CANCELABLE_MUTATION_METHODS = {
         "workbench.create_knowledge_base",
         "workbench.open_knowledge_base",
         "workbench.import_text_document",
+        "workbench.read_raw_document",
     }
 
     def __init__(
@@ -364,6 +367,21 @@ class DesktopEngineServer:
             if active is None:
                 return {"jobs": []}
             return DesktopTextImportService(Path(active.kb_dir)).list_import_jobs()
+        if request.method == "workbench.read_raw_document":
+            active = self._workspace.active()
+            if active is None:
+                raise DesktopRequestError(
+                    "no_active_knowledge_base",
+                    "Open a Desktop Knowledge Base before reading an original document.",
+                )
+            return (
+                DesktopRawAssetService(Path(active.kb_dir))
+                .read_document(
+                    _required_string_param(request, "document_id"),
+                    page=_non_negative_int_param(request, "page", default=0),
+                )
+                .as_dict()
+            )
         if request.method in {
             "workbench.import_text_document",
             "workbench.resume_import_job",
@@ -390,6 +408,9 @@ class DesktopEngineServer:
                 kb_dir = _required_path_param(request, "kb_dir")
                 self._begin_workspace_mutation(request, cancel_event)
                 activation = self._workspace.open(Path(kb_dir))
+                DesktopRawAssetService(
+                    Path(activation.knowledge_base.kb_dir)
+                ).verify_available_documents()
                 self._start_recoverable_imports(Path(activation.knowledge_base.kb_dir))
                 return activation.as_dict()
 
@@ -599,6 +620,15 @@ def _required_string_param(request: DesktopRequest, key: str) -> str:
     value = request.params.get(key)
     if not isinstance(value, str) or not value:
         raise DesktopRequestError("invalid_params", f"{request.method} requires a non-empty {key}.")
+    return value
+
+
+def _non_negative_int_param(request: DesktopRequest, key: str, *, default: int) -> int:
+    value = request.params.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise DesktopRequestError(
+            "invalid_params", f"{request.method} requires a non-negative integer {key}."
+        )
     return value
 
 

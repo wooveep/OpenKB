@@ -7,7 +7,7 @@ mod process_tree;
 use engine_protocol::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
     EngineHealth, EngineSupervisor, ImportControlResult, ImportJobsResult, ImportSourceInspection,
-    InspectKnowledgeBaseResult, KnowledgeBaseActivationResult, RecoveryOverride,
+    InspectKnowledgeBaseResult, KnowledgeBaseActivationResult, RawDocument, RecoveryOverride,
     TextDocumentImportResult,
 };
 use process_tree::ProcessTreeJob;
@@ -140,6 +140,24 @@ async fn desktop_import_jobs(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn desktop_read_raw_document(
+    state: State<'_, DesktopState>,
+    document_id: String,
+    request_id: String,
+    page: u32,
+) -> Result<RawDocument, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.read_raw_document(document_id, request_id, page)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop original-document read stopped unexpectedly: {error}"),
+    })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
 fn desktop_pause_import_job(
     state: State<'_, DesktopState>,
     job_id: String,
@@ -244,6 +262,7 @@ fn main() {
             desktop_inspect_import_sources,
             desktop_import_text_document,
             desktop_import_jobs,
+            desktop_read_raw_document,
             desktop_pause_import_job,
             desktop_resume_import_job,
             desktop_recover_import_job,

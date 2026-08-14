@@ -31,12 +31,14 @@ import {
   type DesktopImportBatchSummary,
 } from "./DesktopDocumentImportPanel"
 import { FailedDocumentsDialog } from "./FailedDocumentsDialog"
+import { DesktopRawDocumentDialog } from "./DesktopRawDocumentDialog"
 import { DesktopBridgeError } from "./contracts"
 import type {
   DesktopImportTask,
   DesktopImportSourceInspection,
   DesktopImportSourcePicker,
   DesktopKnowledgeBase,
+  DesktopRawDocument,
   DesktopRecoveryOverride,
 } from "./contracts"
 
@@ -122,6 +124,8 @@ export default function DesktopKnowledgeBaseWorkspace() {
   const [importDropActive, setImportDropActive] = useState(false)
   const [importBatchSummary, setImportBatchSummary] = useState<DesktopImportBatchSummary | null>(null)
   const [importTasks, setImportTasks] = useState<DesktopImportTask[]>([])
+  const [rawDocument, setRawDocument] = useState<DesktopRawDocument | null>(null)
+  const [loadingRawDocument, setLoadingRawDocument] = useState(false)
   const [failedDocumentsOpen, setFailedDocumentsOpen] = useState(false)
   const [controllingJobId, setControllingJobId] = useState<string | null>(null)
   const activeKnowledgeBaseRead = useRef(0)
@@ -203,6 +207,8 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setSubmitting(true)
     setFormError(null)
     setImportTasks([])
+    setRawDocument(null)
+    setLoadingRawDocument(false)
     setImportSources([])
     setExcludedImportSources([])
     importInspectionRead.current += 1
@@ -354,6 +360,43 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setExcludedImportSources([])
     setImportInspection(null)
     setImporting(false)
+  }
+
+  const openRawDocument = async (documentId: string) => {
+    setImportError(null)
+    setLoadingRawDocument(true)
+    try {
+      setRawDocument(await bridge.readRawDocument(documentId, nextRequestId()))
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : String(error))
+      await refreshActiveKnowledgeBase()
+    } finally {
+      setLoadingRawDocument(false)
+    }
+  }
+
+  const loadMoreRawDocument = async () => {
+    const current = rawDocument
+    if (!current?.hasMore || loadingRawDocument) return
+    setImportError(null)
+    setLoadingRawDocument(true)
+    try {
+      const next = await bridge.readRawDocument(
+        current.documentId,
+        nextRequestId(),
+        current.page + 1,
+      )
+      setRawDocument((displayed) => (
+        displayed?.documentId === current.documentId && displayed.page === current.page
+          ? { ...next, content: displayed.content + next.content }
+          : displayed
+      ))
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : String(error))
+      await refreshActiveKnowledgeBase()
+    } finally {
+      setLoadingRawDocument(false)
+    }
   }
 
   const controlImportJob = async (jobId: string, action: ImportTaskAction) => {
@@ -520,6 +563,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
               onRemoveImportSource={removeImportSource}
               onSubmitImport={() => void submitImportBatch()}
               onControlImportJob={(jobId, action) => void controlImportJob(jobId, action)}
+              onOpenRawDocument={(documentId) => void openRawDocument(documentId)}
             />
           )}
         </main>
@@ -595,6 +639,17 @@ export default function DesktopKnowledgeBaseWorkspace() {
         onOpenChange={setFailedDocumentsOpen}
         onRecover={(jobId, override) => void recoverImportJob(jobId, override)}
       />
+      <DesktopRawDocumentDialog
+        document={rawDocument}
+        loadingMore={loadingRawDocument}
+        onLoadMore={() => void loadMoreRawDocument()}
+        onOpenChange={(open) => {
+          if (!open) {
+            setRawDocument(null)
+            setLoadingRawDocument(false)
+          }
+        }}
+      />
     </div>
   )
 }
@@ -643,6 +698,7 @@ function ActiveKnowledgeBaseView({
   onRemoveImportSource,
   onSubmitImport,
   onControlImportJob,
+  onOpenRawDocument,
 }: {
   knowledgeBase: DesktopKnowledgeBase
   section: WorkspaceSection
@@ -662,6 +718,7 @@ function ActiveKnowledgeBaseView({
   onRemoveImportSource: (path: string) => void
   onSubmitImport: () => void
   onControlImportJob: (jobId: string, action: ImportTaskAction) => void
+  onOpenRawDocument: (documentId: string) => void
 }) {
   const { t } = useTranslation("common")
   const sectionTitle = t(`desktop.knowledgeBases.navigationItems.${section}`)
@@ -704,6 +761,7 @@ function ActiveKnowledgeBaseView({
           onRemoveSource={onRemoveImportSource}
           onSubmit={onSubmitImport}
           onControl={onControlImportJob}
+          onOpenOriginal={onOpenRawDocument}
         />
       ) : null}
     </section>

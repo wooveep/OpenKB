@@ -300,7 +300,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 5,
+            "schema_version": 6,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -345,6 +345,69 @@ def test_engine_inspects_batch_sources_before_importing(tmp_path):
             "error_code": "unsupported_import_format",
         }
     ]
+
+
+def test_engine_reads_a_verified_raw_document(tmp_path):
+    """The Desktop Bridge exposes originals only through the integrity-checked reader."""
+    desktop_kb = tmp_path / "desktop-kb"
+    source = tmp_path / "guide.txt"
+    source.write_text("Original reader text.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(desktop_kb)
+    imported = DesktopTextImportService(desktop_kb).import_text(source)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    result = server._dispatch(
+        DesktopRequest(
+            request_id="read-raw-document",
+            method="workbench.read_raw_document",
+            params={"document_id": imported.document.document_id},
+        ),
+        cancel_event=None,
+    )
+
+    assert result == {
+        "document_id": imported.document.document_id,
+        "name": "guide.txt",
+        "source_format": "txt",
+        "asset_sha256": imported.document.raw_asset_sha256,
+        "byte_size": len(b"Original reader text."),
+        "content": "Original reader text.",
+        "page": 0,
+        "has_more": False,
+    }
+
+
+def test_open_quarantines_documents_with_a_missing_raw_original(tmp_path):
+    """A new Desktop session cannot surface a document whose raw asset disappeared."""
+    desktop_kb = tmp_path / "desktop-kb"
+    source = tmp_path / "guide.txt"
+    source.write_text("Original reader text.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(desktop_kb)
+    imported = DesktopTextImportService(desktop_kb).import_text(source)
+    (desktop_kb / "raw" / f"{imported.document.raw_asset_sha256}.txt").unlink()
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO())
+    server._handshake_complete = True
+
+    server._dispatch(
+        DesktopRequest(
+            request_id="open",
+            method="workbench.open_knowledge_base",
+            params={"kb_dir": str(desktop_kb)},
+        ),
+        cancel_event=None,
+    )
+    jobs = server._dispatch(
+        DesktopRequest(
+            request_id="jobs",
+            method="workbench.import_jobs",
+            params={},
+        ),
+        cancel_event=None,
+    )
+
+    assert jobs["jobs"][0]["document"]["availability"] == "failed"
 
 
 def test_completed_batch_document_remains_visible_while_the_next_job_runs(tmp_path):

@@ -132,6 +132,11 @@
       "importBatchAction": "导入所选 {{count}} 份",
       "importBatchComplete": "批次导入完成：已有 {{count}} 份文档可用。",
       "importBatchFailures": "{{count}} 份文档需要处理",
+      "openOriginal": "打开原文",
+      "loadMoreOriginal": "加载更多",
+      "originalUnavailable": "保存的原文未通过完整性检查，该文档已从问答中排除。",
+      "originalTitle": "原文文档",
+      "originalMetadata": "{{bytes}} 字节 · SHA-256 {{sha256}}",
       "importSourceErrors": {
         "unsupported_import_format": "此格式暂不支持。",
         "import_directory_empty": "该文件夹不包含文件。",

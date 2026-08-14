@@ -7,6 +7,7 @@ import type {
   DesktopImportDropEvent,
   DesktopImportSourceInspection,
   DesktopImportSourcePicker,
+  DesktopRawDocument,
   DesktopActiveKnowledgeBase,
   DesktopEngineHealth,
   DesktopKnowledgeBase,
@@ -137,6 +138,30 @@ export class MemoryDesktopBridge implements DesktopBridge {
   ): Promise<() => void> {
     void listener
     return () => undefined
+  }
+
+  async readRawDocument(
+    documentId: string,
+    requestId: string,
+    page = 0,
+  ): Promise<DesktopRawDocument> {
+    void requestId
+    if (page !== 0) throw new Error("The requested document page was not found.")
+    const document = this.importJobResults.find(
+      (task) => task.document?.documentId === documentId,
+    )?.document
+    if (!document) throw new Error("The requested document was not found.")
+    const content = `Original content for ${document.name}.`
+    return {
+      documentId: document.documentId,
+      name: document.name,
+      sourceFormat: document.sourceFormat,
+      assetSha256: document.rawAssetSha256,
+      byteSize: new TextEncoder().encode(content).byteLength,
+      content,
+      page,
+      hasMore: false,
+    }
   }
 
   async importTextDocument(
@@ -288,7 +313,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 5,
+      schemaVersion: 6,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []

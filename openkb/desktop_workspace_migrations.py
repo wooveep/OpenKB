@@ -125,3 +125,36 @@ RECOVERY_RUN_MIGRATION_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX recovery_runs_job_idx ON recovery_runs(job_id, started_at DESC)
     """,
 )
+
+
+RAW_ASSET_INTEGRITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE raw_asset_integrity (
+        asset_sha256 TEXT PRIMARY KEY REFERENCES raw_assets(asset_sha256) ON DELETE CASCADE,
+        lifecycle_status TEXT NOT NULL DEFAULT 'available'
+        CHECK(lifecycle_status IN ('available', 'quarantined')),
+        integrity_error_code TEXT,
+        verified_at TEXT
+    )
+    """,
+    """
+    INSERT INTO raw_asset_integrity (
+        asset_sha256, lifecycle_status, integrity_error_code, verified_at
+    )
+    SELECT asset_sha256, 'available', NULL, NULL FROM raw_assets
+    """,
+    """
+    CREATE TRIGGER raw_assets_create_integrity
+    AFTER INSERT ON raw_assets
+    BEGIN
+        INSERT INTO raw_asset_integrity (
+            asset_sha256, lifecycle_status, integrity_error_code, verified_at
+        )
+        VALUES (NEW.asset_sha256, 'available', NULL, NULL);
+    END
+    """,
+    """
+    CREATE INDEX raw_asset_integrity_lifecycle_idx
+        ON raw_asset_integrity(lifecycle_status, verified_at DESC)
+    """,
+)

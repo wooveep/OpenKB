@@ -9,7 +9,7 @@ use crate::engine_wire::{
 pub use crate::engine_wire::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, BridgeResult,
     CancelResult, EngineHealth, ImportControlResult, ImportJobsResult, ImportSourceInspection,
-    InspectKnowledgeBaseResult, KnowledgeBaseActivationResult, RecoveryOverride,
+    InspectKnowledgeBaseResult, KnowledgeBaseActivationResult, RawDocument, RecoveryOverride,
     TextDocumentImportResult,
 };
 use serde_json::{json, Value};
@@ -213,6 +213,26 @@ impl EngineSupervisor {
             BridgeError::new(
                 "invalid_engine_response",
                 format!("Engine import jobs response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn read_raw_document(
+        &self,
+        document_id: String,
+        request_id: String,
+        page: u32,
+    ) -> BridgeResult<RawDocument> {
+        self.ensure_started()?;
+        let value = self.request_started(
+            "workbench.read_raw_document",
+            json!({ "document_id": document_id, "page": page }),
+            Some(request_id),
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine raw document response has an invalid shape: {error}"),
             )
         })
     }

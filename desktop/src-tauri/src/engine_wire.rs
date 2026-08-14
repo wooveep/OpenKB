@@ -229,6 +229,24 @@ pub struct ImportedDocument {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RawDocument {
+    #[serde(alias = "document_id")]
+    pub document_id: String,
+    pub name: String,
+    #[serde(alias = "source_format")]
+    pub source_format: ImportedDocumentSourceFormat,
+    #[serde(alias = "asset_sha256")]
+    pub asset_sha256: String,
+    #[serde(alias = "byte_size")]
+    pub byte_size: u64,
+    pub content: String,
+    pub page: u32,
+    #[serde(alias = "has_more")]
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportJob {
     #[serde(alias = "job_id")]
     pub job_id: String,
