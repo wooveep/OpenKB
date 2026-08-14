@@ -138,6 +138,7 @@ class DesktopEngineServer:
         "workbench.open_knowledge_base",
         "workbench.active_knowledge_base",
         "workbench.import_text_document",
+        "workbench.import_jobs",
     }
     _NON_CANCELABLE_MUTATION_METHODS = {
         "workbench.create_knowledge_base",
@@ -365,9 +366,17 @@ class DesktopEngineServer:
                 self._begin_workspace_mutation(request, cancel_event)
                 importer = DesktopTextImportService(
                     Path(active.kb_dir),
-                    on_stage_progress=lambda data: self._emit_event("import.stage_progress", data),
+                    on_stage_progress=lambda data: self._emit_event(
+                        "import.stage_progress", {"request_id": str(request.request_id), **data}
+                    ),
                 )
                 return importer.import_text(Path(source_path)).as_dict()
+
+            if request.method == "workbench.import_jobs":
+                active = self._workspace.active()
+                if active is None:
+                    return {"jobs": []}
+                return DesktopTextImportService(Path(active.kb_dir)).list_import_jobs()
 
             active = self._workspace.active()
             return {"knowledge_base": active.as_dict() if active is not None else None}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 
 import pytest
 
@@ -82,6 +83,9 @@ def test_duplicate_txt_reuses_the_single_available_raw_asset(tmp_path):
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (1,)
 
+    history = importer.list_import_jobs()["jobs"]
+    assert history[0]["job"]["deduplicated"] is True
+
 
 def test_failed_prepublication_stage_never_exposes_a_partial_document(tmp_path, monkeypatch):
     """A crash-like stage failure can leave raw recovery input but not Available Knowledge."""
@@ -102,3 +106,81 @@ def test_failed_prepublication_stage_never_exposes_a_partial_document(tmp_path, 
         assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM evidence_fts").fetchone() == (0,)
         assert connection.execute("SELECT status FROM import_jobs").fetchone() == ("failed",)
+
+
+def test_open_recovers_an_interrupted_job_without_exposing_a_partial_document(tmp_path):
+    """Restarting converges a pre-publication crash into a visible terminal task state."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "interrupted.txt"
+    source.write_text("Recoverable raw source.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    importer = DesktopTextImportService(kb_dir)
+    job_id = desktop_import.uuid.uuid4().hex
+    stage_ids = {stage: desktop_import.uuid.uuid4().hex for stage in desktop_import._STAGES}
+    importer._create_job(job_id, source, stage_ids)
+    importer._set_stage(job_id, stage_ids["preflight"], "preflight", "completed", 20)
+    importer._write_raw_asset("a" * 64, source.read_bytes())
+    importer._set_stage(job_id, stage_ids["raw_asset"], "raw_asset", "completed", 35)
+
+    DesktopKnowledgeBaseRuntime().open(kb_dir)
+
+    history = importer.list_import_jobs()["jobs"]
+    assert history[0]["job"]["status"] == "failed"
+    assert history[0]["document"] is None
+    assert [stage["status"] for stage in history[0]["stages"]] == [
+        "completed",
+        "completed",
+        "failed",
+        "failed",
+        "failed",
+    ]
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)
+
+
+def test_open_waits_for_a_live_import_instead_of_recovering_it(tmp_path, monkeypatch):
+    """A second Engine cannot misclassify a lock-owning import as a crash."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "live.txt"
+    source.write_text("# Live import\n\nStill working.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document_ir_started = threading.Event()
+    release_import = threading.Event()
+    open_finished = threading.Event()
+    outcomes: list[object] = []
+    original_build_document_ir = desktop_import._build_document_ir
+
+    def wait_before_building_document_ir(*args, **kwargs):
+        document_ir_started.set()
+        assert release_import.wait(timeout=2)
+        return original_build_document_ir(*args, **kwargs)
+
+    monkeypatch.setattr(desktop_import, "_build_document_ir", wait_before_building_document_ir)
+
+    def import_in_background() -> None:
+        try:
+            outcomes.append(DesktopTextImportService(kb_dir).import_text(source))
+        except BaseException as error:  # Captured to make the thread assertion deterministic.
+            outcomes.append(error)
+
+    def open_in_background() -> None:
+        try:
+            outcomes.append(DesktopKnowledgeBaseRuntime().open(kb_dir))
+        except BaseException as error:  # Captured to make the thread assertion deterministic.
+            outcomes.append(error)
+        finally:
+            open_finished.set()
+
+    importer_thread = threading.Thread(target=import_in_background)
+    importer_thread.start()
+    assert document_ir_started.wait(timeout=2)
+    opener_thread = threading.Thread(target=open_in_background)
+    opener_thread.start()
+    assert not open_finished.wait(timeout=0.1)
+    release_import.set()
+    importer_thread.join(timeout=2)
+    opener_thread.join(timeout=2)
+
+    assert all(not isinstance(outcome, BaseException) for outcome in outcomes)
+    history = DesktopTextImportService(kb_dir).list_import_jobs()["jobs"]
+    assert [task["job"]["status"] for task in history] == ["completed"]

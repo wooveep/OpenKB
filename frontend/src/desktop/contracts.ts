@@ -35,6 +35,7 @@ export interface DesktopImportStageProgressEvent {
   sequence: number
   kind: "import.stage_progress"
   data: DesktopImportStageRun & {
+    requestId?: string | null
     jobId: string
     documentId?: string | null
   }
@@ -69,6 +70,16 @@ export interface DesktopTextDocumentImport {
   document: DesktopImportedDocument
   job: DesktopImportJob
   stages: DesktopImportStageRun[]
+}
+
+export interface DesktopImportTask {
+  document: DesktopImportedDocument | null
+  job: DesktopImportJob
+  stages: DesktopImportStageRun[]
+}
+
+export interface DesktopImportJobs {
+  jobs: DesktopImportTask[]
 }
 
 /** The SQLite-authoritative knowledge base currently available to the Desktop Runtime. */
@@ -172,6 +183,7 @@ export interface DesktopBridge {
   openKnowledgeBase(kbDir: string, requestId: string): Promise<DesktopKnowledgeBaseActivation>
   activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase>
   importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport>
+  importJobs(): Promise<DesktopImportJobs>
   cancel(targetRequestId: string): Promise<DesktopCancelResult>
   subscribe(listener: (event: DesktopBridgeEvent) => void): Promise<() => void>
 }

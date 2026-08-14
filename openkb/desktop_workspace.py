@@ -505,6 +505,45 @@ def _apply_migrations(
     return latest
 
 
+def _recover_interrupted_import_jobs(connection: sqlite3.Connection) -> None:
+    """Converge pre-publication import work after an Engine or Shell crash.
+
+    Documents and retrieval artifacts are published in their own final
+    transaction, so a running job cannot own a partially available document.
+    The caller holds the KB ingest lock; a live TXT import keeps that lock from
+    job creation through publication, so reaching here means a prior owner has
+    exited or crashed.  Retaining completed stage checkpoints plus a terminal
+    failure lets a later recovery ticket resume safely without pretending the
+    task is still active.
+    """
+    interrupted = connection.execute(
+        "SELECT 1 FROM import_jobs WHERE status = 'running' LIMIT 1"
+    ).fetchone()
+    if interrupted is None:
+        return
+
+    now = _timestamp()
+    with connection:
+        connection.execute(
+            """
+            UPDATE stage_runs
+            SET status = 'failed', error_code = 'import_interrupted',
+                completed_at = COALESCE(completed_at, ?)
+            WHERE status IN ('pending', 'running')
+              AND job_id IN (SELECT job_id FROM import_jobs WHERE status = 'running')
+            """,
+            (now,),
+        )
+        connection.execute(
+            """
+            UPDATE import_jobs
+            SET status = 'failed', error_code = 'import_interrupted', completed_at = ?
+            WHERE status = 'running'
+            """,
+            (now,),
+        )
+
+
 def _set_metadata(
     connection: sqlite3.Connection, key: str, value: str, *, in_transaction: bool = False
 ) -> None:
@@ -557,6 +596,7 @@ def _load_desktop_knowledge_base(kb_dir: Path) -> DesktopKnowledgeBase:
                     raise DesktopKnowledgeBaseStateError(
                         "Desktop Knowledge Base is missing its display name."
                     )
+                _recover_interrupted_import_jobs(connection)
                 row = connection.execute(
                     "SELECT created_at FROM runtime_checkpoints ORDER BY checkpoint_id DESC LIMIT 1"
                 ).fetchone()

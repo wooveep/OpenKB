@@ -16,6 +16,7 @@ from openkb.desktop_engine import (
     FrameReader,
     encode_frame,
 )
+from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 from openkb.workbench_service import DesktopWorkbenchService
 
@@ -357,6 +358,27 @@ def test_engine_imports_txt_and_emits_durable_stage_progress(tmp_path):
         frame.get("method") == "event"
         and isinstance(frame.get("params"), dict)
         and frame["params"].get("kind") == "import.stage_progress"
+        and frame["params"].get("data", {}).get("request_id") == "import"
         and frame["params"].get("data", {}).get("stage") == "search"
         for frame in frames
     )
+
+
+def test_engine_reads_persisted_import_tasks_for_the_active_knowledge_base(tmp_path):
+    """A reopened workbench can project durable task-center state through the Bridge."""
+    desktop_kb = tmp_path / "desktop-kb"
+    source = tmp_path / "notes.txt"
+    source.write_text("One durable import task.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(desktop_kb)
+    imported = DesktopTextImportService(desktop_kb).import_text(source)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    history = server._dispatch(
+        DesktopRequest(request_id="history", method="workbench.import_jobs", params={}),
+        cancel_event=None,
+    )
+
+    assert history["jobs"][0]["job"]["job_id"] == imported.job.job_id
+    assert history["jobs"][0]["document"]["availability"] == "available"

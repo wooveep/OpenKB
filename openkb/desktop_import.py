@@ -17,10 +17,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from portalocker import LockException
+
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import atomic_write_bytes, kb_ingest_lock
 
 _STAGES = ("preflight", "raw_asset", "document_ir", "evidence", "search")
+_STAGE_ORDER_SQL = (
+    "CASE stage "
+    + " ".join(f"WHEN '{stage}' THEN {ordinal}" for ordinal, stage in enumerate(_STAGES, start=1))
+    + " END"
+)
 _HEADING_PATTERN = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*$")
 
 
@@ -125,6 +132,22 @@ class DesktopTextImportResult:
         }
 
 
+@dataclass(frozen=True)
+class DesktopImportTask:
+    """One persisted task-center record, including failed crash recovery work."""
+
+    job: DesktopImportJob
+    document: DesktopImportedDocument | None
+    stages: tuple[DesktopStageRun, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "job": self.job.as_dict(),
+            "document": self.document.as_dict() if self.document is not None else None,
+            "stages": [stage.as_dict() for stage in self.stages],
+        }
+
+
 StageProgressCallback = Callable[[dict[str, object]], None]
 
 
@@ -150,13 +173,25 @@ class DesktopTextImportService:
 
     def import_text(self, source_path: Path) -> DesktopTextImportResult:
         """Run the TXT vertical slice and return one Available Knowledge record."""
+        try:
+            # A live import owns this lock, so reopening cannot falsely recover it.
+            with kb_ingest_lock(self._state_dir):
+                return self._import_text_locked(source_path)
+        except DesktopImportError:
+            raise
+        except (OSError, sqlite3.Error, LockException) as error:
+            raise DesktopImportError(
+                "desktop_import_failed", f"Could not import {source_path.name}: {error}"
+            ) from error
+
+    def _import_text_locked(self, source_path: Path) -> DesktopTextImportResult:
         source = _validate_source(source_path)
         self._require_database()
         job_id = uuid.uuid4().hex
         stage_ids = {stage: uuid.uuid4().hex for stage in _STAGES}
         self._create_job(job_id, source, stage_ids)
         active_stage = "preflight"
-
+        terminal_state_committed = False
         try:
             self._set_stage(job_id, stage_ids[active_stage], active_stage, "running", 0)
             raw_bytes = source.read_bytes()
@@ -169,8 +204,8 @@ class DesktopTextImportService:
             duplicate = self._find_available_document(asset_sha256)
             if duplicate is not None:
                 self._set_stage(job_id, stage_ids[active_stage], active_stage, "completed", 35)
-                self._skip_stages(job_id, stage_ids, after=active_stage)
-                self._complete_job(job_id, duplicate.document_id)
+                self._complete_duplicate_job(job_id, stage_ids, duplicate.document_id)
+                terminal_state_committed = True
                 return self._result(job_id, duplicate, deduplicated=True)
 
             raw_path = self._write_raw_asset(asset_sha256, raw_bytes)
@@ -200,6 +235,7 @@ class DesktopTextImportService:
                 blocks=blocks,
                 evidence=evidence,
             )
+            terminal_state_committed = True
             self._emit_stage(
                 job_id,
                 DesktopStageRun(stage_ids[active_stage], active_stage, "completed", 100),
@@ -207,14 +243,40 @@ class DesktopTextImportService:
             )
             return self._result(job_id, document, deduplicated=deduplicated)
         except DesktopImportError as error:
-            self._fail_job(job_id, stage_ids[active_stage], active_stage, error.code)
+            if not terminal_state_committed:
+                self._fail_job(job_id, stage_ids[active_stage], active_stage, error.code)
             raise
-        except (OSError, sqlite3.Error) as error:
+        except (OSError, sqlite3.Error, LockException) as error:
             wrapped = DesktopImportError(
                 "desktop_import_failed", f"Could not import {source.name}: {error}"
             )
-            self._fail_job(job_id, stage_ids[active_stage], active_stage, wrapped.code)
+            if not terminal_state_committed:
+                self._fail_job(job_id, stage_ids[active_stage], active_stage, wrapped.code)
             raise wrapped from error
+
+    def list_import_jobs(self) -> dict[str, object]:
+        """Return durable task-center records for the active Desktop knowledge base."""
+        self._require_database()
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT import_jobs.job_id, import_jobs.status, import_jobs.progress,
+                    import_jobs.document_id, source_documents.document_id,
+                    source_documents.display_name, source_documents.source_format,
+                    source_documents.asset_sha256, source_documents.availability,
+                    (SELECT COUNT(*) FROM evidence_refs
+                     WHERE evidence_refs.document_id = source_documents.document_id)
+                FROM import_jobs
+                LEFT JOIN source_documents
+                    ON source_documents.document_id = import_jobs.document_id
+                ORDER BY import_jobs.created_at DESC
+                """
+            ).fetchall()
+            tasks = tuple(self._task_from_row(connection, row) for row in rows)
+        finally:
+            connection.close()
+        return {"jobs": [task.as_dict() for task in tasks]}
 
     def _require_database(self) -> None:
         if not self._database_path.is_file():
@@ -306,14 +368,6 @@ class DesktopTextImportService:
             DesktopStageRun(stage_run_id, stage, status, progress, error_code),
         )
 
-    def _skip_stages(self, job_id: str, stage_ids: dict[str, str], *, after: str) -> None:
-        skipped = False
-        for stage in _STAGES:
-            if skipped:
-                self._set_stage(job_id, stage_ids[stage], stage, "skipped", 100)
-            elif stage == after:
-                skipped = True
-
     def _write_raw_asset(self, asset_sha256: str, content: bytes) -> str:
         raw_relative_path = Path("raw") / f"{asset_sha256}.txt"
         with kb_ingest_lock(self._state_dir):
@@ -323,19 +377,9 @@ class DesktopTextImportService:
     def _find_available_document(self, asset_sha256: str) -> DesktopImportedDocument | None:
         connection = self._connect()
         try:
-            row = connection.execute(
-                """
-                SELECT document_id, display_name, source_format, asset_sha256, availability,
-                    (SELECT COUNT(*) FROM evidence_refs
-                     WHERE evidence_refs.document_id = source_documents.document_id)
-                FROM source_documents
-                WHERE asset_sha256 = ? AND availability = 'available'
-                """,
-                (asset_sha256,),
-            ).fetchone()
+            return self._find_available_document_in(connection, asset_sha256)
         finally:
             connection.close()
-        return _document_from_row(row) if row is not None else None
 
     def _publish_document(
         self,
@@ -488,49 +532,81 @@ class DesktopTextImportService:
             (document_id, now, job_id),
         )
 
-    def _complete_job(self, job_id: str, document_id: str) -> None:
+    def _complete_duplicate_job(
+        self, job_id: str, stage_ids: dict[str, str], document_id: str
+    ) -> None:
         now = _timestamp()
         with kb_ingest_lock(self._state_dir):
             connection = self._connect()
             try:
-                with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                for stage in _STAGES[2:]:
                     connection.execute(
                         """
-                        UPDATE import_jobs
-                        SET document_id = ?, status = 'completed', progress = 100,
-                            error_code = NULL, completed_at = ?
-                        WHERE job_id = ?
+                        UPDATE stage_runs
+                        SET status = 'skipped', progress = 100, error_code = NULL,
+                            completed_at = COALESCE(completed_at, ?)
+                        WHERE stage_run_id = ? AND job_id = ?
                         """,
-                        (document_id, now, job_id),
+                        (now, stage_ids[stage], job_id),
                     )
+                connection.execute(
+                    """
+                    UPDATE import_jobs
+                    SET document_id = ?, status = 'completed', progress = 100,
+                        error_code = NULL, completed_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (document_id, now, job_id),
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
             finally:
                 connection.close()
+        for stage in _STAGES[2:]:
+            self._emit_stage(
+                job_id,
+                DesktopStageRun(stage_ids[stage], stage, "skipped", 100),
+                document_id=document_id,
+            )
 
     def _fail_job(self, job_id: str, stage_run_id: str, stage: str, error_code: str) -> None:
         try:
-            self._set_stage(
-                job_id,
-                stage_run_id,
-                stage,
-                "failed",
-                100,
-                error_code=error_code,
-            )
             with kb_ingest_lock(self._state_dir):
                 connection = self._connect()
                 try:
-                    with connection:
-                        connection.execute(
-                            """
-                            UPDATE import_jobs
-                            SET status = 'failed', error_code = ?, completed_at = ?
-                            WHERE job_id = ?
-                            """,
-                            (error_code, _timestamp(), job_id),
-                        )
+                    now = _timestamp()
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(
+                        """
+                        UPDATE stage_runs
+                        SET status = 'failed', progress = 100, error_code = ?,
+                            completed_at = COALESCE(completed_at, ?)
+                        WHERE stage_run_id = ? AND job_id = ?
+                        """,
+                        (error_code, now, stage_run_id, job_id),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE import_jobs
+                        SET status = 'failed', progress = 100, error_code = ?, completed_at = ?
+                        WHERE job_id = ?
+                        """,
+                        (error_code, now, job_id),
+                    )
+                    connection.commit()
+                except BaseException:
+                    connection.rollback()
+                    raise
                 finally:
                     connection.close()
-        except (OSError, sqlite3.Error, DesktopImportError):
+            self._emit_stage(
+                job_id,
+                DesktopStageRun(stage_run_id, stage, "failed", 100, error_code),
+            )
+        except (OSError, sqlite3.Error, LockException, DesktopImportError):
             # Preserve the original import failure even when its bookkeeping is unavailable.
             return
 
@@ -542,21 +618,7 @@ class DesktopTextImportService:
             job_row = connection.execute(
                 "SELECT status, progress, document_id FROM import_jobs WHERE job_id = ?", (job_id,)
             ).fetchone()
-            stage_rows = connection.execute(
-                """
-                SELECT stage_run_id, stage, status, progress, error_code
-                FROM stage_runs
-                WHERE job_id = ?
-                ORDER BY CASE stage
-                    WHEN 'preflight' THEN 1
-                    WHEN 'raw_asset' THEN 2
-                    WHEN 'document_ir' THEN 3
-                    WHEN 'evidence' THEN 4
-                    WHEN 'search' THEN 5
-                END
-                """,
-                (job_id,),
-            ).fetchall()
+            stages = self._stages_for_job(connection, job_id)
         finally:
             connection.close()
         if job_row is None:
@@ -570,17 +632,50 @@ class DesktopTextImportService:
             document_id=str(job_row[2]) if job_row[2] is not None else None,
             deduplicated=deduplicated,
         )
-        stages = tuple(
+        return DesktopTextImportResult(document=document, job=job, stages=stages)
+
+    def _task_from_row(
+        self, connection: sqlite3.Connection, row: tuple[object, ...]
+    ) -> DesktopImportTask:
+        stages = self._stages_for_job(connection, str(row[0]))
+        job = DesktopImportJob(
+            job_id=str(row[0]),
+            status=str(row[1]),
+            progress=int(str(row[2])),
+            document_id=str(row[3]) if row[3] is not None else None,
+            deduplicated=any(
+                stage.stage == "document_ir" and stage.status == "skipped" for stage in stages
+            ),
+        )
+        document = _document_from_row(row[4:]) if row[4] is not None else None
+        return DesktopImportTask(
+            job=job,
+            document=document,
+            stages=stages,
+        )
+
+    def _stages_for_job(
+        self, connection: sqlite3.Connection, job_id: str
+    ) -> tuple[DesktopStageRun, ...]:
+        stage_rows = connection.execute(
+            f"""
+            SELECT stage_run_id, stage, status, progress, error_code
+            FROM stage_runs
+            WHERE job_id = ?
+            ORDER BY {_STAGE_ORDER_SQL}
+            """,
+            (job_id,),
+        ).fetchall()
+        return tuple(
             DesktopStageRun(
                 stage_run_id=str(row[0]),
                 stage=str(row[1]),
                 status=str(row[2]),
-                progress=int(row[3]),
+                progress=int(str(row[3])),
                 error_code=str(row[4]) if row[4] is not None else None,
             )
             for row in stage_rows
         )
-        return DesktopTextImportResult(document=document, job=job, stages=stages)
 
     def _emit_stage(
         self,

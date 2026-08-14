@@ -9,6 +9,7 @@ import {
   type DesktopEngineHealth,
   type DesktopKnowledgeBaseActivation,
   type DesktopKnowledgeBaseInspection,
+  type DesktopImportJobs,
   type DesktopTextDocumentImport,
 } from "./contracts"
 
@@ -80,6 +81,10 @@ export class TauriDesktopBridge implements DesktopBridge {
       sourcePath,
       requestId,
     })
+  }
+
+  async importJobs(): Promise<DesktopImportJobs> {
+    return this.call<DesktopImportJobs>("desktop_import_jobs")
   }
 
   async cancel(targetRequestId: string): Promise<DesktopCancelResult> {
@@ -156,6 +161,10 @@ class UnavailableDesktopBridge implements DesktopBridge {
   importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport> {
     void sourcePath
     void requestId
+    return this.unavailable()
+  }
+
+  importJobs(): Promise<DesktopImportJobs> {
     return this.unavailable()
   }
 

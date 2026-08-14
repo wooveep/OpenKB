@@ -8,6 +8,7 @@ import type {
   DesktopKnowledgeBase,
   DesktopKnowledgeBaseActivation,
   DesktopKnowledgeBaseInspection,
+  DesktopImportTask,
   DesktopTextDocumentImport,
 } from "./contracts"
 
@@ -17,6 +18,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
   private readonly handshakeResult: DesktopBridgeHandshake
   private readonly healthResult: DesktopEngineHealth
   private activeKnowledgeBaseResult: DesktopKnowledgeBase | null = null
+  private importJobResults: DesktopImportTask[] = []
 
   constructor(
     handshakeResult: DesktopBridgeHandshake = {
@@ -110,6 +112,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
         sequence: index + 1,
         kind: "import.stage_progress",
         data: {
+          requestId,
           jobId,
           documentId: stage === "search" ? documentId : undefined,
           stageRunId: `${jobId}-${stage}`,
@@ -120,7 +123,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
         },
       })
     }
-    return {
+    const result: DesktopTextDocumentImport = {
       document: {
         documentId,
         name,
@@ -144,6 +147,12 @@ export class MemoryDesktopBridge implements DesktopBridge {
         errorCode: null,
       })),
     }
+    this.importJobResults = [result, ...this.importJobResults]
+    return result
+  }
+
+  async importJobs(): Promise<{ jobs: DesktopImportTask[] }> {
+    return { jobs: this.importJobResults }
   }
 
   async cancel(targetRequestId: string): Promise<DesktopCancelResult> {
@@ -168,6 +177,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
       schemaVersion: 2,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
+    this.importJobResults = []
     return {
       knowledgeBase: this.activeKnowledgeBaseResult,
       events: [
