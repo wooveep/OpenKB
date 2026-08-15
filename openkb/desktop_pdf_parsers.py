@@ -614,17 +614,16 @@ def _bbox_overlaps(left: list[float], right: list[float]) -> bool:
 
 @lru_cache(maxsize=1)
 def _ocr_engine() -> Any:
-    """Load wheel-bundled PP-OCR models only for an enhanced PDF route."""
+    """Load the packaged DeepDoc OCR pair only for an enhanced PDF route."""
     try:
+        from openkb.desktop_deepdoc_runtime import deepdoc_ocr_engine
+
+        deepdoc_engine = deepdoc_ocr_engine()
+        if deepdoc_engine is not None:
+            return deepdoc_engine
         from rapidocr_onnxruntime import RapidOCR
-    except ImportError as error:
-        raise DesktopImportError(
-            "enhanced_pdf_parser_unavailable",
-            "The bundled ONNX PDF parser is unavailable in this Desktop runtime.",
-        ) from error
-    try:
         return RapidOCR()
-    except (OSError, RuntimeError, ValueError) as error:
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
         raise DesktopImportError(
             "enhanced_pdf_parser_unavailable",
             "The bundled ONNX PDF parser could not be initialized.",

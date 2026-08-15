@@ -32,6 +32,16 @@ function Copy-DirectoryContents {
     Copy-Item -Path (Join-Path $Source "*") -Destination $Destination -Recurse -Force
 }
 
+function Get-DirectoryBytes {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+
+    [int64] $total = 0
+    foreach ($file in @(Get-ChildItem -LiteralPath $Path -Recurse -File)) {
+        $total += $file.Length
+    }
+    return $total
+}
+
 function Write-ReleaseManifest {
     param(
         [Parameter(Mandatory = $true)] [string] $PackageRoot,
@@ -50,13 +60,25 @@ function Write-ReleaseManifest {
                 }
             }
     )
+    [int64] $payloadBytes = 0
+    foreach ($file in $files) {
+        $payloadBytes += [int64] $file.bytes
+    }
     $manifest = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         product = "OpenKB"
         version = $PackageVersion
         platform = "windows-x64"
         entryPoint = "OpenKB.exe"
         generatedAtUtc = [DateTime]::UtcNow.ToString("o")
+        payloadBytes = $payloadBytes
+        componentBytes = [ordered]@{
+            shell = (Get-Item -LiteralPath (Join-Path $PackageRoot "OpenKB.exe")).Length
+            engine = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\engine")
+            webView2 = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\webview2")
+            deepdoc = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\engine\_internal\deepdoc")
+            legacyOffice = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\engine\_internal\legacy-office")
+        }
         files = $files
     }
     $manifestPath = Join-Path $PackageRoot "release-manifest.json"
@@ -90,6 +112,12 @@ $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force -Path $buildRoot, $OutputDirectory | Out-Null
 
 & (Join-Path $PSScriptRoot "Prepare-WebView2FixedRuntime.ps1")
+$deepDocBuildDirectory = Join-Path $buildRoot "deepdoc"
+if (Test-Path -LiteralPath $deepDocBuildDirectory) {
+    Remove-Item -LiteralPath $deepDocBuildDirectory -Recurse -Force
+}
+$deepDocRuntime = & (Join-Path $PSScriptRoot "Prepare-DeepDocRuntime.ps1") `
+    -DestinationDirectory $deepDocBuildDirectory
 $legacyOfficeRuntime = & (Join-Path $PSScriptRoot "Prepare-LegacyOfficeRuntime.ps1") `
     -DestinationDirectory (Join-Path $buildRoot "legacy-office")
 
@@ -141,6 +169,7 @@ try {
             --collect-data openkb `
             --collect-data rapidocr_onnxruntime `
             --collect-all tika `
+            --add-data "$deepDocRuntime;deepdoc" `
             --add-data "$legacyOfficeRuntime;legacy-office" `
             (Join-Path $repoRoot "openkb\desktop_engine.py")
     }
@@ -169,6 +198,9 @@ foreach ($requiredPath in @(
     (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_det_infer.onnx"),
     (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_rec_infer.onnx"),
     (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\models\ch_ppocr_mobile_v2.0_cls_infer.onnx"),
+    (Join-Path $engineDirectory "_internal\deepdoc\det.onnx"),
+    (Join-Path $engineDirectory "_internal\deepdoc\rec.onnx"),
+    (Join-Path $engineDirectory "_internal\deepdoc\ocr.res"),
     (Join-Path $engineDirectory "_internal\legacy-office\tika\tika-server-standard-3.3.2.jar"),
     (Join-Path $engineDirectory "_internal\legacy-office\java\bin\java.exe")
 )) {
@@ -193,7 +225,8 @@ Write-ReleaseManifest -PackageRoot $packageRoot -PackageVersion $Version
 
 $zipPath = Join-Path $OutputDirectory "$packageName.zip"
 $checksumPath = "$zipPath.sha256"
-foreach ($existingOutput in @($zipPath, $checksumPath)) {
+$summaryPath = Join-Path $OutputDirectory "$packageName.release.json"
+foreach ($existingOutput in @($zipPath, $checksumPath, $summaryPath)) {
     if (Test-Path -LiteralPath $existingOutput) {
         Remove-Item -LiteralPath $existingOutput -Force
     }
@@ -210,6 +243,27 @@ $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerIn
     "$zipHash *$([System.IO.Path]::GetFileName($zipPath))`n",
     (New-Object System.Text.UTF8Encoding($false))
 )
+$releaseSummary = [ordered]@{
+    schemaVersion = 1
+    product = "OpenKB"
+    version = $Version
+    platform = "windows-x64"
+    archive = [ordered]@{
+        file = [System.IO.Path]::GetFileName($zipPath)
+        bytes = (Get-Item -LiteralPath $zipPath).Length
+        sha256 = $zipHash
+    }
+    payload = [ordered]@{
+        bytes = ((Get-Content -Raw -LiteralPath (Join-Path $packageRoot "release-manifest.json") | ConvertFrom-Json).payloadBytes)
+        manifest = "release-manifest.json"
+    }
+}
+[System.IO.File]::WriteAllText(
+    $summaryPath,
+    ($releaseSummary | ConvertTo-Json -Depth 5),
+    (New-Object System.Text.UTF8Encoding($false))
+)
 
 Write-Host "Portable package created: $zipPath"
 Write-Host "SHA-256 file created: $checksumPath"
+Write-Host "Release size summary created: $summaryPath"

@@ -7,7 +7,8 @@ SQLite-backed knowledge base on your computer.
 It is designed to run from an extracted portable package. The native Tauri
 shell owns the window and tray, while a bundled Python Engine handles document
 parsing, local storage, retrieval, and model calls over a private stdio bridge.
-It does not start a local HTTP server.
+It does not expose a user-facing local HTTP server. The legacy DOC/PPT parser
+uses its package-local Tika helper only on loopback and only while it is needed.
 
 ## Use the desktop app
 
@@ -48,7 +49,9 @@ uv run mypy openkb
 
 On Windows, use `desktop/scripts/New-PortablePackage.ps1` to build the portable
 archive and `desktop/scripts/Test-PortablePackage.ps1` to validate its Engine
-and bundled parser assets.
+and bundled parser assets. See
+[the clean-machine release checklist](desktop/PORTABLE_ACCEPTANCE.md) for the
+final Windows black-box pass.
 
 ## Architecture notes
 

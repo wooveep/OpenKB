@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "runtime": "InfiniFlow DeepDoc OCR ONNX",
+  "modelRepository": "https://huggingface.co/InfiniFlow/deepdoc",
+  "modelRevision": "de0e793dc6d744406c96dabd688ccc969f41b443",
+  "files": [
+    {
+      "path": "det.onnx",
+      "url": "https://huggingface.co/InfiniFlow/deepdoc/resolve/de0e793dc6d744406c96dabd688ccc969f41b443/det.onnx",
+      "sha256": "30a86f5731181461d08021402766601e4302a9b9b9666be8aff402696339cdff",
+      "bytes": 4745517
+    },
+    {
+      "path": "rec.onnx",
+      "url": "https://huggingface.co/InfiniFlow/deepdoc/resolve/de0e793dc6d744406c96dabd688ccc969f41b443/rec.onnx",
+      "sha256": "1c7cf60de2afd728d512f4190cf37455092b45f06175365c6fc58d8cd7e2a68b",
+      "bytes": 10826336
+    },
+    {
+      "path": "ocr.res",
+      "url": "https://huggingface.co/InfiniFlow/deepdoc/resolve/de0e793dc6d744406c96dabd688ccc969f41b443/ocr.res",
+      "sha256": "28b2362ad4ab2dc38769aa72feb535e3a9ddb3fd2a7585a05920e6393b1dc7f7",
+      "bytes": 26249
+    }
+  ]
+}

@@ -16,6 +16,16 @@ function Assert-That {
     }
 }
 
+function Get-DirectoryBytes {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+
+    [int64] $total = 0
+    foreach ($file in @(Get-ChildItem -LiteralPath $Path -Recurse -File)) {
+        $total += $file.Length
+    }
+    return $total
+}
+
 function Read-Exact {
     param(
         [Parameter(Mandatory = $true)] [System.IO.Stream] $Stream,
@@ -81,10 +91,11 @@ function Read-Response {
         [Parameter(Mandatory = $true)] [string] $RequestId,
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
-        [System.Collections.Generic.List[object]] $Events
+        [System.Collections.Generic.List[object]] $Events,
+        [int] $TimeoutSeconds = 15
     )
 
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
         $remaining = [Math]::Max(1, [int] ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
         $message = Read-Frame -Stream $Stream -TimeoutMilliseconds $remaining
@@ -153,6 +164,10 @@ function Test-FrozenEngine {
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.Environment["PATH"] = "$env:SystemRoot\System32;$env:SystemRoot"
+    $startInfo.Environment["HF_HUB_OFFLINE"] = "1"
+    $startInfo.Environment["TRANSFORMERS_OFFLINE"] = "1"
+    $startInfo.Environment["PIP_NO_INDEX"] = "1"
+    $startInfo.Environment["UV_OFFLINE"] = "1"
     $engine = New-Object System.Diagnostics.Process
     $engine.StartInfo = $startInfo
     Assert-That -Condition ($engine.Start()) -Message "Could not start frozen OpenKB Engine."
@@ -183,6 +198,58 @@ function Test-FrozenEngine {
         }
         $created = Read-Response -Stream $output -RequestId "package-create" -Events $events
         Assert-SuccessResponse -Response $created -RequestId "package-create"
+
+        $sourceImage = Join-Path $ScratchDirectory "package-source.png"
+        $sourceMarkdown = Join-Path $ScratchDirectory "package-source.md"
+        [System.IO.File]::WriteAllBytes(
+            $sourceImage,
+            [Convert]::FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL0aQAAAABJRU5ErkJggg==")
+        )
+        [System.IO.File]::WriteAllText(
+            $sourceMarkdown,
+            "# Package import`n`n![Package image](package-source.png)`n`nOffline package import evidence.`n",
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        Write-Frame -Stream $input -Message @{
+            jsonrpc = "2.0"; id = "package-import"; method = "workbench.import_text_document"; params = @{ source_path = $sourceMarkdown }
+        }
+        $imported = Read-Response -Stream $output -RequestId "package-import" -Events $events
+        Assert-SuccessResponse -Response $imported -RequestId "package-import"
+        Assert-That -Condition ($imported.result.job.status -eq "completed") -Message "Frozen Engine did not complete an offline Markdown import."
+        Assert-That -Condition ($imported.result.document.availability -eq "available") -Message "Frozen Engine did not publish the offline Markdown import."
+        $documentId = [string] $imported.result.document.document_id
+        Assert-That -Condition (-not [string]::IsNullOrWhiteSpace($documentId)) -Message "Frozen Engine returned no imported document identifier."
+
+        Write-Frame -Stream $input -Message @{
+            jsonrpc = "2.0"; id = "package-read-import"; method = "workbench.read_raw_document"; params = @{ document_id = $documentId; page = 0 }
+        }
+        $readImported = Read-Response -Stream $output -RequestId "package-read-import" -Events $events
+        Assert-SuccessResponse -Response $readImported -RequestId "package-read-import"
+        Assert-That -Condition ($readImported.result.name -eq "package-source.md") -Message "Frozen Engine returned the wrong imported source document."
+        Assert-That -Condition (@($readImported.result.source_images).Count -eq 1) -Message "Frozen Engine did not preserve a relative Markdown source image."
+
+        $scannedPdf = Join-Path $ScratchDirectory "package-scanned.pdf"
+        $scannedPdfFixture = Join-Path $PSScriptRoot "..\test-assets\scanned-ocr.pdf.base64"
+        Assert-That -Condition (Test-Path -LiteralPath $scannedPdfFixture -PathType Leaf) -Message "The portable package scan fixture is missing."
+        [System.IO.File]::WriteAllBytes(
+            $scannedPdf,
+            [Convert]::FromBase64String((Get-Content -Raw -LiteralPath $scannedPdfFixture))
+        )
+        Write-Frame -Stream $input -Message @{
+            jsonrpc = "2.0"; id = "package-scan-import"; method = "workbench.import_text_document"; params = @{ source_path = $scannedPdf }
+        }
+        $scannedImport = Read-Response -Stream $output -RequestId "package-scan-import" -Events $events -TimeoutSeconds 60
+        Assert-SuccessResponse -Response $scannedImport -RequestId "package-scan-import"
+        Assert-That -Condition ($scannedImport.result.job.status -eq "completed") -Message "Frozen Engine did not complete an offline scanned-PDF import."
+        Assert-That -Condition ($scannedImport.result.document.availability -eq "available") -Message "Frozen Engine did not publish the scanned-PDF import."
+
+        Write-Frame -Stream $input -Message @{
+            jsonrpc = "2.0"; id = "package-no-legacy-workbench"; method = "workbench.inspect_knowledge_base"; params = @{}
+        }
+        $legacyWorkbench = Read-Response -Stream $output -RequestId "package-no-legacy-workbench" -Events $events
+        Assert-That -Condition ($legacyWorkbench.PSObject.Properties.Name -contains "error") -Message "Frozen Engine exposed a removed legacy workbench method."
+        Assert-That -Condition ($legacyWorkbench.error.code -eq "method_not_found") -Message "Frozen Engine rejected a removed legacy workbench method with the wrong error."
+
         $lockStream = [System.IO.File]::Open(
             (Join-Path $openkbDirectory "ingest.lock"),
             [System.IO.FileMode]::OpenOrCreate,
@@ -263,6 +330,10 @@ function Test-ShellProcessTree {
     $startInfo.WorkingDirectory = $PackageRoot
     $startInfo.UseShellExecute = $false
     $startInfo.Environment["PATH"] = "$env:SystemRoot\System32;$env:SystemRoot"
+    $startInfo.Environment["HF_HUB_OFFLINE"] = "1"
+    $startInfo.Environment["TRANSFORMERS_OFFLINE"] = "1"
+    $startInfo.Environment["PIP_NO_INDEX"] = "1"
+    $startInfo.Environment["UV_OFFLINE"] = "1"
     $shell = New-Object System.Diagnostics.Process
     $shell.StartInfo = $startInfo
     Assert-That -Condition ($shell.Start()) -Message "Could not start OpenKB.exe from the portable package."
@@ -331,6 +402,9 @@ function Assert-PackageLayout {
         (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_det_infer.onnx"),
         (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_rec_infer.onnx"),
         (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_ppocr_mobile_v2.0_cls_infer.onnx"),
+        (Join-Path $PackageRoot "runtime\engine\_internal\deepdoc\det.onnx"),
+        (Join-Path $PackageRoot "runtime\engine\_internal\deepdoc\rec.onnx"),
+        (Join-Path $PackageRoot "runtime\engine\_internal\deepdoc\ocr.res"),
         (Join-Path $PackageRoot "runtime\engine\_internal\legacy-office\tika\tika-server-standard-3.3.2.jar"),
         (Join-Path $PackageRoot "runtime\engine\_internal\legacy-office\java\bin\java.exe"),
         (Join-Path $PackageRoot "runtime\webview2\msedgewebview2.exe"),
@@ -343,16 +417,22 @@ function Assert-PackageLayout {
     Assert-That -Condition ($shells.Count -eq 1) -Message "Portable package must expose exactly one OpenKB.exe."
 
     $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-    foreach ($property in @("schemaVersion", "product", "version", "platform", "entryPoint", "files")) {
+    foreach ($property in @("schemaVersion", "product", "version", "platform", "entryPoint", "payloadBytes", "componentBytes", "files")) {
         Assert-That -Condition ($manifest.PSObject.Properties.Name -contains $property) -Message "Portable package manifest is missing $property."
     }
-    Assert-That -Condition ($manifest.schemaVersion -eq 1) -Message "Portable package manifest has an unsupported schema."
+    Assert-That -Condition ($manifest.schemaVersion -eq 2) -Message "Portable package manifest has an unsupported schema."
     Assert-That -Condition ($manifest.product -eq "OpenKB") -Message "Portable package manifest has the wrong product."
     Assert-That -Condition ($manifest.platform -eq "windows-x64") -Message "Portable package manifest has the wrong platform."
     Assert-That -Condition ($manifest.version -is [string] -and -not [string]::IsNullOrWhiteSpace($manifest.version)) -Message "Portable package manifest has an invalid version."
     Assert-That -Condition ($manifest.entryPoint -eq "OpenKB.exe") -Message "Portable package manifest has the wrong entry point."
+    Assert-That -Condition ($manifest.payloadBytes -is [int] -or $manifest.payloadBytes -is [int64]) -Message "Portable package manifest has an invalid payload size."
+    foreach ($component in @("shell", "engine", "webView2", "deepdoc", "legacyOffice")) {
+        Assert-That -Condition ($manifest.componentBytes.PSObject.Properties.Name -contains $component) -Message "Portable package manifest is missing the $component size."
+        Assert-That -Condition ($manifest.componentBytes.$component -is [int] -or $manifest.componentBytes.$component -is [int64]) -Message "Portable package manifest has an invalid $component size."
+    }
     $records = @($manifest.files)
     Assert-That -Condition ($records.Count -gt 0) -Message "Portable package manifest has no file records."
+    [int64] $recordBytes = 0
 
     $packageRootPath = [System.IO.Path]::GetFullPath($PackageRoot).TrimEnd([char[]]@('\', '/'))
     $packagePrefix = "$packageRootPath$([System.IO.Path]::DirectorySeparatorChar)"
@@ -375,6 +455,18 @@ function Assert-PackageLayout {
         Assert-That -Condition ((Get-Item -LiteralPath $filePath).Length -eq [int64] $record.bytes) -Message "Portable package file size changed: $relativePath"
         $actualHash = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash.ToLowerInvariant()
         Assert-That -Condition ($actualHash -eq ([string] $record.sha256).ToLowerInvariant()) -Message "Portable package file hash changed: $relativePath"
+        $recordBytes += [int64] $record.bytes
+    }
+    Assert-That -Condition ($recordBytes -eq [int64] $manifest.payloadBytes) -Message "Portable package manifest has an incorrect payload size."
+    $actualComponentBytes = [ordered]@{
+        shell = (Get-Item -LiteralPath (Join-Path $PackageRoot "OpenKB.exe")).Length
+        engine = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\engine")
+        webView2 = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\webview2")
+        deepdoc = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\engine\_internal\deepdoc")
+        legacyOffice = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\engine\_internal\legacy-office")
+    }
+    foreach ($component in $actualComponentBytes.Keys) {
+        Assert-That -Condition ([int64] $manifest.componentBytes.$component -eq [int64] $actualComponentBytes[$component]) -Message "Portable package manifest has an incorrect $component size."
     }
 
     $inventoryPaths = @(

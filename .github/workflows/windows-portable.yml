@@ -7,8 +7,7 @@ on:
       - ".github/workflows/windows-portable.yml"
       - "desktop/**"
       - "frontend/**"
-      - "openkb/desktop_engine.py"
-      - "openkb/workbench_service.py"
+      - "openkb/**"
       - "pyproject.toml"
       - "uv.lock"
   push:
@@ -17,8 +16,7 @@ on:
       - ".github/workflows/windows-portable.yml"
       - "desktop/**"
       - "frontend/**"
-      - "openkb/desktop_engine.py"
-      - "openkb/workbench_service.py"
+      - "openkb/**"
       - "pyproject.toml"
       - "uv.lock"
 
@@ -61,4 +59,5 @@ jobs:
           path: |
             ${{ runner.temp }}/portable-output/*.zip
             ${{ runner.temp }}/portable-output/*.sha256
+            ${{ runner.temp }}/portable-output/*.release.json
           if-no-files-found: error
