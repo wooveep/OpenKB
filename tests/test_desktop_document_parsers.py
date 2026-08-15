@@ -71,6 +71,47 @@ def test_markdown_import_retains_structured_ir_and_local_source_image(tmp_path):
     ]
 
 
+def test_d1_structured_versions_reuse_reader_ir_after_original_version_is_unavailable(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    first_source = tmp_path / "first.md"
+    second_source = tmp_path / "second.md"
+    third_source = tmp_path / "third.md"
+    first_source.write_text("### Guide\n\nSame structured body.\n", encoding="utf-8")
+    second_source.write_bytes(b"### Guide\r\n\r\nSame structured body.  \r\n")
+    third_source.write_bytes(b"### Guide\n\nSame structured body.   \n")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    importer = DesktopTextImportService(kb_dir)
+
+    first = importer.import_text(first_source)
+    second = importer.import_text(second_source)
+
+    assert second.job.deduplication is not None
+    assert second.job.deduplication.level == "D1"
+    assert (
+        "### Guide"
+        in DesktopRawAssetService(kb_dir).read_document(second.document.document_id).content
+    )
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM document_ir_blocks WHERE document_id = ?",
+            (second.document.document_id,),
+        ).fetchone() == (0,)
+        connection.execute(
+            "UPDATE source_documents SET availability = 'failed' WHERE document_id = ?",
+            (first.document.document_id,),
+        )
+
+    third = importer.import_text(third_source)
+
+    assert third.job.deduplication is not None
+    assert third.job.deduplication.level == "D1"
+    assert third.job.deduplication.reused_document_id == second.document.document_id
+    assert (
+        "Same structured body."
+        in DesktopRawAssetService(kb_dir).read_document(third.document.document_id).content
+    )
+
+
 def test_docx_import_keeps_body_order_coordinates_and_embedded_source_image(tmp_path):
     kb_dir = tmp_path / "desktop-kb"
     source = tmp_path / "guide.docx"

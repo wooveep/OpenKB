@@ -170,6 +170,9 @@
       },
       "availableKnowledge": "可用知识",
       "importedDocument": "{{name}} 已可用于检索，包含 {{evidence}} 个证据块。",
+      "deduplicationD0": "已复用相同的原始文件。",
+      "deduplicationD1": "已复用相同正文的处理结果。",
+      "deduplicationD2": "已复用 {{count}} 个重复证据片段。",
       "modelCallStatus": "模型分析 · {{status}} · 第 {{attempt}} / {{maximum}} 次",
       "modelCallBudget": "本次最多等待 {{timeout}} 秒（本次调用还剩 {{remaining}} 秒）。",
       "modelCallStates": {

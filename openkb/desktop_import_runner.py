@@ -30,6 +30,7 @@ from openkb.desktop_import_artifacts import (
     source_media_type,
     validate_text_source,
 )
+from openkb.desktop_import_deduplication import normalized_body_sha256
 from openkb.desktop_import_model_ledger import DesktopImportModelLedger
 from openkb.desktop_import_quarantine import DesktopImportQuarantineStore
 from openkb.desktop_import_recovery import DesktopImportRecoveryStore
@@ -193,7 +194,32 @@ class DesktopTextImportService:
                 source_images = source_images_from_checkpoint(document_ir)
 
             stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
+            normalized_body_hash = normalized_body_sha256(blocks)
             if not self._completed(stages, "evidence"):
+                content_duplicate = self._store.find_available_document_by_normalized_body(
+                    normalized_body_hash
+                )
+                if content_duplicate is not None:
+                    document, deduplicated = self._store.complete_content_duplicate_job(
+                        state=state,
+                        source=state.source,
+                        document_id=uuid.uuid4().hex,
+                        asset_sha256=asset_sha256,
+                        raw_path=raw_path,
+                        raw_size=len(raw_bytes),
+                        source_format=source_format,
+                        raw_media_type=source_media_type(source_format),
+                        source_images=source_images,
+                        normalized_body_sha256=normalized_body_hash,
+                        canonical_document=content_duplicate,
+                    )
+                    terminal_state_committed = True
+                    return self._result(
+                        state.job_id,
+                        document.document_id,
+                        deduplicated=deduplicated,
+                    )
+
                 active_stage = "evidence"
                 self._honor_control(state, active_stage)
                 self._store.set_stage(state, active_stage, "running", 60)
@@ -261,6 +287,7 @@ class DesktopTextImportService:
                 blocks=blocks,
                 evidence=evidence,
                 source_images=source_images,
+                normalized_body_sha256=normalized_body_hash,
             )
             terminal_state_committed = True
             self._store.emit_stage(

@@ -170,6 +170,9 @@
       },
       "availableKnowledge": "Available Knowledge",
       "importedDocument": "{{name}} is ready for retrieval with {{evidence}} evidence blocks.",
+      "deduplicationD0": "Reused the identical raw file.",
+      "deduplicationD1": "Reused processing for the identical normalized body.",
+      "deduplicationD2": "Reused {{count}} duplicate evidence fragments.",
       "modelCallStatus": "Model analysis · {{status}} · attempt {{attempt}} of {{maximum}}",
       "modelCallBudget": "This request may wait up to {{timeout}}s ({{remaining}}s call budget remaining).",
       "modelCallStates": {

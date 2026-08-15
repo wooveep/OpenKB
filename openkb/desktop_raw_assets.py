@@ -280,6 +280,19 @@ class DesktopRawAssetService:
     def _document_blocks(
         connection: sqlite3.Connection, document_id: str
     ) -> tuple[DocumentIRBlock, ...]:
+        processing_row = connection.execute(
+            """
+            SELECT canonical_document_id
+            FROM document_content_fingerprints
+            WHERE document_id = ?
+            """,
+            (document_id,),
+        ).fetchone()
+        processing_document_id = (
+            str(processing_row[0])
+            if processing_row is not None and processing_row[0] is not None
+            else document_id
+        )
         rows = connection.execute(
             """
             SELECT block_id, ordinal, kind, text, heading_path, locator_json
@@ -287,7 +300,7 @@ class DesktopRawAssetService:
             WHERE document_id = ?
             ORDER BY ordinal
             """,
-            (document_id,),
+            (processing_document_id,),
         ).fetchall()
         blocks: list[DocumentIRBlock] = []
         for row in rows:

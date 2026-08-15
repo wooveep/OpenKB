@@ -33,6 +33,25 @@ _EVIDENCE_PACK_LIMIT = 6
 _RRF_OFFSET = 60
 _TERM_PATTERN = re.compile(r"[A-Za-z0-9_]{2,}|[\u3400-\u9fff]+")
 _CELL_RANGE_PATTERN = re.compile(r"^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$", re.IGNORECASE)
+_SCORE_COLUMNS = frozenset(("display_name", "heading_path", "text"))
+
+_AVAILABLE_EVIDENCE_OCCURRENCES_CTE = """
+WITH available_evidence_occurrences AS (
+    SELECT evidence_occurrences.evidence_id, evidence_occurrences.document_id,
+        source_documents.display_name, document_ir_blocks.heading_path,
+        document_ir_blocks.locator_json, evidence_refs.text, evidence_occurrences.ordinal,
+        ROW_NUMBER() OVER (
+            PARTITION BY evidence_occurrences.evidence_id
+            ORDER BY source_documents.created_at, source_documents.document_id,
+                evidence_occurrences.ordinal
+        ) AS occurrence_rank
+    FROM evidence_occurrences
+    JOIN evidence_refs ON evidence_refs.evidence_id = evidence_occurrences.evidence_id
+    JOIN source_documents ON source_documents.document_id = evidence_occurrences.document_id
+    JOIN document_ir_blocks ON document_ir_blocks.block_id = evidence_occurrences.block_id
+    WHERE source_documents.availability = 'available'
+)
+"""
 
 
 @dataclass(frozen=True)
@@ -189,16 +208,20 @@ def _fts_candidates(
     query = " OR ".join(f'"{term}"' for term in terms)
     try:
         rows = connection.execute(
-            """
-            SELECT evidence_refs.evidence_id, evidence_refs.document_id,
-                source_documents.display_name, document_ir_blocks.heading_path,
-                evidence_refs.locator_json, evidence_refs.text
+            f"""
+            {_AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+            SELECT available_evidence_occurrences.evidence_id,
+                available_evidence_occurrences.document_id,
+                available_evidence_occurrences.display_name,
+                available_evidence_occurrences.heading_path,
+                available_evidence_occurrences.locator_json,
+                available_evidence_occurrences.text
             FROM evidence_fts
-            JOIN evidence_refs ON evidence_refs.evidence_id = evidence_fts.evidence_id
-            JOIN source_documents ON source_documents.document_id = evidence_refs.document_id
-            JOIN document_ir_blocks ON document_ir_blocks.block_id = evidence_refs.block_id
-            WHERE evidence_fts MATCH ? AND source_documents.availability = 'available'
-            ORDER BY bm25(evidence_fts), evidence_refs.document_id, evidence_refs.ordinal
+            JOIN available_evidence_occurrences
+                ON available_evidence_occurrences.evidence_id = evidence_fts.evidence_id
+            WHERE evidence_fts MATCH ? AND available_evidence_occurrences.occurrence_rank = 1
+            ORDER BY bm25(evidence_fts), available_evidence_occurrences.document_id,
+                available_evidence_occurrences.ordinal
             LIMIT ?
             """,
             (query, _CHANNEL_LIMIT),
@@ -209,17 +232,14 @@ def _fts_candidates(
 
 
 def _like_rows(connection: sqlite3.Connection, terms: tuple[str, ...]) -> list[tuple[object, ...]]:
-    clauses = " OR ".join("lower(evidence_refs.text) LIKE ?" for _ in terms)
+    clauses = " OR ".join("lower(text) LIKE ?" for _ in terms)
     return connection.execute(
         f"""
-        SELECT evidence_refs.evidence_id, evidence_refs.document_id,
-            source_documents.display_name, document_ir_blocks.heading_path,
-            evidence_refs.locator_json, evidence_refs.text
-        FROM evidence_refs
-        JOIN source_documents ON source_documents.document_id = evidence_refs.document_id
-        JOIN document_ir_blocks ON document_ir_blocks.block_id = evidence_refs.block_id
-        WHERE source_documents.availability = 'available' AND ({clauses})
-        ORDER BY evidence_refs.document_id, evidence_refs.ordinal
+        {_AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+        SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
+        FROM available_evidence_occurrences
+        WHERE occurrence_rank = 1 AND ({clauses})
+        ORDER BY document_id, ordinal
         LIMIT ?
         """,
         tuple(f"%{term}%" for term in terms) + (_CHANNEL_LIMIT,),
@@ -235,7 +255,7 @@ def _page_tree_candidates(
         _scored_rows(
             connection,
             terms,
-            weighted_columns=(("document_ir_blocks.heading_path", 2), ("evidence_refs.text", 1)),
+            weighted_columns=(("heading_path", 2), ("text", 1)),
         ),
         "page_tree",
     )
@@ -257,8 +277,8 @@ def _wiki_candidates(
             connection,
             terms,
             weighted_columns=(
-                ("source_documents.display_name", 2),
-                ("document_ir_blocks.heading_path", 1),
+                ("display_name", 2),
+                ("heading_path", 1),
             ),
         ),
         "wiki",
@@ -271,30 +291,29 @@ def _scored_rows(
     *,
     weighted_columns: tuple[tuple[str, int], ...],
 ) -> list[tuple[object, ...]]:
-    """Select a bounded channel ranking from every Available Knowledge document.
+    """Select a bounded channel ranking from every Available Knowledge occurrence.
 
-    Column expressions are internal constants supplied by the two retrieval routes;
+    Column names are internal constants supplied by the two retrieval routes;
     only user-derived terms are bound as SQLite parameters.
     """
     score_parts: list[str] = []
     parameters: list[object] = []
     for term in terms:
         for column, weight in weighted_columns:
+            if column not in _SCORE_COLUMNS:
+                raise ValueError(f"Unsupported Desktop retrieval score column: {column}")
             score_parts.append(f"CASE WHEN instr(lower({column}), ?) > 0 THEN {weight} ELSE 0 END")
             parameters.append(term)
     score_expression = " + ".join(score_parts)
     return connection.execute(
         f"""
+        {_AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
         SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
         FROM (
-            SELECT evidence_refs.evidence_id, evidence_refs.document_id,
-                source_documents.display_name, document_ir_blocks.heading_path,
-                evidence_refs.locator_json, evidence_refs.text,
+            SELECT evidence_id, document_id, display_name, heading_path, locator_json, text,
                 ({score_expression}) AS channel_score
-            FROM evidence_refs
-            JOIN source_documents ON source_documents.document_id = evidence_refs.document_id
-            JOIN document_ir_blocks ON document_ir_blocks.block_id = evidence_refs.block_id
-            WHERE source_documents.availability = 'available'
+            FROM available_evidence_occurrences
+            WHERE occurrence_rank = 1
         )
         WHERE channel_score > 0
         ORDER BY channel_score DESC, document_id, evidence_id

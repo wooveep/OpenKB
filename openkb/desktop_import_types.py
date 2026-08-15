@@ -48,6 +48,28 @@ class DesktopImportedDocument:
 
 
 @dataclass(frozen=True)
+class DesktopDeduplication:
+    """The durable D0–D2 reuse outcome for one completed import job."""
+
+    level: str
+    reason: str
+    reused_document_id: str | None
+    reused_evidence_count: int
+    reusable_stages: tuple[str, ...]
+    normalized_body_sha256: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "level": self.level,
+            "reason": self.reason,
+            "reused_document_id": self.reused_document_id,
+            "reused_evidence_count": self.reused_evidence_count,
+            "reusable_stages": list(self.reusable_stages),
+            "normalized_body_sha256": self.normalized_body_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class DesktopImportJob:
     """The persisted task-center record for one selected source."""
 
@@ -57,6 +79,7 @@ class DesktopImportJob:
     progress: int
     document_id: str | None
     deduplicated: bool
+    deduplication: DesktopDeduplication | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -66,6 +89,7 @@ class DesktopImportJob:
             "progress": self.progress,
             "document_id": self.document_id,
             "deduplicated": self.deduplicated,
+            "deduplication": self.deduplication.as_dict() if self.deduplication else None,
         }
 
 

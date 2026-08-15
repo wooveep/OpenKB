@@ -18,18 +18,24 @@ from openkb.desktop_import_artifacts import (
     DocumentIRBlock,
     SourceImage,
 )
+from openkb.desktop_import_deduplication import (
+    complete_reused_import_in,
+    publish_content_duplicate_in,
+    publish_document_in,
+)
 from openkb.desktop_import_queries import (
+    find_available_document_by_normalized_body_in,
     find_available_document_in,
     stages_for_job,
     task_from_row,
 )
 from openkb.desktop_import_sources import SUPPORTED_DESKTOP_IMPORT_SUFFIXES
 from openkb.desktop_import_types import (
+    DesktopDeduplication,
     DesktopImportedDocument,
     DesktopImportTask,
     DesktopStageRun,
 )
-from openkb.desktop_source_image_assets import persist_source_images
 from openkb.desktop_source_image_assets import write_source_images as write_source_image_files
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import atomic_write_bytes, kb_ingest_lock
@@ -206,12 +212,17 @@ class DesktopImportStore:
                     import_jobs.progress, import_jobs.document_id, source_documents.document_id,
                     source_documents.display_name, source_documents.source_format,
                     source_documents.asset_sha256, source_documents.availability,
-                    (SELECT COUNT(*) FROM evidence_refs
-                     WHERE evidence_refs.document_id = source_documents.document_id),
+                    (SELECT COUNT(*) FROM evidence_occurrences
+                     WHERE evidence_occurrences.document_id = COALESCE(
+                         document_content_fingerprints.canonical_document_id,
+                         source_documents.document_id
+                     )),
                     import_jobs.source_path
                 FROM import_jobs
                 LEFT JOIN import_job_runtime ON import_job_runtime.job_id = import_jobs.job_id
                 LEFT JOIN source_documents ON source_documents.document_id = import_jobs.document_id
+                LEFT JOIN document_content_fingerprints
+                    ON document_content_fingerprints.document_id = source_documents.document_id
                 ORDER BY import_jobs.created_at DESC
                 """
             ).fetchall()
@@ -229,12 +240,17 @@ class DesktopImportStore:
                     import_jobs.progress, import_jobs.document_id, source_documents.document_id,
                     source_documents.display_name, source_documents.source_format,
                     source_documents.asset_sha256, source_documents.availability,
-                    (SELECT COUNT(*) FROM evidence_refs
-                     WHERE evidence_refs.document_id = source_documents.document_id),
+                    (SELECT COUNT(*) FROM evidence_occurrences
+                     WHERE evidence_occurrences.document_id = COALESCE(
+                         document_content_fingerprints.canonical_document_id,
+                         source_documents.document_id
+                     )),
                     import_jobs.source_path
                 FROM import_jobs
                 LEFT JOIN import_job_runtime ON import_job_runtime.job_id = import_jobs.job_id
                 LEFT JOIN source_documents ON source_documents.document_id = import_jobs.document_id
+                LEFT JOIN document_content_fingerprints
+                    ON document_content_fingerprints.document_id = source_documents.document_id
                 WHERE import_jobs.job_id = ?
                 """,
                 (job_id,),
@@ -399,37 +415,37 @@ class DesktopImportStore:
         finally:
             connection.close()
 
+    def find_available_document_by_normalized_body(
+        self, normalized_body_sha256: str
+    ) -> DesktopImportedDocument | None:
+        """Find an exact D1 processing result without inferring document identity."""
+        connection = self._connect()
+        try:
+            return find_available_document_by_normalized_body_in(connection, normalized_body_sha256)
+        finally:
+            connection.close()
+
     def complete_duplicate_job(self, state: ImportJobState, document_id: str) -> None:
         now = _timestamp()
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                for stage in IMPORT_STAGES[2:]:
-                    stage_run_id = state.stage_ids[stage]
-                    connection.execute(
-                        """
-                        UPDATE stage_runs
-                        SET status = 'skipped', progress = 100, error_code = NULL,
-                            completed_at = COALESCE(completed_at, ?)
-                        WHERE stage_run_id = ? AND job_id = ?
-                        """,
-                        (now, stage_run_id, state.job_id),
-                    )
-                    connection.execute(
-                        """
-                        UPDATE stage_run_runtime
-                        SET status = 'skipped', error_code = NULL, updated_at = ?
-                        WHERE stage_run_id = ? AND job_id = ?
-                        """,
-                        (now, stage_run_id, state.job_id),
-                    )
-                self._complete_job_in(
+                complete_reused_import_in(
                     connection,
-                    state.job_id,
-                    state.stage_ids["raw_asset"],
-                    document_id,
-                    now,
+                    state=state,
+                    document_id=document_id,
+                    completed_stage="raw_asset",
+                    skipped_stages=IMPORT_STAGES[2:],
+                    deduplication=DesktopDeduplication(
+                        level="D0",
+                        reason="raw_asset_sha256_match",
+                        reused_document_id=document_id,
+                        reused_evidence_count=0,
+                        reusable_stages=IMPORT_STAGES[2:],
+                    ),
+                    now=now,
+                    complete_job=self._complete_job_in,
                 )
                 connection.commit()
             except BaseException:
@@ -443,6 +459,58 @@ class DesktopImportStore:
                 DesktopStageRun(state.stage_ids[stage], stage, "skipped", 100),
                 document_id=document_id,
             )
+
+    def complete_content_duplicate_job(
+        self,
+        *,
+        state: ImportJobState,
+        source: Path,
+        document_id: str,
+        asset_sha256: str,
+        raw_path: str,
+        raw_size: int,
+        source_format: str,
+        raw_media_type: str,
+        source_images: tuple[SourceImage, ...],
+        normalized_body_sha256: str,
+        canonical_document: DesktopImportedDocument,
+    ) -> tuple[DesktopImportedDocument, bool]:
+        """Publish a distinct raw document that reuses an exact D1 processing result."""
+        now = _timestamp()
+        with kb_ingest_lock(self.state_dir):
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                result = publish_content_duplicate_in(
+                    connection,
+                    state=state,
+                    source=source,
+                    document_id=document_id,
+                    asset_sha256=asset_sha256,
+                    raw_path=raw_path,
+                    raw_size=raw_size,
+                    source_format=source_format,
+                    raw_media_type=raw_media_type,
+                    source_images=source_images,
+                    normalized_body_hash=normalized_body_sha256,
+                    canonical_document=canonical_document,
+                    now=now,
+                    complete_job=self._complete_job_in,
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+        document, deduplicated = result
+        for stage in ("evidence", "model_analysis", "search"):
+            self._emit_stage(
+                state.job_id,
+                DesktopStageRun(state.stage_ids[stage], stage, "skipped", 100),
+                document_id=document.document_id,
+            )
+        return document, deduplicated
 
     def publish_document(
         self,
@@ -458,93 +526,29 @@ class DesktopImportStore:
         blocks: tuple[DocumentIRBlock, ...],
         evidence: tuple[tuple[str, DocumentIRBlock], ...],
         source_images: tuple[SourceImage, ...],
+        normalized_body_sha256: str,
     ) -> tuple[DesktopImportedDocument, bool]:
         now = _timestamp()
-        search_stage_id = state.stage_ids["search"]
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                existing = find_available_document_in(connection, asset_sha256)
-                if existing is not None:
-                    self._complete_job_in(
-                        connection, state.job_id, search_stage_id, existing.document_id, now
-                    )
-                    self._complete_recovery_in(connection, state, now)
-                    connection.execute(
-                        "DELETE FROM quarantined_documents WHERE job_id = ?", (state.job_id,)
-                    )
-                    connection.commit()
-                    return existing, True
-                connection.execute(
-                    """
-                    INSERT INTO raw_assets (
-                        asset_sha256, byte_size, media_type, raw_path, original_name, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(asset_sha256) DO NOTHING
-                    """,
-                    (asset_sha256, raw_size, raw_media_type, raw_path, source.name, now),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO source_documents (
-                        document_id, asset_sha256, display_name, source_format, availability,
-                        created_at, available_at
-                    ) VALUES (?, ?, ?, ?, 'available', ?, ?)
-                    """,
-                    (document_id, asset_sha256, source.name, source_format, now, now),
-                )
-                connection.executemany(
-                    """
-                    INSERT INTO document_ir_blocks (
-                        block_id, document_id, ordinal, kind, text, heading_path, locator_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            block.block_id,
-                            document_id,
-                            block.ordinal,
-                            block.kind,
-                            block.text,
-                            json.dumps(block.heading_path, ensure_ascii=False),
-                            _block_locator(block),
-                        )
-                        for block in blocks
-                    ],
-                )
-                connection.executemany(
-                    """
-                    INSERT INTO evidence_refs (
-                        evidence_id, document_id, block_id, ordinal, text, locator_json
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            evidence_id,
-                            document_id,
-                            block.block_id,
-                            block.ordinal,
-                            block.text,
-                            _block_locator(block),
-                        )
-                        for evidence_id, block in evidence
-                    ],
-                )
-                connection.executemany(
-                    "INSERT INTO evidence_fts (evidence_id, document_id, content) VALUES (?, ?, ?)",
-                    [(evidence_id, document_id, block.text) for evidence_id, block in evidence],
-                )
-                persist_source_images(
+                result = publish_document_in(
                     connection,
+                    state=state,
+                    source=source,
                     document_id=document_id,
+                    asset_sha256=asset_sha256,
+                    raw_path=raw_path,
+                    raw_size=raw_size,
+                    source_format=source_format,
+                    raw_media_type=raw_media_type,
+                    blocks=blocks,
+                    evidence=evidence,
                     source_images=source_images,
-                    created_at=now,
-                )
-                self._complete_job_in(connection, state.job_id, search_stage_id, document_id, now)
-                self._complete_recovery_in(connection, state, now)
-                connection.execute(
-                    "DELETE FROM quarantined_documents WHERE job_id = ?", (state.job_id,)
+                    normalized_body_hash=normalized_body_sha256,
+                    now=now,
+                    complete_job=self._complete_job_in,
                 )
                 connection.commit()
             except BaseException:
@@ -552,17 +556,7 @@ class DesktopImportStore:
                 raise
             finally:
                 connection.close()
-        return (
-            DesktopImportedDocument(
-                document_id=document_id,
-                name=source.name,
-                source_format=source_format,
-                raw_asset_sha256=asset_sha256,
-                evidence_count=len(evidence),
-                availability="available",
-            ),
-            False,
-        )
+        return result
 
     def fail_job(self, state: ImportJobState, stage: str, error_code: str) -> None:
         stage_run_id = state.stage_ids[stage]
@@ -779,11 +773,6 @@ class DesktopImportStore:
             self._on_stage_progress(data)
         except Exception:
             logger.debug("Desktop import stage callback failed for job %s", job_id, exc_info=True)
-
-
-def _block_locator(block: DocumentIRBlock) -> str:
-    locator = block.locator or {"line_start": block.line_start, "line_end": block.line_end}
-    return json.dumps(locator, ensure_ascii=False)
 
 
 def _timestamp() -> str:

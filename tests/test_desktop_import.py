@@ -17,6 +17,7 @@ from openkb.desktop_import import (
 )
 from openkb.desktop_import_store import DesktopImportStore
 from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
@@ -103,6 +104,94 @@ def test_duplicate_txt_reuses_the_single_available_raw_asset(tmp_path):
 
     history = importer.list_import_jobs()["jobs"]
     assert history[0]["job"]["deduplicated"] is True
+
+
+def test_d1_normalized_body_reuses_processing_but_keeps_a_distinct_raw_document(tmp_path):
+    """Equivalent normalized bodies retain two versions while reusing later checkpoints."""
+    kb_dir = tmp_path / "desktop-kb"
+    first_source = tmp_path / "first.txt"
+    second_source = tmp_path / "second.txt"
+    first_source.write_text("# Guide\n\nSame normalized body.\n", encoding="utf-8")
+    second_source.write_bytes(b"# Guide\r\n\r\nSame normalized body.  \r\n")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    importer = DesktopTextImportService(kb_dir)
+
+    first = importer.import_text(first_source)
+    second = importer.import_text(second_source)
+
+    assert second.document.document_id != first.document.document_id
+    assert second.document.raw_asset_sha256 != first.document.raw_asset_sha256
+    assert second.job.deduplication is not None
+    assert second.job.deduplication.level == "D1"
+    assert second.job.deduplication.reused_document_id == first.document.document_id
+    assert second.job.deduplication.reusable_stages == ("evidence", "model_analysis", "search")
+    assert [stage.status for stage in second.stages] == [
+        "completed",
+        "completed",
+        "completed",
+        "skipped",
+        "skipped",
+        "skipped",
+    ]
+    assert len(list((kb_dir / "raw").iterdir())) == 2
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (2,)
+        assert connection.execute("SELECT COUNT(*) FROM document_ir_blocks").fetchone() == (2,)
+        assert connection.execute("SELECT COUNT(*) FROM evidence_refs").fetchone() == (2,)
+        assert connection.execute(
+            """
+            SELECT canonical_document_id FROM document_content_fingerprints
+            WHERE document_id = ?
+            """,
+            (second.document.document_id,),
+        ).fetchone() == (first.document.document_id,)
+
+    history = importer.list_import_jobs()["jobs"]
+    assert history[0]["job"]["deduplication"]["reason"] == "normalized_body_sha256_match"
+
+
+def test_d2_reuses_duplicate_evidence_without_merging_document_identity(tmp_path):
+    """A repeated fragment adds an occurrence, not a second independent EvidenceRef."""
+    kb_dir = tmp_path / "desktop-kb"
+    first_source = tmp_path / "first.txt"
+    second_source = tmp_path / "second.txt"
+    first_source.write_text("# Guide\n\nShared evidence.\n\nFirst-only evidence.", encoding="utf-8")
+    second_source.write_text(
+        "# Guide\n\nShared evidence.\n\nSecond-only evidence.", encoding="utf-8"
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    importer = DesktopTextImportService(kb_dir)
+
+    first = importer.import_text(first_source)
+    second = importer.import_text(second_source)
+
+    assert second.document.document_id != first.document.document_id
+    assert second.job.deduplication is not None
+    assert second.job.deduplication.level == "D2"
+    assert second.job.deduplication.reason == "evidence_sha256_match"
+    assert second.job.deduplication.reused_evidence_count == 2
+    assert second.job.deduplication.reusable_stages == ("evidence",)
+    pack = DesktopEvidenceRetriever(kb_dir).retrieve("Shared evidence")
+    assert [reference.excerpt for reference in pack.evidence].count("Shared evidence.") == 1
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (2,)
+        assert connection.execute("SELECT COUNT(*) FROM evidence_refs").fetchone() == (4,)
+        assert connection.execute("SELECT COUNT(*) FROM evidence_occurrences").fetchone() == (6,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM evidence_refs WHERE text = 'Shared evidence.'"
+        ).fetchone() == (1,)
+        connection.execute(
+            "UPDATE source_documents SET availability = 'failed' WHERE document_id = ?",
+            (first.document.document_id,),
+        )
+
+    fallback_pack = DesktopEvidenceRetriever(kb_dir).retrieve("Shared evidence")
+    shared_reference = next(
+        reference for reference in fallback_pack.evidence if reference.excerpt == "Shared evidence."
+    )
+    assert shared_reference.document_id == second.document.document_id
+    assert shared_reference.document_name == second.document.name
 
 
 def test_failed_prepublication_stage_never_exposes_a_partial_document(tmp_path, monkeypatch):

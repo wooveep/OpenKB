@@ -11,6 +11,7 @@ from openkb.desktop_import_runner import DesktopImportControl, DesktopTextImport
 from openkb.desktop_import_sources import DesktopImportSource, DesktopImportSourceInspection
 from openkb.desktop_import_store import IMPORT_STAGES
 from openkb.desktop_import_types import (
+    DesktopDeduplication,
     DesktopImportedDocument,
     DesktopImportJob,
     DesktopImportTask,
@@ -26,6 +27,7 @@ _STAGES = IMPORT_STAGES
 
 __all__ = [
     "DesktopImportControl",
+    "DesktopDeduplication",
     "DesktopImportError",
     "DesktopImportedDocument",
     "DesktopImportJob",

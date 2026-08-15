@@ -14,7 +14,12 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from openkb.desktop_import_deduplication import (
+    backfill_deduplication_metadata,
+    deduplication_backfill_needed,
+)
 from openkb.desktop_workspace_migrations import (
+    DEDUPLICATION_MIGRATION_STATEMENTS,
     GROUNDED_ANSWER_MIGRATION_STATEMENTS,
     GROUNDED_ANSWER_SOURCE_IMAGE_MIGRATION_STATEMENTS,
     INTERRUPTED_ANSWER_MIGRATION_STATEMENTS,
@@ -342,6 +347,7 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (9, GROUNDED_ANSWER_SOURCE_IMAGE_MIGRATION_STATEMENTS),
     (10, INTERRUPTED_ANSWER_MIGRATION_STATEMENTS),
     (11, KNOWLEDGE_PAGE_MIGRATION_STATEMENTS),
+    (12, DEDUPLICATION_MIGRATION_STATEMENTS),
 )
 
 
@@ -587,6 +593,17 @@ def _apply_migrations(
                     (version, now),
                 )
         applied.add(version)
+    if 12 in applied and deduplication_backfill_needed(connection):
+        try:
+            if in_transaction:
+                backfill_deduplication_metadata(connection, created_at=_timestamp())
+            else:
+                with connection:
+                    backfill_deduplication_metadata(connection, created_at=_timestamp())
+        except ValueError as error:
+            raise DesktopKnowledgeBaseStateError(
+                "Desktop Knowledge Base has invalid document structure for deduplication."
+            ) from error
     return latest
 
 

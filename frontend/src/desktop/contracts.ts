@@ -77,6 +77,16 @@ export interface DesktopImportJob {
   progress: number
   documentId: string | null
   deduplicated: boolean
+  deduplication: DesktopImportDeduplication | null
+}
+
+export interface DesktopImportDeduplication {
+  level: "D0" | "D1" | "D2"
+  reason: "raw_asset_sha256_match" | "normalized_body_sha256_match" | "evidence_sha256_match"
+  reusedDocumentId: string | null
+  reusedEvidenceCount: number
+  reusableStages: DesktopImportStageRun["stage"][]
+  normalizedBodySha256: string | null
 }
 
 export interface DesktopImportStageRun {

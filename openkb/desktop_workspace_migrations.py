@@ -296,3 +296,52 @@ KNOWLEDGE_PAGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON knowledge_page_revisions(page_id, revision_number DESC)
     """,
 )
+
+
+DEDUPLICATION_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE document_content_fingerprints (
+        document_id TEXT PRIMARY KEY REFERENCES source_documents(document_id) ON DELETE CASCADE,
+        normalized_body_sha256 TEXT NOT NULL,
+        canonical_document_id TEXT REFERENCES source_documents(document_id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX document_content_fingerprints_lookup_idx
+        ON document_content_fingerprints(normalized_body_sha256, canonical_document_id)
+    """,
+    """
+    CREATE TABLE evidence_fingerprints (
+        evidence_sha256 TEXT PRIMARY KEY,
+        evidence_id TEXT NOT NULL UNIQUE REFERENCES evidence_refs(evidence_id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE evidence_occurrences (
+        document_id TEXT NOT NULL REFERENCES source_documents(document_id) ON DELETE CASCADE,
+        block_id TEXT NOT NULL REFERENCES document_ir_blocks(block_id) ON DELETE CASCADE,
+        evidence_id TEXT NOT NULL REFERENCES evidence_refs(evidence_id) ON DELETE RESTRICT,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        PRIMARY KEY(document_id, block_id),
+        UNIQUE(document_id, ordinal)
+    )
+    """,
+    """
+    CREATE INDEX evidence_occurrences_evidence_idx
+        ON evidence_occurrences(evidence_id, document_id, ordinal)
+    """,
+    """
+    CREATE TABLE import_deduplications (
+        job_id TEXT PRIMARY KEY REFERENCES import_jobs(job_id) ON DELETE CASCADE,
+        level TEXT NOT NULL CHECK(level IN ('D0', 'D1', 'D2')),
+        reason TEXT NOT NULL,
+        reused_document_id TEXT REFERENCES source_documents(document_id) ON DELETE SET NULL,
+        reused_evidence_count INTEGER NOT NULL DEFAULT 0 CHECK(reused_evidence_count >= 0),
+        normalized_body_sha256 TEXT,
+        reusable_stages_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+)

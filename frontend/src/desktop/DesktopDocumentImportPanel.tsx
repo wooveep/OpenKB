@@ -301,6 +301,17 @@ function ImportTaskCard({
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${task.job.progress}%` }} />
       </div>
+      {task.job.deduplication ? (
+        <p className="mt-3 text-sm text-muted-foreground">
+          {task.job.deduplication.level === "D0"
+            ? t("desktop.knowledgeBases.deduplicationD0")
+            : task.job.deduplication.level === "D1"
+              ? t("desktop.knowledgeBases.deduplicationD1")
+              : t("desktop.knowledgeBases.deduplicationD2", {
+                count: task.job.deduplication.reusedEvidenceCount,
+              })}
+        </p>
+      ) : null}
       {modelCall ? (
         <div className="mt-4 border-t border-border/70 pt-4 text-sm">
           <p className="text-muted-foreground">

@@ -222,6 +222,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
         progress: 100,
         documentId,
         deduplicated: false,
+        deduplication: null,
       },
       stages: stages.map((stage, index) => ({
         stageRunId: `${jobId}-${stage}`,

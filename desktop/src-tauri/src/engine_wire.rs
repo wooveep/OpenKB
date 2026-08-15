@@ -430,6 +430,23 @@ pub struct ImportJob {
     #[serde(alias = "document_id")]
     pub document_id: Option<String>,
     pub deduplicated: bool,
+    #[serde(default)]
+    pub deduplication: Option<ImportDeduplication>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportDeduplication {
+    pub level: String,
+    pub reason: String,
+    #[serde(alias = "reused_document_id")]
+    pub reused_document_id: Option<String>,
+    #[serde(alias = "reused_evidence_count")]
+    pub reused_evidence_count: u32,
+    #[serde(default, alias = "reusable_stages")]
+    pub reusable_stages: Vec<ImportStage>,
+    #[serde(alias = "normalized_body_sha256")]
+    pub normalized_body_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
