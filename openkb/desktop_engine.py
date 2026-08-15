@@ -159,7 +159,12 @@ class DesktopEngineServer:
         "workbench.import_jobs",
         "workbench.read_raw_document",
         "workbench.ask_grounded",
+        "workbench.retry_interrupted_answer",
         "workbench.grounded_answers",
+    }
+    _INTERRUPTION_PRESERVING_METHODS = {
+        "workbench.ask_grounded",
+        "workbench.retry_interrupted_answer",
     }
     _NON_CANCELABLE_MUTATION_METHODS = {
         "workbench.create_knowledge_base",
@@ -260,6 +265,7 @@ class DesktopEngineServer:
                 cancel_event is not None
                 and cancel_event.is_set()
                 and request.method not in self._NON_CANCELABLE_MUTATION_METHODS
+                and request.method not in self._INTERRUPTION_PRESERVING_METHODS
             ):
                 raise DesktopRequestError(
                     "request_cancelled", "Desktop Bridge request was cancelled."
@@ -335,7 +341,11 @@ class DesktopEngineServer:
         if request.method == "engine.health":
             return {"status": "ready", "protocol_version": PROTOCOL_VERSION}
 
-        if cancel_event is not None and cancel_event.is_set():
+        if (
+            cancel_event is not None
+            and cancel_event.is_set()
+            and request.method not in self._INTERRUPTION_PRESERVING_METHODS
+        ):
             raise DesktopRequestError("request_cancelled", "Desktop Bridge request was cancelled.")
 
         if request.method == "workbench.pause_import_job":
@@ -400,7 +410,7 @@ class DesktopEngineServer:
                 return {"answers": []}
             answers = DesktopGroundedAnswerService(Path(active.kb_dir)).list()
             return {"answers": [answer.as_dict() for answer in answers]}
-        if request.method == "workbench.ask_grounded":
+        if request.method in self._INTERRUPTION_PRESERVING_METHODS:
             return self._dispatch_grounded_answer_request(request, cancel_event)
         if request.method in {
             "workbench.import_text_document",
@@ -447,10 +457,6 @@ class DesktopEngineServer:
     ) -> dict[str, object]:
         """Answer against one stable active KB without making model work a mutation."""
         with self._workspace_requests_lock:
-            if cancel_event is not None and cancel_event.is_set():
-                raise DesktopRequestError(
-                    "request_cancelled", "Desktop Bridge request was cancelled."
-                )
             active = self._workspace.active()
             if active is None:
                 raise DesktopRequestError(
@@ -458,12 +464,13 @@ class DesktopEngineServer:
                     "Open a Desktop Knowledge Base before asking a question.",
                 )
             kb_dir = Path(active.kb_dir)
-        answer = DesktopGroundedAnswerService(
+        service = DesktopGroundedAnswerService(
             kb_dir,
             model_gateway=self._model_gateway_factory(kb_dir, None),
-        ).answer(
-            _required_string_param(request, "question"),
-            on_delta=lambda answer_id, delta, replace, attempt: self._emit_event(
+        )
+
+        def on_delta(answer_id: str, delta: str, replace: bool, attempt: int) -> None:
+            self._emit_event(
                 "answer.delta",
                 {
                     "request_id": request.request_id,
@@ -472,8 +479,21 @@ class DesktopEngineServer:
                     "replace": replace,
                     "attempt": attempt,
                 },
-            ),
-        )
+            )
+
+        is_cancelled = cancel_event.is_set if cancel_event is not None else None
+        if request.method == "workbench.ask_grounded":
+            answer = service.answer(
+                _required_string_param(request, "question"),
+                on_delta=on_delta,
+                is_cancelled=is_cancelled,
+            )
+        else:
+            answer = service.retry(
+                _required_string_param(request, "answer_id"),
+                on_delta=on_delta,
+                is_cancelled=is_cancelled,
+            )
         return answer.as_dict()
 
     def _dispatch_import_request(

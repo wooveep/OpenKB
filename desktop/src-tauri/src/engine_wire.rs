@@ -92,6 +92,13 @@ pub enum ModelCallStatus {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
+pub enum AnswerStatus {
+    Completed,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ImportedDocumentAvailability {
     Available,
     Failed,
@@ -313,8 +320,18 @@ pub struct GroundedAnswer {
     pub source_images: Vec<AnswerSourceImage>,
     #[serde(default)]
     pub degradations: Vec<String>,
+    #[serde(default = "default_completed_answer_status")]
+    pub status: AnswerStatus,
+    #[serde(default, alias = "interruption_code")]
+    pub interruption_code: Option<String>,
+    #[serde(default, alias = "interruption_reason")]
+    pub interruption_reason: Option<String>,
     #[serde(alias = "created_at")]
     pub created_at: String,
+}
+
+fn default_completed_answer_status() -> AnswerStatus {
+    AnswerStatus::Completed
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

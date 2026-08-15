@@ -162,6 +162,23 @@ async fn desktop_ask_grounded(
         })?
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_retry_interrupted_answer(
+    state: State<'_, DesktopState>,
+    answer_id: String,
+    request_id: String,
+) -> Result<GroundedAnswer, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.retry_interrupted_answer(answer_id, request_id)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop interrupted-answer retry task stopped unexpectedly: {error}"),
+    })?
+}
+
 #[tauri::command]
 async fn desktop_grounded_answers(
     state: State<'_, DesktopState>,
@@ -315,6 +332,7 @@ fn main() {
             desktop_import_text_document,
             desktop_import_jobs,
             desktop_ask_grounded,
+            desktop_retry_interrupted_answer,
             desktop_grounded_answers,
             desktop_read_raw_document,
             desktop_pause_import_job,

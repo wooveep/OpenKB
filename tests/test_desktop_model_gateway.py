@@ -12,6 +12,7 @@ from openkb.config import LlmCredentialBundle
 from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
+    DesktopModelCancelledError,
     DesktopModelGateway,
     DesktopModelRequest,
     DesktopModelTransportError,
@@ -240,3 +241,34 @@ def test_gateway_does_not_retry_authentication_or_response_format_failures():
             on_event=lambda _event: None,
         )
     assert response_error.value.failure.code == "model_response_invalid"
+
+
+def test_gateway_stops_while_waiting_for_a_provider_retry_after():
+    """A user stop interrupts retry backoff instead of waiting for the provider delay."""
+    retry_waiting = threading.Event()
+    stop = threading.Event()
+    stopped = threading.Event()
+
+    def rate_limited_transport(_request, _timeout_seconds):
+        raise DesktopModelTransportError("rate_limited", retry_after_seconds=1)
+
+    def run() -> None:
+        try:
+            DesktopModelGateway(rate_limited_transport).analyze(
+                DesktopModelRequest("grounded_answer", "answer", "source"),
+                on_event=lambda event: retry_waiting.set()
+                if event.status == "retry_wait"
+                else None,
+                is_cancelled=stop.is_set,
+            )
+        except DesktopModelCancelledError:
+            stopped.set()
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert retry_waiting.wait(timeout=1)
+    stop.set()
+    worker.join(timeout=0.5)
+
+    assert stopped.is_set()
+    assert not worker.is_alive()

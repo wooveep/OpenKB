@@ -27,6 +27,9 @@ use std::{
 };
 use tauri::ipc::Channel;
 
+#[path = "engine_protocol_answers.rs"]
+mod answers;
+
 const PROTOCOL_VERSION: u32 = 1;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const IMPORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -213,26 +216,6 @@ impl EngineSupervisor {
             BridgeError::new(
                 "invalid_engine_response",
                 format!("Engine import jobs response has an invalid shape: {error}"),
-            )
-        })
-    }
-
-    pub fn ask_grounded(
-        &self,
-        question: String,
-        request_id: String,
-    ) -> BridgeResult<GroundedAnswer> {
-        self.ensure_started()?;
-        let value = self.request_started_with_timeout(
-            "workbench.ask_grounded",
-            json!({ "question": question }),
-            Some(request_id),
-            IMPORT_REQUEST_TIMEOUT,
-        )?;
-        serde_json::from_value(value).map_err(|error| {
-            BridgeError::new(
-                "invalid_engine_response",
-                format!("Engine grounded answer response has an invalid shape: {error}"),
             )
         })
     }

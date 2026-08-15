@@ -235,3 +235,28 @@ GROUNDED_ANSWER_SOURCE_IMAGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON grounded_answer_source_images(answer_id, ordinal)
     """,
 )
+
+
+INTERRUPTED_ANSWER_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    ALTER TABLE grounded_answers
+        ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'
+        CHECK(status IN ('completed', 'interrupted'))
+    """,
+    """
+    ALTER TABLE grounded_answers ADD COLUMN interruption_code TEXT
+    """,
+    """
+    ALTER TABLE grounded_answers ADD COLUMN interruption_reason TEXT
+    """,
+    """
+    ALTER TABLE grounded_answers ADD COLUMN updated_at TEXT
+    """,
+    """
+    UPDATE grounded_answers SET updated_at = completed_at WHERE updated_at IS NULL
+    """,
+    """
+    CREATE INDEX grounded_answers_status_created_idx
+        ON grounded_answers(status, created_at DESC)
+    """,
+)

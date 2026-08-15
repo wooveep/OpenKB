@@ -222,6 +222,9 @@ export interface DesktopGroundedAnswer {
   citations: DesktopEvidenceRef[]
   sourceImages: DesktopAnswerSourceImage[]
   degradations: string[]
+  status: "completed" | "interrupted"
+  interruptionCode: string | null
+  interruptionReason: string | null
   createdAt: string
 }
 
@@ -346,6 +349,7 @@ export interface DesktopBridge {
   importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport>
   importJobs(): Promise<DesktopImportJobs>
   askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer>
+  retryInterruptedAnswer(answerId: string, requestId: string): Promise<DesktopGroundedAnswer>
   groundedAnswers(): Promise<DesktopGroundedAnswers>
   pauseImportJob(jobId: string): Promise<DesktopImportControlResult>
   resumeImportJob(jobId: string, requestId: string): Promise<DesktopTextDocumentImport>

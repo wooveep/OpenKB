@@ -95,7 +95,7 @@ class DesktopEvidencePack:
 
 @dataclass(frozen=True)
 class DesktopGroundedAnswer:
-    """A completed answer and immutable snapshots of every cited source fragment."""
+    """A persisted completed or interrupted answer and its cited source fragments."""
 
     answer_id: str
     question: str
@@ -105,6 +105,9 @@ class DesktopGroundedAnswer:
     degradations: tuple[str, ...]
     created_at: str
     source_images: tuple[DesktopAnswerSourceImage, ...] = ()
+    status: str = "completed"
+    interruption_code: str | None = None
+    interruption_reason: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -116,4 +119,7 @@ class DesktopGroundedAnswer:
             "degradations": list(self.degradations),
             "created_at": self.created_at,
             "source_images": [image.as_dict() for image in self.source_images],
+            "status": self.status,
+            "interruption_code": self.interruption_code,
+            "interruption_reason": self.interruption_reason,
         }

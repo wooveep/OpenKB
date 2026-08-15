@@ -146,6 +146,16 @@ export class TauriDesktopBridge implements DesktopBridge {
     return this.call<DesktopGroundedAnswer>("desktop_ask_grounded", { question, requestId })
   }
 
+  async retryInterruptedAnswer(
+    answerId: string,
+    requestId: string,
+  ): Promise<DesktopGroundedAnswer> {
+    return this.call<DesktopGroundedAnswer>("desktop_retry_interrupted_answer", {
+      answerId,
+      requestId,
+    })
+  }
+
   async groundedAnswers(): Promise<DesktopGroundedAnswers> {
     return this.call<DesktopGroundedAnswers>("desktop_grounded_answers")
   }
@@ -294,6 +304,12 @@ class UnavailableDesktopBridge implements DesktopBridge {
 
   askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer> {
     void question
+    void requestId
+    return this.unavailable()
+  }
+
+  retryInterruptedAnswer(answerId: string, requestId: string): Promise<DesktopGroundedAnswer> {
+    void answerId
     void requestId
     return this.unavailable()
   }

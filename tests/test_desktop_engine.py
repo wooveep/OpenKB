@@ -300,7 +300,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 9,
+            "schema_version": 10,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -759,3 +759,49 @@ def test_engine_streams_and_returns_a_grounded_answer(tmp_path):
     )
     assert delta_event["params"]["data"]["replace"] is True
     assert delta_event["params"]["data"]["attempt"] == 1
+
+
+def test_engine_returns_a_persisted_interrupted_answer_after_user_stop(tmp_path):
+    """Stopping an in-flight answer is a durable answer state, not a bridge error."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "answer.txt"
+    source.write_text("The project uses a local evidence baseline.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+    output = io.BytesIO()
+    stop = threading.Event()
+
+    class StoppingTransport:
+        def __call__(self, _request, _timeout_seconds):
+            return '{"terms": ["evidence"]}'
+
+        def stream(self, _request, _timeout_seconds, on_delta):
+            on_delta("partial answer")
+            stop.set()
+            return "late answer"
+
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        output,
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(StoppingTransport()),
+    )
+    server._handshake_complete = True
+
+    server._run_request(
+        DesktopRequest(
+            request_id="answer",
+            method="workbench.ask_grounded",
+            params={"question": "What baseline does the project use?"},
+        ),
+        cancel_event=stop,
+    )
+
+    response = next(
+        frame for frame in _decode_frames(output.getvalue()) if frame.get("id") == "answer"
+    )
+    result = response["result"]
+    assert result["status"] == "interrupted"
+    assert result["interruption_code"] == "answer_cancelled"
+    assert result["answer_text"] == "partial answer"

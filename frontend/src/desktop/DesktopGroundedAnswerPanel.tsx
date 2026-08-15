@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core"
-import { Images, Loader2, SendHorizontal } from "lucide-react"
+import { Images, Loader2, RotateCcw, SendHorizontal, Square } from "lucide-react"
 import { useCallback, useEffect, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
@@ -22,6 +22,7 @@ type StreamingAnswer = {
   answerId: string | null
   attempt: number
   content: string
+  retrying: boolean
 }
 
 /** Ask over the persisted Available Knowledge evidence pack, never browser state. */
@@ -62,6 +63,7 @@ export function DesktopGroundedAnswerPanel({
           answerId: event.data.answerId,
           attempt: event.data.attempt,
           content: replace ? event.data.delta : current.content + event.data.delta,
+          retrying: current.retrying,
         }
       })
     }).then((remove) => {
@@ -80,7 +82,7 @@ export function DesktopGroundedAnswerPanel({
     const requestId = nextAnswerRequestId()
     setAnswering(true)
     setError(null)
-    setStreaming({ requestId, answerId: null, attempt: 0, content: "" })
+    setStreaming({ requestId, answerId: null, attempt: 0, content: "", retrying: false })
     try {
       const answer = await bridge.askGrounded(normalized, requestId)
       setAnswers((current) => [
@@ -93,6 +95,34 @@ export function DesktopGroundedAnswerPanel({
     } finally {
       setStreaming(null)
       setAnswering(false)
+    }
+  }
+
+  const retryAnswer = async (answer: DesktopGroundedAnswer) => {
+    if (answering || answer.status !== "interrupted") return
+    const requestId = nextAnswerRequestId()
+    setAnswering(true)
+    setError(null)
+    setStreaming({ requestId, answerId: answer.answerId, attempt: 0, content: "", retrying: true })
+    try {
+      const replacement = await bridge.retryInterruptedAnswer(answer.answerId, requestId)
+      setAnswers((current) => current.map((item) => (
+        item.answerId === replacement.answerId ? replacement : item
+      )))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setStreaming(null)
+      setAnswering(false)
+    }
+  }
+
+  const stopAnswer = async () => {
+    if (!streaming) return
+    try {
+      await bridge.cancel(streaming.requestId)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
     }
   }
 
@@ -121,7 +151,13 @@ export function DesktopGroundedAnswerPanel({
           placeholder={t("desktop.knowledgeBases.answerQuestionPlaceholder")}
           className="mt-2 w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
-        <div className="mt-3 flex justify-end">
+        <div className="mt-3 flex justify-end gap-2">
+          {answering ? (
+            <Button type="button" variant="outline" onClick={() => void stopAnswer()}>
+              <Square className="size-3.5" />
+              {t("desktop.knowledgeBases.stopAnswer")}
+            </Button>
+          ) : null}
           <Button disabled={!question.trim() || answering} onClick={() => void ask()}>
             {answering ? <Loader2 className="size-4 animate-spin" /> : <SendHorizontal className="size-4" />}
             {answering
@@ -135,11 +171,21 @@ export function DesktopGroundedAnswerPanel({
       {streaming ? (
         <AnswerCard
           answerText={streaming.content}
-          title={t("desktop.knowledgeBases.answerStreaming")}
+          title={t(
+            streaming.retrying
+              ? "desktop.knowledgeBases.answerRetrying"
+              : "desktop.knowledgeBases.answerStreaming",
+          )}
         />
       ) : null}
       {answers.length ? answers.map((answer) => (
-        <CompletedAnswerCard key={answer.answerId} answer={answer} onOpenOriginal={onOpenOriginal} />
+        <CompletedAnswerCard
+          key={answer.answerId}
+          answer={answer}
+          onOpenOriginal={onOpenOriginal}
+          onRetry={() => void retryAnswer(answer)}
+          retrying={answering}
+        />
       )) : (
         <p className="rounded-apple-lg border border-dashed border-border/80 p-5 text-sm text-muted-foreground">
           {t("desktop.knowledgeBases.noAnswers")}
@@ -152,13 +198,38 @@ export function DesktopGroundedAnswerPanel({
 function CompletedAnswerCard({
   answer,
   onOpenOriginal,
+  onRetry,
+  retrying,
 }: {
   answer: DesktopGroundedAnswer
   onOpenOriginal: (documentId: string, locator: Record<string, unknown>) => void
+  onRetry: () => void
+  retrying: boolean
 }) {
   const { t } = useTranslation("common")
   return (
     <AnswerCard answerText={answer.answerText} title={answer.question}>
+      {answer.status === "interrupted" ? (
+        <section className="mt-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+          <p className="font-medium">{t("desktop.knowledgeBases.answerInterrupted")}</p>
+          {answer.interruptionReason ? (
+            <p className="mt-1 text-muted-foreground">{answer.interruptionReason}</p>
+          ) : null}
+          <Button
+            className="mt-3"
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={retrying}
+            onClick={onRetry}
+          >
+            {retrying ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}
+            {retrying
+              ? t("desktop.knowledgeBases.answerRetrying")
+              : t("desktop.knowledgeBases.retryAnswer")}
+          </Button>
+        </section>
+      ) : null}
       {answer.sourceImages.length ? (
         <AnswerSourceImages
           images={answer.sourceImages}

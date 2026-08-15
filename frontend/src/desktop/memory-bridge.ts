@@ -274,9 +274,34 @@ export class MemoryDesktopBridge implements DesktopBridge {
       citations,
       sourceImages: [],
       degradations: ["answer_model_unavailable"],
+      status: "completed",
+      interruptionCode: null,
+      interruptionReason: null,
       createdAt: new Date().toISOString(),
     }
     this.groundedAnswerResults = [result, ...this.groundedAnswerResults]
+    return result
+  }
+
+  async retryInterruptedAnswer(
+    answerId: string,
+    requestId: string,
+  ): Promise<DesktopGroundedAnswer> {
+    void requestId
+    const existing = this.groundedAnswerResults.find((answer) => answer.answerId === answerId)
+    if (!existing || existing.status !== "interrupted") {
+      throw new Error("Only an interrupted answer can be retried.")
+    }
+    const result: DesktopGroundedAnswer = {
+      ...existing,
+      answerText: `Retried answer for “${existing.question}”.`,
+      status: "completed",
+      interruptionCode: null,
+      interruptionReason: null,
+    }
+    this.groundedAnswerResults = this.groundedAnswerResults.map((answer) => (
+      answer.answerId === answerId ? result : answer
+    ))
     return result
   }
 
@@ -370,7 +395,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 9,
+      schemaVersion: 10,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []

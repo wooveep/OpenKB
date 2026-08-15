@@ -22,6 +22,7 @@ ModelTransportDeltaCallback = Callable[[str], None]
 ModelDeltaCallback = Callable[[int, str], None]
 ModelStreamTransport = Callable[["DesktopModelRequest", float, ModelTransportDeltaCallback], object]
 RetryCallback = Callable[[int], None]
+CancellationCallback = Callable[[], bool]
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,10 @@ class DesktopModelCallError(RuntimeError):
         self.call_id = call_id
         self.failure = failure
         self.attempt_count = attempt_count
+
+
+class DesktopModelCancelledError(RuntimeError):
+    """Stop one logical model call without classifying it as a provider failure."""
 
 
 _FAILURES: dict[str, DesktopModelFailure] = {
@@ -179,15 +184,20 @@ class DesktopModelGateway:
         self._initial_timeout_seconds = initial_timeout_seconds
 
     def analyze(
-        self, request: DesktopModelRequest, *, on_event: ModelEventCallback
+        self,
+        request: DesktopModelRequest,
+        *,
+        on_event: ModelEventCallback,
+        is_cancelled: CancellationCallback | None = None,
     ) -> DesktopModelResult:
         """Execute one bounded analysis call and emit every attempt state transition."""
         return self._run(
             request,
             on_event=on_event,
             attempt_call=lambda current_request, timeout, _attempt: self._call_transport(
-                current_request, timeout
+                current_request, timeout, is_cancelled=is_cancelled
             ),
+            is_cancelled=is_cancelled,
         )
 
     def stream(
@@ -197,11 +207,12 @@ class DesktopModelGateway:
         on_event: ModelEventCallback,
         on_delta: ModelDeltaCallback,
         on_reset: RetryCallback | None = None,
+        is_cancelled: CancellationCallback | None = None,
     ) -> DesktopModelResult:
         """Emit production response deltas while preserving the existing call policy."""
         stream_transport = getattr(self._transport, "stream", None)
         if not callable(stream_transport):
-            result = self.analyze(request, on_event=on_event)
+            result = self.analyze(request, on_event=on_event, is_cancelled=is_cancelled)
             on_delta(1, result.content)
             return result
         transport = cast(ModelStreamTransport, stream_transport)
@@ -214,7 +225,9 @@ class DesktopModelGateway:
                 timeout,
                 transport,
                 lambda delta: on_delta(attempt, delta),
+                is_cancelled=is_cancelled,
             ),
+            is_cancelled=is_cancelled,
         )
 
     def _run(
@@ -224,10 +237,13 @@ class DesktopModelGateway:
         on_event: ModelEventCallback,
         attempt_call: Callable[[DesktopModelRequest, float, int], object],
         on_retry: RetryCallback | None = None,
+        is_cancelled: CancellationCallback | None = None,
     ) -> DesktopModelResult:
         call_id = uuid.uuid4().hex
         started_at = self._clock()
         for attempt_index in range(MAX_AUTOMATIC_RETRIES + 1):
+            if _is_cancelled(is_cancelled):
+                raise DesktopModelCancelledError()
             remaining = _remaining_seconds(started_at, self._clock())
             if remaining <= 0:
                 raise self._deadline_error(call_id, attempt_index, on_event)
@@ -246,6 +262,8 @@ class DesktopModelGateway:
             )
             try:
                 response = attempt_call(request, timeout_seconds, attempt_index + 1)
+            except DesktopModelCancelledError:
+                raise
             except Exception as error:
                 failure = classify_model_error(error)
                 remaining = _remaining_seconds(started_at, self._clock())
@@ -271,7 +289,9 @@ class DesktopModelGateway:
                     )
                     if on_retry is not None:
                         on_retry(attempt_index + 2)
-                    self._wait_for_retry(error, started_at)
+                    if _is_cancelled(is_cancelled):
+                        raise DesktopModelCancelledError() from error
+                    self._wait_for_retry(error, started_at, is_cancelled=is_cancelled)
                     continue
                 on_event(
                     DesktopModelAttemptEvent(
@@ -286,6 +306,8 @@ class DesktopModelGateway:
                 )
                 raise DesktopModelCallError(call_id, failure, attempt_index + 1) from error
 
+            if _is_cancelled(is_cancelled):
+                raise DesktopModelCancelledError()
             now = self._clock()
             remaining = _remaining_seconds(started_at, now)
             if now - started_at >= MODEL_CALL_DEADLINE_SECONDS:
@@ -335,7 +357,13 @@ class DesktopModelGateway:
         )
         return DesktopModelCallError(call_id, failure, attempts)
 
-    def _call_transport(self, request: DesktopModelRequest, timeout_seconds: float) -> object:
+    def _call_transport(
+        self,
+        request: DesktopModelRequest,
+        timeout_seconds: float,
+        *,
+        is_cancelled: CancellationCallback | None,
+    ) -> object:
         """Bound the wait even when an adapter fails to honor its timeout argument."""
         completed = threading.Event()
         outcome: dict[str, object] = {}
@@ -349,8 +377,7 @@ class DesktopModelGateway:
                 completed.set()
 
         threading.Thread(target=invoke, daemon=True, name="openkb-model-attempt").start()
-        if not completed.wait(timeout_seconds):
-            raise TimeoutError()
+        _wait_for_model_response(completed, timeout_seconds, is_cancelled)
         error = outcome.get("error")
         if isinstance(error, Exception):
             raise error
@@ -362,6 +389,8 @@ class DesktopModelGateway:
         timeout_seconds: float,
         transport: ModelStreamTransport,
         on_delta: ModelTransportDeltaCallback,
+        *,
+        is_cancelled: CancellationCallback | None,
     ) -> object:
         """Bound one provider stream and discard late chunks after a timeout."""
         active = threading.Event()
@@ -382,16 +411,22 @@ class DesktopModelGateway:
                 completed.set()
 
         threading.Thread(target=invoke, daemon=True, name="openkb-model-stream-attempt").start()
-        if not completed.wait(timeout_seconds):
+        try:
+            _wait_for_model_response(completed, timeout_seconds, is_cancelled)
+        finally:
             active.clear()
-            raise TimeoutError()
-        active.clear()
         error = outcome.get("error")
         if isinstance(error, Exception):
             raise error
         return outcome.get("response")
 
-    def _wait_for_retry(self, error: Exception, started_at: float) -> None:
+    def _wait_for_retry(
+        self,
+        error: Exception,
+        started_at: float,
+        *,
+        is_cancelled: CancellationCallback | None,
+    ) -> None:
         retry_after = (
             error.retry_after_seconds
             if isinstance(error, DesktopModelTransportError)
@@ -401,8 +436,36 @@ class DesktopModelGateway:
         if retry_after <= 0:
             return
         remaining = _remaining_seconds(started_at, self._clock())
-        if remaining > 0:
-            self._sleep(min(float(retry_after), remaining))
+        wait_remaining = min(float(retry_after), remaining)
+        while wait_remaining > 0:
+            if _is_cancelled(is_cancelled):
+                raise DesktopModelCancelledError()
+            interval = min(0.05, wait_remaining)
+            self._sleep(interval)
+            wait_remaining -= interval
+
+
+def _wait_for_model_response(
+    completed: threading.Event,
+    timeout_seconds: float,
+    is_cancelled: CancellationCallback | None,
+) -> None:
+    """Poll an untrusted adapter wait so a Desktop answer can stop promptly."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if _is_cancelled(is_cancelled):
+            raise DesktopModelCancelledError()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError()
+        if completed.wait(min(0.05, remaining)):
+            if _is_cancelled(is_cancelled):
+                raise DesktopModelCancelledError()
+            return
+
+
+def _is_cancelled(callback: CancellationCallback | None) -> bool:
+    return callback is not None and callback()
 
 
 def classify_model_error(error: Exception) -> DesktopModelFailure:

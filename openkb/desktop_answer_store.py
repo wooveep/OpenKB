@@ -19,7 +19,7 @@ from openkb.locks import kb_ingest_lock
 
 
 class DesktopGroundedAnswerStore:
-    """Keep completed answers auditable even after source material changes later."""
+    """Keep completed and interrupted answers auditable across Desktop restarts."""
 
     def __init__(self, kb_dir: Path) -> None:
         self._state_dir = desktop_state_dir(kb_dir)
@@ -30,64 +30,68 @@ class DesktopGroundedAnswerStore:
             connection = _connect(self._database_path)
             try:
                 with connection:
-                    connection.execute(
+                    _insert_answer(connection, answer)
+                    _replace_answer_sources(connection, answer)
+            finally:
+                connection.close()
+        return answer
+
+    def replace_interrupted(self, answer: DesktopGroundedAnswer) -> DesktopGroundedAnswer:
+        """Atomically replace an interrupted card only after a complete retry succeeds."""
+        with kb_ingest_lock(self._state_dir):
+            connection = _connect(self._database_path)
+            try:
+                with connection:
+                    now = _timestamp()
+                    cursor = connection.execute(
                         """
-                        INSERT INTO grounded_answers (
-                            answer_id, question, answer_text, retrieval_plan_json,
-                            degradations_json, created_at, completed_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        UPDATE grounded_answers
+                        SET question = ?, answer_text = ?, retrieval_plan_json = ?,
+                            degradations_json = ?, status = ?, interruption_code = ?,
+                            interruption_reason = ?, completed_at = ?, updated_at = ?
+                        WHERE answer_id = ? AND status = 'interrupted'
                         """,
                         (
-                            answer.answer_id,
                             answer.question,
                             answer.answer_text,
                             json.dumps(answer.retrieval_plan.as_dict(), ensure_ascii=False),
                             json.dumps(answer.degradations, ensure_ascii=False),
-                            answer.created_at,
-                            answer.created_at,
+                            answer.status,
+                            answer.interruption_code,
+                            answer.interruption_reason,
+                            now,
+                            now,
+                            answer.answer_id,
                         ),
                     )
-                    connection.executemany(
-                        """
-                        INSERT INTO grounded_answer_citations (
-                            answer_id, evidence_id, ordinal, document_id, document_name, section,
-                            locator_json, excerpt, channels_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            (
-                                answer.answer_id,
-                                citation.evidence_id,
-                                ordinal,
-                                citation.document_id,
-                                citation.document_name,
-                                citation.section,
-                                json.dumps(citation.locator, ensure_ascii=False),
-                                citation.excerpt,
-                                json.dumps(citation.channels, ensure_ascii=False),
-                            )
-                            for ordinal, citation in enumerate(answer.citations)
-                        ],
-                    )
-                    connection.executemany(
-                        """
-                        INSERT INTO grounded_answer_source_images (
-                            answer_id, source_image_id, evidence_id, ordinal
-                        ) VALUES (?, ?, ?, ?)
-                        """,
-                        [
-                            (
-                                answer.answer_id,
-                                image.source_image_id,
-                                image.evidence_id,
-                                ordinal,
-                            )
-                            for ordinal, image in enumerate(answer.source_images)
-                        ],
-                    )
+                    if cursor.rowcount != 1:
+                        raise DesktopAnswerError(
+                            "answer_retry_unavailable",
+                            "This interrupted answer is no longer available for retry.",
+                        )
+                    _replace_answer_sources(connection, answer)
             finally:
                 connection.close()
         return answer
+
+    def interrupted(self, answer_id: str) -> DesktopGroundedAnswer:
+        """Load one persisted interrupted answer or report a stable retry error."""
+        connection = _connect(self._database_path)
+        try:
+            row = _answer_row(connection, answer_id)
+            if row is None:
+                raise DesktopAnswerError(
+                    "interrupted_answer_not_found", "The interrupted answer was not found."
+                )
+            answer = _answer_from_row(connection, row, self._state_dir.parent)
+            if answer.status != "interrupted":
+                raise DesktopAnswerError(
+                    "answer_retry_unavailable",
+                    "Only an interrupted answer can be retried.",
+                )
+            return answer
+        finally:
+            connection.close()
 
     def list(self) -> tuple[DesktopGroundedAnswer, ...]:
         connection = _connect(self._database_path)
@@ -95,7 +99,7 @@ class DesktopGroundedAnswerStore:
             rows = connection.execute(
                 """
                 SELECT answer_id, question, answer_text, retrieval_plan_json, degradations_json,
-                    created_at
+                    created_at, status, interruption_code, interruption_reason
                 FROM grounded_answers
                 ORDER BY created_at DESC
                 """
@@ -114,6 +118,10 @@ def new_answer(
     citations: tuple[DesktopEvidenceRef, ...],
     degradations: tuple[str, ...],
     source_images: tuple[DesktopAnswerSourceImage, ...] = (),
+    status: str = "completed",
+    interruption_code: str | None = None,
+    interruption_reason: str | None = None,
+    created_at: str | None = None,
 ) -> DesktopGroundedAnswer:
     return DesktopGroundedAnswer(
         answer_id=answer_id,
@@ -122,8 +130,11 @@ def new_answer(
         retrieval_plan=retrieval_plan,
         citations=citations,
         degradations=degradations,
-        created_at=_timestamp(),
+        created_at=created_at or _timestamp(),
         source_images=source_images,
+        status=status,
+        interruption_code=interruption_code,
+        interruption_reason=interruption_reason,
     )
 
 
@@ -167,7 +178,93 @@ def _answer_from_row(
         degradations=tuple(value for value in _json_list(str(row[4])) if isinstance(value, str)),
         created_at=str(row[5]),
         source_images=_source_images_for_answer(connection, answer_id, kb_dir),
+        status=str(row[6]),
+        interruption_code=str(row[7]) if row[7] is not None else None,
+        interruption_reason=str(row[8]) if row[8] is not None else None,
     )
+
+
+def _insert_answer(connection: sqlite3.Connection, answer: DesktopGroundedAnswer) -> None:
+    connection.execute(
+        """
+        INSERT INTO grounded_answers (
+            answer_id, question, answer_text, retrieval_plan_json, degradations_json,
+            created_at, completed_at, status, interruption_code, interruption_reason, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            answer.answer_id,
+            answer.question,
+            answer.answer_text,
+            json.dumps(answer.retrieval_plan.as_dict(), ensure_ascii=False),
+            json.dumps(answer.degradations, ensure_ascii=False),
+            answer.created_at,
+            answer.created_at,
+            answer.status,
+            answer.interruption_code,
+            answer.interruption_reason,
+            answer.created_at,
+        ),
+    )
+
+
+def _replace_answer_sources(connection: sqlite3.Connection, answer: DesktopGroundedAnswer) -> None:
+    connection.execute(
+        "DELETE FROM grounded_answer_source_images WHERE answer_id = ?", (answer.answer_id,)
+    )
+    connection.execute(
+        "DELETE FROM grounded_answer_citations WHERE answer_id = ?", (answer.answer_id,)
+    )
+    connection.executemany(
+        """
+        INSERT INTO grounded_answer_citations (
+            answer_id, evidence_id, ordinal, document_id, document_name, section,
+            locator_json, excerpt, channels_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                answer.answer_id,
+                citation.evidence_id,
+                ordinal,
+                citation.document_id,
+                citation.document_name,
+                citation.section,
+                json.dumps(citation.locator, ensure_ascii=False),
+                citation.excerpt,
+                json.dumps(citation.channels, ensure_ascii=False),
+            )
+            for ordinal, citation in enumerate(answer.citations)
+        ],
+    )
+    connection.executemany(
+        """
+        INSERT INTO grounded_answer_source_images (
+            answer_id, source_image_id, evidence_id, ordinal
+        ) VALUES (?, ?, ?, ?)
+        """,
+        [
+            (
+                answer.answer_id,
+                image.source_image_id,
+                image.evidence_id,
+                ordinal,
+            )
+            for ordinal, image in enumerate(answer.source_images)
+        ],
+    )
+
+
+def _answer_row(connection: sqlite3.Connection, answer_id: str) -> tuple[object, ...] | None:
+    return connection.execute(
+        """
+        SELECT answer_id, question, answer_text, retrieval_plan_json, degradations_json,
+            created_at, status, interruption_code, interruption_reason
+        FROM grounded_answers
+        WHERE answer_id = ?
+        """,
+        (answer_id,),
+    ).fetchone()
 
 
 def _source_images_for_answer(

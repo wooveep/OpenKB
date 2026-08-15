@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from openkb.desktop_answer_types import (
 )
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
+    DesktopModelCancelledError,
     DesktopModelGateway,
     DesktopModelRequest,
 )
@@ -48,10 +50,12 @@ class DesktopEvidenceRetriever:
         self._database_path = desktop_state_database_path(self._kb_dir)
         self._model_gateway = model_gateway
 
-    def retrieve(self, question: str) -> DesktopEvidencePack:
+    def retrieve(
+        self, question: str, *, is_cancelled: Callable[[], bool] | None = None
+    ) -> DesktopEvidencePack:
         """Plan and retrieve without ever allowing optional model work to block a reply."""
         normalized_question = _validate_question(question)
-        plan, degradations = self._plan(normalized_question)
+        plan, degradations = self._plan(normalized_question, is_cancelled=is_cancelled)
         connection = _connect(self._database_path)
         try:
             candidates = (
@@ -70,7 +74,9 @@ class DesktopEvidenceRetriever:
             source_images=source_images,
         )
 
-    def _plan(self, question: str) -> tuple[DesktopRetrievalPlan, list[str]]:
+    def _plan(
+        self, question: str, *, is_cancelled: Callable[[], bool] | None = None
+    ) -> tuple[DesktopRetrievalPlan, list[str]]:
         fallback = _deterministic_plan(question)
         if self._model_gateway is None:
             return fallback, ["retrieval_plan_unavailable"]
@@ -78,9 +84,12 @@ class DesktopEvidenceRetriever:
             result = self._model_gateway.analyze(
                 DesktopModelRequest("retrieval_plan", "Grounded answer question", question),
                 on_event=lambda _event: None,
+                is_cancelled=is_cancelled,
             )
             model_plan = _model_plan(question, result.content)
             return _with_baseline_terms(fallback, model_plan), []
+        except DesktopModelCancelledError:
+            return fallback, ["retrieval_plan_cancelled"]
         except (DesktopModelCallError, ValueError, json.JSONDecodeError):
             return fallback, ["retrieval_plan_fallback"]
 

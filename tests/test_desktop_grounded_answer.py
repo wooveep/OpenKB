@@ -130,8 +130,8 @@ def test_source_image_matching_never_infers_a_link_from_page_or_slide_alone():
     )
 
 
-def test_grounded_answer_falls_back_when_optional_model_calls_fail(tmp_path):
-    """A bad planner or answer-model response cannot interrupt the evidence answer."""
+def test_grounded_answer_persists_an_interruption_when_the_answer_model_fails(tmp_path):
+    """A terminal failure retains a retryable card instead of replacing it with a fallback."""
     kb_dir = tmp_path / "desktop-kb"
     source = tmp_path / "fallback.txt"
     source.write_text("OpenKB keeps a local evidence baseline.", encoding="utf-8")
@@ -144,8 +144,11 @@ def test_grounded_answer_falls_back_when_optional_model_calls_fail(tmp_path):
     ).answer("What baseline does OpenKB keep?")
 
     assert answer.citations
-    assert answer.degradations == ("retrieval_plan_fallback", "answer_model_fallback")
-    assert "Available source evidence" in answer.answer_text
+    assert answer.degradations == ("retrieval_plan_fallback",)
+    assert answer.status == "interrupted"
+    assert answer.interruption_code == "model_response_invalid"
+    assert answer.answer_text == ""
+    assert DesktopGroundedAnswerService(kb_dir).list() == (answer,)
 
 
 def test_grounded_answer_streams_model_deltas_without_losing_baseline_terms(tmp_path):
@@ -247,8 +250,8 @@ def test_grounded_answer_replaces_a_failed_stream_attempt(tmp_path):
     assert next_attempt[-1][0] == "accepted answer"
 
 
-def test_grounded_answer_replaces_partial_text_before_model_fallback(tmp_path):
-    """A terminal stream error cannot append delayed text to the fallback answer."""
+def test_grounded_answer_persists_partial_text_when_the_model_stream_is_interrupted(tmp_path):
+    """A terminal stream error keeps the text that was already visible to the user."""
     kb_dir = tmp_path / "desktop-kb"
     source = tmp_path / "fallback-stream.txt"
     source.write_text("OpenKB keeps local evidence.", encoding="utf-8")
@@ -279,7 +282,79 @@ def test_grounded_answer_replaces_partial_text_before_model_fallback(tmp_path):
         ),
     )
 
-    assert answer.degradations == ("answer_model_fallback",)
+    assert answer.status == "interrupted"
+    assert answer.interruption_code == "model_timeout"
+    assert answer.answer_text == "partial model text"
     assert deltas[0][1:] == ("partial model text", True, 1)
-    assert deltas[1][2:] == (True, 5)
-    assert deltas[1][1].startswith("Available source evidence")
+    assert len(deltas) == 1
+
+
+def test_grounded_answer_retry_preserves_the_old_card_until_a_complete_replacement(tmp_path):
+    """A failed retry cannot overwrite the interrupted text it was meant to repair."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "retryable-answer.txt"
+    source.write_text("OpenKB keeps local evidence available.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+
+    class RetryTransport:
+        def __init__(self) -> None:
+            self.stream_attempts = 0
+
+        def __call__(self, _request, _timeout_seconds):
+            return '{"terms": ["evidence"]}'
+
+        def stream(self, _request, _timeout_seconds, on_delta):
+            self.stream_attempts += 1
+            if self.stream_attempts < 3:
+                on_delta(f"partial attempt {self.stream_attempts}")
+                raise ValueError("invalid response")
+            on_delta("complete replacement")
+            return "complete replacement"
+
+    service = DesktopGroundedAnswerService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(RetryTransport()),
+    )
+    interrupted = service.answer("What does OpenKB keep?")
+    failed_retry = service.retry(interrupted.answer_id)
+
+    assert interrupted.status == "interrupted"
+    assert interrupted.answer_text == "partial attempt 1"
+    assert failed_retry == interrupted
+    assert service.list() == (interrupted,)
+
+    replacement = service.retry(interrupted.answer_id)
+
+    assert replacement.answer_id == interrupted.answer_id
+    assert replacement.created_at == interrupted.created_at
+    assert replacement.status == "completed"
+    assert replacement.answer_text == "complete replacement"
+    assert DesktopGroundedAnswerService(kb_dir).list() == (replacement,)
+
+
+def test_grounded_answer_stops_deterministic_stream_at_the_visible_partial_text(tmp_path):
+    """Stopping after a local fallback delta persists an interrupted card, not a full answer."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "local-answer.txt"
+    source.write_text("OpenKB keeps local evidence. " * 100, encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+    cancelled = False
+    deltas: list[str] = []
+
+    def on_delta(_answer_id, delta, _replace, _attempt) -> None:
+        nonlocal cancelled
+        deltas.append(delta)
+        cancelled = True
+
+    answer = DesktopGroundedAnswerService(kb_dir).answer(
+        "What evidence does OpenKB keep?",
+        on_delta=on_delta,
+        is_cancelled=lambda: cancelled,
+    )
+
+    assert answer.status == "interrupted"
+    assert answer.interruption_code == "answer_cancelled"
+    assert answer.answer_text == deltas[0]
+    assert len(deltas) == 1
