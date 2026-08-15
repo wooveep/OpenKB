@@ -1,9 +1,6 @@
 //! Engine restart and shutdown policy kept separate from request mediation.
 
-use super::{
-    mark_transport_failed, BridgeError, BridgeHandshake, BridgeResult, EngineSupervisor,
-    SHUTDOWN_TIMEOUT,
-};
+use super::{mark_transport_failed, BridgeError, BridgeResult, EngineSupervisor, SHUTDOWN_TIMEOUT};
 use serde_json::json;
 use std::sync::atomic::Ordering;
 

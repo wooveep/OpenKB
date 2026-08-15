@@ -502,6 +502,18 @@ try {
 }
 finally {
     if (Test-Path -LiteralPath $temporaryRoot) {
-        Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+        # Windows can release the disposable test lock just after the Engine exits.
+        # The runner cleans any remaining temporary directory after this process.
+        for ($attempt = 0; $attempt -lt 10 -and (Test-Path -LiteralPath $temporaryRoot); $attempt++) {
+            try {
+                Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction Stop
+            }
+            catch {
+                Start-Sleep -Milliseconds 200
+            }
+        }
+        if (Test-Path -LiteralPath $temporaryRoot) {
+            Write-Warning "Could not remove disposable portable-package validation directory: $temporaryRoot"
+        }
     }
 }

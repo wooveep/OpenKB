@@ -12,9 +12,9 @@ pub use crate::engine_wire::{
     DocumentVersionCandidateDecision, DocumentVersionCandidatesResult, EngineHealth,
     GroundedAnswer, GroundedAnswersResult, ImportControlResult, ImportJobsResult,
     ImportSourceInspection, KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind,
-    KnowledgePagesResult, KnowledgeReconciliationCommit, KnowledgeReconciliationConflict,
-    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision, ModelSettings,
-    RawDocument, RecoveryOverride, TextDocumentImportResult,
+    KnowledgePagesResult, KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
+    KnowledgeReconciliationDecision, ModelSettings, RawDocument, RecoveryOverride,
+    TextDocumentImportResult,
 };
 use serde_json::{json, Value};
 use std::{
