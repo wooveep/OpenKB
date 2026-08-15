@@ -238,7 +238,10 @@ function Test-FrozenEngine {
         Write-Frame -Stream $input -Message @{
             jsonrpc = "2.0"; id = "package-scan-import"; method = "workbench.import_text_document"; params = @{ source_path = $scannedPdf }
         }
-        $scannedImport = Read-Response -Stream $output -RequestId "package-scan-import" -Events $events -TimeoutSeconds 60
+        # First-run ONNX initialization is a packaging smoke check, not the Desktop
+        # model-response budget. Allow slower clean Windows machines to load it once.
+        Write-Host "Testing frozen scanned-PDF import..."
+        $scannedImport = Read-Response -Stream $output -RequestId "package-scan-import" -Events $events -TimeoutSeconds 180
         Assert-SuccessResponse -Response $scannedImport -RequestId "package-scan-import"
         Assert-That -Condition ($scannedImport.result.job.status -eq "completed") -Message "Frozen Engine did not complete an offline scanned-PDF import."
         Assert-That -Condition ($scannedImport.result.document.availability -eq "available") -Message "Frozen Engine did not publish the scanned-PDF import."
