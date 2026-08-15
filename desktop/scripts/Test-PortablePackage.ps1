@@ -162,7 +162,9 @@ function Test-FrozenEngine {
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
+    # The Engine reserves stdout for framed protocol messages. Let stderr inherit
+    # the build log so ONNX diagnostics cannot fill an unread redirected pipe.
+    $startInfo.RedirectStandardError = $false
     $startInfo.Environment["PATH"] = "$env:SystemRoot\System32;$env:SystemRoot"
     $startInfo.Environment["HF_HUB_OFFLINE"] = "1"
     $startInfo.Environment["TRANSFORMERS_OFFLINE"] = "1"
