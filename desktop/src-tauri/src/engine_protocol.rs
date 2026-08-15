@@ -11,11 +11,10 @@ pub use crate::engine_wire::{
     CancelResult, DiagnosticBundleResult, DocumentVersionCandidate,
     DocumentVersionCandidateDecision, DocumentVersionCandidatesResult, EngineHealth,
     GroundedAnswer, GroundedAnswersResult, ImportControlResult, ImportJobsResult,
-    ImportSourceInspection, InspectKnowledgeBaseResult, KnowledgeBaseActivationResult,
-    KnowledgePage, KnowledgePageKind, KnowledgePagesResult, KnowledgeReconciliationCommit,
-    KnowledgeReconciliationConflict, KnowledgeReconciliationConflictsResult,
-    KnowledgeReconciliationDecision, ModelSettings, RawDocument, RecoveryOverride,
-    TextDocumentImportResult,
+    ImportSourceInspection, KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind,
+    KnowledgePagesResult, KnowledgeReconciliationCommit, KnowledgeReconciliationConflict,
+    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision, ModelSettings,
+    RawDocument, RecoveryOverride, TextDocumentImportResult,
 };
 use serde_json::{json, Value};
 use std::{
@@ -119,25 +118,6 @@ impl EngineSupervisor {
         Ok(EngineHealth {
             status: wire.status,
             protocol_version: wire.protocol_version,
-        })
-    }
-
-    pub fn inspect_knowledge_base(
-        &self,
-        kb_dir: String,
-        request_id: String,
-    ) -> BridgeResult<InspectKnowledgeBaseResult> {
-        self.ensure_started()?;
-        let value = self.request_started(
-            "workbench.inspect_knowledge_base",
-            json!({ "kb_dir": kb_dir }),
-            Some(request_id),
-        )?;
-        serde_json::from_value(value).map_err(|error| {
-            BridgeError::new(
-                "invalid_engine_response",
-                format!("Engine inspection response has an invalid shape: {error}"),
-            )
         })
     }
 

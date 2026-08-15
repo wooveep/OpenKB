@@ -266,7 +266,7 @@ pub struct ActiveKnowledgeBaseResult {
 pub struct KnowledgeBaseActivationResult {
     #[serde(alias = "knowledge_base")]
     pub knowledge_base: DesktopKnowledgeBase,
-    pub events: Vec<WorkbenchEvent>,
+    pub events: Vec<KnowledgeBaseEvent>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -594,77 +594,10 @@ pub struct ImportControlResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KnowledgeBaseSnapshot {
-    #[serde(alias = "kb_dir")]
-    pub kb_dir: String,
-    pub inventory: KnowledgeBaseInventory,
-    pub status: KnowledgeBaseStatus,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KnowledgeBaseInventory {
-    pub documents: Vec<KnowledgeBaseDocument>,
-    #[serde(alias = "document_count")]
-    pub document_count: u64,
-    pub summaries: Vec<String>,
-    pub concepts: Vec<String>,
-    pub entities: Vec<String>,
-    pub reports: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KnowledgeBaseDocument {
-    #[serde(rename = "hash")]
-    pub file_hash: String,
-    pub name: String,
-    #[serde(rename = "type")]
-    pub raw_type: String,
-    #[serde(alias = "display_type")]
-    pub display_type: String,
-    pub pages: Option<u64>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct KnowledgeBaseDirectories {
-    pub sources: u64,
-    pub summaries: u64,
-    pub concepts: u64,
-    pub reports: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KnowledgeBaseStatus {
-    pub directories: KnowledgeBaseDirectories,
-    #[serde(alias = "raw_count")]
-    pub raw_count: u64,
-    #[serde(alias = "total_indexed")]
-    pub total_indexed: u64,
-    #[serde(alias = "last_compile")]
-    pub last_compile: Option<String>,
-    #[serde(alias = "last_lint")]
-    pub last_lint: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", content = "data")]
-pub enum WorkbenchEvent {
-    #[serde(rename = "knowledge_base.inspected")]
-    KnowledgeBaseInspected(KnowledgeBaseInspectedEventData),
+pub enum KnowledgeBaseEvent {
     #[serde(rename = "knowledge_base.activated")]
     KnowledgeBaseActivated(KnowledgeBaseActivatedEventData),
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KnowledgeBaseInspectedEventData {
-    #[serde(alias = "kb_dir")]
-    pub kb_dir: String,
-    #[serde(alias = "document_count")]
-    pub document_count: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -676,13 +609,6 @@ pub struct KnowledgeBaseActivatedEventData {
     #[serde(alias = "previous_kb_dir")]
     pub previous_kb_dir: Option<String>,
     pub checkpointed: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InspectKnowledgeBaseResult {
-    pub snapshot: KnowledgeBaseSnapshot,
-    pub events: Vec<WorkbenchEvent>,
 }
 
 #[derive(Deserialize)]

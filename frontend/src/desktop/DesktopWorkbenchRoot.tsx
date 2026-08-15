@@ -7,7 +7,7 @@ import DesktopKnowledgeBaseWorkspace from "./DesktopKnowledgeBaseWorkspace"
 import DesktopStartup from "./DesktopStartup"
 import type { DesktopBridge } from "./contracts"
 
-/** Desktop-only root. Future workbench views extend this instead of the REST UI. */
+/** Desktop-only root for the supported local workbench. */
 export default function DesktopWorkbenchRoot({ bridge }: { bridge?: DesktopBridge }) {
   const { t } = useTranslation("common")
   const [engineReady, setEngineReady] = useState(false)

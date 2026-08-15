@@ -6,18 +6,19 @@ are honored by convention and checked in review. When a rule proves valuable,
 promote it into a lint (see `tests/test_file_size.py` for the pattern).
 
 ## Boundaries
-- **Validate data shapes at boundaries.** Parse/validate inputs (frontmatter via
-  `openkb/frontmatter.py`, config via `openkb/config.py`) at the edge. Never build
-  on guessed shapes.
+- **Validate data shapes at boundaries.** Parse/validate Desktop Bridge frames,
+  document IR, and configuration at the edge. Never build on guessed shapes.
 
 ## Reuse
 - **Prefer shared utilities over hand-rolled helpers** so invariants stay
   centralized. Check `openkb/` for an existing helper before writing a new one.
 
 ## I/O and state
-- **All wiki file writes go through `openkb/locks.py` / `openkb/mutation.py`**
-  (atomic, crash-safe). No ad-hoc writes to the wiki tree.
-- **Log through `openkb/log.py`**, not bare `print`, for anything diagnostic.
+- **All Desktop KB mutations go through `openkb/locks.py` and the owning
+  SQLite service** (atomic, crash-safe). No ad-hoc writes to a KB's state,
+  raw assets, or generated pages.
+- **Keep protocol stdout clean.** Python Engine diagnostics go through logging
+  to stderr; stdout is reserved for framed Desktop Bridge messages.
 
 ## Size and shape
 <a id="file-size"></a>

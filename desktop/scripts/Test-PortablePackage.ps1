@@ -178,12 +178,11 @@ function Test-FrozenEngine {
 
         $knowledgeBase = Join-Path $ScratchDirectory "cancel-kb"
         $openkbDirectory = Join-Path $knowledgeBase ".openkb"
-        New-Item -ItemType Directory -Force -Path $openkbDirectory, (Join-Path $knowledgeBase "wiki") | Out-Null
-        [System.IO.File]::WriteAllText(
-            (Join-Path $openkbDirectory "hashes.json"),
-            "{}",
-            (New-Object System.Text.UTF8Encoding($false))
-        )
+        Write-Frame -Stream $input -Message @{
+            jsonrpc = "2.0"; id = "package-create"; method = "workbench.create_knowledge_base"; params = @{ kb_dir = $knowledgeBase; name = "Cancel test" }
+        }
+        $created = Read-Response -Stream $output -RequestId "package-create" -Events $events
+        Assert-SuccessResponse -Response $created -RequestId "package-create"
         $lockStream = [System.IO.File]::Open(
             (Join-Path $openkbDirectory "ingest.lock"),
             [System.IO.FileMode]::OpenOrCreate,
@@ -194,12 +193,12 @@ function Test-FrozenEngine {
         $lockStream.Lock(0, 1)
         try {
             Write-Frame -Stream $input -Message @{
-                jsonrpc = "2.0"; id = "package-inspect"; method = "workbench.inspect_knowledge_base"; params = @{ kb_dir = $knowledgeBase }
+                jsonrpc = "2.0"; id = "package-read"; method = "workbench.read_raw_document"; params = @{ document_id = "cancel-test"; page = 0 }
             }
-            Read-RequestEvent -Stream $output -RequestId "package-inspect" -Kind "engine.request_started" -Events $events | Out-Null
+            Read-RequestEvent -Stream $output -RequestId "package-read" -Kind "engine.request_started" -Events $events | Out-Null
 
             Write-Frame -Stream $input -Message @{
-                jsonrpc = "2.0"; id = "package-cancel"; method = "engine.cancel"; params = @{ request_id = "package-inspect" }
+                jsonrpc = "2.0"; id = "package-cancel"; method = "engine.cancel"; params = @{ request_id = "package-read" }
             }
             $cancel = Read-Response -Stream $output -RequestId "package-cancel" -Events $events
             Assert-SuccessResponse -Response $cancel -RequestId "package-cancel"
@@ -209,14 +208,14 @@ function Test-FrozenEngine {
             $lockStream.Unlock(0, 1)
             $lockStream.Dispose()
         }
-        $cancelledInspection = Read-Response -Stream $output -RequestId "package-inspect" -Events $events
-        Assert-That -Condition ($cancelledInspection.PSObject.Properties.Name -contains "error") -Message "Cancelled Engine request unexpectedly succeeded."
-        Assert-That -Condition ($cancelledInspection.error.code -eq "request_cancelled") -Message "Cancelled Engine request returned the wrong error."
+        $cancelledRead = Read-Response -Stream $output -RequestId "package-read" -Events $events
+        Assert-That -Condition ($cancelledRead.PSObject.Properties.Name -contains "error") -Message "Cancelled Engine request unexpectedly succeeded."
+        Assert-That -Condition ($cancelledRead.error.code -eq "request_cancelled") -Message "Cancelled Engine request returned the wrong error."
         $cancelledEventCount = @(
             $events | Where-Object {
                 $_.method -eq "event" -and
                 $_.params.kind -eq "engine.request_cancelled" -and
-                [string] $_.params.data.request_id -eq "package-inspect"
+                [string] $_.params.data.request_id -eq "package-read"
             }
         ).Count
         Assert-That -Condition ($cancelledEventCount -gt 0) -Message "Frozen Engine did not stream the cancellation event."

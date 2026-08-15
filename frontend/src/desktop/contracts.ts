@@ -344,55 +344,6 @@ export interface DesktopActiveKnowledgeBase {
   knowledgeBase: DesktopKnowledgeBase | null
 }
 
-export interface DesktopKnowledgeBaseSnapshot {
-  kbDir: string
-  inventory: DesktopKnowledgeBaseInventory
-  status: DesktopKnowledgeBaseStatus
-}
-
-export interface DesktopKnowledgeBaseInventory {
-  documents: DesktopKnowledgeBaseDocument[]
-  documentCount: number
-  summaries: string[]
-  concepts: string[]
-  entities: string[]
-  reports: string[]
-}
-
-export interface DesktopKnowledgeBaseDocument {
-  hash: string
-  name: string
-  type: string
-  displayType: string
-  pages: number | null
-}
-
-export interface DesktopKnowledgeBaseStatus {
-  directories: {
-    sources: number
-    summaries: number
-    concepts: number
-    reports: number
-  }
-  rawCount: number
-  totalIndexed: number
-  lastCompile: string | null
-  lastLint: string | null
-}
-
-export interface DesktopKnowledgeBaseInspectedEvent {
-  kind: "knowledge_base.inspected"
-  data: {
-    kbDir: string
-    documentCount: number
-  }
-}
-
-export interface DesktopKnowledgeBaseInspection {
-  snapshot: DesktopKnowledgeBaseSnapshot
-  events: DesktopKnowledgeBaseInspectedEvent[]
-}
-
 export class DesktopBridgeError extends Error {
   readonly code: string
 
@@ -421,10 +372,6 @@ export interface DesktopDiagnosticBundle {
 export interface DesktopBridge {
   handshake(): Promise<DesktopBridgeHandshake>
   health(): Promise<DesktopEngineHealth>
-  inspectKnowledgeBase(
-    kbDir: string,
-    requestId: string,
-  ): Promise<DesktopKnowledgeBaseInspection>
   createKnowledgeBase(
     kbDir: string,
     name: string | undefined,

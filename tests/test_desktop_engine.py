@@ -21,7 +21,6 @@ from openkb.desktop_import import DesktopImportControl, DesktopImportError, Desk
 from openkb.desktop_import_store import DesktopImportStore
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
-from openkb.workbench_service import DesktopWorkbenchService
 
 
 class FragmentedBytesIO(io.BytesIO):
@@ -43,20 +42,6 @@ class WaitForResponseBytesIO(FragmentedBytesIO):
         if not chunk:
             assert self._response_written.wait(timeout=1)
         return chunk
-
-
-class InspectResponseOutput(io.BytesIO):
-    """Signal the input stream once the asynchronous inspection has completed."""
-
-    def __init__(self, response_written: threading.Event) -> None:
-        super().__init__()
-        self._response_written = response_written
-
-    def write(self, payload: bytes) -> int:
-        size = super().write(payload)
-        if b'"id":"inspect"' in payload:
-            self._response_written.set()
-        return size
 
 
 class RequestResponseOutput(io.BytesIO):
@@ -95,7 +80,7 @@ def test_frame_reader_handles_fragmented_and_concatenated_frames():
         FrameReader(io.BytesIO(struct.pack(">I", 2) + b"[]")).read_frame()
 
 
-def test_engine_reports_handshake_health_events_command_and_cancel_round_trip(kb_dir):
+def test_engine_reports_handshake_health_events_command_and_cancel_round_trip():
     """Desktop Shell can establish a ready Engine and use the typed control path."""
     incoming = b"".join(
         (
@@ -118,9 +103,9 @@ def test_engine_reports_handshake_health_events_command_and_cancel_round_trip(kb
             encode_frame(
                 {
                     "jsonrpc": "2.0",
-                    "id": "inspect",
-                    "method": "workbench.inspect_knowledge_base",
-                    "params": {"kb_dir": str(kb_dir)},
+                    "id": "active",
+                    "method": "workbench.active_knowledge_base",
+                    "params": {},
                 }
             ),
             encode_frame(
@@ -133,43 +118,18 @@ def test_engine_reports_handshake_health_events_command_and_cancel_round_trip(kb
             ),
         )
     )
-    inspection_complete = threading.Event()
-    output = InspectResponseOutput(inspection_complete)
+    active_complete = threading.Event()
+    output = RequestResponseOutput(active_complete, "active")
 
     DesktopEngineServer(
-        WaitForResponseBytesIO(incoming, inspection_complete), output, engine_version="test"
+        WaitForResponseBytesIO(incoming, active_complete), output, engine_version="test"
     ).serve()
 
     frames = _decode_frames(output.getvalue())
     responses = {frame["id"]: frame for frame in frames if "id" in frame}
     assert responses["handshake"]["result"] == {"protocol_version": 1, "engine_version": "test"}
     assert responses["health"]["result"] == {"status": "ready", "protocol_version": 1}
-    assert responses["inspect"]["result"] == {
-        "snapshot": {
-            "kb_dir": str(kb_dir),
-            "inventory": {
-                "documents": [],
-                "document_count": 0,
-                "summaries": [],
-                "concepts": [],
-                "entities": [],
-                "reports": [],
-            },
-            "status": {
-                "directories": {"sources": 0, "summaries": 0, "concepts": 0, "reports": 0},
-                "raw_count": 0,
-                "total_indexed": 0,
-                "last_compile": None,
-                "last_lint": None,
-            },
-        },
-        "events": [
-            {
-                "kind": "knowledge_base.inspected",
-                "data": {"kb_dir": str(kb_dir), "document_count": 0},
-            }
-        ],
-    }
+    assert responses["active"]["result"] == {"knowledge_base": None}
     assert responses["cancel"]["result"] == {"cancelled": False, "request_id": "not-running"}
     assert any(
         frame.get("method") == "event"
@@ -179,13 +139,13 @@ def test_engine_reports_handshake_health_events_command_and_cancel_round_trip(kb
     )
 
 
-def test_engine_cancels_an_active_caller_owned_request(kb_dir):
+def test_engine_cancels_an_active_caller_owned_request():
     """Cancellation targets the same request ID that crossed the Desktop Bridge."""
 
-    class SlowWorkbenchService(DesktopWorkbenchService):
-        def execute(self, command):
+    class SlowWorkspace(DesktopKnowledgeBaseRuntime):
+        def active(self):
             time.sleep(0.02)
-            return super().execute(command)
+            return super().active()
 
     incoming = b"".join(
         (
@@ -201,8 +161,8 @@ def test_engine_cancels_an_active_caller_owned_request(kb_dir):
                 {
                     "jsonrpc": "2.0",
                     "id": "workbench-request",
-                    "method": "workbench.inspect_knowledge_base",
-                    "params": {"kb_dir": str(kb_dir)},
+                    "method": "workbench.active_knowledge_base",
+                    "params": {},
                 }
             ),
             encode_frame(
@@ -218,7 +178,7 @@ def test_engine_cancels_an_active_caller_owned_request(kb_dir):
     output = io.BytesIO()
 
     DesktopEngineServer(
-        FragmentedBytesIO(incoming), output, service=SlowWorkbenchService(), engine_version="test"
+        FragmentedBytesIO(incoming), output, workspace=SlowWorkspace(), engine_version="test"
     ).serve()
 
     responses = {frame["id"]: frame for frame in _decode_frames(output.getvalue()) if "id" in frame}

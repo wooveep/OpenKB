@@ -20,11 +20,7 @@ _REPO_ROOT = _PKG.parent
 
 # Grandfathered: existing debt. Keys are posix paths relative to the repo
 # root; add a brief reason comment with every new entry.
-_GRANDFATHERED = {
-    "openkb/cli.py",  # monolithic Click entry point; split into command groups
-    "openkb/agent/compiler.py",  # LLM wiki compiler; split into focused units
-    "openkb/agent/chat.py",  # chat loop; extract cohesive concerns
-}
+_GRANDFATHERED: set[str] = set()
 
 
 def _line_count(path: Path) -> int:

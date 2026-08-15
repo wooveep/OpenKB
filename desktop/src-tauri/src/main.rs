@@ -11,8 +11,8 @@ use engine_protocol::{
     DiagnosticBundleResult, DocumentVersionCandidate, DocumentVersionCandidateDecision,
     DocumentVersionCandidatesResult, EngineHealth, EngineSupervisor, GroundedAnswer,
     GroundedAnswersResult, ImportControlResult, ImportJobsResult, ImportSourceInspection,
-    InspectKnowledgeBaseResult, KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind,
-    KnowledgePagesResult, KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
+    KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind, KnowledgePagesResult,
+    KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
     KnowledgeReconciliationDecision, ModelSettings, RawDocument, RecoveryOverride,
     TextDocumentImportResult,
 };
@@ -36,21 +36,6 @@ fn desktop_bridge_handshake(
 #[tauri::command]
 fn desktop_engine_health(state: State<'_, DesktopState>) -> Result<EngineHealth, BridgeError> {
     state.engine.health()
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_inspect_knowledge_base(
-    state: State<'_, DesktopState>,
-    kb_dir: String,
-    request_id: String,
-) -> Result<InspectKnowledgeBaseResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.inspect_knowledge_base(kb_dir, request_id))
-        .await
-        .map_err(|error| BridgeError {
-            code: "desktop_command_failed".to_owned(),
-            message: format!("Desktop inspection task stopped unexpectedly: {error}"),
-        })?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -526,7 +511,6 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             desktop_bridge_handshake,
             desktop_engine_health,
-            desktop_inspect_knowledge_base,
             desktop_create_knowledge_base,
             desktop_open_knowledge_base,
             desktop_take_launch_intents,

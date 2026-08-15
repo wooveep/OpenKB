@@ -17,7 +17,6 @@ import {
   type DesktopImportSourceInspection,
   type DesktopImportSourcePicker,
   type DesktopKnowledgeBaseActivation,
-  type DesktopKnowledgeBaseInspection,
   type DesktopModelSettings,
   type DesktopKnowledgePage,
   type DesktopKnowledgePages,
@@ -56,16 +55,6 @@ export class TauriDesktopBridge implements DesktopBridge {
 
   async health(): Promise<DesktopEngineHealth> {
     return this.call<DesktopEngineHealth>("desktop_engine_health")
-  }
-
-  async inspectKnowledgeBase(
-    kbDir: string,
-    requestId: string,
-  ): Promise<DesktopKnowledgeBaseInspection> {
-    return this.call<DesktopKnowledgeBaseInspection>("desktop_inspect_knowledge_base", {
-      kbDir,
-      requestId,
-    })
   }
 
   async createKnowledgeBase(
@@ -350,12 +339,6 @@ class UnavailableDesktopBridge implements DesktopBridge {
   }
 
   health(): Promise<DesktopEngineHealth> {
-    return this.unavailable()
-  }
-
-  inspectKnowledgeBase(kbDir: string, requestId: string): Promise<DesktopKnowledgeBaseInspection> {
-    void kbDir
-    void requestId
     return this.unavailable()
   }
 

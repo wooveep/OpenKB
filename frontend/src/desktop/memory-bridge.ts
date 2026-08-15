@@ -17,7 +17,6 @@ import type {
   DesktopGroundedAnswers,
   DesktopKnowledgeBase,
   DesktopKnowledgeBaseActivation,
-  DesktopKnowledgeBaseInspection,
   DesktopKnowledgePage,
   DesktopKnowledgePages,
   DesktopKnowledgePageKind,
@@ -74,39 +73,6 @@ export class MemoryDesktopBridge implements DesktopBridge {
 
   async health(): Promise<DesktopEngineHealth> {
     return this.healthResult
-  }
-
-  async inspectKnowledgeBase(
-    kbDir: string,
-    requestId: string,
-  ): Promise<DesktopKnowledgeBaseInspection> {
-    void requestId
-    return {
-      snapshot: {
-        kbDir,
-        inventory: {
-          documents: [],
-          documentCount: 0,
-          summaries: [],
-          concepts: [],
-          entities: [],
-          reports: [],
-        },
-        status: {
-          directories: { sources: 0, summaries: 0, concepts: 0, reports: 0 },
-          rawCount: 0,
-          totalIndexed: 0,
-          lastCompile: null,
-          lastLint: null,
-        },
-      },
-      events: [
-        {
-          kind: "knowledge_base.inspected",
-          data: { kbDir, documentCount: 0 },
-        },
-      ],
-    }
   }
 
   async createKnowledgeBase(

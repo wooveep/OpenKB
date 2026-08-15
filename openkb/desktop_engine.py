@@ -38,11 +38,6 @@ from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
     DesktopKnowledgeBaseRuntime,
 )
-from openkb.workbench_service import (
-    DesktopWorkbenchError,
-    DesktopWorkbenchService,
-    InspectKnowledgeBaseCommand,
-)
 
 PROTOCOL_VERSION = 1
 MAX_FRAME_BYTES = 16 * 1024 * 1024
@@ -197,7 +192,6 @@ class DesktopEngineServer:
         input_stream: BinaryIO,
         output_stream: BinaryIO,
         *,
-        service: DesktopWorkbenchService | None = None,
         workspace: DesktopKnowledgeBaseRuntime | None = None,
         engine_version: str | None = None,
         model_gateway_factory: (
@@ -206,7 +200,6 @@ class DesktopEngineServer:
     ) -> None:
         self._reader = FrameReader(input_stream)
         self._writer = FrameWriter(output_stream)
-        self._service = service or DesktopWorkbenchService()
         self._workspace = workspace or DesktopKnowledgeBaseRuntime()
         self._workspace_requests_lock = threading.Lock()
         self._engine_version = engine_version or __version__
@@ -297,7 +290,6 @@ class DesktopEngineServer:
         except (
             DesktopAnswerError,
             DesktopKnowledgePageError,
-            DesktopWorkbenchError,
             DesktopKnowledgeBaseError,
             DesktopImportError,
         ) as error:
@@ -373,24 +365,6 @@ class DesktopEngineServer:
             return self._cancel_import_job(_required_string_param(request, "job_id"))
         if request.method in self._WORKSPACE_METHODS:
             return self._dispatch_workspace_request(request, cancel_event)
-
-        if request.method == "workbench.inspect_knowledge_base":
-            kb_dir = request.params.get("kb_dir")
-            if not isinstance(kb_dir, str) or not kb_dir:
-                raise DesktopRequestError(
-                    "invalid_params", "workbench.inspect_knowledge_base requires a kb_dir."
-                )
-            outcome = self._service.execute(InspectKnowledgeBaseCommand(kb_dir=Path(kb_dir)))
-            return {
-                "snapshot": {
-                    "kb_dir": outcome.snapshot.kb_dir,
-                    "inventory": outcome.snapshot.inventory.as_dict(),
-                    "status": outcome.snapshot.status.as_dict(),
-                },
-                "events": [
-                    {"kind": event.kind, "data": event.data.as_dict()} for event in outcome.events
-                ],
-            }
 
         raise DesktopRequestError(
             "method_not_found", f"Unknown Desktop Bridge method: {request.method}"
