@@ -99,6 +99,13 @@ pub enum AnswerStatus {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
+pub enum KnowledgePageKind {
+    Concept,
+    Entity,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ImportedDocumentAvailability {
     Available,
     Failed,
@@ -359,6 +366,42 @@ pub struct AnswerSourceImage {
 #[serde(rename_all = "camelCase")]
 pub struct GroundedAnswersResult {
     pub answers: Vec<GroundedAnswer>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgePageSummary {
+    #[serde(alias = "page_id")]
+    pub page_id: String,
+    pub kind: KnowledgePageKind,
+    pub title: String,
+    #[serde(alias = "revision_number")]
+    pub revision_number: u32,
+    #[serde(alias = "updated_at")]
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgePage {
+    #[serde(alias = "page_id")]
+    pub page_id: String,
+    pub kind: KnowledgePageKind,
+    pub title: String,
+    #[serde(alias = "revision_number")]
+    pub revision_number: u32,
+    #[serde(alias = "content_markdown")]
+    pub content_markdown: String,
+    #[serde(alias = "materialized_path")]
+    pub materialized_path: String,
+    #[serde(alias = "updated_at")]
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgePagesResult {
+    pub pages: Vec<KnowledgePageSummary>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

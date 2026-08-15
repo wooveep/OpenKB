@@ -260,3 +260,39 @@ INTERRUPTED_ANSWER_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON grounded_answers(status, created_at DESC)
     """,
 )
+
+
+KNOWLEDGE_PAGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE knowledge_pages (
+        page_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK(kind IN ('concept', 'entity')),
+        title TEXT NOT NULL,
+        normalized_title TEXT NOT NULL,
+        materialized_path TEXT NOT NULL UNIQUE,
+        current_revision_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(kind, normalized_title)
+    )
+    """,
+    """
+    CREATE TABLE knowledge_page_revisions (
+        revision_id TEXT PRIMARY KEY,
+        page_id TEXT NOT NULL REFERENCES knowledge_pages(page_id) ON DELETE CASCADE,
+        revision_number INTEGER NOT NULL CHECK(revision_number >= 1),
+        title TEXT NOT NULL,
+        content_markdown TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(page_id, revision_number)
+    )
+    """,
+    """
+    CREATE INDEX knowledge_pages_kind_updated_idx
+        ON knowledge_pages(kind, updated_at DESC)
+    """,
+    """
+    CREATE INDEX knowledge_page_revisions_page_revision_idx
+        ON knowledge_page_revisions(page_id, revision_number DESC)
+    """,
+)

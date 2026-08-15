@@ -300,7 +300,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 10,
+            "schema_version": 11,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -759,6 +759,70 @@ def test_engine_streams_and_returns_a_grounded_answer(tmp_path):
     )
     assert delta_event["params"]["data"]["replace"] is True
     assert delta_event["params"]["data"]["attempt"] == 1
+
+
+def test_engine_browses_saves_and_re_materializes_user_knowledge_pages(tmp_path):
+    """The Desktop bridge exposes SQLite-authoritative Concept and Entity revisions."""
+    kb_dir = tmp_path / "desktop-kb"
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    saved = server._dispatch(
+        DesktopRequest(
+            request_id="save-page",
+            method="workbench.save_knowledge_page",
+            params={
+                "page_id": None,
+                "kind": "concept",
+                "title": "Evidence",
+                "content_markdown": "User-owned **knowledge**.",
+            },
+        ),
+        cancel_event=None,
+    )
+    listed = server._dispatch(
+        DesktopRequest(
+            request_id="list-pages",
+            method="workbench.knowledge_pages",
+            params={},
+        ),
+        cancel_event=None,
+    )
+    read = server._dispatch(
+        DesktopRequest(
+            request_id="read-page",
+            method="workbench.knowledge_page",
+            params={"page_id": str(saved["page_id"])},
+        ),
+        cancel_event=None,
+    )
+
+    assert listed["pages"] == [
+        {
+            "page_id": saved["page_id"],
+            "kind": "concept",
+            "title": "Evidence",
+            "revision_number": 1,
+            "updated_at": saved["updated_at"],
+        }
+    ]
+    assert read["content_markdown"] == "User-owned **knowledge**."
+
+    projection = kb_dir / str(saved["materialized_path"])
+    projection.unlink()
+    reopened = DesktopEngineServer(io.BytesIO(), io.BytesIO())
+    reopened._handshake_complete = True
+    reopened._dispatch(
+        DesktopRequest(
+            request_id="open-page-kb",
+            method="workbench.open_knowledge_base",
+            params={"kb_dir": str(kb_dir)},
+        ),
+        cancel_event=None,
+    )
+    assert "User-owned **knowledge**." in projection.read_text(encoding="utf-8")
 
 
 def test_engine_returns_a_persisted_interrupted_answer_after_user_stop(tmp_path):

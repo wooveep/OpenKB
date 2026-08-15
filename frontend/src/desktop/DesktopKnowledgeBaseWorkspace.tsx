@@ -31,9 +31,11 @@ import {
   type DesktopImportBatchSummary,
 } from "./DesktopDocumentImportPanel"
 import { DesktopGroundedAnswerPanel } from "./DesktopGroundedAnswerPanel"
+import { DesktopKnowledgePagePanel } from "./DesktopKnowledgePagePanel"
 import { FailedDocumentsDialog } from "./FailedDocumentsDialog"
 import { DesktopRawDocumentDialog } from "./DesktopRawDocumentDialog"
 import { DesktopBridgeError } from "./contracts"
+import { nextDesktopRequestId } from "./request-id"
 import type {
   DesktopImportTask,
   DesktopImportSourceInspection,
@@ -59,16 +61,6 @@ const navigation: Array<{
   { id: "review", icon: ClipboardCheck, labelKey: "review" },
   { id: "settings", icon: Settings, labelKey: "settings" },
 ]
-
-let requestSequence = 0
-
-function nextRequestId(): string {
-  requestSequence += 1
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID()
-  }
-  return `desktop-knowledge-base-${Date.now()}-${requestSequence}`
-}
 
 function isImportControlError(error: unknown): boolean {
   return error instanceof DesktopBridgeError
@@ -220,9 +212,9 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setImportBatchSummary(null)
     try {
       if (dialogMode === "create") {
-        await bridge.createKnowledgeBase(path.trim(), name.trim() || undefined, nextRequestId())
+        await bridge.createKnowledgeBase(path.trim(), name.trim() || undefined, nextDesktopRequestId("knowledge-base"))
       } else {
-        await bridge.openKnowledgeBase(path.trim(), nextRequestId())
+        await bridge.openKnowledgeBase(path.trim(), nextDesktopRequestId("knowledge-base"))
       }
       await refreshActiveKnowledgeBase()
       setSection("overview")
@@ -249,7 +241,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setInspectingImportSources(true)
     setImportError(null)
     try {
-      const inspection = await bridge.inspectImportSources(sourcePaths, nextRequestId())
+      const inspection = await bridge.inspectImportSources(sourcePaths, nextDesktopRequestId("knowledge-base"))
       if (read === importInspectionRead.current) {
         setImportInspection(withoutExcludedImportSources(inspection, excludedSourcePaths))
       }
@@ -338,7 +330,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
     let completed = 0
     const failures: Array<{ name: string; reason: string }> = []
     for (const source of importInspection.supported) {
-      const requestId = nextRequestId()
+      const requestId = nextDesktopRequestId("knowledge-base")
       try {
         const result = await bridge.importTextDocument(source.path, requestId)
         completed += 1
@@ -375,7 +367,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
     try {
       setRawDocument(await bridge.readRawDocument(
         documentId,
-        nextRequestId(),
+        nextDesktopRequestId("knowledge-base"),
         0,
         locator ?? undefined,
       ))
@@ -395,7 +387,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
     try {
       const next = await bridge.readRawDocument(
         current.documentId,
-        nextRequestId(),
+        nextDesktopRequestId("knowledge-base"),
         current.page + 1,
       )
       setRawDocument((displayed) => (
@@ -420,7 +412,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
       } else if (action === "cancel") {
         await bridge.cancelImportJob(jobId)
       } else {
-        await bridge.resumeImportJob(jobId, nextRequestId())
+        await bridge.resumeImportJob(jobId, nextDesktopRequestId("knowledge-base"))
       }
     } catch (error) {
       if (!isImportControlError(error)) {
@@ -436,7 +428,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setControllingJobId(jobId)
     setImportError(null)
     try {
-      await bridge.recoverImportJob(jobId, recoveryOverride, nextRequestId())
+      await bridge.recoverImportJob(jobId, recoveryOverride, nextDesktopRequestId("knowledge-base"))
     } catch (error) {
       if (!isImportControlError(error)) {
         setImportError(error instanceof Error ? error.message : String(error))
@@ -779,6 +771,7 @@ function ActiveKnowledgeBaseView({
         />
       ) : null}
       {section === "answers" ? <DesktopGroundedAnswerPanel onOpenOriginal={onOpenRawDocument} /> : null}
+      {section === "knowledge" ? <DesktopKnowledgePagePanel /> : null}
     </section>
   )
 }

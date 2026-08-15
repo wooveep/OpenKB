@@ -8,7 +8,8 @@ use engine_protocol::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
     EngineHealth, EngineSupervisor, GroundedAnswer, GroundedAnswersResult, ImportControlResult,
     ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
-    KnowledgeBaseActivationResult, RawDocument, RecoveryOverride, TextDocumentImportResult,
+    KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind, KnowledgePagesResult,
+    RawDocument, RecoveryOverride, TextDocumentImportResult,
 };
 use process_tree::ProcessTreeJob;
 use std::{path::Path, sync::Arc};
@@ -192,6 +193,53 @@ async fn desktop_grounded_answers(
         })?
 }
 
+#[tauri::command]
+async fn desktop_knowledge_pages(
+    state: State<'_, DesktopState>,
+) -> Result<KnowledgePagesResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.knowledge_pages())
+        .await
+        .map_err(|error| BridgeError {
+            code: "desktop_command_failed".to_owned(),
+            message: format!("Desktop knowledge-page lookup stopped unexpectedly: {error}"),
+        })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_get_knowledge_page(
+    state: State<'_, DesktopState>,
+    page_id: String,
+) -> Result<KnowledgePage, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.knowledge_page(page_id))
+        .await
+        .map_err(|error| BridgeError {
+            code: "desktop_command_failed".to_owned(),
+            message: format!("Desktop knowledge-page read stopped unexpectedly: {error}"),
+        })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_save_knowledge_page(
+    state: State<'_, DesktopState>,
+    page_id: Option<String>,
+    kind: KnowledgePageKind,
+    title: String,
+    content_markdown: String,
+    request_id: String,
+) -> Result<KnowledgePage, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.save_knowledge_page(page_id, kind, title, content_markdown, request_id)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop knowledge-page save stopped unexpectedly: {error}"),
+    })?
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn desktop_read_raw_document(
     state: State<'_, DesktopState>,
@@ -334,6 +382,9 @@ fn main() {
             desktop_ask_grounded,
             desktop_retry_interrupted_answer,
             desktop_grounded_answers,
+            desktop_knowledge_pages,
+            desktop_get_knowledge_page,
+            desktop_save_knowledge_page,
             desktop_read_raw_document,
             desktop_pause_import_job,
             desktop_resume_import_job,

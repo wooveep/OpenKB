@@ -232,6 +232,25 @@ export interface DesktopGroundedAnswers {
   answers: DesktopGroundedAnswer[]
 }
 
+export type DesktopKnowledgePageKind = "concept" | "entity"
+
+export interface DesktopKnowledgePageSummary {
+  pageId: string
+  kind: DesktopKnowledgePageKind
+  title: string
+  revisionNumber: number
+  updatedAt: string
+}
+
+export interface DesktopKnowledgePage extends DesktopKnowledgePageSummary {
+  contentMarkdown: string
+  materializedPath: string
+}
+
+export interface DesktopKnowledgePages {
+  pages: DesktopKnowledgePageSummary[]
+}
+
 /** The SQLite-authoritative knowledge base currently available to the Desktop Runtime. */
 export interface DesktopKnowledgeBase {
   kbDir: string
@@ -351,6 +370,15 @@ export interface DesktopBridge {
   askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer>
   retryInterruptedAnswer(answerId: string, requestId: string): Promise<DesktopGroundedAnswer>
   groundedAnswers(): Promise<DesktopGroundedAnswers>
+  knowledgePages(): Promise<DesktopKnowledgePages>
+  getKnowledgePage(pageId: string): Promise<DesktopKnowledgePage>
+  saveKnowledgePage(
+    pageId: string | undefined,
+    kind: DesktopKnowledgePageKind,
+    title: string,
+    contentMarkdown: string,
+    requestId: string,
+  ): Promise<DesktopKnowledgePage>
   pauseImportJob(jobId: string): Promise<DesktopImportControlResult>
   resumeImportJob(jobId: string, requestId: string): Promise<DesktopTextDocumentImport>
   recoverImportJob(

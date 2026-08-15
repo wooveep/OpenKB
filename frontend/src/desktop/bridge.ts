@@ -15,6 +15,9 @@ import {
   type DesktopImportSourcePicker,
   type DesktopKnowledgeBaseActivation,
   type DesktopKnowledgeBaseInspection,
+  type DesktopKnowledgePage,
+  type DesktopKnowledgePages,
+  type DesktopKnowledgePageKind,
   type DesktopImportJobs,
   type DesktopRawDocument,
   type DesktopRecoveryOverride,
@@ -158,6 +161,30 @@ export class TauriDesktopBridge implements DesktopBridge {
 
   async groundedAnswers(): Promise<DesktopGroundedAnswers> {
     return this.call<DesktopGroundedAnswers>("desktop_grounded_answers")
+  }
+
+  async knowledgePages(): Promise<DesktopKnowledgePages> {
+    return this.call<DesktopKnowledgePages>("desktop_knowledge_pages")
+  }
+
+  async getKnowledgePage(pageId: string): Promise<DesktopKnowledgePage> {
+    return this.call<DesktopKnowledgePage>("desktop_get_knowledge_page", { pageId })
+  }
+
+  async saveKnowledgePage(
+    pageId: string | undefined,
+    kind: DesktopKnowledgePageKind,
+    title: string,
+    contentMarkdown: string,
+    requestId: string,
+  ): Promise<DesktopKnowledgePage> {
+    return this.call<DesktopKnowledgePage>("desktop_save_knowledge_page", {
+      pageId,
+      kind,
+      title,
+      contentMarkdown,
+      requestId,
+    })
   }
 
   async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {
@@ -315,6 +342,30 @@ class UnavailableDesktopBridge implements DesktopBridge {
   }
 
   groundedAnswers(): Promise<DesktopGroundedAnswers> {
+    return this.unavailable()
+  }
+
+  knowledgePages(): Promise<DesktopKnowledgePages> {
+    return this.unavailable()
+  }
+
+  getKnowledgePage(pageId: string): Promise<DesktopKnowledgePage> {
+    void pageId
+    return this.unavailable()
+  }
+
+  saveKnowledgePage(
+    pageId: string | undefined,
+    kind: DesktopKnowledgePageKind,
+    title: string,
+    contentMarkdown: string,
+    requestId: string,
+  ): Promise<DesktopKnowledgePage> {
+    void pageId
+    void kind
+    void title
+    void contentMarkdown
+    void requestId
     return this.unavailable()
   }
 

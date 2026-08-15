@@ -5,17 +5,8 @@ import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
 import { useDesktopBridge } from "./bridge-context"
 import type { DesktopAnswerSourceImage, DesktopGroundedAnswer } from "./contracts"
+import { nextDesktopRequestId } from "./request-id"
 import { formatSourceLocator } from "./source-locator"
-
-let requestSequence = 0
-
-function nextAnswerRequestId(): string {
-  requestSequence += 1
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID()
-  }
-  return `desktop-answer-${Date.now()}-${requestSequence}`
-}
 
 type StreamingAnswer = {
   requestId: string
@@ -79,7 +70,7 @@ export function DesktopGroundedAnswerPanel({
   const ask = async () => {
     const normalized = question.trim()
     if (!normalized || answering) return
-    const requestId = nextAnswerRequestId()
+    const requestId = nextDesktopRequestId("answer")
     setAnswering(true)
     setError(null)
     setStreaming({ requestId, answerId: null, attempt: 0, content: "", retrying: false })
@@ -100,7 +91,7 @@ export function DesktopGroundedAnswerPanel({
 
   const retryAnswer = async (answer: DesktopGroundedAnswer) => {
     if (answering || answer.status !== "interrupted") return
-    const requestId = nextAnswerRequestId()
+    const requestId = nextDesktopRequestId("answer")
     setAnswering(true)
     setError(null)
     setStreaming({ requestId, answerId: answer.answerId, attempt: 0, content: "", retrying: true })

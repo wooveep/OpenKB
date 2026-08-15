@@ -10,7 +10,8 @@ pub use crate::engine_wire::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, BridgeResult,
     CancelResult, EngineHealth, GroundedAnswer, GroundedAnswersResult, ImportControlResult,
     ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
-    KnowledgeBaseActivationResult, RawDocument, RecoveryOverride, TextDocumentImportResult,
+    KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind, KnowledgePagesResult,
+    RawDocument, RecoveryOverride, TextDocumentImportResult,
 };
 use serde_json::{json, Value};
 use std::{
@@ -29,6 +30,8 @@ use tauri::ipc::Channel;
 
 #[path = "engine_protocol_answers.rs"]
 mod answers;
+#[path = "engine_protocol_knowledge_pages.rs"]
+mod knowledge_pages;
 
 const PROTOCOL_VERSION: u32 = 1;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);

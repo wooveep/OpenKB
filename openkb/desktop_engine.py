@@ -28,6 +28,7 @@ from openkb.desktop_import import (
 )
 from openkb.desktop_import_sources import inspect_import_sources
 from openkb.desktop_import_types import DesktopRecoveryOverride
+from openkb.desktop_knowledge_pages import DesktopKnowledgePageError, DesktopKnowledgePageService
 from openkb.desktop_legacy_office_parsers import shutdown_legacy_office_runtime
 from openkb.desktop_model_gateway import MODEL_CALL_DEADLINE_SECONDS, DesktopModelGateway
 from openkb.desktop_model_transport import desktop_model_gateway_for
@@ -161,6 +162,9 @@ class DesktopEngineServer:
         "workbench.ask_grounded",
         "workbench.retry_interrupted_answer",
         "workbench.grounded_answers",
+        "workbench.knowledge_pages",
+        "workbench.knowledge_page",
+        "workbench.save_knowledge_page",
     }
     _INTERRUPTION_PRESERVING_METHODS = {
         "workbench.ask_grounded",
@@ -171,6 +175,7 @@ class DesktopEngineServer:
         "workbench.open_knowledge_base",
         "workbench.import_text_document",
         "workbench.read_raw_document",
+        "workbench.save_knowledge_page",
     }
 
     def __init__(
@@ -277,6 +282,7 @@ class DesktopEngineServer:
             self._write_error(request.request_id, error.code, str(error))
         except (
             DesktopAnswerError,
+            DesktopKnowledgePageError,
             DesktopWorkbenchError,
             DesktopKnowledgeBaseError,
             DesktopImportError,
@@ -410,6 +416,12 @@ class DesktopEngineServer:
                 return {"answers": []}
             answers = DesktopGroundedAnswerService(Path(active.kb_dir)).list()
             return {"answers": [answer.as_dict() for answer in answers]}
+        if request.method in {
+            "workbench.knowledge_pages",
+            "workbench.knowledge_page",
+            "workbench.save_knowledge_page",
+        }:
+            return self._dispatch_knowledge_page_request(request, cancel_event)
         if request.method in self._INTERRUPTION_PRESERVING_METHODS:
             return self._dispatch_grounded_answer_request(request, cancel_event)
         if request.method in {
@@ -441,6 +453,9 @@ class DesktopEngineServer:
                 DesktopRawAssetService(
                     Path(activation.knowledge_base.kb_dir)
                 ).verify_available_documents()
+                DesktopKnowledgePageService(
+                    Path(activation.knowledge_base.kb_dir)
+                ).materialize_current_pages()
                 self._start_recoverable_imports(Path(activation.knowledge_base.kb_dir))
                 return activation.as_dict()
 
@@ -455,46 +470,16 @@ class DesktopEngineServer:
     def _dispatch_grounded_answer_request(
         self, request: DesktopRequest, cancel_event: threading.Event | None
     ) -> dict[str, object]:
-        """Answer against one stable active KB without making model work a mutation."""
-        with self._workspace_requests_lock:
-            active = self._workspace.active()
-            if active is None:
-                raise DesktopRequestError(
-                    "no_active_knowledge_base",
-                    "Open a Desktop Knowledge Base before asking a question.",
-                )
-            kb_dir = Path(active.kb_dir)
-        service = DesktopGroundedAnswerService(
-            kb_dir,
-            model_gateway=self._model_gateway_factory(kb_dir, None),
-        )
+        from openkb.desktop_engine_answers import dispatch_grounded_answer_request
 
-        def on_delta(answer_id: str, delta: str, replace: bool, attempt: int) -> None:
-            self._emit_event(
-                "answer.delta",
-                {
-                    "request_id": request.request_id,
-                    "answer_id": answer_id,
-                    "delta": delta,
-                    "replace": replace,
-                    "attempt": attempt,
-                },
-            )
+        return dispatch_grounded_answer_request(self, request, cancel_event)
 
-        is_cancelled = cancel_event.is_set if cancel_event is not None else None
-        if request.method == "workbench.ask_grounded":
-            answer = service.answer(
-                _required_string_param(request, "question"),
-                on_delta=on_delta,
-                is_cancelled=is_cancelled,
-            )
-        else:
-            answer = service.retry(
-                _required_string_param(request, "answer_id"),
-                on_delta=on_delta,
-                is_cancelled=is_cancelled,
-            )
-        return answer.as_dict()
+    def _dispatch_knowledge_page_request(
+        self, request: DesktopRequest, cancel_event: threading.Event | None
+    ) -> dict[str, object]:
+        from openkb.desktop_engine_knowledge_pages import dispatch_knowledge_page_request
+
+        return dispatch_knowledge_page_request(self, request, cancel_event)
 
     def _dispatch_import_request(
         self, request: DesktopRequest, cancel_event: threading.Event | None
