@@ -12,8 +12,8 @@ pub use document_versions::{
 #[path = "engine_wire_knowledge_reconciliation.rs"]
 mod knowledge_reconciliation;
 pub use knowledge_reconciliation::{
-    KnowledgeReconciliationCommit, KnowledgeReconciliationConflict,
-    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision,
+    KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
+    KnowledgeReconciliationDecision,
 };
 #[path = "engine_wire_settings.rs"]
 mod settings;
