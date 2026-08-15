@@ -113,6 +113,7 @@ pub enum ImportedDocumentSourceFormat {
     Xls,
     Xlsx,
     Pptx,
+    Pdf,
 }
 
 #[derive(Clone, Debug, Serialize)]

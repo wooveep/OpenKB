@@ -21,6 +21,7 @@ _SOURCE_FORMATS = {
     ".xls": "xls",
     ".xlsx": "xlsx",
     ".pptx": "pptx",
+    ".pdf": "pdf",
 }
 _SOURCE_MEDIA_TYPES = {
     "txt": "text/plain",
@@ -29,6 +30,7 @@ _SOURCE_MEDIA_TYPES = {
     "xls": "application/vnd.ms-excel",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "pdf": "application/pdf",
 }
 _SOURCE_SUFFIXES = {
     "txt": (".txt",),
@@ -37,6 +39,7 @@ _SOURCE_SUFFIXES = {
     "xls": (".xls",),
     "xlsx": (".xlsx",),
     "pptx": (".pptx",),
+    "pdf": (".pdf",),
 }
 _TEXT_SOURCE_FORMATS = {"txt", "markdown"}
 
@@ -95,7 +98,7 @@ def validate_text_source(source_path: Path) -> Path:
     if source.suffix.lower() not in SUPPORTED_DESKTOP_IMPORT_SUFFIXES:
         raise DesktopImportError(
             "unsupported_import_format",
-            "Desktop import supports TXT, Markdown, DOCX, XLS, XLSX, and PPTX files.",
+            "Desktop import supports TXT, Markdown, DOCX, XLS, XLSX, PPTX, and PDF files.",
         )
     if not source.is_file():
         raise DesktopImportError(

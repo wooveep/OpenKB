@@ -14,6 +14,7 @@ SUPPORTED_DESKTOP_IMPORT_SUFFIXES = (
     ".xls",
     ".xlsx",
     ".pptx",
+    ".pdf",
 )
 
 

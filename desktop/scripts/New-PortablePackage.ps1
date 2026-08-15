@@ -107,6 +107,14 @@ if (-not (Test-Path -LiteralPath $tauriCli)) {
     throw "Tauri CLI is not installed. Run without -SkipDependencyInstall or install frontend dependencies."
 }
 
+$enginePythonVersion = (& uv run --extra desktop-build python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw "Desktop Engine Python version check failed with exit code $LASTEXITCODE."
+}
+if ($enginePythonVersion -ne "3.12") {
+    throw "The portable Desktop Engine must be frozen with Python 3.12; found $enginePythonVersion."
+}
+
 $engineRoot = Join-Path $buildRoot "engine"
 $engineDist = Join-Path $engineRoot "dist"
 $engineWork = Join-Path $engineRoot "work"
@@ -129,6 +137,7 @@ try {
             --specpath $engineSpec `
             --paths $repoRoot `
             --collect-data openkb `
+            --collect-data rapidocr_onnxruntime `
             (Join-Path $repoRoot "openkb\desktop_engine.py")
     }
 }
@@ -148,7 +157,15 @@ $shellExe = Join-Path $srcTauri "target\release\OpenKB.exe"
 $engineDirectory = Join-Path $engineDist "OpenKBEngine"
 $engineExe = Join-Path $engineDirectory "OpenKBEngine.exe"
 $webViewRuntime = Join-Path $srcTauri "runtime\webview2"
-foreach ($requiredPath in @($shellExe, $engineExe, (Join-Path $webViewRuntime "msedgewebview2.exe"))) {
+foreach ($requiredPath in @(
+    $shellExe,
+    $engineExe,
+    (Join-Path $webViewRuntime "msedgewebview2.exe"),
+    (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\config.yaml"),
+    (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_det_infer.onnx"),
+    (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_rec_infer.onnx"),
+    (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\models\ch_ppocr_mobile_v2.0_cls_infer.onnx")
+)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Portable package prerequisite is missing: $requiredPath"
     }

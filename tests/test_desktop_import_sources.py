@@ -17,6 +17,7 @@ def test_source_inspection_expands_directories_deduplicates_and_sorts(tmp_path):
     (sources / "ledger.xlsx").write_bytes(b"workbook")
     (sources / "legacy.xls").write_bytes(b"legacy workbook")
     (sources / "briefing.pptx").write_bytes(b"presentation")
+    (sources / "report.pdf").write_bytes(b"pdf")
     (nested / "beta.txt").write_text("beta", encoding="utf-8")
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -31,6 +32,7 @@ def test_source_inspection_expands_directories_deduplicates_and_sorts(tmp_path):
         "ledger.xlsx",
         "legacy.xls",
         "beta.txt",
+        "report.pdf",
         "zeta.txt",
     ]
     assert [(source.name, source.error_code) for source in inspection.unsupported] == [
@@ -45,4 +47,5 @@ def test_source_inspection_expands_directories_deduplicates_and_sorts(tmp_path):
         ".xls",
         ".xlsx",
         ".pptx",
+        ".pdf",
     ]

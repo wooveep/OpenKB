@@ -328,6 +328,10 @@ function Assert-PackageLayout {
         (Join-Path $PackageRoot "LICENSE"),
         (Join-Path $PackageRoot "THIRD_PARTY_NOTICES.md"),
         (Join-Path $PackageRoot "runtime\engine\OpenKBEngine.exe"),
+        (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\config.yaml"),
+        (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_det_infer.onnx"),
+        (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_rec_infer.onnx"),
+        (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_ppocr_mobile_v2.0_cls_infer.onnx"),
         (Join-Path $PackageRoot "runtime\webview2\msedgewebview2.exe"),
         $manifestPath
     )) {

@@ -55,6 +55,10 @@ def parse_structured_document(source: Path, raw_bytes: bytes) -> ParsedDocument:
         from openkb.desktop_presentation_parsers import parse_presentation_document
 
         return parse_presentation_document(source, raw_bytes)
+    if source_format == "pdf":
+        from openkb.desktop_pdf_parsers import parse_pdf_document
+
+        return parse_pdf_document(source, raw_bytes)
     raise DesktopImportError(
         "unsupported_import_format", f"No structured parser is registered for {source.name}."
     )

@@ -323,7 +323,7 @@ def test_engine_inspects_batch_sources_before_importing(tmp_path):
     source_directory = tmp_path / "sources"
     source_directory.mkdir()
     (source_directory / "note.txt").write_text("Ready.", encoding="utf-8")
-    (source_directory / "diagram.pdf").write_bytes(b"not parsed yet")
+    (source_directory / "diagram.pdf").write_bytes(b"PDF will be parsed when imported")
     server = DesktopEngineServer(io.BytesIO(), io.BytesIO())
     server._handshake_complete = True
 
@@ -336,15 +336,8 @@ def test_engine_inspects_batch_sources_before_importing(tmp_path):
         cancel_event=None,
     )
 
-    assert [source["name"] for source in result["supported"]] == ["note.txt"]
-    assert result["unsupported"] == [
-        {
-            "path": str((source_directory / "diagram.pdf").resolve()),
-            "name": "diagram.pdf",
-            "status": "unsupported",
-            "error_code": "unsupported_import_format",
-        }
-    ]
+    assert [source["name"] for source in result["supported"]] == ["diagram.pdf", "note.txt"]
+    assert result["unsupported"] == []
 
 
 def test_engine_reads_a_verified_raw_document(tmp_path):
