@@ -211,7 +211,7 @@ function Test-FrozenEngine {
         $lockStream.Lock(0, 1)
         try {
             Write-Frame -Stream $input -Message @{
-                jsonrpc = "2.0"; id = "package-read"; method = "workbench.read_raw_document"; params = @{ document_id = "cancel-test"; page = 0 }
+                jsonrpc = "2.0"; id = "package-read"; method = "workbench.knowledge_pages"; params = @{}
             }
             Read-RequestEvent -Stream $output -RequestId "package-read" -Kind "engine.request_started" -Events $events | Out-Null
 
