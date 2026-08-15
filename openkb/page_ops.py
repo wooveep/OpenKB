@@ -33,7 +33,7 @@ from openkb.locks import atomic_write_text, kb_ingest_lock
 # generated artifacts and stay read-only.
 EDITABLE_SECTIONS = ("concepts", "entities", "summaries")
 # DELETABLE is narrower: a summary is bound to its source document, so it is
-# removed by deleting the DOCUMENT (/api/v1/remove), never on its own — deleting
+# removed by deleting the document, never on its own — deleting
 # it alone would leave a doc with no summary.
 DELETABLE_SECTIONS = ("concepts", "entities")
 

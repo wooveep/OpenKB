@@ -2,11 +2,9 @@ import path from "path"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 
-// Dev server proxies /api to the OpenKB REST API on :7566; production
-// serves the built bundle from the same origin via FastAPI StaticFiles.
-// outDir MUST stay ../openkb/web — the wheel packages it from there
-// (see pyproject.toml [tool.hatch.build] artifacts).
-export default defineConfig(({ mode }) => ({
+// The Desktop shell loads this bundle directly. Keep it outside the Python
+// package so Python distributions cannot accidentally expose a browser UI.
+export default defineConfig({
   base: "/",
   plugins: [react()],
   resolve: {
@@ -15,16 +13,10 @@ export default defineConfig(({ mode }) => ({
     },
   },
   build: {
-    outDir: mode === "desktop" ? "../openkb/desktop-web" : "../openkb/web",
+    outDir: "../openkb/desktop-web",
     emptyOutDir: true,
   },
   server: {
     port: 5173,
-    proxy: {
-      "/api": {
-        target: "http://127.0.0.1:7566",
-        changeOrigin: true,
-      },
-    },
   },
-}))
+})

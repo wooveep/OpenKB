@@ -1,7 +1,6 @@
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
-import { HashRouter } from "react-router"
-import App from "./App"
+import DesktopWorkbenchRoot from "./desktop/DesktopWorkbenchRoot"
 import { ThemeProvider } from "@/lib/theme"
 import { LanguageProvider } from "@/lib/language"
 import "./lib/i18n"
@@ -11,9 +10,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <LanguageProvider>
       <ThemeProvider>
-        <HashRouter>
-          <App />
-        </HashRouter>
+        <DesktopWorkbenchRoot />
       </ThemeProvider>
     </LanguageProvider>
   </StrictMode>,

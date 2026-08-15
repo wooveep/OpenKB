@@ -41,7 +41,7 @@ type DesktopWindow = Window & {
   __TAURI_INTERNALS__?: unknown
 }
 
-/** True only in Tauri; browser mode keeps its existing REST compatibility path. */
+/** True only when the Desktop Workbench is running inside its Tauri shell. */
 export function isDesktopShell(): boolean {
   if (typeof window === "undefined") return false
   const desktopWindow = window as DesktopWindow

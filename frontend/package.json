@@ -1,5 +1,5 @@
 {
-  "name": "openkb-web",
+  "name": "openkb-desktop",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -7,7 +7,7 @@
     "dev": "vite",
     "i18n:check": "node scripts/check-i18n.mjs",
     "build": "npm run i18n:check && tsc -b && vite build",
-    "build:desktop": "npm run i18n:check && tsc -b && vite build --mode desktop",
+    "build:desktop": "npm run build",
     "lint": "eslint .",
     "preview": "vite preview",
     "tauri": "tauri --config ../desktop/src-tauri/tauri.conf.json"
@@ -61,7 +61,6 @@
     "react-hook-form": "^7.70.0",
     "react-i18next": "17.0.10",
     "react-resizable-panels": "^4.2.2",
-    "react-router": "^7.18.1",
     "recharts": "^2.15.4",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.4.0",

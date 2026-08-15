@@ -5,23 +5,11 @@ import resourcesToBackend from "i18next-resources-to-backend"
 export const SUPPORTED_LANGUAGES = ["zh", "en"] as const
 export type Language = (typeof SUPPORTED_LANGUAGES)[number]
 
-/** All namespaces. Only `common` is preloaded (see `ns` below); every other
- * namespace lazy-loads its {zh,en} JSON on the first useTranslation('<ns>'),
- * code-split per locale-namespace by Vite. */
-export const NAMESPACES = [
-  "common",
-  "home",
-  "kbList",
-  "kb",
-  "kbSettings",
-  "settings",
-  "chat",
-  "artifacts",
-] as const
+/** Desktop UI translations are kept in one always-loaded namespace. */
+export const NAMESPACES = ["common"] as const
 
 void i18n
-  // Turns a dynamic import() into an i18next backend: one code-split chunk per
-  // `locales/<lng>/<ns>.json`. Mirrors E's mermaid `import()` lazy pattern.
+  // Turns a dynamic import() into the locale backend used by the desktop shell.
   .use(
     resourcesToBackend(
       (language: string, namespace: string) => import(`../locales/${language}/${namespace}.json`),

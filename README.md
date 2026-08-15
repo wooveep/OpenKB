@@ -49,7 +49,7 @@ OpenKB has two layers: a **wiki foundation** that compiles and maintains your kn
 - **Skill Factory:** Distills redistributable agent skills from your wiki.
 - **OKF-ready:** Wiki pages follow the [Google OKF](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing) specification for knowledge sharing.
 - **Obsidian-compatible:** The wiki is plain `.md` files with cross-links. Opens in Obsidian for graph view.
-- **Knowledge Workbench (Web UI):** A bundled web UI served at `/` to browse the KB, upload and compile documents, and stream queries and chats — all in the browser.
+- **Desktop Workbench:** A local desktop workspace for importing documents, recovering failures, asking grounded questions, reviewing knowledge changes, and managing settings.
 
 # 🚀 Getting Started
 
@@ -118,18 +118,9 @@ LLM_API_KEY=your_llm_api_key
 
 Subscription-based providers that authenticate via OAuth device flow (e.g. `chatgpt/*`, `github_copilot/*`) need no API key; OpenKB skips the missing-key warning for them.
 
-### Knowledge Workbench (Web UI)
+### Desktop Workbench
 
-OpenKB ships a bundled web UI, served by the REST API at `/`. Install the API extra and start the server — no configuration needed:
-
-```bash
-pip install "openkb[web]"
-openkb-web                       # serves the API + Workbench at http://127.0.0.1:7566/
-```
-
-Open `http://127.0.0.1:7566/` for the Workbench. Auth is off by default (local-first); set `OPENKB_API_TOKEN` to require a bearer token before exposing the server. See the [full Web UI guide](examples/rest-api/README.md#knowledge-workbench-web-ui).
-
-> Working on the UI itself? Run the Vite dev server with `cd frontend && npm install && npm run dev` (it proxies `/api` to a running `openkb-web`), or `npm run build` to regenerate the bundled `openkb/web/`.
+OpenKB's supported interactive experience is the local Desktop Workbench. It provides document import and recovery, grounded question answering with citations and source images, knowledge-page editing and conflict review, model settings, and background task visibility.
 
 # 🧩 How OpenKB Works
 
@@ -339,12 +330,6 @@ gemini skills install https://github.com/VectifyAI/OpenKB.git --path skills/open
 
 The skill is read-only. It won't run `openkb add`, `remove`, or `lint --fix` without you asking. See [`skills/openkb/SKILL.md`](skills/openkb/SKILL.md) for the full instruction set.
 
-# REST API
-
-OpenKB ships a FastAPI service for HTTP clients. Install with `pip install -e ".[web]"`, then start with `python -m openkb.api`. The interactive API reference is at [`/docs`](http://127.0.0.1:7566/docs) (importable into Postman).
-
-See the [full REST API reference](examples/rest-api/README.md#rest-api) for endpoints, auth, and SSE streaming.
-
 # 🧭 Learn More
 
 ### Compared to Karpathy's Approach
@@ -374,7 +359,7 @@ See the [full REST API reference](examples/rest-api/README.md#rest-api) for endp
 - [ ] Scale to large document collections with nested folder support
 - [ ] Hierarchical concept (topic) indexing for massive knowledge bases
 - [ ] Database-backed storage engine
-- [x] Web UI for browsing and managing wikis (Knowledge Workbench, served at `/`)
+- [x] Desktop Workbench for importing, reviewing, and asking grounded questions
 
 ### Contributing
 

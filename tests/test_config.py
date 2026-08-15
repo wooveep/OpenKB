@@ -554,19 +554,6 @@ def test_query_agent_uses_global_language(_isolated_global, tmp_path, monkeypatc
     assert captured["language"] == "de"
 
 
-# --- scalar-whitelist parity --------------------------------------------------
-
-
-def test_global_scalar_keys_match_api_writable_keys():
-    # GLOBAL_SCALAR_KEYS (resolver) and _KB_CONFIG_WRITABLE_KEYS (config PATCH)
-    # must stay identical: a scalar added to only one would let the global PATCH
-    # persist a key the resolver ignores (or vice-versa). Guard the drift here
-    # rather than merging the two sources (lower-risk).
-    from openkb.api_models import _KB_CONFIG_WRITABLE_KEYS
-
-    assert set(GLOBAL_SCALAR_KEYS) == set(_KB_CONFIG_WRITABLE_KEYS)
-
-
 # --- kb_root_dir precedence / resolve_init_kb_dir / registered_kbs ------------
 
 

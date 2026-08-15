@@ -66,9 +66,6 @@ Issues = "https://github.com/VectifyAI/OpenKB/issues"
 [project.scripts]
 openkb = "openkb.cli:cli"
 openkb-desktop-engine = "openkb.desktop_engine:main"
-openkb-web = "openkb.api:main"
-# Backwards-compatible alias for the historical name; same entry point.
-openkb-api = "openkb.api:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -83,21 +80,9 @@ dev = [
     "types-PyYAML==6.0.12.20260518",
 ]
 desktop-build = ["pyinstaller==6.22.0"]
-# The Knowledge Workbench Web UI is served by this FastAPI server. `web` is the
-# canonical extra; `api` is a backwards-compatible alias so an existing
-# `pip install "openkb[api]"` keeps working.
-web = ["fastapi", "uvicorn", "python-multipart"]
-api = ["openkb[web]"]
 
 [tool.hatch.version]
 source = "vcs"
-
-# The Workbench web bundle (openkb/web) is git-ignored but must ship in the
-# published package. `artifacts` force-includes it into both the sdist and the
-# wheel when present (built by `npm run build`, e.g. in release CI). When it is
-# absent the build still succeeds — the API server just serves no UI.
-[tool.hatch.build]
-artifacts = ["openkb/web/**"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["openkb"]

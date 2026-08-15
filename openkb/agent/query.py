@@ -149,8 +149,8 @@ async def iter_agent_response_events(
 ) -> AsyncIterator[dict[str, Any]]:
     """Yield non-TTY events for a streamed agent response.
 
-    The CLI renders these events to stdout; the REST API serializes the same
-    events as SSE. Events: ``{"event": "delta", "data": {"text": ...}}`` for
+    Callers can render these events in their own transport. Events:
+    ``{"event": "delta", "data": {"text": ...}}`` for
     each response-text delta, ``{"event": "tool_call", "data": {...}}`` for
     tool invocations, and a final ``{"event": "final", "data": {"answer": ...,
     "history": [...]}}`` carrying the complete answer and reusable Agents SDK

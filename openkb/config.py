@@ -58,7 +58,7 @@ GLOBAL_CONFIG_DIR = Path.home() / ".config" / "openkb"
 GLOBAL_CONFIG_PATH = GLOBAL_CONFIG_DIR / "global.yaml"
 GLOBAL_CONFIG_LOCK_PATH = GLOBAL_CONFIG_DIR / "global.lock"
 
-# Portable KB names for the REST API: letters (any script, incl. CJK), numbers,
+# Portable KB names: letters (any script, incl. CJK), numbers,
 # underscores, hyphens — but NO spaces, dots, or path separators. Lets clients
 # address a knowledge base by a filesystem-safe short name (``kb``) instead of an
 # absolute path, resolved via kb_aliases/known_kbs/OPENKB_KB_ROOT. `\w` is Unicode
@@ -97,7 +97,7 @@ def _load_global_config_unlocked() -> dict[str, Any]:
     hand-edited global.yaml) to ``{}`` is sunk HERE — the single load choke
     point — so every reader (:func:`kb_root_dir`, :func:`registered_kbs`,
     :func:`resolve_kb_alias`, :func:`resolve_effective_config`, and the config
-    PATCH in ``api_config``) can treat the result as a dict without repeating an
+    configuration adapter can treat the result as a dict without repeating an
     ``isinstance`` guard, and a malformed file degrades to defaults on every
     command's hot path instead of raising ``AttributeError``.
     """
@@ -306,12 +306,12 @@ def resolve_litellm_settings(config: dict) -> dict[str, Any]:
 # Process-wide extra headers for LLM requests, resolved from the active KB's
 # config by the CLI entry points (cli._setup_llm_key). LLM call sites read it
 # via get_extra_headers() so the value doesn't have to be threaded through
-# every compile/agent call chain — mirroring how the API key is applied
+# every compile/agent call chain — mirroring how the credential is applied
 # globally via litellm.api_key / provider env vars.
 
 
-# Shared by cli._setup_llm_key and resolve_credential_bundle so the CLI and
-# REST paths apply identical litellm.* override semantics.
+# Shared by cli._setup_llm_key and resolve_credential_bundle so product entry
+# points apply identical litellm.* override semantics.
 def resolve_per_request_overrides(
     config: dict[str, Any],
 ) -> tuple[dict[str, str], float | None, dict[str, Any]]:
@@ -465,10 +465,9 @@ def resolve_credential_bundle(kb_dir: Path) -> LlmCredentialBundle:
     config_path = kb_dir / ".openkb" / "config.yaml"
     if config_path.exists():
         config = load_config(config_path)
-        # Shared resolver so CLI and REST apply identical litellm.* override
+        # Shared resolver so product entry points apply identical litellm.* override
         # semantics. litellm module-level settings (drop_params etc.) are
-        # process globals and intentionally not carried per-request: the REST
-        # server runs multiple KBs in one process, so they cannot be isolated.
+        # process globals and intentionally not carried in the credential bundle.
         extra_headers, timeout, _ = resolve_per_request_overrides(config)
         parallel_tool_calls, parallel_tool_calls_explicit = resolve_parallel_tool_calls(config)
 
@@ -603,7 +602,7 @@ def register_kb(kb_path: Path) -> None:
 
 
 def kb_root_dir() -> Path:
-    """Return the root directory for API-addressable KB names.
+    """Return the root directory for named knowledge bases.
 
     Precedence: env ``OPENKB_KB_ROOT`` > global.yaml ``kb_root`` > the default
     ``<GLOBAL_CONFIG_DIR>/kbs``. The env var stays the top override (a deployer
@@ -625,10 +624,7 @@ def kb_root_dir() -> Path:
 def _is_kb_dir(kb_dir: Path) -> bool:
     """Whether ``kb_dir`` is a KB directory (has both ``.openkb`` and ``wiki``).
 
-    Mirrors ``openkb.api_helpers._is_kb_dir``; duplicated here (rather than
-    imported) so this low-level config module — used by the CLI — does not pull
-    in the FastAPI web stack, and to avoid an import cycle (``api_helpers``
-    imports this module). Used to recognize ``kb_root_dir()`` children so a
+    Used to recognize ``kb_root_dir()`` children so a
     root-level KB is never shadowed by a same-named off-root registry entry.
     """
     return (kb_dir / ".openkb").is_dir() and (kb_dir / "wiki").is_dir()
@@ -652,8 +648,8 @@ def resolve_init_kb_dir(kb_name: str, path: str | None = None) -> Path:
     """Resolve the target directory for a newly-initialized KB.
 
     Default: ``kb_root_dir() / kb_name``. When ``path`` is given it must be an
-    ABSOLUTE directory (a relative path raises ``ValueError`` — the REST init
-    endpoint maps that to a 400); it is used verbatim after ``expanduser()`` +
+    ABSOLUTE directory (a relative path raises ``ValueError``); it is used
+    verbatim after ``expanduser()`` +
     ``resolve()``. Any absolute location is allowed, matching the CLI's
     cwd-based init (OpenKB is a local-first tool). The caller still registers
     the alias (``register_kb_alias``) so name→path resolution keeps working for
@@ -681,8 +677,8 @@ def validate_kb_name(name: str) -> str:
 def register_kb_alias(name: str, kb_path: Path) -> None:
     """Register a portable KB name alias for a KB path.
 
-    Held under the global-config lock so concurrent API writes (uvicorn
-    threadpool) can't lose an alias to a read-modify-write race.
+    Held under the global-config lock so concurrent writes cannot lose an
+    alias to a read-modify-write race.
     """
     alias = validate_kb_name(name)
     resolved = str(kb_path.resolve())
@@ -702,8 +698,8 @@ def register_kb_alias(name: str, kb_path: Path) -> None:
 def resolve_kb_alias(name: str) -> Path:
     """Resolve a portable KB name to its path, using the unified name→path map.
 
-    Resolution is kept in lock-step with :func:`registered_kbs` (and hence the
-    ``/api/v1/kbs`` list) so the two can never disagree. Order:
+    Resolution is kept in lock-step with :func:`registered_kbs` so the two can
+    never disagree. Order:
 
     1. an explicit ``kb_aliases`` entry (user-set name→path) wins outright;
     2. else ``<kb_root>/<name>`` when it is a KB dir — a root-level KB is never
@@ -739,8 +735,8 @@ def resolve_kb_alias(name: str) -> Path:
 def registered_kbs() -> list[tuple[str, Path]]:
     """Enumerate registered KBs as UNIQUE ``(name, resolved_path)`` pairs.
 
-    The single name→path registry view shared by API discovery
-    (``_list_knowledge_bases``) and name resolution (:func:`resolve_kb_alias`),
+    The single name→path registry view shared by product entry points and name
+    resolution (:func:`resolve_kb_alias`),
     so the KB list and resolution can never disagree. Names are deduped by name
     AND resolved path:
 
@@ -751,9 +747,8 @@ def registered_kbs() -> list[tuple[str, Path]]:
       with a warning — never silently truncated to a wrong path or emitted as a
       duplicate name.
 
-    Root children are NOT emitted here (``_list_knowledge_bases`` surfaces them
-    from the filesystem and :func:`resolve_kb_alias` prefers them before this
-    registry); they participate only as reserved names for the tie-break above.
+    Root children are not emitted here; they participate only as reserved names
+    for the tie-break above.
     A malformed global.yaml (coerced to ``{}`` by the loader) or a non-string
     entry is tolerated rather than raising.
     """
