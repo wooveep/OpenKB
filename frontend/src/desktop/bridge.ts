@@ -22,6 +22,8 @@ import {
   type DesktopDocumentVersionCandidates,
   type DesktopDocumentVersionCandidateDecision,
   type DesktopKnowledgeReconciliationConflicts,
+  type DesktopKnowledgeReconciliationCommit,
+  type DesktopKnowledgeReconciliationDecision,
   type DesktopImportJobs,
   type DesktopRawDocument,
   type DesktopRecoveryOverride,
@@ -210,6 +212,26 @@ export class TauriDesktopBridge implements DesktopBridge {
   async knowledgeReconciliationConflicts(): Promise<DesktopKnowledgeReconciliationConflicts> {
     return this.call<DesktopKnowledgeReconciliationConflicts>(
       "desktop_knowledge_reconciliation_conflicts",
+    )
+  }
+
+  async stageKnowledgeReconciliationDecisions(
+    candidateIds: string[],
+    decision: DesktopKnowledgeReconciliationDecision | null,
+    requestId: string,
+  ): Promise<DesktopKnowledgeReconciliationConflicts> {
+    return this.call<DesktopKnowledgeReconciliationConflicts>(
+      "desktop_stage_knowledge_reconciliation_decisions",
+      { candidateIds, decision, requestId },
+    )
+  }
+
+  async commitKnowledgeReconciliationDecisions(
+    requestId: string,
+  ): Promise<DesktopKnowledgeReconciliationCommit> {
+    return this.call<DesktopKnowledgeReconciliationCommit>(
+      "desktop_commit_knowledge_reconciliation_decisions",
+      { requestId },
     )
   }
 
@@ -411,6 +433,24 @@ class UnavailableDesktopBridge implements DesktopBridge {
   }
 
   knowledgeReconciliationConflicts(): Promise<DesktopKnowledgeReconciliationConflicts> {
+    return this.unavailable()
+  }
+
+  stageKnowledgeReconciliationDecisions(
+    candidateIds: string[],
+    decision: DesktopKnowledgeReconciliationDecision | null,
+    requestId: string,
+  ): Promise<DesktopKnowledgeReconciliationConflicts> {
+    void candidateIds
+    void decision
+    void requestId
+    return this.unavailable()
+  }
+
+  commitKnowledgeReconciliationDecisions(
+    requestId: string,
+  ): Promise<DesktopKnowledgeReconciliationCommit> {
+    void requestId
     return this.unavailable()
   }
 

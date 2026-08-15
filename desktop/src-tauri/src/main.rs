@@ -10,8 +10,8 @@ use engine_protocol::{
     EngineHealth, EngineSupervisor, GroundedAnswer, GroundedAnswersResult, ImportControlResult,
     ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
     KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind, KnowledgePagesResult,
-    KnowledgeReconciliationConflictsResult, RawDocument, RecoveryOverride,
-    TextDocumentImportResult,
+    KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
+    KnowledgeReconciliationDecision, RawDocument, RecoveryOverride, TextDocumentImportResult,
 };
 use process_tree::ProcessTreeJob;
 use std::{path::Path, sync::Arc};
@@ -271,6 +271,40 @@ async fn desktop_knowledge_reconciliation_conflicts(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn desktop_stage_knowledge_reconciliation_decisions(
+    state: State<'_, DesktopState>,
+    candidate_ids: Vec<String>,
+    decision: Option<KnowledgeReconciliationDecision>,
+    request_id: String,
+) -> Result<KnowledgeReconciliationConflictsResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.stage_knowledge_reconciliation_decisions(candidate_ids, decision, request_id)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop knowledge-reconciliation staging stopped unexpectedly: {error}"),
+    })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_commit_knowledge_reconciliation_decisions(
+    state: State<'_, DesktopState>,
+    request_id: String,
+) -> Result<KnowledgeReconciliationCommit, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.commit_knowledge_reconciliation_decisions(request_id)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop knowledge-reconciliation commit stopped unexpectedly: {error}"),
+    })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
 async fn desktop_resolve_document_version_candidate(
     state: State<'_, DesktopState>,
     candidate_id: String,
@@ -435,6 +469,8 @@ fn main() {
             desktop_save_knowledge_page,
             desktop_document_version_candidates,
             desktop_knowledge_reconciliation_conflicts,
+            desktop_stage_knowledge_reconciliation_decisions,
+            desktop_commit_knowledge_reconciliation_decisions,
             desktop_resolve_document_version_candidate,
             desktop_read_raw_document,
             desktop_pause_import_job,

@@ -28,6 +28,7 @@ from openkb.desktop_import import (
 )
 from openkb.desktop_import_sources import inspect_import_sources
 from openkb.desktop_import_types import DesktopRecoveryOverride
+from openkb.desktop_knowledge_generations import materialize_current_generation
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageError, DesktopKnowledgePageService
 from openkb.desktop_legacy_office_parsers import shutdown_legacy_office_runtime
 from openkb.desktop_model_gateway import MODEL_CALL_DEADLINE_SECONDS, DesktopModelGateway
@@ -168,6 +169,8 @@ class DesktopEngineServer:
         "workbench.document_version_candidates",
         "workbench.resolve_document_version_candidate",
         "workbench.knowledge_reconciliation_conflicts",
+        "workbench.stage_knowledge_reconciliation_decisions",
+        "workbench.commit_knowledge_reconciliation_decisions",
     }
     _INTERRUPTION_PRESERVING_METHODS = {
         "workbench.ask_grounded",
@@ -180,6 +183,8 @@ class DesktopEngineServer:
         "workbench.read_raw_document",
         "workbench.save_knowledge_page",
         "workbench.resolve_document_version_candidate",
+        "workbench.stage_knowledge_reconciliation_decisions",
+        "workbench.commit_knowledge_reconciliation_decisions",
     }
 
     def __init__(
@@ -357,13 +362,10 @@ class DesktopEngineServer:
             and request.method not in self._INTERRUPTION_PRESERVING_METHODS
         ):
             raise DesktopRequestError("request_cancelled", "Desktop Bridge request was cancelled.")
-
         if request.method == "workbench.pause_import_job":
             return self._pause_import_job(_required_string_param(request, "job_id"))
-
         if request.method == "workbench.cancel_import_job":
             return self._cancel_import_job(_required_string_param(request, "job_id"))
-
         if request.method in self._WORKSPACE_METHODS:
             return self._dispatch_workspace_request(request, cancel_event)
 
@@ -431,7 +433,7 @@ class DesktopEngineServer:
             "workbench.resolve_document_version_candidate",
         }:
             return self._dispatch_document_version_request(request, cancel_event)
-        if request.method == "workbench.knowledge_reconciliation_conflicts":
+        if "knowledge_reconciliation" in request.method:
             return self._dispatch_knowledge_reconciliation_request(request, cancel_event)
         if request.method in self._INTERRUPTION_PRESERVING_METHODS:
             return self._dispatch_grounded_answer_request(request, cancel_event)
@@ -461,13 +463,11 @@ class DesktopEngineServer:
                 kb_dir = _required_path_param(request, "kb_dir")
                 self._begin_workspace_mutation(request, cancel_event)
                 activation = self._workspace.open(Path(kb_dir))
-                DesktopRawAssetService(
-                    Path(activation.knowledge_base.kb_dir)
-                ).verify_available_documents()
-                DesktopKnowledgePageService(
-                    Path(activation.knowledge_base.kb_dir)
-                ).materialize_current_pages()
-                self._start_recoverable_imports(Path(activation.knowledge_base.kb_dir))
+                active_kb_dir = Path(activation.knowledge_base.kb_dir)
+                DesktopRawAssetService(active_kb_dir).verify_available_documents()
+                DesktopKnowledgePageService(active_kb_dir).materialize_current_pages()
+                materialize_current_generation(active_kb_dir)
+                self._start_recoverable_imports(active_kb_dir)
                 return activation.as_dict()
 
             if request.method == "workbench.inspect_import_sources":

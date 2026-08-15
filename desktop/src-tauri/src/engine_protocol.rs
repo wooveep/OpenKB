@@ -12,7 +12,8 @@ pub use crate::engine_wire::{
     DocumentVersionCandidatesResult, EngineHealth, GroundedAnswer, GroundedAnswersResult,
     ImportControlResult, ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
     KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind, KnowledgePagesResult,
-    KnowledgeReconciliationConflict, KnowledgeReconciliationConflictsResult, RawDocument,
+    KnowledgeReconciliationCommit, KnowledgeReconciliationConflict,
+    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision, RawDocument,
     RecoveryOverride, TextDocumentImportResult,
 };
 use serde_json::{json, Value};

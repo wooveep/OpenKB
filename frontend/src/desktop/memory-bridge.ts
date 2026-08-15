@@ -22,7 +22,9 @@ import type {
   DesktopDocumentVersionCandidates,
   DesktopDocumentVersionCandidateDecision,
   DesktopKnowledgeReconciliationConflict,
+  DesktopKnowledgeReconciliationCommit,
   DesktopKnowledgeReconciliationConflicts,
+  DesktopKnowledgeReconciliationDecision,
   DesktopImportTask,
   DesktopRecoveryOverride,
   DesktopTextDocumentImport,
@@ -399,6 +401,40 @@ export class MemoryDesktopBridge implements DesktopBridge {
 
   async knowledgeReconciliationConflicts(): Promise<DesktopKnowledgeReconciliationConflicts> {
     return { conflicts: this.knowledgeReconciliationConflictResults }
+  }
+
+  async stageKnowledgeReconciliationDecisions(
+    candidateIds: string[],
+    decision: DesktopKnowledgeReconciliationDecision | null,
+    requestId: string,
+  ): Promise<DesktopKnowledgeReconciliationConflicts> {
+    void requestId
+    const selected = new Set(candidateIds)
+    if (!selected.size) throw new Error("Choose one or more knowledge conflicts first.")
+    this.knowledgeReconciliationConflictResults = this.knowledgeReconciliationConflictResults.map((conflict) => (
+      selected.has(conflict.candidateId) ? { ...conflict, stagedDecision: decision } : conflict
+    ))
+    return this.knowledgeReconciliationConflicts()
+  }
+
+  async commitKnowledgeReconciliationDecisions(
+    requestId: string,
+  ): Promise<DesktopKnowledgeReconciliationCommit> {
+    void requestId
+    const staged = this.knowledgeReconciliationConflictResults.filter(
+      (conflict) => conflict.stagedDecision !== null,
+    )
+    if (!staged.length) throw new Error("Choose at least one knowledge conflict before committing.")
+    const published = staged.filter((conflict) => conflict.stagedDecision === "publish_incoming")
+    this.knowledgeReconciliationConflictResults = this.knowledgeReconciliationConflictResults.filter(
+      (conflict) => conflict.stagedDecision === null,
+    )
+    return {
+      publishedGenerationId: published.length ? 1 : null,
+      publishedCount: published.length,
+      keptCount: staged.length - published.length,
+      resolvedCandidateIds: staged.map((conflict) => conflict.candidateId),
+    }
   }
 
   async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {

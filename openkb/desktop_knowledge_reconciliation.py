@@ -9,7 +9,6 @@ User-owned Knowledge Page revisions remain separate SQLite authority.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import re
 import sqlite3
 import uuid
@@ -19,6 +18,13 @@ from pathlib import Path
 
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
 from openkb.desktop_import_types import DesktopKnowledgeReconciliationConflict
+from openkb.desktop_knowledge_generations import (
+    KnowledgeGenerationChange,
+    current_generation_id_in,
+    knowledge_content_sha256,
+    normalized_knowledge_content,
+    publish_generation_changes_in,
+)
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
 from openkb.desktop_workspace import desktop_state_database_path
 
@@ -54,7 +60,8 @@ class DesktopKnowledgeReconciliationService:
     """Persist compatible additions and isolate conflicts from published knowledge."""
 
     def __init__(self, kb_dir: Path) -> None:
-        self._database_path = desktop_state_database_path(kb_dir.expanduser().resolve())
+        self._kb_dir = kb_dir.expanduser().resolve()
+        self._database_path = desktop_state_database_path(self._kb_dir)
 
     def record_document_changes(
         self, document_id: str, blocks: tuple[DocumentIRBlock, ...]
@@ -80,7 +87,7 @@ class DesktopKnowledgeReconciliationService:
                 document_name = str(document[0])
                 conflicts: list[DesktopKnowledgeReconciliationConflict] = []
                 for parsed_change in _extract_changes(blocks, document_name):
-                    current_generation_id = _current_generation_id_in(connection)
+                    current_generation_id = current_generation_id_in(connection)
                     for change in _resolved_kinds_in(
                         connection, current_generation_id, parsed_change
                     ):
@@ -105,10 +112,12 @@ class DesktopKnowledgeReconciliationService:
                 SELECT candidates.candidate_id, candidates.document_id, documents.display_name,
                     candidates.kind, candidates.title, candidates.content_markdown,
                     candidates.baseline_kind, candidates.baseline_title,
-                    candidates.baseline_content_markdown, candidates.observed_generation_id
+                    candidates.baseline_content_markdown, candidates.observed_generation_id,
+                    candidates.staged_decision
                 FROM knowledge_reconciliation_candidates AS candidates
                 JOIN source_documents AS documents ON documents.document_id = candidates.document_id
                 WHERE candidates.status = 'pending_conflict'
+                    AND candidates.resolution_status IS NULL
                     AND documents.availability = 'available'
                 ORDER BY candidates.created_at DESC, candidates.candidate_id
                 """
@@ -121,7 +130,7 @@ class DesktopKnowledgeReconciliationService:
         """Expose the stable current generation for transport and focused checks."""
         connection = self._connect()
         try:
-            return _current_generation_id_in(connection)
+            return current_generation_id_in(connection)
         finally:
             connection.close()
 
@@ -133,7 +142,7 @@ class DesktopKnowledgeReconciliationService:
         document_name: str,
         change: _IncomingChange,
     ) -> DesktopKnowledgeReconciliationConflict | None:
-        current_generation_id = _current_generation_id_in(connection)
+        current_generation_id = current_generation_id_in(connection)
         baselines = _baselines_in(connection, current_generation_id, change)
         relationships = tuple(
             _relationship(change.content_markdown, baseline.content_markdown)
@@ -167,6 +176,7 @@ class DesktopKnowledgeReconciliationService:
                 baseline_title=conflict_baseline.title,
                 baseline_content_markdown=conflict_baseline.content_markdown,
                 observed_generation_id=current_generation_id,
+                staged_decision=None,
             )
 
         has_addition = not baselines or any(
@@ -174,11 +184,10 @@ class DesktopKnowledgeReconciliationService:
         )
         baseline_for_record = baselines[0] if baselines else None
         if has_addition:
-            published_generation_id = _advance_generation_in(
+            published_generation_id = publish_generation_changes_in(
                 connection,
                 current_generation_id=current_generation_id,
-                document_id=document_id,
-                change=change,
+                changes=(_generation_change(document_id, change),),
                 now=now,
             )
             _insert_candidate_in(
@@ -307,13 +316,11 @@ def _bounded_content(values: Iterable[object]) -> str:
 
 
 def _content_sha256(value: str) -> str:
-    return hashlib.sha256(_normalized_content(value).encode("utf-8")).hexdigest()
+    return knowledge_content_sha256(value)
 
 
 def _normalized_content(value: str) -> str:
-    return "\n".join(
-        " ".join(line.split()) for line in value.splitlines() if line.strip()
-    ).casefold()
+    return normalized_knowledge_content(value)
 
 
 def _content_units(value: str) -> frozenset[str]:
@@ -436,91 +443,15 @@ def _baselines_in(
     return tuple(baselines)
 
 
-def _advance_generation_in(
-    connection: sqlite3.Connection,
-    *,
-    current_generation_id: int | None,
-    document_id: str,
-    change: _IncomingChange,
-    now: str,
-) -> int:
-    cursor = connection.execute(
-        """
-        INSERT INTO knowledge_generations (parent_generation_id, created_at)
-        VALUES (?, ?)
-        """,
-        (current_generation_id, now),
+def _generation_change(document_id: str, change: _IncomingChange) -> KnowledgeGenerationChange:
+    return KnowledgeGenerationChange(
+        document_id=document_id,
+        kind=change.kind,
+        title=change.title,
+        normalized_title=change.normalized_title,
+        content_markdown=change.content_markdown,
+        content_sha256=change.content_sha256,
     )
-    if cursor.lastrowid is None:
-        raise RuntimeError("Knowledge generation insert did not return an identifier.")
-    generation_id = cursor.lastrowid
-    if current_generation_id is not None:
-        connection.execute(
-            """
-            INSERT INTO knowledge_generation_items (
-                generation_id, item_key, kind, title, normalized_title,
-                content_markdown, content_sha256, source_document_id, created_at
-            )
-            SELECT ?, item_key, kind, title, normalized_title,
-                content_markdown, content_sha256, source_document_id, created_at
-            FROM knowledge_generation_items WHERE generation_id = ?
-            """,
-            (generation_id, current_generation_id),
-        )
-    existing = connection.execute(
-        """
-        SELECT item_key FROM knowledge_generation_items
-        WHERE generation_id = ? AND kind = ? AND normalized_title = ?
-        """,
-        (generation_id, change.kind, change.normalized_title),
-    ).fetchone()
-    if existing is None:
-        connection.execute(
-            """
-            INSERT INTO knowledge_generation_items (
-                generation_id, item_key, kind, title, normalized_title,
-                content_markdown, content_sha256, source_document_id, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                generation_id,
-                uuid.uuid4().hex,
-                change.kind,
-                change.title,
-                change.normalized_title,
-                change.content_markdown,
-                change.content_sha256,
-                document_id,
-                now,
-            ),
-        )
-    else:
-        connection.execute(
-            """
-            UPDATE knowledge_generation_items
-            SET title = ?, content_markdown = ?, content_sha256 = ?,
-                source_document_id = ?, created_at = ?
-            WHERE generation_id = ? AND item_key = ?
-            """,
-            (
-                change.title,
-                change.content_markdown,
-                change.content_sha256,
-                document_id,
-                now,
-                generation_id,
-                str(existing[0]),
-            ),
-        )
-    connection.execute(
-        """
-        INSERT INTO knowledge_generation_state (singleton, current_generation_id)
-        VALUES (1, ?)
-        ON CONFLICT(singleton) DO UPDATE SET current_generation_id = excluded.current_generation_id
-        """,
-        (generation_id,),
-    )
-    return generation_id
 
 
 def _insert_candidate_in(
@@ -580,13 +511,6 @@ def _insert_candidate_in(
     return candidate_id
 
 
-def _current_generation_id_in(connection: sqlite3.Connection) -> int | None:
-    row = connection.execute(
-        "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1"
-    ).fetchone()
-    return int(row[0]) if row is not None else None
-
-
 def _conflict_from_row(row: tuple[object, ...]) -> DesktopKnowledgeReconciliationConflict:
     return DesktopKnowledgeReconciliationConflict(
         candidate_id=str(row[0]),
@@ -599,6 +523,7 @@ def _conflict_from_row(row: tuple[object, ...]) -> DesktopKnowledgeReconciliatio
         baseline_title=str(row[7]),
         baseline_content_markdown=str(row[8]),
         observed_generation_id=int(str(row[9])) if row[9] is not None else None,
+        staged_decision=str(row[10]) if row[10] is not None else None,
     )
 
 

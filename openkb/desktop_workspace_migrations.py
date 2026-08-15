@@ -485,3 +485,46 @@ KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON knowledge_reconciliation_candidates(document_id, created_at DESC)
     """,
 )
+
+
+# Review choices are durable only inside the reconciliation queue.  A resolution
+# record deliberately retains identifiers, outcome and time, but never a copy of
+# the discarded derived Markdown.
+KNOWLEDGE_RECONCILIATION_RESOLUTION_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    ALTER TABLE knowledge_reconciliation_candidates
+        ADD COLUMN staged_decision TEXT CHECK(staged_decision IN (
+            'publish_incoming', 'keep_current'
+        ))
+    """,
+    """
+    ALTER TABLE knowledge_reconciliation_candidates
+        ADD COLUMN resolution_status TEXT CHECK(resolution_status IN ('published', 'kept'))
+    """,
+    """
+    ALTER TABLE knowledge_reconciliation_candidates
+        ADD COLUMN resolved_at TEXT
+    """,
+    """
+    CREATE TABLE knowledge_reconciliation_resolution_records (
+        resolution_id TEXT PRIMARY KEY,
+        candidate_id TEXT NOT NULL UNIQUE
+            REFERENCES knowledge_reconciliation_candidates(candidate_id) ON DELETE CASCADE,
+        document_id TEXT NOT NULL REFERENCES source_documents(document_id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK(kind IN ('concept', 'entity')),
+        normalized_title TEXT NOT NULL,
+        decision TEXT NOT NULL CHECK(decision IN ('publish_incoming', 'keep_current')),
+        published_generation_id INTEGER
+            REFERENCES knowledge_generations(generation_id) ON DELETE SET NULL,
+        resolved_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX knowledge_reconciliation_candidates_staged_idx
+        ON knowledge_reconciliation_candidates(status, resolution_status, staged_decision)
+    """,
+    """
+    CREATE INDEX knowledge_reconciliation_resolution_records_document_idx
+        ON knowledge_reconciliation_resolution_records(document_id, resolved_at DESC)
+    """,
+)

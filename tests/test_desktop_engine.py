@@ -300,7 +300,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 14,
+            "schema_version": 15,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -851,6 +851,36 @@ def test_engine_lists_isolated_knowledge_reconciliation_conflicts(tmp_path):
     assert len(queue["conflicts"]) == 1
     assert queue["conflicts"][0]["title"] == "Evidence"
     assert queue["conflicts"][0]["baseline_kind"] == "published_generation"
+
+    staged = server._dispatch(
+        DesktopRequest(
+            request_id="stage-knowledge-conflict",
+            method="workbench.stage_knowledge_reconciliation_decisions",
+            params={
+                "candidate_ids": [queue["conflicts"][0]["candidate_id"]],
+                "decision": "publish_incoming",
+            },
+        ),
+        cancel_event=None,
+    )
+    assert staged["conflicts"][0]["staged_decision"] == "publish_incoming"
+    committed = server._dispatch(
+        DesktopRequest(
+            request_id="commit-knowledge-conflict",
+            method="workbench.commit_knowledge_reconciliation_decisions",
+            params={},
+        ),
+        cancel_event=None,
+    )
+    assert committed["published_count"] == 1
+    assert server._dispatch(
+        DesktopRequest(
+            request_id="knowledge-conflicts-after-commit",
+            method="workbench.knowledge_reconciliation_conflicts",
+            params={},
+        ),
+        cancel_event=None,
+    ) == {"conflicts": []}
 
 
 def test_engine_returns_a_persisted_interrupted_answer_after_user_stop(tmp_path):

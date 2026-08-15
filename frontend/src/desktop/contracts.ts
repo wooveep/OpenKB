@@ -280,6 +280,7 @@ export interface DesktopDocumentVersionCandidates {
 }
 
 export type DesktopKnowledgeReconciliationBaselineKind = "published_generation" | "user_revision"
+export type DesktopKnowledgeReconciliationDecision = "publish_incoming" | "keep_current"
 
 export interface DesktopKnowledgeReconciliationConflict {
   candidateId: string
@@ -292,10 +293,18 @@ export interface DesktopKnowledgeReconciliationConflict {
   baselineTitle: string
   baselineContentMarkdown: string
   observedGenerationId: number | null
+  stagedDecision: DesktopKnowledgeReconciliationDecision | null
 }
 
 export interface DesktopKnowledgeReconciliationConflicts {
   conflicts: DesktopKnowledgeReconciliationConflict[]
+}
+
+export interface DesktopKnowledgeReconciliationCommit {
+  publishedGenerationId: number | null
+  publishedCount: number
+  keptCount: number
+  resolvedCandidateIds: string[]
 }
 
 /** The SQLite-authoritative knowledge base currently available to the Desktop Runtime. */
@@ -433,6 +442,14 @@ export interface DesktopBridge {
     requestId: string,
   ): Promise<DesktopDocumentVersionCandidate>
   knowledgeReconciliationConflicts(): Promise<DesktopKnowledgeReconciliationConflicts>
+  stageKnowledgeReconciliationDecisions(
+    candidateIds: string[],
+    decision: DesktopKnowledgeReconciliationDecision | null,
+    requestId: string,
+  ): Promise<DesktopKnowledgeReconciliationConflicts>
+  commitKnowledgeReconciliationDecisions(
+    requestId: string,
+  ): Promise<DesktopKnowledgeReconciliationCommit>
   pauseImportJob(jobId: string): Promise<DesktopImportControlResult>
   resumeImportJob(jobId: string, requestId: string): Promise<DesktopTextDocumentImport>
   recoverImportJob(

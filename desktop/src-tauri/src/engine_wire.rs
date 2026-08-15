@@ -12,7 +12,8 @@ pub use document_versions::{
 #[path = "engine_wire_knowledge_reconciliation.rs"]
 mod knowledge_reconciliation;
 pub use knowledge_reconciliation::{
-    KnowledgeReconciliationConflict, KnowledgeReconciliationConflictsResult,
+    KnowledgeReconciliationCommit, KnowledgeReconciliationConflict,
+    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision,
 };
 
 pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;

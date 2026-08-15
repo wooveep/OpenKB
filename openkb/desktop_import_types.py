@@ -111,6 +111,7 @@ class DesktopKnowledgeReconciliationConflict:
     baseline_title: str
     baseline_content_markdown: str
     observed_generation_id: int | None
+    staged_decision: str | None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -124,6 +125,25 @@ class DesktopKnowledgeReconciliationConflict:
             "baseline_title": self.baseline_title,
             "baseline_content_markdown": self.baseline_content_markdown,
             "observed_generation_id": self.observed_generation_id,
+            "staged_decision": self.staged_decision,
+        }
+
+
+@dataclass(frozen=True)
+class DesktopKnowledgeReconciliationCommit:
+    """The durable outcome of one atomic review-queue commit."""
+
+    published_generation_id: int | None
+    published_count: int
+    kept_count: int
+    resolved_candidate_ids: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "published_generation_id": self.published_generation_id,
+            "published_count": self.published_count,
+            "kept_count": self.kept_count,
+            "resolved_candidate_ids": list(self.resolved_candidate_ids),
         }
 
 
