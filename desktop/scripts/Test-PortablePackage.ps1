@@ -170,7 +170,6 @@ function Test-FrozenEngine {
     $startInfo.Environment["TRANSFORMERS_OFFLINE"] = "1"
     $startInfo.Environment["PIP_NO_INDEX"] = "1"
     $startInfo.Environment["UV_OFFLINE"] = "1"
-    $startInfo.Environment["OPENKB_ENGINE_TRACEBACK_AFTER_SECONDS"] = "30"
     $engine = New-Object System.Diagnostics.Process
     $engine.StartInfo = $startInfo
     Assert-That -Condition ($engine.Start()) -Message "Could not start frozen OpenKB Engine."

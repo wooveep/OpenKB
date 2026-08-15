@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import struct
 import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import BinaryIO
 
@@ -762,7 +762,7 @@ def _parse_request(frame: dict[str, object]) -> DesktopRequest:
 
 def main() -> int:
     """Run the packaged Engine child process."""
-    _enable_debug_tracebacks()
+    _preload_frozen_ocr_dependencies()
     try:
         DesktopEngineServer(sys.stdin.buffer, sys.stdout.buffer).serve()
     except Exception as error:
@@ -771,20 +771,14 @@ def main() -> int:
     return 0
 
 
-def _enable_debug_tracebacks() -> None:
-    """Emit worker stacks only when an integration runner explicitly asks for them."""
-    value = os.environ.get("OPENKB_ENGINE_TRACEBACK_AFTER_SECONDS")
-    if value is None:
+def _preload_frozen_ocr_dependencies() -> None:
+    """Load native OCR imports on the Engine main thread before worker dispatch."""
+    if getattr(sys, "_MEIPASS", None) is None:
         return
     try:
-        delay = float(value)
-    except ValueError:
+        import_module("rapidocr_onnxruntime")
+    except ImportError:
         return
-    if delay <= 0:
-        return
-    import faulthandler
-
-    faulthandler.dump_traceback_later(delay, repeat=True, file=sys.stderr)
 
 
 if __name__ == "__main__":
