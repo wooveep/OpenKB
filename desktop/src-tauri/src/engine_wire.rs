@@ -4,6 +4,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::io::{Read, Write};
 
+#[path = "engine_wire_document_versions.rs"]
+mod document_versions;
+pub use document_versions::{
+    DocumentVersionCandidate, DocumentVersionCandidateDecision, DocumentVersionCandidatesResult,
+};
+
 pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 pub type BridgeResult<T> = Result<T, BridgeError>;

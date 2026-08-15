@@ -345,3 +345,70 @@ DEDUPLICATION_MIGRATION_STATEMENTS: tuple[str, ...] = (
     )
     """,
 )
+
+
+DOCUMENT_VERSION_CANDIDATE_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE document_version_sources (
+        source_id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE document_version_members (
+        document_id TEXT PRIMARY KEY REFERENCES source_documents(document_id) ON DELETE CASCADE,
+        source_id TEXT NOT NULL REFERENCES document_version_sources(source_id) ON DELETE RESTRICT,
+        linked_at TEXT NOT NULL
+    )
+    """,
+    """
+    INSERT INTO document_version_sources (source_id, created_at)
+    SELECT document_id, created_at
+    FROM source_documents
+    """,
+    """
+    INSERT INTO document_version_members (document_id, source_id, linked_at)
+    SELECT document_id, document_id, created_at
+    FROM source_documents
+    """,
+    """
+    CREATE TRIGGER source_documents_create_version_source
+    AFTER INSERT ON source_documents
+    BEGIN
+        INSERT INTO document_version_sources (source_id, created_at)
+        VALUES (NEW.document_id, NEW.created_at);
+        INSERT INTO document_version_members (document_id, source_id, linked_at)
+        VALUES (NEW.document_id, NEW.document_id, NEW.created_at);
+    END
+    """,
+    """
+    CREATE TABLE document_version_candidates (
+        candidate_id TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL REFERENCES source_documents(document_id) ON DELETE CASCADE,
+        candidate_document_id TEXT NOT NULL
+            REFERENCES source_documents(document_id) ON DELETE CASCADE,
+        lexical_score REAL NOT NULL CHECK(lexical_score >= 0.0 AND lexical_score <= 1.0),
+        character_score REAL NOT NULL CHECK(character_score >= 0.0 AND character_score <= 1.0),
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'accepted', 'rejected', 'dismissed')),
+        resolution TEXT CHECK(
+            resolution IS NULL
+            OR resolution IN (
+                'linked_existing_source', 'kept_independent', 'other_candidate_selected'
+            )
+        ),
+        created_at TEXT NOT NULL,
+        resolved_at TEXT,
+        CHECK(document_id <> candidate_document_id),
+        UNIQUE(document_id, candidate_document_id)
+    )
+    """,
+    """
+    CREATE INDEX document_version_candidates_pending_idx
+        ON document_version_candidates(status, document_id, created_at DESC)
+    """,
+    """
+    CREATE INDEX document_version_members_source_idx
+        ON document_version_members(source_id, linked_at)
+    """,
+)

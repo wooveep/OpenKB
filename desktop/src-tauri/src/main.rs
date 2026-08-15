@@ -6,6 +6,7 @@ mod process_tree;
 
 use engine_protocol::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
+    DocumentVersionCandidate, DocumentVersionCandidateDecision, DocumentVersionCandidatesResult,
     EngineHealth, EngineSupervisor, GroundedAnswer, GroundedAnswersResult, ImportControlResult,
     ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
     KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind, KnowledgePagesResult,
@@ -240,6 +241,37 @@ async fn desktop_save_knowledge_page(
     })?
 }
 
+#[tauri::command]
+async fn desktop_document_version_candidates(
+    state: State<'_, DesktopState>,
+) -> Result<DocumentVersionCandidatesResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.document_version_candidates())
+        .await
+        .map_err(|error| BridgeError {
+            code: "desktop_command_failed".to_owned(),
+            message: format!("Desktop document-version lookup stopped unexpectedly: {error}"),
+        })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_resolve_document_version_candidate(
+    state: State<'_, DesktopState>,
+    candidate_id: String,
+    decision: DocumentVersionCandidateDecision,
+    request_id: String,
+) -> Result<DocumentVersionCandidate, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.resolve_document_version_candidate(candidate_id, decision, request_id)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop document-version decision stopped unexpectedly: {error}"),
+    })?
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn desktop_read_raw_document(
     state: State<'_, DesktopState>,
@@ -385,6 +417,8 @@ fn main() {
             desktop_knowledge_pages,
             desktop_get_knowledge_page,
             desktop_save_knowledge_page,
+            desktop_document_version_candidates,
+            desktop_resolve_document_version_candidate,
             desktop_read_raw_document,
             desktop_pause_import_job,
             desktop_resume_import_job,

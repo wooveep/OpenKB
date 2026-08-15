@@ -24,7 +24,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 12
+    assert first.knowledge_base.schema_version == 13
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
@@ -43,6 +43,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
             (10,),
             (11,),
             (12,),
+            (13,),
         ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
@@ -76,6 +77,10 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
     DesktopKnowledgeBaseRuntime().create(kb_dir)
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE document_version_candidates")
+        connection.execute("DROP TRIGGER source_documents_create_version_source")
+        connection.execute("DROP TABLE document_version_members")
+        connection.execute("DROP TABLE document_version_sources")
         connection.execute("DROP TABLE knowledge_page_revisions")
         connection.execute("DROP TABLE knowledge_pages")
         connection.execute("DROP TABLE import_deduplications")
@@ -98,6 +103,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
         connection.execute("DELETE FROM schema_migrations WHERE version = 11")
         connection.execute("DELETE FROM schema_migrations WHERE version = 12")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 13")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
@@ -144,6 +150,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
             (10,),
             (11,),
             (12,),
+            (13,),
         ]
         assert connection.execute(
             "SELECT status FROM import_job_runtime WHERE job_id = 'legacy-job'"
@@ -170,6 +177,10 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
     database_path = kb_dir / ".openkb" / "state.sqlite3"
 
     with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE document_version_candidates")
+        connection.execute("DROP TRIGGER source_documents_create_version_source")
+        connection.execute("DROP TABLE document_version_members")
+        connection.execute("DROP TABLE document_version_sources")
         connection.execute("DROP TABLE knowledge_page_revisions")
         connection.execute("DROP TABLE knowledge_pages")
         connection.execute("DROP TABLE import_deduplications")
@@ -190,6 +201,7 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
         connection.execute("DELETE FROM schema_migrations WHERE version = 11")
         connection.execute("DELETE FROM schema_migrations WHERE version = 12")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 13")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
@@ -219,6 +231,31 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
         "search",
     ]
     assert resumed.stages[4].status == "skipped"
+
+
+def test_migration_backfills_independent_version_sources_for_existing_documents(tmp_path):
+    """Opening an older Desktop KB makes existing imports eligible for D3 review."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "existing.txt"
+    source.write_text("Existing document content.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE document_version_candidates")
+        connection.execute("DROP TRIGGER source_documents_create_version_source")
+        connection.execute("DROP TABLE document_version_members")
+        connection.execute("DROP TABLE document_version_sources")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 13")
+
+    DesktopKnowledgeBaseRuntime().open(kb_dir)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT source_id FROM document_version_members WHERE document_id = ?",
+            (imported.document.document_id,),
+        ).fetchone() == (imported.document.document_id,)
 
 
 def test_opening_a_legacy_knowledge_base_is_rejected_without_creating_desktop_state(kb_dir):

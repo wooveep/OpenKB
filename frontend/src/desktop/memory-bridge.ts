@@ -18,6 +18,9 @@ import type {
   DesktopKnowledgePage,
   DesktopKnowledgePages,
   DesktopKnowledgePageKind,
+  DesktopDocumentVersionCandidate,
+  DesktopDocumentVersionCandidates,
+  DesktopDocumentVersionCandidateDecision,
   DesktopImportTask,
   DesktopRecoveryOverride,
   DesktopTextDocumentImport,
@@ -32,6 +35,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
   private importJobResults: DesktopImportTask[] = []
   private groundedAnswerResults: DesktopGroundedAnswer[] = []
   private knowledgePageResults: DesktopKnowledgePage[] = []
+  private documentVersionCandidateResults: DesktopDocumentVersionCandidate[] = []
 
   constructor(
     handshakeResult: DesktopBridgeHandshake = {
@@ -361,6 +365,33 @@ export class MemoryDesktopBridge implements DesktopBridge {
       ? this.knowledgePageResults.map((candidate) => candidate.pageId === page.pageId ? page : candidate)
       : [page, ...this.knowledgePageResults]
     return page
+  }
+
+  async documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates> {
+    return {
+      candidates: this.documentVersionCandidateResults.filter((candidate) => candidate.status === "pending"),
+    }
+  }
+
+  async resolveDocumentVersionCandidate(
+    candidateId: string,
+    decision: DesktopDocumentVersionCandidateDecision,
+    requestId: string,
+  ): Promise<DesktopDocumentVersionCandidate> {
+    void requestId
+    const candidate = this.documentVersionCandidateResults.find((item) => item.candidateId === candidateId)
+    if (!candidate) throw new Error("The selected document version candidate was not found.")
+    if (candidate.status !== "pending") throw new Error("The selected document version candidate is resolved.")
+    const status: DesktopDocumentVersionCandidate["status"] = decision === "link_to_candidate"
+      ? "accepted"
+      : "rejected"
+    const resolved = { ...candidate, status }
+    this.documentVersionCandidateResults = this.documentVersionCandidateResults.map((item) => (
+      item.documentId === candidate.documentId
+        ? item.candidateId === candidateId ? resolved : { ...item, status: "dismissed" }
+        : item
+    ))
+    return resolved
   }
 
   async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {

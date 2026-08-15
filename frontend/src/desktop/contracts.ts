@@ -261,6 +261,24 @@ export interface DesktopKnowledgePages {
   pages: DesktopKnowledgePageSummary[]
 }
 
+export type DesktopDocumentVersionCandidateDecision = "link_to_candidate" | "keep_separate"
+
+export interface DesktopDocumentVersionCandidate {
+  candidateId: string
+  documentId: string
+  documentName: string
+  candidateDocumentId: string
+  candidateDocumentName: string
+  lexicalScore: number
+  characterScore: number
+  reason: "lexical_character_similarity"
+  status: "pending" | "accepted" | "rejected" | "dismissed"
+}
+
+export interface DesktopDocumentVersionCandidates {
+  candidates: DesktopDocumentVersionCandidate[]
+}
+
 /** The SQLite-authoritative knowledge base currently available to the Desktop Runtime. */
 export interface DesktopKnowledgeBase {
   kbDir: string
@@ -389,6 +407,12 @@ export interface DesktopBridge {
     contentMarkdown: string,
     requestId: string,
   ): Promise<DesktopKnowledgePage>
+  documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates>
+  resolveDocumentVersionCandidate(
+    candidateId: string,
+    decision: DesktopDocumentVersionCandidateDecision,
+    requestId: string,
+  ): Promise<DesktopDocumentVersionCandidate>
   pauseImportJob(jobId: string): Promise<DesktopImportControlResult>
   resumeImportJob(jobId: string, requestId: string): Promise<DesktopTextDocumentImport>
   recoverImportJob(

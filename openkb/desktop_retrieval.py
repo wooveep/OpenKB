@@ -17,6 +17,7 @@ from openkb.desktop_answer_types import (
     DesktopEvidenceRef,
     DesktopRetrievalPlan,
 )
+from openkb.desktop_lexical import cjk_bigrams, is_cjk_text
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -181,23 +182,13 @@ def _terms(value: str) -> tuple[str, ...]:
     terms: list[str] = []
     for match in _TERM_PATTERN.finditer(value.casefold()):
         token = match.group(0)
-        values = _cjk_bigrams(token) if _is_cjk(token) else (token,)
+        values = cjk_bigrams(token) if is_cjk_text(token) else (token,)
         for item in values:
             if item and item not in terms:
                 terms.append(item)
             if len(terms) == _MAX_PLAN_TERMS:
                 return tuple(terms)
     return tuple(terms)
-
-
-def _is_cjk(value: str) -> bool:
-    return bool(value) and all("\u3400" <= character <= "\u9fff" for character in value)
-
-
-def _cjk_bigrams(value: str) -> tuple[str, ...]:
-    if len(value) <= 2:
-        return (value,)
-    return tuple(value[index : index + 2] for index in range(len(value) - 1))
 
 
 def _fts_candidates(

@@ -8,8 +8,9 @@ use crate::engine_wire::{
 };
 pub use crate::engine_wire::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, BridgeResult,
-    CancelResult, EngineHealth, GroundedAnswer, GroundedAnswersResult, ImportControlResult,
-    ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
+    CancelResult, DocumentVersionCandidate, DocumentVersionCandidateDecision,
+    DocumentVersionCandidatesResult, EngineHealth, GroundedAnswer, GroundedAnswersResult,
+    ImportControlResult, ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
     KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind, KnowledgePagesResult,
     RawDocument, RecoveryOverride, TextDocumentImportResult,
 };
@@ -30,6 +31,8 @@ use tauri::ipc::Channel;
 
 #[path = "engine_protocol_answers.rs"]
 mod answers;
+#[path = "engine_protocol_document_versions.rs"]
+mod document_versions;
 #[path = "engine_protocol_knowledge_pages.rs"]
 mod knowledge_pages;
 

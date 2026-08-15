@@ -70,6 +70,34 @@ class DesktopDeduplication:
 
 
 @dataclass(frozen=True)
+class DesktopDocumentVersionCandidate:
+    """One user-reviewable D3 suggestion; it never changes source identity itself."""
+
+    candidate_id: str
+    document_id: str
+    document_name: str
+    candidate_document_id: str
+    candidate_document_name: str
+    lexical_score: float
+    character_score: float
+    reason: str
+    status: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "candidate_id": self.candidate_id,
+            "document_id": self.document_id,
+            "document_name": self.document_name,
+            "candidate_document_id": self.candidate_document_id,
+            "candidate_document_name": self.candidate_document_name,
+            "lexical_score": self.lexical_score,
+            "character_score": self.character_score,
+            "reason": self.reason,
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
 class DesktopImportJob:
     """The persisted task-center record for one selected source."""
 

@@ -9,6 +9,7 @@ from hashlib import sha256
 import pytest
 
 from openkb import desktop_import_runner
+from openkb.desktop_document_versions import DesktopDocumentVersionService
 from openkb.desktop_import import (
     DesktopImportControl,
     DesktopImportError,
@@ -192,6 +193,85 @@ def test_d2_reuses_duplicate_evidence_without_merging_document_identity(tmp_path
     )
     assert shared_reference.document_id == second.document.document_id
     assert shared_reference.document_name == second.document.name
+
+
+def test_d3_candidate_never_links_versions_until_the_user_confirms(tmp_path):
+    """A bounded lexical/character suggestion is review-only until it is accepted."""
+    kb_dir = tmp_path / "desktop-kb"
+    first_source = tmp_path / "architecture-notes.txt"
+    second_source = tmp_path / "architecture-notes-v2.txt"
+    first_source.write_text(
+        "# Architecture notes\n\nOpenKB Desktop stores imported files in raw assets and uses "
+        "SQLite evidence blocks for local retrieval. A user reviews related document versions "
+        "before any source history is linked.",
+        encoding="utf-8",
+    )
+    second_source.write_text(
+        "# Architecture notes v2\n\nOpenKB Desktop stores imported files in raw assets and uses "
+        "SQLite evidence blocks for local retrieval. A user reviews related document versions "
+        "before any source history is linked. This version improves the review display.",
+        encoding="utf-8",
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    importer = DesktopTextImportService(kb_dir)
+
+    first = importer.import_text(first_source)
+    second = importer.import_text(second_source)
+    versions = DesktopDocumentVersionService(kb_dir)
+    (candidate,) = versions.list_candidates()
+
+    assert candidate.document_id == second.document.document_id
+    assert candidate.candidate_document_id == first.document.document_id
+    assert candidate.reason == "lexical_character_similarity"
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT source_id FROM document_version_members WHERE document_id = ?",
+            (second.document.document_id,),
+        ).fetchone() == (second.document.document_id,)
+
+    resolved = versions.resolve_candidate(candidate.candidate_id, "link_to_candidate")
+
+    assert resolved.status == "accepted"
+    assert versions.list_candidates() == ()
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT source_id FROM document_version_members WHERE document_id = ?",
+            (second.document.document_id,),
+        ).fetchone() == (first.document.document_id,)
+
+
+def test_d3_rejection_keeps_a_document_as_an_independent_source(tmp_path):
+    """Rejecting a D3 suggestion has no hidden automatic source merge."""
+    kb_dir = tmp_path / "desktop-kb"
+    first_source = tmp_path / "roadmap.txt"
+    second_source = tmp_path / "roadmap-draft.txt"
+    first_source.write_text(
+        "# Product roadmap\n\nThe desktop workbench imports local documents, builds evidence, "
+        "and keeps source records available for grounded answers.",
+        encoding="utf-8",
+    )
+    second_source.write_text(
+        "# Product roadmap draft\n\nThe desktop workbench imports local documents, "
+        "builds evidence, "
+        "and keeps source records available for grounded answers. This is a separate proposal.",
+        encoding="utf-8",
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    importer = DesktopTextImportService(kb_dir)
+
+    importer.import_text(first_source)
+    second = importer.import_text(second_source)
+    versions = DesktopDocumentVersionService(kb_dir)
+    (candidate,) = versions.list_candidates()
+
+    resolved = versions.resolve_candidate(candidate.candidate_id, "keep_separate")
+
+    assert resolved.status == "rejected"
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT source_id FROM document_version_members WHERE document_id = ?",
+            (second.document.document_id,),
+        ).fetchone() == (second.document.document_id,)
 
 
 def test_failed_prepublication_stage_never_exposes_a_partial_document(tmp_path, monkeypatch):

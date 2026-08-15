@@ -31,6 +31,7 @@ import {
   type DesktopImportBatchSummary,
 } from "./DesktopDocumentImportPanel"
 import { DesktopGroundedAnswerPanel } from "./DesktopGroundedAnswerPanel"
+import { DesktopDocumentVersionCandidatePanel } from "./DesktopDocumentVersionCandidatePanel"
 import { DesktopKnowledgePagePanel } from "./DesktopKnowledgePagePanel"
 import { FailedDocumentsDialog } from "./FailedDocumentsDialog"
 import { DesktopRawDocumentDialog } from "./DesktopRawDocumentDialog"
@@ -772,6 +773,7 @@ function ActiveKnowledgeBaseView({
       ) : null}
       {section === "answers" ? <DesktopGroundedAnswerPanel onOpenOriginal={onOpenRawDocument} /> : null}
       {section === "knowledge" ? <DesktopKnowledgePagePanel /> : null}
+      {section === "review" ? <DesktopDocumentVersionCandidatePanel /> : null}
     </section>
   )
 }

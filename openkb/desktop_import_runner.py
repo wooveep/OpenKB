@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
 import threading
 import uuid
@@ -13,8 +14,10 @@ from typing import Callable
 from portalocker import LockException
 
 from openkb.desktop_document_parsers import analysis_text, parse_structured_document
+from openkb.desktop_document_versions import DesktopDocumentVersionService
 from openkb.desktop_import_artifacts import (
     DesktopImportError,
+    DocumentIRBlock,
     SourceImage,
     build_document_ir,
     build_evidence,
@@ -56,6 +59,7 @@ _DIRECT_QUARANTINE_CODES = {
     "legacy_office_parse_failed",
     "legacy_office_runtime_unavailable",
 }
+logger = logging.getLogger(__name__)
 
 
 class DesktopImportControl:
@@ -93,6 +97,7 @@ class DesktopTextImportService:
     ) -> None:
         self._store = DesktopImportStore(kb_dir, on_stage_progress=on_stage_progress)
         self._model_ledger = DesktopImportModelLedger(kb_dir)
+        self._document_versions = DesktopDocumentVersionService(kb_dir)
         self._quarantine = DesktopImportQuarantineStore(kb_dir)
         self._recovery = DesktopImportRecoveryStore(kb_dir, on_stage_progress=on_stage_progress)
         self._control = control or DesktopImportControl()
@@ -214,6 +219,7 @@ class DesktopTextImportService:
                         canonical_document=content_duplicate,
                     )
                     terminal_state_committed = True
+                    self._record_document_version_candidates(document.document_id, blocks)
                     return self._result(
                         state.job_id,
                         document.document_id,
@@ -297,6 +303,7 @@ class DesktopTextImportService:
                 100,
                 document_id=document.document_id,
             )
+            self._record_document_version_candidates(document.document_id, blocks)
             return self._result(state.job_id, document.document_id, deduplicated=deduplicated)
         except _DuplicateImport as duplicate:
             return self._result(state.job_id, duplicate.document_id, deduplicated=True)
@@ -478,6 +485,17 @@ class DesktopTextImportService:
             model_calls=task.model_calls,
             quarantine=task.quarantine,
         )
+
+    def _record_document_version_candidates(
+        self, document_id: str, blocks: tuple[DocumentIRBlock, ...]
+    ) -> None:
+        """D3 suggestions never make an otherwise successful import fail."""
+        try:
+            self._document_versions.record_candidates(document_id, blocks)
+        except (DesktopImportError, OSError, sqlite3.Error, ValueError) as error:
+            logger.warning(
+                "Could not record D3 Document Version Candidates for %s: %s", document_id, error
+            )
 
     def _honor_control(self, state: ImportJobState, stage: str) -> None:
         action = self._control.action

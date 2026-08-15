@@ -229,6 +229,18 @@
         "saving": "正在保存…",
         "saved": "用户修订已保存，Markdown 阅读视图已刷新。"
       },
+      "versionCandidates": {
+        "title": "文档版本审核",
+        "description": "相似文档只有在你确认后才会关联到同一来源。",
+        "loading": "正在检查相似文档…",
+        "empty": "没有待审核的文档版本候选。",
+        "importedDocument": "本次导入文档",
+        "existingDocument": "已有文档",
+        "similarity": "词法 {{lexical}}% · 字符 {{character}}%",
+        "link": "关联到此来源",
+        "keepSeparate": "保留为独立来源",
+        "saved": "文档版本决定已保存。"
+      },
       "answersTitle": "询问可用知识",
       "answersDescription": "OpenKB 会从可用文档建立本地证据包，并保留答案及其引用以便查看。",
       "answerQuestionLabel": "问题",

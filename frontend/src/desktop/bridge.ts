@@ -18,6 +18,9 @@ import {
   type DesktopKnowledgePage,
   type DesktopKnowledgePages,
   type DesktopKnowledgePageKind,
+  type DesktopDocumentVersionCandidate,
+  type DesktopDocumentVersionCandidates,
+  type DesktopDocumentVersionCandidateDecision,
   type DesktopImportJobs,
   type DesktopRawDocument,
   type DesktopRecoveryOverride,
@@ -183,6 +186,22 @@ export class TauriDesktopBridge implements DesktopBridge {
       kind,
       title,
       contentMarkdown,
+      requestId,
+    })
+  }
+
+  async documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates> {
+    return this.call<DesktopDocumentVersionCandidates>("desktop_document_version_candidates")
+  }
+
+  async resolveDocumentVersionCandidate(
+    candidateId: string,
+    decision: DesktopDocumentVersionCandidateDecision,
+    requestId: string,
+  ): Promise<DesktopDocumentVersionCandidate> {
+    return this.call<DesktopDocumentVersionCandidate>("desktop_resolve_document_version_candidate", {
+      candidateId,
+      decision,
       requestId,
     })
   }
@@ -365,6 +384,21 @@ class UnavailableDesktopBridge implements DesktopBridge {
     void kind
     void title
     void contentMarkdown
+    void requestId
+    return this.unavailable()
+  }
+
+  documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates> {
+    return this.unavailable()
+  }
+
+  resolveDocumentVersionCandidate(
+    candidateId: string,
+    decision: DesktopDocumentVersionCandidateDecision,
+    requestId: string,
+  ): Promise<DesktopDocumentVersionCandidate> {
+    void candidateId
+    void decision
     void requestId
     return this.unavailable()
   }

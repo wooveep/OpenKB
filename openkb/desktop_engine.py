@@ -165,6 +165,8 @@ class DesktopEngineServer:
         "workbench.knowledge_pages",
         "workbench.knowledge_page",
         "workbench.save_knowledge_page",
+        "workbench.document_version_candidates",
+        "workbench.resolve_document_version_candidate",
     }
     _INTERRUPTION_PRESERVING_METHODS = {
         "workbench.ask_grounded",
@@ -176,6 +178,7 @@ class DesktopEngineServer:
         "workbench.import_text_document",
         "workbench.read_raw_document",
         "workbench.save_knowledge_page",
+        "workbench.resolve_document_version_candidate",
     }
 
     def __init__(
@@ -422,6 +425,11 @@ class DesktopEngineServer:
             "workbench.save_knowledge_page",
         }:
             return self._dispatch_knowledge_page_request(request, cancel_event)
+        if request.method in {
+            "workbench.document_version_candidates",
+            "workbench.resolve_document_version_candidate",
+        }:
+            return self._dispatch_document_version_request(request, cancel_event)
         if request.method in self._INTERRUPTION_PRESERVING_METHODS:
             return self._dispatch_grounded_answer_request(request, cancel_event)
         if request.method in {
@@ -480,6 +488,13 @@ class DesktopEngineServer:
         from openkb.desktop_engine_knowledge_pages import dispatch_knowledge_page_request
 
         return dispatch_knowledge_page_request(self, request, cancel_event)
+
+    def _dispatch_document_version_request(
+        self, request: DesktopRequest, cancel_event: threading.Event | None
+    ) -> dict[str, object]:
+        from openkb.desktop_engine_document_versions import dispatch_document_version_request
+
+        return dispatch_document_version_request(self, request, cancel_event)
 
     def _dispatch_import_request(
         self, request: DesktopRequest, cancel_event: threading.Event | None

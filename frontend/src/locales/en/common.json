@@ -229,6 +229,18 @@
         "saving": "Saving…",
         "saved": "User revision saved and Markdown reader view refreshed."
       },
+      "versionCandidates": {
+        "title": "Document version review",
+        "description": "Similar documents are linked to the same source only after your confirmation.",
+        "loading": "Checking similar documents…",
+        "empty": "No document versions need review.",
+        "importedDocument": "Imported document",
+        "existingDocument": "Existing document",
+        "similarity": "Lexical {{lexical}}% · character {{character}}%",
+        "link": "Use this existing source",
+        "keepSeparate": "Keep as separate source",
+        "saved": "Document version decision saved."
+      },
       "answersTitle": "Ask Available Knowledge",
       "answersDescription": "OpenKB builds a local evidence pack from available documents, then keeps the answer and its citations for review.",
       "answerQuestionLabel": "Question",
