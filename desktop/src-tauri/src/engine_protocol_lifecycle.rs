@@ -64,7 +64,7 @@ impl EngineSupervisor {
         let _ = self.stop_child_with_grace(SHUTDOWN_TIMEOUT);
     }
 
-    fn restore_active_knowledge_base(&self) -> BridgeResult<()> {
+    pub(super) fn restore_active_knowledge_base(&self) -> BridgeResult<()> {
         let active_kb_dir = self
             .active_kb_dir
             .lock()

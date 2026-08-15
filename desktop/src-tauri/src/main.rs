@@ -54,7 +54,7 @@ async fn desktop_create_knowledge_base(
     .map_err(|error| BridgeError {
         code: "desktop_command_failed".to_owned(),
         message: format!("Desktop knowledge-base creation task stopped unexpectedly: {error}"),
-    })?;
+    })??;
     desktop_runtime::remember_active_knowledge_base(&app, &activation.knowledge_base.kb_dir);
     allow_source_images(&app, &activation)?;
     Ok(activation)
@@ -75,7 +75,7 @@ async fn desktop_open_knowledge_base(
     .map_err(|error| BridgeError {
         code: "desktop_command_failed".to_owned(),
         message: format!("Desktop knowledge-base open task stopped unexpectedly: {error}"),
-    })?;
+    })??;
     desktop_runtime::remember_active_knowledge_base(&app, &activation.knowledge_base.kb_dir);
     allow_source_images(&app, &activation)?;
     Ok(activation)
@@ -493,7 +493,7 @@ fn main() {
                 .expect("Could not create the OpenKB Desktop Runtime process tree"),
             runtime: DesktopRuntimeState::default(),
         })
-        .setup(|app| desktop_runtime::initialize(app))
+        .setup(|app| Ok(desktop_runtime::initialize(app)?))
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
