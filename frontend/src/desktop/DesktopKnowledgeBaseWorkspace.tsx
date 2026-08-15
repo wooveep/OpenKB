@@ -38,6 +38,8 @@ import { FailedDocumentsDialog } from "./FailedDocumentsDialog"
 import { DesktopRawDocumentDialog } from "./DesktopRawDocumentDialog"
 import { DesktopBridgeError } from "./contracts"
 import { nextDesktopRequestId } from "./request-id"
+import { useDeferredImportSources } from "./useDeferredImportSources"
+import { useDesktopRuntimeEvents } from "./useDesktopRuntimeEvents"
 import type {
   DesktopImportTask,
   DesktopImportSourceInspection,
@@ -256,9 +258,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
       if (read === importInspectionRead.current) setInspectingImportSources(false)
     }
   }, [bridge, excludedImportSources])
-
-  const addImportSources = useCallback((sourcePaths: string[]) => {
-    if (importing) return
+  const selectImportSources = useCallback((sourcePaths: string[]) => {
     const nextSources = mergeImportSources(importSources, sourcePaths)
     if (!nextSources.length) return
     const selectedSourceKeys = new Set(sourcePaths.map(importSourceKey))
@@ -269,11 +269,20 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setExcludedImportSources(nextExcludedSources)
     setImportBatchSummary(null)
     void inspectImportSources(nextSources, nextExcludedSources)
-  }, [excludedImportSources, importSources, importing, inspectImportSources])
+  }, [excludedImportSources, importSources, inspectImportSources])
+  const addImportSources = useDeferredImportSources(importing, selectImportSources)
 
   useEffect(() => {
     addImportSourcesRef.current = addImportSources
   }, [addImportSources])
+  useDesktopRuntimeEvents({
+    bridge,
+    importSourcesRef: addImportSourcesRef,
+    refreshActiveKnowledgeBase,
+    setLoading,
+    setLoadError,
+    setSection,
+  })
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined

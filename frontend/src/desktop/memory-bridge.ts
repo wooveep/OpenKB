@@ -6,6 +6,8 @@ import type {
   DesktopDiagnosticBundle,
   DesktopImportControlResult,
   DesktopImportDropEvent,
+  DesktopRuntimeEvent,
+  DesktopRuntimeLaunchIntent,
   DesktopImportSourceInspection,
   DesktopImportSourcePicker,
   DesktopRawDocument,
@@ -549,6 +551,17 @@ export class MemoryDesktopBridge implements DesktopBridge {
 
   async cancel(targetRequestId: string): Promise<DesktopCancelResult> {
     return { cancelled: true, requestId: targetRequestId }
+  }
+
+  async subscribeRuntimeEvents(
+    listener: (event: DesktopRuntimeEvent) => void,
+  ): Promise<() => void> {
+    void listener
+    return () => undefined
+  }
+
+  async takeLaunchIntents(): Promise<DesktopRuntimeLaunchIntent[]> {
+    return []
   }
 
   async subscribe(listener: (event: DesktopBridgeEvent) => void): Promise<() => void> {

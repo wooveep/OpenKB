@@ -1,9 +1,11 @@
 //! OpenKB Desktop Shell: native window ownership and typed Engine mediation.
 
+mod desktop_runtime;
 mod engine_protocol;
 mod engine_wire;
 mod process_tree;
 
+use desktop_runtime::DesktopRuntimeState;
 use engine_protocol::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
     DiagnosticBundleResult, DocumentVersionCandidate, DocumentVersionCandidateDecision,
@@ -18,9 +20,10 @@ use process_tree::ProcessTreeJob;
 use std::{path::Path, sync::Arc};
 use tauri::{ipc::Channel, Manager, State};
 
-struct DesktopState {
-    engine: Arc<EngineSupervisor>,
+pub(crate) struct DesktopState {
+    pub(crate) engine: Arc<EngineSupervisor>,
     _process_tree: ProcessTreeJob,
+    pub(crate) runtime: DesktopRuntimeState,
 }
 
 #[tauri::command]
@@ -67,6 +70,7 @@ async fn desktop_create_knowledge_base(
         code: "desktop_command_failed".to_owned(),
         message: format!("Desktop knowledge-base creation task stopped unexpectedly: {error}"),
     })?;
+    desktop_runtime::remember_active_knowledge_base(&app, &activation.knowledge_base.kb_dir);
     allow_source_images(&app, &activation)?;
     Ok(activation)
 }
@@ -87,8 +91,16 @@ async fn desktop_open_knowledge_base(
         code: "desktop_command_failed".to_owned(),
         message: format!("Desktop knowledge-base open task stopped unexpectedly: {error}"),
     })?;
+    desktop_runtime::remember_active_knowledge_base(&app, &activation.knowledge_base.kb_dir);
     allow_source_images(&app, &activation)?;
     Ok(activation)
+}
+
+#[tauri::command]
+fn desktop_take_launch_intents(
+    state: State<'_, DesktopState>,
+) -> Vec<desktop_runtime::DesktopLaunchIntent> {
+    state.runtime.take_launch_intents()
 }
 
 #[tauri::command]
@@ -486,27 +498,30 @@ fn allow_source_images(
 
 fn main() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            desktop_runtime::forward_launch_intent(app, args, cwd);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .manage(DesktopState {
             engine: Arc::new(EngineSupervisor::default()),
             _process_tree: ProcessTreeJob::create()
                 .expect("Could not create the OpenKB Desktop Runtime process tree"),
+            runtime: DesktopRuntimeState::default(),
         })
-        .setup(|app| {
-            // Do not hold window creation behind a Python startup: React renders
-            // its starting state immediately and asks the same supervisor for the
-            // handshake. The supervisor serializes either path to one Engine.
-            let app_handle = app.handle().clone();
-            std::thread::spawn(move || {
-                let state = app_handle.state::<DesktopState>();
-                if let Err(error) = state.engine.start() {
-                    eprintln!(
-                        "OpenKB Desktop Engine did not start during shell setup: {}",
-                        error.message
-                    );
+        .setup(|app| desktop_runtime::initialize(app))
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.app_handle().state::<DesktopState>();
+                if state.runtime.should_hide_main_window() {
+                    api.prevent_close();
+                    if let Err(error) = window.hide() {
+                        eprintln!("Could not hide OpenKB Desktop window to the tray: {error}");
+                    }
                 }
-            });
-            Ok(())
+            }
         })
         .invoke_handler(tauri::generate_handler![
             desktop_bridge_handshake,
@@ -514,6 +529,7 @@ fn main() {
             desktop_inspect_knowledge_base,
             desktop_create_knowledge_base,
             desktop_open_knowledge_base,
+            desktop_take_launch_intents,
             desktop_active_knowledge_base,
             desktop_inspect_import_sources,
             desktop_import_text_document,
@@ -545,7 +561,7 @@ fn main() {
         .expect("error while building OpenKB Desktop Shell");
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
-            app_handle.state::<DesktopState>().engine.shutdown();
+            desktop_runtime::shutdown_engine(app_handle);
         }
     });
 }

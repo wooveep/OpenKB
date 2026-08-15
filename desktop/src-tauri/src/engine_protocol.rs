@@ -40,6 +40,8 @@ mod document_versions;
 mod knowledge_pages;
 #[path = "engine_protocol_knowledge_reconciliation.rs"]
 mod knowledge_reconciliation;
+#[path = "engine_protocol_lifecycle.rs"]
+mod lifecycle;
 #[path = "engine_protocol_settings.rs"]
 mod settings;
 
@@ -73,6 +75,9 @@ pub struct EngineSupervisor {
     handshake: Mutex<Option<BridgeHandshake>>,
     start_guard: Mutex<()>,
     stopping: AtomicBool,
+    has_started: AtomicBool,
+    restart_attempted: AtomicBool,
+    active_kb_dir: Mutex<Option<String>>,
     request_sequence: AtomicU64,
 }
 
@@ -84,6 +89,9 @@ impl Default for EngineSupervisor {
             handshake: Mutex::new(None),
             start_guard: Mutex::new(()),
             stopping: AtomicBool::new(false),
+            has_started: AtomicBool::new(false),
+            restart_attempted: AtomicBool::new(false),
+            active_kb_dir: Mutex::new(None),
             request_sequence: AtomicU64::new(0),
         }
     }
@@ -358,34 +366,6 @@ impl EngineSupervisor {
         })
     }
 
-    /// Ask the owned Engine to stop, then reap it so the Shell never leaves work behind.
-    pub fn shutdown(&self) {
-        self.stopping.store(true, Ordering::Release);
-        let _startup_guard = match self.start_guard.lock() {
-            Ok(guard) => guard,
-            Err(_) => return,
-        };
-        if self.transport.connected.load(Ordering::Acquire) {
-            let _ = self.request_started_with_timeout(
-                "engine.shutdown",
-                json!({}),
-                None,
-                SHUTDOWN_TIMEOUT,
-            );
-        }
-        mark_transport_failed(
-            &self.transport,
-            BridgeError::new(
-                "engine_shutdown",
-                "Desktop Shell is shutting down the Python Engine.",
-            ),
-        );
-        if let Ok(mut handshake) = self.handshake.lock() {
-            *handshake = None;
-        }
-        let _ = self.stop_child_with_grace(SHUTDOWN_TIMEOUT);
-    }
-
     pub fn subscribe(
         &self,
         subscription_id: String,
@@ -409,9 +389,19 @@ impl EngineSupervisor {
     }
 
     fn ensure_started(&self) -> BridgeResult<BridgeHandshake> {
+        self.ensure_started_inner(false)
+    }
+
+    fn ensure_started_inner(&self, recover_after_exit: bool) -> BridgeResult<BridgeHandshake> {
         self.require_running()?;
         if let Some(handshake) = self.current_handshake()? {
             return Ok(handshake);
+        }
+        if self.has_started.load(Ordering::Acquire) && !recover_after_exit {
+            return Err(BridgeError::new(
+                "engine_unavailable",
+                "Python Engine exited; Desktop Runtime is attempting its one automatic recovery.",
+            ));
         }
 
         let _guard = self.start_guard.lock().map_err(|_| {
@@ -456,6 +446,9 @@ impl EngineSupervisor {
             )
         })?;
         *stored = Some(handshake.clone());
+        drop(stored);
+        self.has_started.store(true, Ordering::Release);
+        self.restore_active_knowledge_base()?;
         Ok(handshake)
     }
 
@@ -777,20 +770,4 @@ fn mark_transport_failed(transport: &SharedTransport, error: BridgeError) {
         writer.take();
     }
     fail_pending(transport, error);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::EngineSupervisor;
-
-    #[test]
-    fn shutdown_refuses_to_start_a_new_engine() {
-        let supervisor = EngineSupervisor::default();
-        supervisor.shutdown();
-
-        let error = supervisor
-            .handshake()
-            .expect_err("shutdown must be terminal");
-        assert_eq!(error.code, "engine_stopping");
-    }
 }

@@ -12,6 +12,8 @@ import {
   type DesktopGroundedAnswers,
   type DesktopImportControlResult,
   type DesktopImportDropEvent,
+  type DesktopRuntimeEvent,
+  type DesktopRuntimeLaunchIntent,
   type DesktopImportSourceInspection,
   type DesktopImportSourcePicker,
   type DesktopKnowledgeBaseActivation,
@@ -153,6 +155,22 @@ export class TauriDesktopBridge implements DesktopBridge {
         paths: "paths" in payload ? payload.paths : [],
       })
     })
+  }
+
+  async takeLaunchIntents(): Promise<DesktopRuntimeLaunchIntent[]> {
+    return runtimeLaunchIntents(await this.call<unknown>("desktop_take_launch_intents"))
+  }
+
+  async subscribeRuntimeEvents(
+    listener: (event: DesktopRuntimeEvent) => void,
+  ): Promise<() => void> {
+    const { listen } = await import("@tauri-apps/api/event")
+    const listeners = await Promise.all([
+      listen("desktop://launch-intents-ready", () => listener({ kind: "launch_intents_available" })),
+      listen("desktop://task-center", () => listener({ kind: "tasks.requested" })),
+      listen("desktop://engine-restarted", () => listener({ kind: "engine.restarted" })),
+    ])
+    return () => listeners.forEach((remove) => remove())
   }
 
   async readRawDocument(
@@ -414,6 +432,17 @@ class UnavailableDesktopBridge implements DesktopBridge {
     return this.unavailable()
   }
 
+  subscribeRuntimeEvents(
+    listener: (event: DesktopRuntimeEvent) => void,
+  ): Promise<() => void> {
+    void listener
+    return Promise.resolve(() => undefined)
+  }
+
+  takeLaunchIntents(): Promise<DesktopRuntimeLaunchIntent[]> {
+    return Promise.resolve([])
+  }
+
   readRawDocument(
     documentId: string,
     requestId: string,
@@ -576,4 +605,31 @@ function toDesktopBridgeError(error: unknown): DesktopBridgeError {
     "desktop_bridge_failed",
     error instanceof Error ? error.message : String(error),
   )
+}
+
+function runtimeLaunchIntents(payload: unknown): DesktopRuntimeLaunchIntent[] {
+  if (!Array.isArray(payload)) return []
+  return payload.filter(isRecord).flatMap((intent) => {
+    const normalized = runtimeLaunchIntent(intent)
+    return normalized === null ? [] : [normalized]
+  })
+}
+
+function runtimeLaunchIntent(payload: Record<string, unknown>): DesktopRuntimeLaunchIntent | null {
+  if (payload.kind === "openKnowledgeBase" && nonEmptyString(payload.kbDir)) {
+    return { kind: "openKnowledgeBase", kbDir: payload.kbDir }
+  }
+  if (payload.kind === "importSources" && Array.isArray(payload.sourcePaths)) {
+    const sourcePaths = payload.sourcePaths.filter(nonEmptyString)
+    return sourcePaths.length ? { kind: "importSources", sourcePaths } : null
+  }
+  return null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0
 }

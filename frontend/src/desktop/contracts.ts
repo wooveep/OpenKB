@@ -156,6 +156,16 @@ export interface DesktopImportDropEvent {
   paths: string[]
 }
 
+/** Shell-owned lifecycle actions forwarded into the existing workbench. */
+export type DesktopRuntimeLaunchIntent =
+  | { kind: "openKnowledgeBase"; kbDir: string }
+  | { kind: "importSources"; sourcePaths: string[] }
+
+export type DesktopRuntimeEvent =
+  | { kind: "launch_intents_available" }
+  | { kind: "tasks.requested" }
+  | { kind: "engine.restarted" }
+
 export interface DesktopRawDocument {
   documentId: string
   name: string
@@ -439,6 +449,8 @@ export interface DesktopBridge {
   subscribeImportDrops(
     listener: (event: DesktopImportDropEvent) => void,
   ): Promise<() => void>
+  takeLaunchIntents(): Promise<DesktopRuntimeLaunchIntent[]>
+  subscribeRuntimeEvents(listener: (event: DesktopRuntimeEvent) => void): Promise<() => void>
   readRawDocument(
     documentId: string,
     requestId: string,
