@@ -167,6 +167,7 @@ class DesktopEngineServer:
         "workbench.save_knowledge_page",
         "workbench.document_version_candidates",
         "workbench.resolve_document_version_candidate",
+        "workbench.knowledge_reconciliation_conflicts",
     }
     _INTERRUPTION_PRESERVING_METHODS = {
         "workbench.ask_grounded",
@@ -430,6 +431,8 @@ class DesktopEngineServer:
             "workbench.resolve_document_version_candidate",
         }:
             return self._dispatch_document_version_request(request, cancel_event)
+        if request.method == "workbench.knowledge_reconciliation_conflicts":
+            return self._dispatch_knowledge_reconciliation_request(request, cancel_event)
         if request.method in self._INTERRUPTION_PRESERVING_METHODS:
             return self._dispatch_grounded_answer_request(request, cancel_event)
         if request.method in {
@@ -486,15 +489,21 @@ class DesktopEngineServer:
         self, request: DesktopRequest, cancel_event: threading.Event | None
     ) -> dict[str, object]:
         from openkb.desktop_engine_knowledge_pages import dispatch_knowledge_page_request
-
         return dispatch_knowledge_page_request(self, request, cancel_event)
 
     def _dispatch_document_version_request(
         self, request: DesktopRequest, cancel_event: threading.Event | None
     ) -> dict[str, object]:
         from openkb.desktop_engine_document_versions import dispatch_document_version_request
-
         return dispatch_document_version_request(self, request, cancel_event)
+
+    def _dispatch_knowledge_reconciliation_request(
+        self, request: DesktopRequest, cancel_event: threading.Event | None
+    ) -> dict[str, object]:
+        from openkb.desktop_engine_knowledge_reconciliation import (
+            dispatch_knowledge_reconciliation_request,
+        )
+        return dispatch_knowledge_reconciliation_request(self, request, cancel_event)
 
     def _dispatch_import_request(
         self, request: DesktopRequest, cancel_event: threading.Event | None

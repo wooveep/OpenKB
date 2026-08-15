@@ -10,7 +10,8 @@ use engine_protocol::{
     EngineHealth, EngineSupervisor, GroundedAnswer, GroundedAnswersResult, ImportControlResult,
     ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
     KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind, KnowledgePagesResult,
-    RawDocument, RecoveryOverride, TextDocumentImportResult,
+    KnowledgeReconciliationConflictsResult, RawDocument, RecoveryOverride,
+    TextDocumentImportResult,
 };
 use process_tree::ProcessTreeJob;
 use std::{path::Path, sync::Arc};
@@ -254,6 +255,21 @@ async fn desktop_document_version_candidates(
         })?
 }
 
+#[tauri::command]
+async fn desktop_knowledge_reconciliation_conflicts(
+    state: State<'_, DesktopState>,
+) -> Result<KnowledgeReconciliationConflictsResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.knowledge_reconciliation_conflicts())
+        .await
+        .map_err(|error| BridgeError {
+            code: "desktop_command_failed".to_owned(),
+            message: format!(
+                "Desktop knowledge-reconciliation lookup stopped unexpectedly: {error}"
+            ),
+        })?
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn desktop_resolve_document_version_candidate(
     state: State<'_, DesktopState>,
@@ -418,6 +434,7 @@ fn main() {
             desktop_get_knowledge_page,
             desktop_save_knowledge_page,
             desktop_document_version_candidates,
+            desktop_knowledge_reconciliation_conflicts,
             desktop_resolve_document_version_candidate,
             desktop_read_raw_document,
             desktop_pause_import_job,

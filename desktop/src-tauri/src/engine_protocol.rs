@@ -12,7 +12,8 @@ pub use crate::engine_wire::{
     DocumentVersionCandidatesResult, EngineHealth, GroundedAnswer, GroundedAnswersResult,
     ImportControlResult, ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
     KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind, KnowledgePagesResult,
-    RawDocument, RecoveryOverride, TextDocumentImportResult,
+    KnowledgeReconciliationConflict, KnowledgeReconciliationConflictsResult, RawDocument,
+    RecoveryOverride, TextDocumentImportResult,
 };
 use serde_json::{json, Value};
 use std::{
@@ -35,6 +36,8 @@ mod answers;
 mod document_versions;
 #[path = "engine_protocol_knowledge_pages.rs"]
 mod knowledge_pages;
+#[path = "engine_protocol_knowledge_reconciliation.rs"]
+mod knowledge_reconciliation;
 
 const PROTOCOL_VERSION: u32 = 1;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);

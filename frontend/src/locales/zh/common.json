@@ -241,6 +241,18 @@
         "keepSeparate": "保留为独立来源",
         "saved": "文档版本决定已保存。"
       },
+      "reconciliation": {
+        "title": "知识冲突",
+        "description": "兼容新增会自动发布；存在冲突的概念和实体变更会保留在这里，等待你审核。",
+        "loading": "正在检查知识变更…",
+        "empty": "没有待审核的知识冲突。",
+        "concept": "概念",
+        "entity": "实体",
+        "fromDocument": "来自 {{document}} 的新增变更",
+        "incoming": "导入内容",
+        "userRevision": "当前用户修订",
+        "publishedKnowledge": "当前已发布知识"
+      },
       "answersTitle": "询问可用知识",
       "answersDescription": "OpenKB 会从可用文档建立本地证据包，并保留答案及其引用以便查看。",
       "answerQuestionLabel": "问题",

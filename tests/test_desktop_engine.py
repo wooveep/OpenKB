@@ -300,7 +300,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 13,
+            "schema_version": 14,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -823,6 +823,34 @@ def test_engine_browses_saves_and_re_materializes_user_knowledge_pages(tmp_path)
         cancel_event=None,
     )
     assert "User-owned **knowledge**." in projection.read_text(encoding="utf-8")
+
+
+def test_engine_lists_isolated_knowledge_reconciliation_conflicts(tmp_path):
+    """The review queue exposes conflicts without publishing the incoming change."""
+    kb_dir = tmp_path / "desktop-kb"
+    first = tmp_path / "first.txt"
+    first.write_text("# Concept: Evidence\n\nStable statement.", encoding="utf-8")
+    second = tmp_path / "second.txt"
+    second.write_text("# Concept: Evidence\n\nConflicting statement.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(first)
+    DesktopTextImportService(kb_dir).import_text(second)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    queue = server._dispatch(
+        DesktopRequest(
+            request_id="knowledge-conflicts",
+            method="workbench.knowledge_reconciliation_conflicts",
+            params={},
+        ),
+        cancel_event=None,
+    )
+
+    assert len(queue["conflicts"]) == 1
+    assert queue["conflicts"][0]["title"] == "Evidence"
+    assert queue["conflicts"][0]["baseline_kind"] == "published_generation"
 
 
 def test_engine_returns_a_persisted_interrupted_answer_after_user_stop(tmp_path):

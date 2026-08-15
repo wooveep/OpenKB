@@ -44,6 +44,7 @@ from openkb.desktop_import_types import (
     DesktopStageRun,
     DesktopTextImportResult,
 )
+from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
 from openkb.desktop_model_gateway import (
     DesktopModelAttemptEvent,
     DesktopModelCallError,
@@ -98,6 +99,7 @@ class DesktopTextImportService:
         self._store = DesktopImportStore(kb_dir, on_stage_progress=on_stage_progress)
         self._model_ledger = DesktopImportModelLedger(kb_dir)
         self._document_versions = DesktopDocumentVersionService(kb_dir)
+        self._knowledge_reconciliation = DesktopKnowledgeReconciliationService(kb_dir)
         self._quarantine = DesktopImportQuarantineStore(kb_dir)
         self._recovery = DesktopImportRecoveryStore(kb_dir, on_stage_progress=on_stage_progress)
         self._control = control or DesktopImportControl()
@@ -220,6 +222,7 @@ class DesktopTextImportService:
                     )
                     terminal_state_committed = True
                     self._record_document_version_candidates(document.document_id, blocks)
+                    self._record_knowledge_reconciliation(document.document_id, blocks)
                     return self._result(
                         state.job_id,
                         document.document_id,
@@ -304,6 +307,7 @@ class DesktopTextImportService:
                 document_id=document.document_id,
             )
             self._record_document_version_candidates(document.document_id, blocks)
+            self._record_knowledge_reconciliation(document.document_id, blocks)
             return self._result(state.job_id, document.document_id, deduplicated=deduplicated)
         except _DuplicateImport as duplicate:
             return self._result(state.job_id, duplicate.document_id, deduplicated=True)
@@ -496,6 +500,15 @@ class DesktopTextImportService:
             logger.warning(
                 "Could not record D3 Document Version Candidates for %s: %s", document_id, error
             )
+
+    def _record_knowledge_reconciliation(
+        self, document_id: str, blocks: tuple[DocumentIRBlock, ...]
+    ) -> None:
+        """Knowledge conflicts are review work, never an import failure."""
+        try:
+            self._knowledge_reconciliation.record_document_changes(document_id, blocks)
+        except (DesktopImportError, OSError, sqlite3.Error, ValueError) as error:
+            logger.warning("Could not reconcile imported knowledge for %s: %s", document_id, error)
 
     def _honor_control(self, state: ImportJobState, stage: str) -> None:
         action = self._control.action

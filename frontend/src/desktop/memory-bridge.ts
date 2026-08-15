@@ -21,6 +21,8 @@ import type {
   DesktopDocumentVersionCandidate,
   DesktopDocumentVersionCandidates,
   DesktopDocumentVersionCandidateDecision,
+  DesktopKnowledgeReconciliationConflict,
+  DesktopKnowledgeReconciliationConflicts,
   DesktopImportTask,
   DesktopRecoveryOverride,
   DesktopTextDocumentImport,
@@ -36,6 +38,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
   private groundedAnswerResults: DesktopGroundedAnswer[] = []
   private knowledgePageResults: DesktopKnowledgePage[] = []
   private documentVersionCandidateResults: DesktopDocumentVersionCandidate[] = []
+  private knowledgeReconciliationConflictResults: DesktopKnowledgeReconciliationConflict[] = []
 
   constructor(
     handshakeResult: DesktopBridgeHandshake = {
@@ -392,6 +395,10 @@ export class MemoryDesktopBridge implements DesktopBridge {
         : item
     ))
     return resolved
+  }
+
+  async knowledgeReconciliationConflicts(): Promise<DesktopKnowledgeReconciliationConflicts> {
+    return { conflicts: this.knowledgeReconciliationConflictResults }
   }
 
   async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {

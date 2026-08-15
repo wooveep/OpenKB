@@ -412,3 +412,76 @@ DOCUMENT_VERSION_CANDIDATE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON document_version_members(source_id, linked_at)
     """,
 )
+
+
+# Knowledge reconciliation deliberately has its own lineage.  A document-version
+# relationship is about source identity; a reconciliation candidate is about a
+# proposed Concept or Entity change and must never rewrite that relationship.
+KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE knowledge_generations (
+        generation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        parent_generation_id INTEGER REFERENCES knowledge_generations(generation_id),
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE knowledge_generation_state (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        current_generation_id INTEGER NOT NULL
+            REFERENCES knowledge_generations(generation_id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TABLE knowledge_generation_items (
+        generation_id INTEGER NOT NULL
+            REFERENCES knowledge_generations(generation_id) ON DELETE CASCADE,
+        item_key TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('concept', 'entity')),
+        title TEXT NOT NULL,
+        normalized_title TEXT NOT NULL,
+        content_markdown TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL,
+        source_document_id TEXT NOT NULL
+            REFERENCES source_documents(document_id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(generation_id, item_key),
+        UNIQUE(generation_id, kind, normalized_title)
+    )
+    """,
+    """
+    CREATE INDEX knowledge_generation_items_current_lookup_idx
+        ON knowledge_generation_items(generation_id, kind, normalized_title)
+    """,
+    """
+    CREATE TABLE knowledge_reconciliation_candidates (
+        candidate_id TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL REFERENCES source_documents(document_id) ON DELETE CASCADE,
+        source_block_id TEXT REFERENCES document_ir_blocks(block_id) ON DELETE SET NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('concept', 'entity')),
+        title TEXT NOT NULL,
+        normalized_title TEXT NOT NULL,
+        content_markdown TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL,
+        classification TEXT NOT NULL CHECK(classification IN (
+            'duplicate', 'compatible_addition', 'conflict'
+        )),
+        status TEXT NOT NULL CHECK(status IN ('auto_reconciled', 'pending_conflict')),
+        baseline_kind TEXT CHECK(baseline_kind IN ('published_generation', 'user_revision')),
+        baseline_id TEXT,
+        baseline_title TEXT,
+        baseline_content_markdown TEXT,
+        observed_generation_id INTEGER
+            REFERENCES knowledge_generations(generation_id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX knowledge_reconciliation_candidates_review_idx
+        ON knowledge_reconciliation_candidates(status, created_at DESC)
+    """,
+    """
+    CREATE INDEX knowledge_reconciliation_candidates_document_idx
+        ON knowledge_reconciliation_candidates(document_id, created_at DESC)
+    """,
+)

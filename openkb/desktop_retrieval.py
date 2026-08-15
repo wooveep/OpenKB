@@ -82,6 +82,7 @@ class DesktopEvidenceRetriever:
                 _fts_candidates(connection, plan.terms)
                 + _page_tree_candidates(connection, plan.terms)
                 + _wiki_candidates(connection, plan.terms)
+                + _knowledge_generation_candidates(connection, plan.terms)
             )
             evidence = _fuse_candidates(candidates)
             source_images = _source_images_for_evidence(connection, evidence, self._kb_dir)
@@ -274,6 +275,52 @@ def _wiki_candidates(
         ),
         "wiki",
     )
+
+
+def _knowledge_generation_candidates(
+    connection: sqlite3.Connection, terms: tuple[str, ...]
+) -> tuple[_Candidate, ...]:
+    """Route published derived knowledge back to its available source evidence."""
+    if not terms:
+        return ()
+    score_parts: list[str] = []
+    parameters: list[object] = []
+    for term in terms:
+        score_parts.extend(
+            (
+                "CASE WHEN instr(lower(items.title), ?) > 0 THEN 2 ELSE 0 END",
+                "CASE WHEN instr(lower(items.content_markdown), ?) > 0 THEN 1 ELSE 0 END",
+            )
+        )
+        parameters.extend((term, term))
+    score_expression = " + ".join(score_parts)
+    rows = connection.execute(
+        f"""
+        {_AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+        SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
+        FROM (
+            SELECT available_evidence_occurrences.evidence_id,
+                available_evidence_occurrences.document_id,
+                available_evidence_occurrences.display_name,
+                available_evidence_occurrences.heading_path,
+                available_evidence_occurrences.locator_json,
+                available_evidence_occurrences.text,
+                ({score_expression}) AS channel_score,
+                items.item_key, available_evidence_occurrences.ordinal
+            FROM knowledge_generation_state AS state
+            JOIN knowledge_generation_items AS items
+                ON items.generation_id = state.current_generation_id
+            JOIN available_evidence_occurrences
+                ON available_evidence_occurrences.document_id = items.source_document_id
+            WHERE state.singleton = 1 AND available_evidence_occurrences.occurrence_rank = 1
+        )
+        WHERE channel_score > 0
+        ORDER BY channel_score DESC, item_key, ordinal
+        LIMIT ?
+        """,
+        (*parameters, _CHANNEL_LIMIT),
+    ).fetchall()
+    return _ranked_candidates(rows, "knowledge_generation")
 
 
 def _scored_rows(

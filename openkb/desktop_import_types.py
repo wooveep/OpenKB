@@ -98,6 +98,36 @@ class DesktopDocumentVersionCandidate:
 
 
 @dataclass(frozen=True)
+class DesktopKnowledgeReconciliationConflict:
+    """An incoming knowledge change that needs a person before publication."""
+
+    candidate_id: str
+    document_id: str
+    document_name: str
+    kind: str
+    title: str
+    content_markdown: str
+    baseline_kind: str
+    baseline_title: str
+    baseline_content_markdown: str
+    observed_generation_id: int | None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "candidate_id": self.candidate_id,
+            "document_id": self.document_id,
+            "document_name": self.document_name,
+            "kind": self.kind,
+            "title": self.title,
+            "content_markdown": self.content_markdown,
+            "baseline_kind": self.baseline_kind,
+            "baseline_title": self.baseline_title,
+            "baseline_content_markdown": self.baseline_content_markdown,
+            "observed_generation_id": self.observed_generation_id,
+        }
+
+
+@dataclass(frozen=True)
 class DesktopImportJob:
     """The persisted task-center record for one selected source."""
 

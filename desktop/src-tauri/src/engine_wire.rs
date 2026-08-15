@@ -9,6 +9,11 @@ mod document_versions;
 pub use document_versions::{
     DocumentVersionCandidate, DocumentVersionCandidateDecision, DocumentVersionCandidatesResult,
 };
+#[path = "engine_wire_knowledge_reconciliation.rs"]
+mod knowledge_reconciliation;
+pub use knowledge_reconciliation::{
+    KnowledgeReconciliationConflict, KnowledgeReconciliationConflictsResult,
+};
 
 pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 

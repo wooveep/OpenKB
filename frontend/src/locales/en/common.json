@@ -241,6 +241,18 @@
         "keepSeparate": "Keep as separate source",
         "saved": "Document version decision saved."
       },
+      "reconciliation": {
+        "title": "Knowledge conflicts",
+        "description": "Compatible additions are published automatically. Conflicting Concept and Entity changes stay here until you review them.",
+        "loading": "Checking knowledge changes…",
+        "empty": "No knowledge conflicts need review.",
+        "concept": "Concept",
+        "entity": "Entity",
+        "fromDocument": "Incoming change from {{document}}",
+        "incoming": "Incoming change",
+        "userRevision": "Current user revision",
+        "publishedKnowledge": "Current published knowledge"
+      },
       "answersTitle": "Ask Available Knowledge",
       "answersDescription": "OpenKB builds a local evidence pack from available documents, then keeps the answer and its citations for review.",
       "answerQuestionLabel": "Question",

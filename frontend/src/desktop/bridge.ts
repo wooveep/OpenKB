@@ -21,6 +21,7 @@ import {
   type DesktopDocumentVersionCandidate,
   type DesktopDocumentVersionCandidates,
   type DesktopDocumentVersionCandidateDecision,
+  type DesktopKnowledgeReconciliationConflicts,
   type DesktopImportJobs,
   type DesktopRawDocument,
   type DesktopRecoveryOverride,
@@ -204,6 +205,12 @@ export class TauriDesktopBridge implements DesktopBridge {
       decision,
       requestId,
     })
+  }
+
+  async knowledgeReconciliationConflicts(): Promise<DesktopKnowledgeReconciliationConflicts> {
+    return this.call<DesktopKnowledgeReconciliationConflicts>(
+      "desktop_knowledge_reconciliation_conflicts",
+    )
   }
 
   async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {
@@ -400,6 +407,10 @@ class UnavailableDesktopBridge implements DesktopBridge {
     void candidateId
     void decision
     void requestId
+    return this.unavailable()
+  }
+
+  knowledgeReconciliationConflicts(): Promise<DesktopKnowledgeReconciliationConflicts> {
     return this.unavailable()
   }
 

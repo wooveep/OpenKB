@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from openkb.desktop_knowledge_titles import normalize_knowledge_title
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import atomic_write_text, kb_ingest_lock, kb_read_lock
 
@@ -364,12 +365,12 @@ def _require_kind(kind: str) -> str:
 
 
 def _normalize_title(title: str) -> tuple[str, str]:
-    display_title = " ".join(title.split())
+    display_title, normalized_title = normalize_knowledge_title(title)
     if not display_title:
         raise DesktopKnowledgePageError(
             "knowledge_page_title_required", "A knowledge page title is required."
         )
-    return display_title, display_title.casefold()
+    return display_title, normalized_title
 
 
 def _render_markdown(page: DesktopKnowledgePage) -> str:

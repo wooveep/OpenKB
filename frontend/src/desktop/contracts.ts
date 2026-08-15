@@ -279,6 +279,25 @@ export interface DesktopDocumentVersionCandidates {
   candidates: DesktopDocumentVersionCandidate[]
 }
 
+export type DesktopKnowledgeReconciliationBaselineKind = "published_generation" | "user_revision"
+
+export interface DesktopKnowledgeReconciliationConflict {
+  candidateId: string
+  documentId: string
+  documentName: string
+  kind: DesktopKnowledgePageKind
+  title: string
+  contentMarkdown: string
+  baselineKind: DesktopKnowledgeReconciliationBaselineKind
+  baselineTitle: string
+  baselineContentMarkdown: string
+  observedGenerationId: number | null
+}
+
+export interface DesktopKnowledgeReconciliationConflicts {
+  conflicts: DesktopKnowledgeReconciliationConflict[]
+}
+
 /** The SQLite-authoritative knowledge base currently available to the Desktop Runtime. */
 export interface DesktopKnowledgeBase {
   kbDir: string
@@ -413,6 +432,7 @@ export interface DesktopBridge {
     decision: DesktopDocumentVersionCandidateDecision,
     requestId: string,
   ): Promise<DesktopDocumentVersionCandidate>
+  knowledgeReconciliationConflicts(): Promise<DesktopKnowledgeReconciliationConflicts>
   pauseImportJob(jobId: string): Promise<DesktopImportControlResult>
   resumeImportJob(jobId: string, requestId: string): Promise<DesktopTextDocumentImport>
   recoverImportJob(
