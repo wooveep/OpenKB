@@ -112,6 +112,7 @@ pub enum ImportedDocumentSourceFormat {
     Docx,
     Xls,
     Xlsx,
+    Pptx,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -51,6 +51,10 @@ def parse_structured_document(source: Path, raw_bytes: bytes) -> ParsedDocument:
         from openkb.desktop_spreadsheet_parsers import parse_spreadsheet_document
 
         return parse_spreadsheet_document(source, raw_bytes, source_format)
+    if source_format == "pptx":
+        from openkb.desktop_presentation_parsers import parse_presentation_document
+
+        return parse_presentation_document(source, raw_bytes)
     raise DesktopImportError(
         "unsupported_import_format", f"No structured parser is registered for {source.name}."
     )

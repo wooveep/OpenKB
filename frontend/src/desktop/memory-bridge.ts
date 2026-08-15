@@ -128,7 +128,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     return {
       supported,
       unsupported,
-      supportedExtensions: [".txt", ".md", ".markdown", ".docx", ".xls", ".xlsx"],
+      supportedExtensions: [".txt", ".md", ".markdown", ".docx", ".xls", ".xlsx", ".pptx"],
     }
   }
 
@@ -352,14 +352,15 @@ export class MemoryDesktopBridge implements DesktopBridge {
 }
 
 function isSupportedImportSource(sourcePath: string): boolean {
-  return /\.(txt|md|markdown|docx|xls|xlsx)$/i.test(sourcePath)
+  return /\.(txt|md|markdown|docx|xls|xlsx|pptx)$/i.test(sourcePath)
 }
 
-function sourceFormat(sourcePath: string): "txt" | "markdown" | "docx" | "xls" | "xlsx" {
+function sourceFormat(sourcePath: string): "txt" | "markdown" | "docx" | "xls" | "xlsx" | "pptx" {
   if (/\.(md|markdown)$/i.test(sourcePath)) return "markdown"
   if (/\.docx$/i.test(sourcePath)) return "docx"
   if (/\.xlsx$/i.test(sourcePath)) return "xlsx"
   if (/\.xls$/i.test(sourcePath)) return "xls"
+  if (/\.pptx$/i.test(sourcePath)) return "pptx"
   return "txt"
 }
 

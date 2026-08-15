@@ -35,6 +35,7 @@ dependencies = [
     "pageindex==0.3.0.dev3",
     "markitdown[docx,pptx,xlsx,xls]==0.1.5",
     "openpyxl==3.1.5",
+    "python-pptx==1.0.2",
     "xlrd==2.0.2",
     "trafilatura==2.0.0",
     "click==8.4.0",
