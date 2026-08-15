@@ -253,11 +253,16 @@ impl EngineSupervisor {
         document_id: String,
         request_id: String,
         page: u32,
+        focus_locator: Option<serde_json::Value>,
     ) -> BridgeResult<RawDocument> {
         self.ensure_started()?;
         let value = self.request_started(
             "workbench.read_raw_document",
-            json!({ "document_id": document_id, "page": page }),
+            json!({
+                "document_id": document_id,
+                "page": page,
+                "focus_locator": focus_locator,
+            }),
             Some(request_id),
         )?;
         serde_json::from_value(value).map_err(|error| {

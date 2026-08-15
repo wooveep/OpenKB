@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -65,6 +66,52 @@ def test_raw_reader_pages_a_large_original_below_the_engine_frame_limit(tmp_path
     assert (first.content, first.has_more) == ("abcd", True)
     assert (second.content, second.has_more) == ("efgh", True)
     assert (third.content, third.has_more) == ("i", False)
+
+
+def test_raw_reader_focus_locator_opens_the_matching_structured_source_page(tmp_path, monkeypatch):
+    """A source-image ID selects its figure rather than an earlier matching paragraph."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "guide.md"
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nsource-image")
+    source.write_text(
+        "# Guide\n\n" + ("Earlier source text. " * 80) + "![Target image](diagram.png)\n",
+        encoding="utf-8",
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        source_image_id, locator_json = connection.execute(
+            "SELECT source_image_id, locator_json FROM source_images"
+        ).fetchone()
+        locator = json.loads(locator_json)
+        assert "source_image_id" not in locator
+        locator["source_image_id"] = source_image_id
+    monkeypatch.setattr(desktop_raw_assets, "RAW_DOCUMENT_PAGE_BYTES", 128)
+
+    focused = DesktopRawAssetService(kb_dir).read_document(
+        imported.document.document_id, focus_locator=locator
+    )
+
+    assert focused.page > 0
+    assert "[Image: Target image]" in focused.content
+
+
+def test_raw_reader_focus_locator_opens_the_matching_text_line(tmp_path, monkeypatch):
+    """A TXT citation line opens the raw-reader page that contains that line."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "guide.txt"
+    source.write_text(("filler\n" * 64) + "\nTarget source line\n", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    monkeypatch.setattr(desktop_raw_assets, "RAW_DOCUMENT_PAGE_BYTES", 128)
+
+    focused = DesktopRawAssetService(kb_dir).read_document(
+        imported.document.document_id, focus_locator={"line_start": 66, "line_end": 66}
+    )
+
+    assert focused.page > 0
+    assert "Target source line" in focused.content
 
 
 @pytest.mark.parametrize(

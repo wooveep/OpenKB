@@ -208,7 +208,7 @@ def _source_images_for_answer(
                 media_type=str(row[5]),
                 file_path=str(file_path),
                 alt_text=str(row[7]) if row[7] is not None else None,
-                locator=_json_object(str(row[8])),
+                locator={**_json_object(str(row[8])), "source_image_id": str(row[0])},
             )
         )
     return tuple(images)

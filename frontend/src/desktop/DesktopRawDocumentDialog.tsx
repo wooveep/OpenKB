@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import type { DesktopRawDocument } from "./contracts"
+import { formatSourceLocator } from "./source-locator"
 
 /** Read-only view of the verified original plus its independently retained images. */
 export function DesktopRawDocumentDialog({
@@ -41,7 +42,7 @@ export function DesktopRawDocumentDialog({
         {document && focusLocator ? (
           <p className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-foreground">
             {t("desktop.knowledgeBases.originalFocusLocation", {
-              location: formatLocator(focusLocator),
+              location: formatSourceLocator(focusLocator),
             })}
           </p>
         ) : null}
@@ -89,21 +90,4 @@ export function DesktopRawDocumentDialog({
       </DialogContent>
     </Dialog>
   )
-}
-
-function formatLocator(locator: Record<string, unknown>): string {
-  const values = [
-    "page",
-    "slide",
-    "sheet",
-    "cell_range",
-    "cell",
-    "line_start",
-    "line_end",
-    "paragraph",
-    "table",
-    "body_order",
-    "ordinal",
-  ].flatMap((key) => locator[key] === undefined ? [] : [`${key}: ${String(locator[key])}`])
-  return values.length ? values.join(" · ") : "document"
 }

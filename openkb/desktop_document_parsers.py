@@ -80,16 +80,17 @@ def analysis_text(blocks: tuple[DocumentIRBlock, ...]) -> str:
 
 def materialize_reader_markdown(blocks: tuple[DocumentIRBlock, ...]) -> str:
     """Render a read-only Markdown view from authority IR, never the reverse."""
-    rendered: list[str] = []
-    for block in blocks:
-        if block.kind == "heading":
-            level = _reader_heading_level(block)
-            rendered.append(f"{'#' * level} {block.text}")
-        elif block.kind == "figure":
-            rendered.append(f"[Image: {block.text}]")
-        else:
-            rendered.append(block.text)
+    rendered = [materialize_reader_markdown_block(block) for block in blocks]
     return "\n\n".join(part for part in rendered if part).strip()
+
+
+def materialize_reader_markdown_block(block: DocumentIRBlock) -> str:
+    """Render one authority block for reader pagination and stable source focus."""
+    if block.kind == "heading":
+        return f"{'#' * _reader_heading_level(block)} {block.text}"
+    if block.kind == "figure":
+        return f"[Image: {block.text}]"
+    return block.text
 
 
 def _parse_markdown(source: Path, text: str) -> ParsedDocument:

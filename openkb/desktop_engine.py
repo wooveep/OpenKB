@@ -390,6 +390,7 @@ class DesktopEngineServer:
                 .read_document(
                     _required_string_param(request, "document_id"),
                     page=_non_negative_int_param(request, "page", default=0),
+                    focus_locator=_optional_object_param(request, "focus_locator"),
                 )
                 .as_dict()
             )
@@ -683,6 +684,18 @@ def _non_negative_int_param(request: DesktopRequest, key: str, *, default: int) 
             "invalid_params", f"{request.method} requires a non-negative integer {key}."
         )
     return value
+
+
+def _optional_object_param(request: DesktopRequest, key: str) -> dict[str, object] | None:
+    """Return an optional non-empty object parameter for stable source focus."""
+    value = request.params.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not value:
+        raise DesktopRequestError(
+            "invalid_params", f"{request.method} {key} must be a non-empty object."
+        )
+    return dict(value)
 
 
 def _recovery_override_param(request: DesktopRequest) -> DesktopRecoveryOverride:

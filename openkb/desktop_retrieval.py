@@ -415,7 +415,7 @@ def _source_images_for_evidence(
                     media_type=str(row[4]),
                     file_path=str(file_path),
                     alt_text=str(row[6]) if row[6] is not None else None,
-                    locator=locator,
+                    locator={**locator, "source_image_id": source_image_id},
                 )
             )
     return tuple(selected)
@@ -431,14 +431,16 @@ def _source_image_matches_evidence(
         return True
     if _same_locator_value(image_locator, evidence_locator, "body_order"):
         return True
-    if _same_locator_value(image_locator, evidence_locator, "slide"):
-        return True
-    if _same_locator_value(image_locator, evidence_locator, "page"):
-        return _bbox_matches(image_locator, evidence_locator)
     if _same_locator_value(image_locator, evidence_locator, "sheet"):
         return _cell_ranges_overlap(
             image_locator.get("cell_range"), evidence_locator.get("cell_range")
         )
+    if "page" in image_locator and "page" in evidence_locator:
+        if not _same_locator_value(image_locator, evidence_locator, "page"):
+            return False
+        return _bbox_matches(image_locator, evidence_locator)
+    if "slide" in image_locator and "slide" in evidence_locator:
+        return False
     return _line_ranges_overlap(image_locator, evidence_locator)
 
 
@@ -453,14 +455,14 @@ def _bbox_matches(image_locator: dict[str, object], evidence_locator: dict[str, 
     image_bbox = image_locator.get("bbox")
     evidence_bbox = evidence_locator.get("bbox")
     if not isinstance(image_bbox, list) or not isinstance(evidence_bbox, list):
-        return True
+        return False
     if len(image_bbox) != 4 or len(evidence_bbox) != 4:
-        return True
+        return False
     try:
         image_values = tuple(float(value) for value in image_bbox)
         evidence_values = tuple(float(value) for value in evidence_bbox)
     except (TypeError, ValueError):
-        return True
+        return False
     return not (
         image_values[2] <= evidence_values[0]
         or image_values[0] >= evidence_values[2]

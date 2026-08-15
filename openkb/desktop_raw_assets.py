@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from openkb.desktop_document_parsers import materialize_reader_markdown
+from openkb.desktop_document_parsers import (
+    materialize_reader_markdown,
+    materialize_reader_markdown_block,
+)
 from openkb.desktop_import_artifacts import (
     DesktopImportError,
     DocumentIRBlock,
@@ -93,7 +96,13 @@ class DesktopRawAssetService:
         self.state_dir = desktop_state_dir(self.kb_dir)
         self.database_path = desktop_state_database_path(self.kb_dir)
 
-    def read_document(self, document_id: str, *, page: int = 0) -> DesktopRawDocument:
+    def read_document(
+        self,
+        document_id: str,
+        *,
+        page: int = 0,
+        focus_locator: dict[str, object] | None = None,
+    ) -> DesktopRawDocument:
         """Return one verified original-reader page without exceeding the Engine frame limit."""
         if page < 0:
             raise DesktopImportError(
@@ -123,7 +132,12 @@ class DesktopRawAssetService:
                     self._quarantine(connection, record, error_code)
                     connection.commit()
                     raise DesktopImportError(error_code, _integrity_message(error_code))
-                content = self._reader_content(connection, record, raw_bytes)
+                content, focus_offset = self._reader_content(
+                    connection,
+                    record,
+                    raw_bytes,
+                    focus_locator=focus_locator,
+                )
                 source_images = self._source_images_for_document(connection, record.document_id)
                 self._mark_verified(connection, record.asset_sha256)
                 connection.commit()
@@ -132,7 +146,10 @@ class DesktopRawAssetService:
                 raise
             finally:
                 connection.close()
-        content, has_more = _content_page(content, page)
+        reader_page = (
+            _page_for_focus_offset(content, focus_offset) if focus_offset is not None else page
+        )
+        content, has_more = _content_page(content, reader_page)
         return DesktopRawDocument(
             document_id=record.document_id,
             name=record.name,
@@ -140,7 +157,7 @@ class DesktopRawAssetService:
             asset_sha256=record.asset_sha256,
             byte_size=record.byte_size,
             content=content,
-            page=page,
+            page=reader_page,
             has_more=has_more,
             source_images=source_images,
         )
@@ -237,10 +254,13 @@ class DesktopRawAssetService:
         connection: sqlite3.Connection,
         record: _RawAssetRecord,
         raw_bytes: bytes,
-    ) -> str:
+        *,
+        focus_locator: dict[str, object] | None,
+    ) -> tuple[str, int | None]:
         if record.source_format == "txt":
             try:
-                return raw_bytes.decode("utf-8-sig")
+                content = raw_bytes.decode("utf-8-sig")
+                return content, _content_offset_for_line_locator(content, focus_locator)
             except UnicodeDecodeError as error:
                 self._quarantine(connection, record, "raw_asset_content_invalid")
                 connection.commit()
@@ -249,7 +269,8 @@ class DesktopRawAssetService:
                 ) from error
         if source_format_uses_structured_ir(record.source_format):
             blocks = self._document_blocks(connection, record.document_id)
-            return materialize_reader_markdown(blocks)
+            content = materialize_reader_markdown(blocks)
+            return content, _content_offset_for_locator(blocks, focus_locator)
         raise DesktopImportError(
             "raw_document_reader_unsupported",
             "This original cannot be displayed by the current Desktop reader.",
@@ -417,6 +438,56 @@ def _content_page(content: str, page: int) -> tuple[str, bool]:
         start = _next_page_boundary(content, start)
     end = _next_page_boundary(content, start)
     return content[start:end], end < len(content)
+
+
+def _content_offset_for_locator(
+    blocks: tuple[DocumentIRBlock, ...], focus_locator: dict[str, object] | None
+) -> int | None:
+    if not focus_locator:
+        return None
+    offset = 0
+    for block in blocks:
+        rendered = materialize_reader_markdown_block(block)
+        if not rendered:
+            continue
+        if _block_contains_locator(block, focus_locator):
+            return offset
+        offset += len(rendered) + 2
+    return None
+
+
+def _content_offset_for_line_locator(
+    content: str, focus_locator: dict[str, object] | None
+) -> int | None:
+    """Resolve a TXT evidence line to its original-content character offset."""
+    if not focus_locator:
+        return None
+    line_start = focus_locator.get("line_start")
+    if isinstance(line_start, bool) or not isinstance(line_start, int) or line_start < 1:
+        return None
+    lines = content.splitlines(keepends=True)
+    if line_start > len(lines):
+        return None
+    return sum(len(line) for line in lines[: line_start - 1])
+
+
+def _block_contains_locator(block: DocumentIRBlock, focus_locator: dict[str, object]) -> bool:
+    locator = block.locator
+    return locator is not None and all(
+        locator.get(key) == value for key, value in focus_locator.items()
+    )
+
+
+def _page_for_focus_offset(content: str, offset: int) -> int:
+    page = 0
+    start = 0
+    while start < len(content):
+        end = _next_page_boundary(content, start)
+        if offset < end:
+            return page
+        start = end
+        page += 1
+    return 0
 
 
 def _next_page_boundary(content: str, start: int) -> int:

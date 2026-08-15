@@ -118,8 +118,14 @@ export class TauriDesktopBridge implements DesktopBridge {
     documentId: string,
     requestId: string,
     page = 0,
+    focusLocator: Record<string, unknown> | undefined = undefined,
   ): Promise<DesktopRawDocument> {
-    return this.call<DesktopRawDocument>("desktop_read_raw_document", { documentId, requestId, page })
+    return this.call<DesktopRawDocument>("desktop_read_raw_document", {
+      documentId,
+      requestId,
+      page,
+      focusLocator,
+    })
   }
 
   async importTextDocument(
@@ -263,9 +269,16 @@ class UnavailableDesktopBridge implements DesktopBridge {
     return this.unavailable()
   }
 
-  readRawDocument(documentId: string, requestId: string): Promise<DesktopRawDocument> {
+  readRawDocument(
+    documentId: string,
+    requestId: string,
+    page?: number,
+    focusLocator?: Record<string, unknown>,
+  ): Promise<DesktopRawDocument> {
     void documentId
     void requestId
+    void page
+    void focusLocator
     return this.unavailable()
   }
 

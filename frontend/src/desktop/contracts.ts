@@ -341,6 +341,7 @@ export interface DesktopBridge {
     documentId: string,
     requestId: string,
     page?: number,
+    focusLocator?: Record<string, unknown>,
   ): Promise<DesktopRawDocument>
   importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport>
   importJobs(): Promise<DesktopImportJobs>

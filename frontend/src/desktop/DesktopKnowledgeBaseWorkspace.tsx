@@ -373,7 +373,12 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setRawDocumentFocus(locator)
     setLoadingRawDocument(true)
     try {
-      setRawDocument(await bridge.readRawDocument(documentId, nextRequestId()))
+      setRawDocument(await bridge.readRawDocument(
+        documentId,
+        nextRequestId(),
+        0,
+        locator ?? undefined,
+      ))
     } catch (error) {
       setImportError(error instanceof Error ? error.message : String(error))
       await refreshActiveKnowledgeBase()

@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
 import { useDesktopBridge } from "./bridge-context"
 import type { DesktopAnswerSourceImage, DesktopGroundedAnswer } from "./contracts"
+import { formatSourceLocator } from "./source-locator"
 
 let requestSequence = 0
 
@@ -183,7 +184,7 @@ function CompletedAnswerCard({
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {t("desktop.knowledgeBases.answerCitationLocation", {
-                      location: formatLocator(citation.locator),
+                      location: formatSourceLocator(citation.locator),
                     })}
                   </p>
                 </button>
@@ -278,22 +279,4 @@ function AnswerCard({
       {children}
     </article>
   )
-}
-
-function formatLocator(locator: Record<string, unknown>): string {
-  const values = [
-    "page",
-    "slide",
-    "sheet",
-    "cell_range",
-    "cell",
-    "line_start",
-    "line_end",
-    "paragraph",
-    "table",
-    "body_order",
-    "ordinal",
-  ]
-    .flatMap((key) => locator[key] === undefined ? [] : [`${key}: ${String(locator[key])}`])
-  return values.length ? values.join(" · ") : "document"
 }

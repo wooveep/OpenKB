@@ -151,8 +151,10 @@ export class MemoryDesktopBridge implements DesktopBridge {
     documentId: string,
     requestId: string,
     page = 0,
+    focusLocator: Record<string, unknown> | undefined = undefined,
   ): Promise<DesktopRawDocument> {
     void requestId
+    void focusLocator
     if (page !== 0) throw new Error("The requested document page was not found.")
     const document = this.importJobResults.find(
       (task) => task.document?.documentId === documentId,

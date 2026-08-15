@@ -8,6 +8,7 @@ from pathlib import Path
 from openkb.desktop_grounded_answer import DesktopGroundedAnswerService
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_retrieval import _source_image_matches_evidence
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
@@ -102,12 +103,15 @@ def test_grounded_answer_persists_only_source_images_bound_to_its_citations(tmp_
     assert source_image.document_id == imported.document_id
     assert source_image.evidence_id in {citation.evidence_id for citation in answer.citations}
     assert source_image.locator["line_start"] == 5
+    assert source_image.locator["source_image_id"] == source_image.source_image_id
     assert Path(source_image.file_path).read_bytes() == image_bytes
 
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         assert connection.execute(
             "SELECT source_image_id, evidence_id FROM grounded_answer_source_images"
         ).fetchall() == [(source_image.source_image_id, source_image.evidence_id)]
+        restored = DesktopGroundedAnswerService(kb_dir).list()[0]
+        assert restored.source_images[0].locator["source_image_id"] == source_image.source_image_id
         connection.execute(
             "UPDATE source_documents SET availability = 'failed' WHERE document_id = ?",
             (imported.document_id,),
@@ -115,6 +119,15 @@ def test_grounded_answer_persists_only_source_images_bound_to_its_citations(tmp_
         connection.commit()
 
     assert DesktopGroundedAnswerService(kb_dir).list()[0].source_images == ()
+
+
+def test_source_image_matching_never_infers_a_link_from_page_or_slide_alone():
+    """A matching container alone is not enough to show an unreferenced image."""
+    assert not _source_image_matches_evidence("image-1", {"page": 2}, {"page": 2})
+    assert not _source_image_matches_evidence("image-1", {"slide": 2}, {"slide": 2})
+    assert _source_image_matches_evidence(
+        "image-1", {"page": 2, "bbox": [0, 0, 10, 10]}, {"page": 2, "bbox": [5, 5, 15, 15]}
+    )
 
 
 def test_grounded_answer_falls_back_when_optional_model_calls_fail(tmp_path):

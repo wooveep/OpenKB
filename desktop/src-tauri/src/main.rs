@@ -181,10 +181,11 @@ async fn desktop_read_raw_document(
     document_id: String,
     request_id: String,
     page: u32,
+    focus_locator: Option<serde_json::Value>,
 ) -> Result<RawDocument, BridgeError> {
     let engine = Arc::clone(&state.engine);
     tauri::async_runtime::spawn_blocking(move || {
-        engine.read_raw_document(document_id, request_id, page)
+        engine.read_raw_document(document_id, request_id, page, focus_locator)
     })
     .await
     .map_err(|error| BridgeError {
