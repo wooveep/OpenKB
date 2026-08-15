@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import yaml
@@ -67,6 +68,29 @@ class DesktopLiteLLMTransport:
         self._bundle = bundle
 
     def __call__(self, request: DesktopModelRequest, timeout_seconds: float) -> object:
+        return _response_content(self._completion(request, timeout_seconds, stream=False))
+
+    def stream(
+        self,
+        request: DesktopModelRequest,
+        timeout_seconds: float,
+        on_delta: Callable[[str], None],
+    ) -> object:
+        """Consume LiteLLM's iterator and forward only textual answer deltas."""
+        response = self._completion(request, timeout_seconds, stream=True)
+        if not hasattr(response, "__iter__"):
+            raise DesktopModelTransportError("response_format")
+        parts: list[str] = []
+        for chunk in response:
+            delta = _stream_delta(chunk)
+            if delta:
+                parts.append(delta)
+                on_delta(delta)
+        return "".join(parts)
+
+    def _completion(
+        self, request: DesktopModelRequest, timeout_seconds: float, *, stream: bool
+    ) -> object:
         if not isinstance(self._model, str) or not self._model.strip():
             raise DesktopModelTransportError("configuration")
         if not self._bundle.api_key:
@@ -81,6 +105,7 @@ class DesktopLiteLLMTransport:
                 timeout=timeout_seconds,
                 api_key=self._bundle.api_key,
                 base_url=self._bundle.base_url,
+                **({"stream": True} if stream else {}),
                 **(
                     {"extra_headers": self._bundle.extra_headers}
                     if self._bundle.extra_headers
@@ -92,10 +117,34 @@ class DesktopLiteLLMTransport:
             if category is not None:
                 raise DesktopModelTransportError(category) from error
             raise
-        return _response_content(response)
+        return response
 
 
 def _messages_for(request: DesktopModelRequest) -> list[dict[str, str]]:
+    if request.operation == "retrieval_plan":
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "Build a bounded retrieval plan for a local knowledge base. "
+                    "Return exactly one JSON object with a single `terms` array of at most 8 "
+                    "short search terms. Do not write SQL, tool calls, or an answer."
+                ),
+            },
+            {"role": "user", "content": request.content},
+        ]
+    if request.operation == "grounded_answer":
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "Answer only from the supplied source evidence. Be concise, state when "
+                    "the evidence is insufficient, and cite supporting evidence numbers "
+                    "such as [1]."
+                ),
+            },
+            {"role": "user", "content": request.content},
+        ]
     return [
         {
             "role": "system",
@@ -119,6 +168,14 @@ def _response_content(response: object) -> str:
     if not isinstance(content, str) or not content.strip():
         raise DesktopModelTransportError("response_format")
     return content
+
+
+def _stream_delta(chunk: object) -> str:
+    choices = _value(chunk, "choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    content = _value(_value(choices[0], "delta"), "content")
+    return content if isinstance(content, str) else ""
 
 
 def _provider_error_category(error: Exception) -> str | None:

@@ -8,7 +8,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 INITIAL_RESPONSE_TIMEOUT_SECONDS = 20.0
 RETRY_TIMEOUT_INCREMENT_SECONDS = 10.0
@@ -18,6 +18,10 @@ MODEL_CALL_DEADLINE_SECONDS = 60.0
 ModelCallStatus = Literal["running", "retry_wait", "completed", "failed"]
 ModelTransport = Callable[["DesktopModelRequest", float], object]
 ModelEventCallback = Callable[["DesktopModelAttemptEvent"], None]
+ModelTransportDeltaCallback = Callable[[str], None]
+ModelDeltaCallback = Callable[[int, str], None]
+ModelStreamTransport = Callable[["DesktopModelRequest", float, ModelTransportDeltaCallback], object]
+RetryCallback = Callable[[int], None]
 
 
 @dataclass(frozen=True)
@@ -178,6 +182,49 @@ class DesktopModelGateway:
         self, request: DesktopModelRequest, *, on_event: ModelEventCallback
     ) -> DesktopModelResult:
         """Execute one bounded analysis call and emit every attempt state transition."""
+        return self._run(
+            request,
+            on_event=on_event,
+            attempt_call=lambda current_request, timeout, _attempt: self._call_transport(
+                current_request, timeout
+            ),
+        )
+
+    def stream(
+        self,
+        request: DesktopModelRequest,
+        *,
+        on_event: ModelEventCallback,
+        on_delta: ModelDeltaCallback,
+        on_reset: RetryCallback | None = None,
+    ) -> DesktopModelResult:
+        """Emit production response deltas while preserving the existing call policy."""
+        stream_transport = getattr(self._transport, "stream", None)
+        if not callable(stream_transport):
+            result = self.analyze(request, on_event=on_event)
+            on_delta(1, result.content)
+            return result
+        transport = cast(ModelStreamTransport, stream_transport)
+        return self._run(
+            request,
+            on_event=on_event,
+            on_retry=on_reset,
+            attempt_call=lambda current_request, timeout, attempt: self._call_stream_transport(
+                current_request,
+                timeout,
+                transport,
+                lambda delta: on_delta(attempt, delta),
+            ),
+        )
+
+    def _run(
+        self,
+        request: DesktopModelRequest,
+        *,
+        on_event: ModelEventCallback,
+        attempt_call: Callable[[DesktopModelRequest, float, int], object],
+        on_retry: RetryCallback | None = None,
+    ) -> DesktopModelResult:
         call_id = uuid.uuid4().hex
         started_at = self._clock()
         for attempt_index in range(MAX_AUTOMATIC_RETRIES + 1):
@@ -198,7 +245,7 @@ class DesktopModelGateway:
                 )
             )
             try:
-                response = self._call_transport(request, timeout_seconds)
+                response = attempt_call(request, timeout_seconds, attempt_index + 1)
             except Exception as error:
                 failure = classify_model_error(error)
                 remaining = _remaining_seconds(started_at, self._clock())
@@ -222,6 +269,8 @@ class DesktopModelGateway:
                             next_timeout_seconds=next_timeout,
                         )
                     )
+                    if on_retry is not None:
+                        on_retry(attempt_index + 2)
                     self._wait_for_retry(error, started_at)
                     continue
                 on_event(
@@ -302,6 +351,41 @@ class DesktopModelGateway:
         threading.Thread(target=invoke, daemon=True, name="openkb-model-attempt").start()
         if not completed.wait(timeout_seconds):
             raise TimeoutError()
+        error = outcome.get("error")
+        if isinstance(error, Exception):
+            raise error
+        return outcome.get("response")
+
+    def _call_stream_transport(
+        self,
+        request: DesktopModelRequest,
+        timeout_seconds: float,
+        transport: ModelStreamTransport,
+        on_delta: ModelTransportDeltaCallback,
+    ) -> object:
+        """Bound one provider stream and discard late chunks after a timeout."""
+        active = threading.Event()
+        active.set()
+        completed = threading.Event()
+        outcome: dict[str, object] = {}
+
+        def emit(delta: str) -> None:
+            if active.is_set() and delta:
+                on_delta(delta)
+
+        def invoke() -> None:
+            try:
+                outcome["response"] = transport(request, timeout_seconds, emit)
+            except Exception as error:
+                outcome["error"] = error
+            finally:
+                completed.set()
+
+        threading.Thread(target=invoke, daemon=True, name="openkb-model-stream-attempt").start()
+        if not completed.wait(timeout_seconds):
+            active.clear()
+            raise TimeoutError()
+        active.clear()
         error = outcome.get("error")
         if isinstance(error, Exception):
             raise error

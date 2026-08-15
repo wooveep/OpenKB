@@ -7,6 +7,8 @@ import {
   type DesktopBridgeHandshake,
   type DesktopCancelResult,
   type DesktopEngineHealth,
+  type DesktopGroundedAnswer,
+  type DesktopGroundedAnswers,
   type DesktopImportControlResult,
   type DesktopImportDropEvent,
   type DesktopImportSourceInspection,
@@ -132,6 +134,14 @@ export class TauriDesktopBridge implements DesktopBridge {
 
   async importJobs(): Promise<DesktopImportJobs> {
     return this.call<DesktopImportJobs>("desktop_import_jobs")
+  }
+
+  async askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer> {
+    return this.call<DesktopGroundedAnswer>("desktop_ask_grounded", { question, requestId })
+  }
+
+  async groundedAnswers(): Promise<DesktopGroundedAnswers> {
+    return this.call<DesktopGroundedAnswers>("desktop_grounded_answers")
   }
 
   async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {
@@ -266,6 +276,16 @@ class UnavailableDesktopBridge implements DesktopBridge {
   }
 
   importJobs(): Promise<DesktopImportJobs> {
+    return this.unavailable()
+  }
+
+  askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer> {
+    void question
+    void requestId
+    return this.unavailable()
+  }
+
+  groundedAnswers(): Promise<DesktopGroundedAnswers> {
     return this.unavailable()
   }
 

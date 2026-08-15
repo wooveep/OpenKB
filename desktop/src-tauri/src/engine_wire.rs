@@ -156,6 +156,8 @@ pub enum EngineEvent {
     RequestCompleted(EngineRequestEventData),
     #[serde(rename = "import.stage_progress")]
     ImportStageProgress(ImportStageProgressEventData),
+    #[serde(rename = "answer.delta")]
+    AnswerDelta(AnswerDeltaEventData),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -184,6 +186,24 @@ pub struct ImportStageProgressEventData {
     pub error_code: Option<String>,
     #[serde(alias = "document_id")]
     pub document_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnswerDeltaEventData {
+    #[serde(alias = "request_id")]
+    pub request_id: String,
+    #[serde(alias = "answer_id")]
+    pub answer_id: String,
+    pub delta: String,
+    #[serde(default)]
+    pub replace: bool,
+    #[serde(default = "default_answer_attempt")]
+    pub attempt: u32,
+}
+
+fn default_answer_attempt() -> u32 {
+    1
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -253,6 +273,52 @@ pub struct RawDocument {
     pub has_more: bool,
     #[serde(default, alias = "source_images")]
     pub source_images: Vec<SourceImage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalPlan {
+    pub query: String,
+    pub terms: Vec<String>,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceRef {
+    #[serde(alias = "evidence_id")]
+    pub evidence_id: String,
+    #[serde(alias = "document_id")]
+    pub document_id: String,
+    #[serde(alias = "document_name")]
+    pub document_name: String,
+    pub section: String,
+    pub locator: Value,
+    pub excerpt: String,
+    pub channels: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroundedAnswer {
+    #[serde(alias = "answer_id")]
+    pub answer_id: String,
+    pub question: String,
+    #[serde(alias = "answer_text")]
+    pub answer_text: String,
+    #[serde(alias = "retrieval_plan")]
+    pub retrieval_plan: RetrievalPlan,
+    pub citations: Vec<EvidenceRef>,
+    #[serde(default)]
+    pub degradations: Vec<String>,
+    #[serde(alias = "created_at")]
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroundedAnswersResult {
+    pub answers: Vec<GroundedAnswer>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

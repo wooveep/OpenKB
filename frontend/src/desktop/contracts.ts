@@ -12,7 +12,10 @@ export interface DesktopEngineHealth {
   protocolVersion: number
 }
 
-export type DesktopBridgeEvent = DesktopEngineBridgeEvent | DesktopImportStageProgressEvent
+export type DesktopBridgeEvent =
+  | DesktopEngineBridgeEvent
+  | DesktopImportStageProgressEvent
+  | DesktopGroundedAnswerDeltaEvent
 
 export interface DesktopEngineBridgeEvent {
   sequence: number
@@ -43,6 +46,18 @@ export interface DesktopImportStageProgressEvent {
     requestId?: string | null
     jobId: string
     documentId?: string | null
+  }
+}
+
+export interface DesktopGroundedAnswerDeltaEvent {
+  sequence: number
+  kind: "answer.delta"
+  data: {
+    requestId: string
+    answerId: string
+    delta: string
+    replace: boolean
+    attempt: number
   }
 }
 
@@ -171,6 +186,36 @@ export interface DesktopImportJobs {
   jobs: DesktopImportTask[]
 }
 
+export interface DesktopRetrievalPlan {
+  query: string
+  terms: string[]
+  source: "deterministic" | "model" | string
+}
+
+export interface DesktopEvidenceRef {
+  evidenceId: string
+  documentId: string
+  documentName: string
+  section: string
+  locator: Record<string, unknown>
+  excerpt: string
+  channels: string[]
+}
+
+export interface DesktopGroundedAnswer {
+  answerId: string
+  question: string
+  answerText: string
+  retrievalPlan: DesktopRetrievalPlan
+  citations: DesktopEvidenceRef[]
+  degradations: string[]
+  createdAt: string
+}
+
+export interface DesktopGroundedAnswers {
+  answers: DesktopGroundedAnswer[]
+}
+
 /** The SQLite-authoritative knowledge base currently available to the Desktop Runtime. */
 export interface DesktopKnowledgeBase {
   kbDir: string
@@ -286,6 +331,8 @@ export interface DesktopBridge {
   ): Promise<DesktopRawDocument>
   importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport>
   importJobs(): Promise<DesktopImportJobs>
+  askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer>
+  groundedAnswers(): Promise<DesktopGroundedAnswers>
   pauseImportJob(jobId: string): Promise<DesktopImportControlResult>
   resumeImportJob(jobId: string, requestId: string): Promise<DesktopTextDocumentImport>
   recoverImportJob(

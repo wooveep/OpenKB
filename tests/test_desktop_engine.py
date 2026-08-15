@@ -300,7 +300,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 7,
+            "schema_version": 8,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -724,3 +724,38 @@ def test_engine_signals_an_active_import_without_waiting_for_workspace_lock():
     assert cancelled == {"job_id": "cancel-job", "accepted": True}
     assert pause_control.action == "paused"
     assert cancel_control.action == "cancelled"
+
+
+def test_engine_streams_and_returns_a_grounded_answer(tmp_path):
+    """The typed private protocol returns completed citations after answer deltas."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "answer.txt"
+    source.write_text("# Evidence\n\nThe project uses a local evidence baseline.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+    output = io.BytesIO()
+    server = DesktopEngineServer(io.BytesIO(), output, workspace=workspace)
+    server._handshake_complete = True
+
+    server._run_request(
+        DesktopRequest(
+            request_id="answer",
+            method="workbench.ask_grounded",
+            params={"question": "What baseline does the project use?"},
+        ),
+        cancel_event=threading.Event(),
+    )
+
+    frames = _decode_frames(output.getvalue())
+    response = next(frame for frame in frames if frame.get("id") == "answer")
+    assert response["result"]["citations"][0]["document_name"] == "answer.txt"
+    delta_event = next(
+        frame
+        for frame in frames
+        if frame.get("method") == "event"
+        and frame["params"]["kind"] == "answer.delta"
+        and frame["params"]["data"]["request_id"] == "answer"
+    )
+    assert delta_event["params"]["data"]["replace"] is True
+    assert delta_event["params"]["data"]["attempt"] == 1

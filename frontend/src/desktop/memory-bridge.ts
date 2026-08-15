@@ -10,6 +10,8 @@ import type {
   DesktopRawDocument,
   DesktopActiveKnowledgeBase,
   DesktopEngineHealth,
+  DesktopGroundedAnswer,
+  DesktopGroundedAnswers,
   DesktopKnowledgeBase,
   DesktopKnowledgeBaseActivation,
   DesktopKnowledgeBaseInspection,
@@ -25,6 +27,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
   private readonly healthResult: DesktopEngineHealth
   private activeKnowledgeBaseResult: DesktopKnowledgeBase | null = null
   private importJobResults: DesktopImportTask[] = []
+  private groundedAnswerResults: DesktopGroundedAnswer[] = []
 
   constructor(
     handshakeResult: DesktopBridgeHandshake = {
@@ -232,6 +235,52 @@ export class MemoryDesktopBridge implements DesktopBridge {
     return { jobs: this.importJobResults }
   }
 
+  async askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer> {
+    if (this.activeKnowledgeBaseResult === null) {
+      throw new Error("Open a Desktop Knowledge Base before asking a question.")
+    }
+    const source = this.importJobResults.find(
+      (task) => task.document?.availability === "available",
+    )?.document
+    const citations = source ? [{
+      evidenceId: `evidence-${source.documentId}`,
+      documentId: source.documentId,
+      documentName: source.name,
+      section: "Document",
+      locator: { ordinal: 0 },
+      excerpt: `Original content for ${source.name}.`,
+      channels: ["fts", "page_tree"],
+    }] : []
+    const answerId = `answer-${requestId}`
+    const answerText = citations.length
+      ? `Available source evidence for “${question}”:\n\n[1] ${citations[0].excerpt}`
+      : `No available source evidence was found for: ${question}`
+    this.emit({
+      sequence: this.importJobResults.length + 1,
+      kind: "answer.delta",
+      data: { requestId, answerId, delta: answerText, replace: true, attempt: 1 },
+    })
+    const result: DesktopGroundedAnswer = {
+      answerId,
+      question,
+      answerText,
+      retrievalPlan: {
+        query: question,
+        terms: question.split(/\s+/).filter(Boolean),
+        source: "deterministic",
+      },
+      citations,
+      degradations: ["answer_model_unavailable"],
+      createdAt: new Date().toISOString(),
+    }
+    this.groundedAnswerResults = [result, ...this.groundedAnswerResults]
+    return result
+  }
+
+  async groundedAnswers(): Promise<DesktopGroundedAnswers> {
+    return { answers: this.groundedAnswerResults }
+  }
+
   async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {
     this.updateImportTask(jobId, "paused")
     return { jobId, accepted: true }
@@ -318,10 +367,11 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 7,
+      schemaVersion: 8,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []
+    this.groundedAnswerResults = []
     return {
       knowledgeBase: this.activeKnowledgeBaseResult,
       events: [

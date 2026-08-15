@@ -200,7 +200,17 @@
       "runtime": "Desktop Runtime",
       "active": "Active now",
       "readyTitle": "{{section}} is ready",
-      "readyDescription": "This knowledge base is bound to this Desktop Runtime. Future imports, answers, and knowledge editing will happen here safely."
+      "readyDescription": "This knowledge base is bound to this Desktop Runtime. Future imports, answers, and knowledge editing will happen here safely.",
+      "answersTitle": "Ask Available Knowledge",
+      "answersDescription": "OpenKB builds a local evidence pack from available documents, then keeps the answer and its citations for review.",
+      "answerQuestionLabel": "Question",
+      "answerQuestionPlaceholder": "Ask a question about the imported documents…",
+      "askQuestion": "Ask",
+      "askingQuestion": "Answering…",
+      "answerStreaming": "Generating answer…",
+      "noAnswers": "Ask a question to begin a grounded answer history.",
+      "answerSources": "Source evidence",
+      "answerCitationLocation": "Original position · {{location}}"
     }
   }
 }

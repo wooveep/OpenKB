@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -112,6 +113,40 @@ def test_gateway_enforces_the_response_wait_when_transport_blocks(monkeypatch):
     finally:
         release.set()
 
+    assert error.value.failure.code == "model_timeout"
+
+
+def test_gateway_stream_timeout_does_not_wait_for_a_blocking_delta_callback(monkeypatch):
+    """Slow event delivery cannot extend the provider response timeout."""
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+    monkeypatch.setattr(desktop_model_gateway, "MAX_AUTOMATIC_RETRIES", 0)
+
+    class BlockingStreamTransport:
+        def __call__(self, _request, _timeout_seconds):
+            return "unused"
+
+        def stream(self, _request, _timeout_seconds, on_delta):
+            on_delta("partial")
+            return "unused"
+
+    def blocking_delta(_attempt, _delta):
+        callback_started.set()
+        release_callback.wait()
+
+    started_at = time.monotonic()
+    try:
+        with pytest.raises(DesktopModelCallError) as error:
+            DesktopModelGateway(BlockingStreamTransport(), initial_timeout_seconds=0.01).stream(
+                DesktopModelRequest("grounded_answer", "answer", "source"),
+                on_event=lambda _event: None,
+                on_delta=blocking_delta,
+            )
+    finally:
+        release_callback.set()
+
+    assert callback_started.is_set()
+    assert time.monotonic() - started_at < 0.5
     assert error.value.failure.code == "model_timeout"
 
 

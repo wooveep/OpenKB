@@ -8,9 +8,9 @@ use crate::engine_wire::{
 };
 pub use crate::engine_wire::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, BridgeResult,
-    CancelResult, EngineHealth, ImportControlResult, ImportJobsResult, ImportSourceInspection,
-    InspectKnowledgeBaseResult, KnowledgeBaseActivationResult, RawDocument, RecoveryOverride,
-    TextDocumentImportResult,
+    CancelResult, EngineHealth, GroundedAnswer, GroundedAnswersResult, ImportControlResult,
+    ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
+    KnowledgeBaseActivationResult, RawDocument, RecoveryOverride, TextDocumentImportResult,
 };
 use serde_json::{json, Value};
 use std::{
@@ -213,6 +213,37 @@ impl EngineSupervisor {
             BridgeError::new(
                 "invalid_engine_response",
                 format!("Engine import jobs response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn ask_grounded(
+        &self,
+        question: String,
+        request_id: String,
+    ) -> BridgeResult<GroundedAnswer> {
+        self.ensure_started()?;
+        let value = self.request_started_with_timeout(
+            "workbench.ask_grounded",
+            json!({ "question": question }),
+            Some(request_id),
+            IMPORT_REQUEST_TIMEOUT,
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine grounded answer response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn grounded_answers(&self) -> BridgeResult<GroundedAnswersResult> {
+        self.ensure_started()?;
+        let value = self.request_started("workbench.grounded_answers", json!({}), None)?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine grounded answer history has an invalid shape: {error}"),
             )
         })
     }

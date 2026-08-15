@@ -6,9 +6,9 @@ mod process_tree;
 
 use engine_protocol::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
-    EngineHealth, EngineSupervisor, ImportControlResult, ImportJobsResult, ImportSourceInspection,
-    InspectKnowledgeBaseResult, KnowledgeBaseActivationResult, RawDocument, RecoveryOverride,
-    TextDocumentImportResult,
+    EngineHealth, EngineSupervisor, GroundedAnswer, GroundedAnswersResult, ImportControlResult,
+    ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
+    KnowledgeBaseActivationResult, RawDocument, RecoveryOverride, TextDocumentImportResult,
 };
 use process_tree::ProcessTreeJob;
 use std::{path::Path, sync::Arc};
@@ -144,6 +144,34 @@ async fn desktop_import_jobs(
         .map_err(|error| BridgeError {
             code: "desktop_command_failed".to_owned(),
             message: format!("Desktop import task lookup stopped unexpectedly: {error}"),
+        })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_ask_grounded(
+    state: State<'_, DesktopState>,
+    question: String,
+    request_id: String,
+) -> Result<GroundedAnswer, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.ask_grounded(question, request_id))
+        .await
+        .map_err(|error| BridgeError {
+            code: "desktop_command_failed".to_owned(),
+            message: format!("Desktop grounded answer task stopped unexpectedly: {error}"),
+        })?
+}
+
+#[tauri::command]
+async fn desktop_grounded_answers(
+    state: State<'_, DesktopState>,
+) -> Result<GroundedAnswersResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.grounded_answers())
+        .await
+        .map_err(|error| BridgeError {
+            code: "desktop_command_failed".to_owned(),
+            message: format!("Desktop grounded answer history stopped unexpectedly: {error}"),
         })?
 }
 
@@ -285,6 +313,8 @@ fn main() {
             desktop_inspect_import_sources,
             desktop_import_text_document,
             desktop_import_jobs,
+            desktop_ask_grounded,
+            desktop_grounded_answers,
             desktop_read_raw_document,
             desktop_pause_import_job,
             desktop_resume_import_job,

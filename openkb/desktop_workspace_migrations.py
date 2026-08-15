@@ -183,3 +183,36 @@ SOURCE_IMAGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON source_images(document_id, ordinal)
     """,
 )
+
+
+GROUNDED_ANSWER_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE grounded_answers (
+        answer_id TEXT PRIMARY KEY,
+        question TEXT NOT NULL,
+        answer_text TEXT NOT NULL,
+        retrieval_plan_json TEXT NOT NULL,
+        degradations_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        completed_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE grounded_answer_citations (
+        answer_id TEXT NOT NULL REFERENCES grounded_answers(answer_id) ON DELETE CASCADE,
+        evidence_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        document_id TEXT NOT NULL,
+        document_name TEXT NOT NULL,
+        section TEXT NOT NULL,
+        locator_json TEXT NOT NULL,
+        excerpt TEXT NOT NULL,
+        channels_json TEXT NOT NULL,
+        PRIMARY KEY(answer_id, evidence_id)
+    )
+    """,
+    """
+    CREATE INDEX grounded_answer_citations_answer_idx
+        ON grounded_answer_citations(answer_id, ordinal)
+    """,
+)

@@ -30,6 +30,7 @@ import {
   DesktopDocumentImportPanel,
   type DesktopImportBatchSummary,
 } from "./DesktopDocumentImportPanel"
+import { DesktopGroundedAnswerPanel } from "./DesktopGroundedAnswerPanel"
 import { FailedDocumentsDialog } from "./FailedDocumentsDialog"
 import { DesktopRawDocumentDialog } from "./DesktopRawDocumentDialog"
 import { DesktopBridgeError } from "./contracts"
@@ -764,6 +765,7 @@ function ActiveKnowledgeBaseView({
           onOpenOriginal={onOpenRawDocument}
         />
       ) : null}
+      {section === "answers" ? <DesktopGroundedAnswerPanel /> : null}
     </section>
   )
 }

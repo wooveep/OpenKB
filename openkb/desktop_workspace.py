@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from openkb.desktop_workspace_migrations import (
+    GROUNDED_ANSWER_MIGRATION_STATEMENTS,
     MODEL_CALL_MIGRATION_STATEMENTS,
     RAW_ASSET_INTEGRITY_MIGRATION_STATEMENTS,
     RECOVERY_RUN_MIGRATION_STATEMENTS,
@@ -334,6 +335,7 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (5, RECOVERY_RUN_MIGRATION_STATEMENTS),
     (6, RAW_ASSET_INTEGRITY_MIGRATION_STATEMENTS),
     (7, SOURCE_IMAGE_MIGRATION_STATEMENTS),
+    (8, GROUNDED_ANSWER_MIGRATION_STATEMENTS),
 )
 
 

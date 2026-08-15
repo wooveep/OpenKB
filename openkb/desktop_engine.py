@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import BinaryIO
 
 from openkb import __version__
+from openkb.desktop_answer_types import DesktopAnswerError
+from openkb.desktop_grounded_answer import DesktopGroundedAnswerService
 from openkb.desktop_import import (
     DesktopImportControl,
     DesktopImportError,
@@ -156,6 +158,8 @@ class DesktopEngineServer:
         "workbench.recover_import_job",
         "workbench.import_jobs",
         "workbench.read_raw_document",
+        "workbench.ask_grounded",
+        "workbench.grounded_answers",
     }
     _NON_CANCELABLE_MUTATION_METHODS = {
         "workbench.create_knowledge_base",
@@ -265,7 +269,12 @@ class DesktopEngineServer:
         except DesktopRequestError as error:
             completed_data["error_code"] = error.code
             self._write_error(request.request_id, error.code, str(error))
-        except (DesktopWorkbenchError, DesktopKnowledgeBaseError, DesktopImportError) as error:
+        except (
+            DesktopAnswerError,
+            DesktopWorkbenchError,
+            DesktopKnowledgeBaseError,
+            DesktopImportError,
+        ) as error:
             completed_data["error_code"] = error.code
             self._write_error(request.request_id, error.code, str(error))
         except Exception as error:  # Keep unexpected Engine failures behind a stable boundary.
@@ -384,6 +393,14 @@ class DesktopEngineServer:
                 )
                 .as_dict()
             )
+        if request.method == "workbench.grounded_answers":
+            active = self._workspace.active()
+            if active is None:
+                return {"answers": []}
+            answers = DesktopGroundedAnswerService(Path(active.kb_dir)).list()
+            return {"answers": [answer.as_dict() for answer in answers]}
+        if request.method == "workbench.ask_grounded":
+            return self._dispatch_grounded_answer_request(request, cancel_event)
         if request.method in {
             "workbench.import_text_document",
             "workbench.resume_import_job",
@@ -423,6 +440,40 @@ class DesktopEngineServer:
 
             active = self._workspace.active()
             return {"knowledge_base": active.as_dict() if active is not None else None}
+
+    def _dispatch_grounded_answer_request(
+        self, request: DesktopRequest, cancel_event: threading.Event | None
+    ) -> dict[str, object]:
+        """Answer against one stable active KB without making model work a mutation."""
+        with self._workspace_requests_lock:
+            if cancel_event is not None and cancel_event.is_set():
+                raise DesktopRequestError(
+                    "request_cancelled", "Desktop Bridge request was cancelled."
+                )
+            active = self._workspace.active()
+            if active is None:
+                raise DesktopRequestError(
+                    "no_active_knowledge_base",
+                    "Open a Desktop Knowledge Base before asking a question.",
+                )
+            kb_dir = Path(active.kb_dir)
+        answer = DesktopGroundedAnswerService(
+            kb_dir,
+            model_gateway=self._model_gateway_factory(kb_dir, None),
+        ).answer(
+            _required_string_param(request, "question"),
+            on_delta=lambda answer_id, delta, replace, attempt: self._emit_event(
+                "answer.delta",
+                {
+                    "request_id": request.request_id,
+                    "answer_id": answer_id,
+                    "delta": delta,
+                    "replace": replace,
+                    "attempt": attempt,
+                },
+            ),
+        )
+        return answer.as_dict()
 
     def _dispatch_import_request(
         self, request: DesktopRequest, cancel_event: threading.Event | None
