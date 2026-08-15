@@ -201,6 +201,43 @@ function Test-FrozenEngine {
         $created = Read-Response -Stream $output -RequestId "package-create" -Events $events
         Assert-SuccessResponse -Response $created -RequestId "package-create"
 
+        $lockStream = [System.IO.File]::Open(
+            (Join-Path $openkbDirectory "ingest.lock"),
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::ReadWrite
+        )
+        $lockStream.SetLength(1)
+        $lockStream.Lock(0, 1)
+        try {
+            Write-Frame -Stream $input -Message @{
+                jsonrpc = "2.0"; id = "package-read"; method = "workbench.read_raw_document"; params = @{ document_id = "cancel-test"; page = 0 }
+            }
+            Read-RequestEvent -Stream $output -RequestId "package-read" -Kind "engine.request_started" -Events $events | Out-Null
+
+            Write-Frame -Stream $input -Message @{
+                jsonrpc = "2.0"; id = "package-cancel"; method = "engine.cancel"; params = @{ request_id = "package-read" }
+            }
+            $cancel = Read-Response -Stream $output -RequestId "package-cancel" -Events $events
+            Assert-SuccessResponse -Response $cancel -RequestId "package-cancel"
+            Assert-That -Condition ($cancel.result.cancelled -eq $true) -Message "Frozen Engine did not cancel an active request."
+        }
+        finally {
+            $lockStream.Unlock(0, 1)
+            $lockStream.Dispose()
+        }
+        $cancelledRead = Read-Response -Stream $output -RequestId "package-read" -Events $events
+        Assert-That -Condition ($cancelledRead.PSObject.Properties.Name -contains "error") -Message "Cancelled Engine request unexpectedly succeeded."
+        Assert-That -Condition ($cancelledRead.error.code -eq "request_cancelled") -Message "Cancelled Engine request returned the wrong error."
+        $cancelledEventCount = @(
+            $events | Where-Object {
+                $_.method -eq "event" -and
+                $_.params.kind -eq "engine.request_cancelled" -and
+                [string] $_.params.data.request_id -eq "package-read"
+            }
+        ).Count
+        Assert-That -Condition ($cancelledEventCount -gt 0) -Message "Frozen Engine did not stream the cancellation event."
+
         $sourceImage = Join-Path $ScratchDirectory "package-source.png"
         $sourceMarkdown = Join-Path $ScratchDirectory "package-source.md"
         [System.IO.File]::WriteAllBytes(
@@ -254,43 +291,6 @@ function Test-FrozenEngine {
         $legacyWorkbench = Read-Response -Stream $output -RequestId "package-no-legacy-workbench" -Events $events
         Assert-That -Condition ($legacyWorkbench.PSObject.Properties.Name -contains "error") -Message "Frozen Engine exposed a removed legacy workbench method."
         Assert-That -Condition ($legacyWorkbench.error.code -eq "method_not_found") -Message "Frozen Engine rejected a removed legacy workbench method with the wrong error."
-
-        $lockStream = [System.IO.File]::Open(
-            (Join-Path $openkbDirectory "ingest.lock"),
-            [System.IO.FileMode]::OpenOrCreate,
-            [System.IO.FileAccess]::ReadWrite,
-            [System.IO.FileShare]::ReadWrite
-        )
-        $lockStream.SetLength(1)
-        $lockStream.Lock(0, 1)
-        try {
-            Write-Frame -Stream $input -Message @{
-                jsonrpc = "2.0"; id = "package-read"; method = "workbench.read_raw_document"; params = @{ document_id = "cancel-test"; page = 0 }
-            }
-            Read-RequestEvent -Stream $output -RequestId "package-read" -Kind "engine.request_started" -Events $events | Out-Null
-
-            Write-Frame -Stream $input -Message @{
-                jsonrpc = "2.0"; id = "package-cancel"; method = "engine.cancel"; params = @{ request_id = "package-read" }
-            }
-            $cancel = Read-Response -Stream $output -RequestId "package-cancel" -Events $events
-            Assert-SuccessResponse -Response $cancel -RequestId "package-cancel"
-            Assert-That -Condition ($cancel.result.cancelled -eq $true) -Message "Frozen Engine did not cancel an active request."
-        }
-        finally {
-            $lockStream.Unlock(0, 1)
-            $lockStream.Dispose()
-        }
-        $cancelledRead = Read-Response -Stream $output -RequestId "package-read" -Events $events
-        Assert-That -Condition ($cancelledRead.PSObject.Properties.Name -contains "error") -Message "Cancelled Engine request unexpectedly succeeded."
-        Assert-That -Condition ($cancelledRead.error.code -eq "request_cancelled") -Message "Cancelled Engine request returned the wrong error."
-        $cancelledEventCount = @(
-            $events | Where-Object {
-                $_.method -eq "event" -and
-                $_.params.kind -eq "engine.request_cancelled" -and
-                [string] $_.params.data.request_id -eq "package-read"
-            }
-        ).Count
-        Assert-That -Condition ($cancelledEventCount -gt 0) -Message "Frozen Engine did not stream the cancellation event."
 
         Write-Frame -Stream $input -Message @{
             jsonrpc = "2.0"; id = "package-shutdown"; method = "engine.shutdown"; params = @{}
