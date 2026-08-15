@@ -145,6 +145,26 @@ def _messages_for(request: DesktopModelRequest) -> list[dict[str, str]]:
             },
             {"role": "user", "content": request.content},
         ]
+    if request.operation == "knowledge_graph_extraction":
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "Extract a small evidence-bound local knowledge graph. Return exactly one "
+                    "JSON object with `nodes` and `edges` arrays. Each node must have `id`, "
+                    "`evidence_id`, `type` (`entity`, `concept`, or `claim`), and `label`. "
+                    "Each edge must have `evidence_id`, `source_id`, `target_id`, and `type` "
+                    "from IS_A, PART_OF, RELATED_TO, DEPENDS_ON, USES, PRODUCES, LOCATED_IN, "
+                    "CREATED_BY, PRECEDES, REPLACES, SUPPORTS, or CONTRADICTS. Use only the "
+                    "provided evidence IDs; both endpoints and every edge must cite the same "
+                    "evidence ID. Do not merge same-named entities or invent facts."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Document: {request.document_name}\n\n{request.content}",
+            },
+        ]
     return [
         {
             "role": "system",

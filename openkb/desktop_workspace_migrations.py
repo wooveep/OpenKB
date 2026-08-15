@@ -528,3 +528,74 @@ KNOWLEDGE_RECONCILIATION_RESOLUTION_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON knowledge_reconciliation_resolution_records(document_id, resolved_at DESC)
     """,
 )
+
+
+# The local graph deliberately stores an individual node for every extracted
+# evidence assertion.  A normalized label is an indexable retrieval anchor,
+# never a uniqueness key or an automatic identity merge.
+KNOWLEDGE_GRAPH_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE knowledge_graph_nodes (
+        node_id TEXT PRIMARY KEY,
+        evidence_id TEXT NOT NULL REFERENCES evidence_refs(evidence_id)
+            ON DELETE CASCADE,
+        node_type TEXT NOT NULL CHECK(node_type IN ('entity', 'concept', 'claim')),
+        label TEXT NOT NULL,
+        normalized_label TEXT NOT NULL,
+        extraction_method TEXT NOT NULL CHECK(extraction_method IN ('model', 'deterministic')),
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX knowledge_graph_nodes_anchor_idx
+        ON knowledge_graph_nodes(normalized_label, node_type, evidence_id)
+    """,
+    """
+    CREATE INDEX knowledge_graph_nodes_evidence_idx
+        ON knowledge_graph_nodes(evidence_id, node_type)
+    """,
+    """
+    CREATE TABLE knowledge_graph_edges (
+        edge_id TEXT PRIMARY KEY,
+        evidence_id TEXT NOT NULL REFERENCES evidence_refs(evidence_id)
+            ON DELETE CASCADE,
+        source_node_id TEXT NOT NULL REFERENCES knowledge_graph_nodes(node_id)
+            ON DELETE CASCADE,
+        target_node_id TEXT NOT NULL REFERENCES knowledge_graph_nodes(node_id)
+            ON DELETE CASCADE,
+        edge_type TEXT NOT NULL CHECK(edge_type IN (
+            'IS_A', 'PART_OF', 'RELATED_TO', 'DEPENDS_ON', 'USES', 'PRODUCES',
+            'LOCATED_IN', 'CREATED_BY', 'PRECEDES', 'REPLACES', 'SUPPORTS', 'CONTRADICTS'
+        )),
+        support_score REAL NOT NULL CHECK(support_score >= 0 AND support_score <= 1),
+        extraction_method TEXT NOT NULL CHECK(extraction_method IN ('model', 'deterministic')),
+        created_at TEXT NOT NULL,
+        CHECK(source_node_id <> target_node_id)
+    )
+    """,
+    """
+    CREATE INDEX knowledge_graph_edges_source_idx
+        ON knowledge_graph_edges(source_node_id, edge_id)
+    """,
+    """
+    CREATE INDEX knowledge_graph_edges_target_idx
+        ON knowledge_graph_edges(target_node_id, edge_id)
+    """,
+    """
+    CREATE INDEX knowledge_graph_edges_evidence_idx
+        ON knowledge_graph_edges(evidence_id, edge_id)
+    """,
+    """
+    CREATE TABLE knowledge_graph_diagnostics (
+        diagnostic_id TEXT PRIMARY KEY,
+        phase TEXT NOT NULL CHECK(phase IN ('extraction', 'query')),
+        error_code TEXT NOT NULL,
+        document_id TEXT REFERENCES source_documents(document_id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX knowledge_graph_diagnostics_recent_idx
+        ON knowledge_graph_diagnostics(created_at DESC)
+    """,
+)

@@ -17,6 +17,13 @@ from openkb.desktop_answer_types import (
     DesktopEvidenceRef,
     DesktopRetrievalPlan,
 )
+from openkb.desktop_knowledge_graph import (
+    DesktopKnowledgeGraphQueryError,
+    bounded_graph_rows,
+    graph_query_deadline,
+    local_graph_evidence_ids,
+    record_query_diagnostic,
+)
 from openkb.desktop_lexical import cjk_bigrams, is_cjk_text
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
@@ -31,6 +38,8 @@ _MAX_PLAN_TERMS = 8
 _MAX_COMBINED_PLAN_TERMS = 12
 _CHANNEL_LIMIT = 12
 _EVIDENCE_PACK_LIMIT = 6
+_BASELINE_MINIMUM_QUOTA = 4
+_GRAPH_CANDIDATE_LIMIT = 2
 _RRF_OFFSET = 60
 _TERM_PATTERN = re.compile(r"[A-Za-z0-9_]{2,}|[\u3400-\u9fff]+")
 _CELL_RANGE_PATTERN = re.compile(r"^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$", re.IGNORECASE)
@@ -76,18 +85,29 @@ class DesktopEvidenceRetriever:
         """Plan and retrieve without ever allowing optional model work to block a reply."""
         normalized_question = _validate_question(question)
         plan, degradations = self._plan(normalized_question, is_cancelled=is_cancelled)
+        graph_error_code: str | None = None
         connection = _connect(self._database_path)
         try:
-            candidates = (
+            baseline_candidates = (
                 _fts_candidates(connection, plan.terms)
                 + _page_tree_candidates(connection, plan.terms)
                 + _wiki_candidates(connection, plan.terms)
                 + _knowledge_generation_candidates(connection, plan.terms)
             )
-            evidence = _fuse_candidates(candidates)
+            baseline = _fuse_candidates(baseline_candidates)
+            try:
+                graph_candidates = _graph_candidates(connection, plan.terms, baseline)
+            except DesktopKnowledgeGraphQueryError as error:
+                # The graph is an invisible enhancement.  Its safe diagnostic
+                # is deliberately separate from user-visible answer degradations.
+                graph_error_code = error.code
+                graph_candidates = ()
+            evidence = _with_graph_budget(baseline, graph_candidates)
             source_images = _source_images_for_evidence(connection, evidence, self._kb_dir)
         finally:
             connection.close()
+        if graph_error_code is not None:
+            record_query_diagnostic(self._kb_dir, graph_error_code)
         return DesktopEvidencePack(
             retrieval_plan=plan,
             evidence=evidence,
@@ -323,6 +343,41 @@ def _knowledge_generation_candidates(
     return _ranked_candidates(rows, "knowledge_generation")
 
 
+def _graph_candidates(
+    connection: sqlite3.Connection,
+    terms: tuple[str, ...],
+    baseline: tuple[DesktopEvidenceRef, ...],
+) -> tuple[_Candidate, ...]:
+    """Resolve a bounded graph neighborhood back to available EvidenceRefs."""
+    deadline = graph_query_deadline()
+    evidence_ids = local_graph_evidence_ids(
+        connection,
+        terms=terms,
+        anchor_evidence_ids=tuple(reference.evidence_id for reference in baseline),
+        deadline=deadline,
+    )
+    if not evidence_ids:
+        return ()
+    rows = bounded_graph_rows(
+        connection,
+        f"""
+        {_AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+        SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
+        FROM available_evidence_occurrences
+        WHERE occurrence_rank = 1 AND evidence_id IN ({_placeholders(evidence_ids)})
+        """,
+        evidence_ids,
+        deadline,
+    )
+    rows_by_evidence_id = {str(row[0]): row for row in rows}
+    ordered_rows = [
+        rows_by_evidence_id[evidence_id]
+        for evidence_id in evidence_ids
+        if evidence_id in rows_by_evidence_id
+    ]
+    return _ranked_candidates(ordered_rows, "knowledge_graph")
+
+
 def _scored_rows(
     connection: sqlite3.Connection,
     terms: tuple[str, ...],
@@ -427,6 +482,59 @@ def _fuse_candidates(candidates: tuple[_Candidate, ...]) -> tuple[DesktopEvidenc
         )
         for key in selected
     )
+
+
+def _with_graph_budget(
+    baseline: tuple[DesktopEvidenceRef, ...], graph: tuple[_Candidate, ...]
+) -> tuple[DesktopEvidenceRef, ...]:
+    """Reserve baseline evidence before an optional graph can add context."""
+    graph_references = {candidate.reference.evidence_id: candidate.reference for candidate in graph}
+
+    def with_graph_channel(reference: DesktopEvidenceRef) -> DesktopEvidenceRef:
+        graph_reference = graph_references.get(reference.evidence_id)
+        if graph_reference is None:
+            return reference
+        return DesktopEvidenceRef(
+            **{
+                **reference.__dict__,
+                "channels": tuple(sorted(set(reference.channels) | set(graph_reference.channels))),
+            }
+        )
+
+    baseline_references = tuple(with_graph_channel(reference) for reference in baseline)
+    baseline_by_evidence_id = {
+        reference.evidence_id: reference for reference in baseline_references
+    }
+    selected: list[DesktopEvidenceRef] = []
+    selected_ids: set[str] = set()
+
+    def append(reference: DesktopEvidenceRef) -> None:
+        if reference.evidence_id not in selected_ids and len(selected) < _EVIDENCE_PACK_LIMIT:
+            selected.append(reference)
+            selected_ids.add(reference.evidence_id)
+
+    for reference in baseline_references[:_BASELINE_MINIMUM_QUOTA]:
+        append(reference)
+    graph_added = 0
+    for candidate in graph:
+        if graph_added == _GRAPH_CANDIDATE_LIMIT:
+            break
+        reference = baseline_by_evidence_id.get(
+            candidate.reference.evidence_id, candidate.reference
+        )
+        if reference.evidence_id in selected_ids:
+            continue
+        append(reference)
+        graph_added += 1
+    for reference in baseline_references:
+        append(reference)
+    return tuple(selected)
+
+
+def _placeholders(values: tuple[str, ...]) -> str:
+    if not values:
+        raise ValueError("Evidence lookup requires at least one identifier.")
+    return ", ".join("?" for _ in values)
 
 
 def _source_images_for_evidence(

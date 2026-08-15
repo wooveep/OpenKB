@@ -44,6 +44,10 @@ from openkb.desktop_import_types import (
     DesktopStageRun,
     DesktopTextImportResult,
 )
+from openkb.desktop_knowledge_graph import (
+    record_graph_extraction_diagnostic,
+    start_graph_extraction,
+)
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
 from openkb.desktop_model_gateway import (
     DesktopModelAttemptEvent,
@@ -112,25 +116,29 @@ class DesktopTextImportService:
             # A live worker owns the KB lock, so open-time recovery sees only a crashed owner.
             with kb_ingest_lock(self._store.state_dir):
                 self._store.require_database()
-                return self._run(self._store.create_job(source))
+                result = self._run(self._store.create_job(source))
         except DesktopImportError:
             raise
         except (OSError, sqlite3.Error, LockException) as error:
             raise DesktopImportError(
                 "desktop_import_failed", f"Could not import {source.name}: {error}"
             ) from error
+        self._start_graph_extraction(result)
+        return result
 
     def resume_text(self, job_id: str) -> DesktopTextImportResult:
         """Resume from the earliest pending stage without rerunning checkpoints."""
         try:
             with kb_ingest_lock(self._store.state_dir):
-                return self._run(self._store.resume_job(job_id))
+                result = self._run(self._store.resume_job(job_id))
         except DesktopImportError:
             raise
         except (OSError, sqlite3.Error, LockException) as error:
             raise DesktopImportError(
                 "desktop_import_failed", f"Could not resume import {job_id}: {error}"
             ) from error
+        self._start_graph_extraction(result)
+        return result
 
     def recover_text(
         self, job_id: str, override: DesktopRecoveryOverride
@@ -138,13 +146,15 @@ class DesktopTextImportService:
         """Resume a quarantined document at its failed stage using one run-only override."""
         try:
             with kb_ingest_lock(self._store.state_dir):
-                return self._run(self._recovery.begin(job_id, override))
+                result = self._run(self._recovery.begin(job_id, override))
         except DesktopImportError:
             raise
         except (OSError, sqlite3.Error, LockException) as error:
             raise DesktopImportError(
                 "desktop_import_failed", f"Could not recover import {job_id}: {error}"
             ) from error
+        self._start_graph_extraction(result)
+        return result
 
     def recoverable_job_ids(self) -> tuple[str, ...]:
         """Expose durable recovery work so the Engine can give each job its own control."""
@@ -164,6 +174,20 @@ class DesktopTextImportService:
                 "import_job_not_cancellable", f"Job {job_id} is {state.status}; not cancellable."
             )
         self._store.cancel_job(state, self._next_stage(state))
+
+    def _start_graph_extraction(self, result: DesktopTextImportResult) -> None:
+        """Make optional graph work independent from the completed Import Job result."""
+        try:
+            start_graph_extraction(
+                self._store.kb_dir,
+                result.document.document_id,
+                model_gateway=self._model_gateway,
+            )
+        except (OSError, RuntimeError):
+            # A document remains available through the baseline even if a local
+            # worker cannot be started.
+            record_graph_extraction_diagnostic(self._store.kb_dir, result.document.document_id)
+            logger.warning("Could not start local knowledge graph extraction.")
 
     def _run(self, state: ImportJobState) -> DesktopTextImportResult:
         stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
