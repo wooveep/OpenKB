@@ -9,6 +9,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from openkb.desktop_answer_types import (
     DesktopAnswerError,
@@ -17,6 +18,7 @@ from openkb.desktop_answer_types import (
     DesktopEvidenceRef,
     DesktopRetrievalPlan,
 )
+from openkb.desktop_graph_feature_flags import local_graph_default_enabled
 from openkb.desktop_knowledge_graph import (
     DesktopKnowledgeGraphQueryError,
     bounded_graph_rows,
@@ -38,12 +40,16 @@ _MAX_PLAN_TERMS = 8
 _MAX_COMBINED_PLAN_TERMS = 12
 _CHANNEL_LIMIT = 12
 _EVIDENCE_PACK_LIMIT = 6
+DESKTOP_EVIDENCE_RECALL_K = _EVIDENCE_PACK_LIMIT
 _BASELINE_MINIMUM_QUOTA = 4
 _GRAPH_CANDIDATE_LIMIT = 2
 _RRF_OFFSET = 60
 _TERM_PATTERN = re.compile(r"[A-Za-z0-9_]{2,}|[\u3400-\u9fff]+")
 _CELL_RANGE_PATTERN = re.compile(r"^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$", re.IGNORECASE)
 _SCORE_COLUMNS = frozenset(("display_name", "heading_path", "text"))
+
+DesktopRetrievalVariant = Literal["fts", "page_tree", "wiki", "baseline", "local_graph"]
+_EVALUATION_RETRIEVAL_VARIANTS = frozenset(("fts", "page_tree", "wiki", "baseline", "local_graph"))
 
 _AVAILABLE_EVIDENCE_OCCURRENCES_CTE = """
 WITH available_evidence_occurrences AS (
@@ -83,26 +89,53 @@ class DesktopEvidenceRetriever:
         self, question: str, *, is_cancelled: Callable[[], bool] | None = None
     ) -> DesktopEvidencePack:
         """Plan and retrieve without ever allowing optional model work to block a reply."""
+        variant: DesktopRetrievalVariant = (
+            "local_graph" if local_graph_default_enabled(self._kb_dir) else "baseline"
+        )
+        return self.retrieve_variant(question, variant=variant, is_cancelled=is_cancelled)
+
+    def build_plan(
+        self, question: str, *, is_cancelled: Callable[[], bool] | None = None
+    ) -> tuple[DesktopRetrievalPlan, tuple[str, ...]]:
+        """Build one bounded plan that an evaluation can reuse across variants."""
         normalized_question = _validate_question(question)
         plan, degradations = self._plan(normalized_question, is_cancelled=is_cancelled)
+        return plan, tuple(degradations)
+
+    def retrieve_variant(
+        self,
+        question: str,
+        *,
+        variant: DesktopRetrievalVariant,
+        retrieval_plan: DesktopRetrievalPlan | None = None,
+        degradations: tuple[str, ...] = (),
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> DesktopEvidencePack:
+        """Retrieve one named vectorless channel for a fixed evaluation plan.
+
+        Normal answers select ``baseline`` until an approved evaluation enables
+        ``local_graph``.  The narrower variants are exposed so the regression
+        harness can compare like-for-like candidate sets without giving each
+        variant a different query plan.
+        """
+        if variant not in _EVALUATION_RETRIEVAL_VARIANTS:
+            raise ValueError(f"Unsupported Desktop retrieval variant: {variant}")
+        normalized_question = _validate_question(question)
+        if retrieval_plan is None:
+            plan, plan_degradations = self._plan(normalized_question, is_cancelled=is_cancelled)
+            all_degradations = tuple((*degradations, *plan_degradations))
+        else:
+            if retrieval_plan.query != normalized_question:
+                raise DesktopAnswerError(
+                    "desktop_retrieval_plan_invalid",
+                    "The evaluation retrieval plan does not match the question.",
+                )
+            plan = retrieval_plan
+            all_degradations = degradations
         graph_error_code: str | None = None
         connection = _connect(self._database_path)
         try:
-            baseline_candidates = (
-                _fts_candidates(connection, plan.terms)
-                + _page_tree_candidates(connection, plan.terms)
-                + _wiki_candidates(connection, plan.terms)
-                + _knowledge_generation_candidates(connection, plan.terms)
-            )
-            baseline = _fuse_candidates(baseline_candidates)
-            try:
-                graph_candidates = _graph_candidates(connection, plan.terms, baseline)
-            except DesktopKnowledgeGraphQueryError as error:
-                # The graph is an invisible enhancement.  Its safe diagnostic
-                # is deliberately separate from user-visible answer degradations.
-                graph_error_code = error.code
-                graph_candidates = ()
-            evidence = _with_graph_budget(baseline, graph_candidates)
+            evidence, graph_error_code = _variant_evidence(connection, plan.terms, variant)
             source_images = _source_images_for_evidence(connection, evidence, self._kb_dir)
         finally:
             connection.close()
@@ -111,7 +144,7 @@ class DesktopEvidenceRetriever:
         return DesktopEvidencePack(
             retrieval_plan=plan,
             evidence=evidence,
-            degradations=tuple(degradations),
+            degradations=all_degradations,
             source_images=source_images,
         )
 
@@ -376,6 +409,39 @@ def _graph_candidates(
         if evidence_id in rows_by_evidence_id
     ]
     return _ranked_candidates(ordered_rows, "knowledge_graph")
+
+
+def _variant_evidence(
+    connection: sqlite3.Connection,
+    terms: tuple[str, ...],
+    variant: DesktopRetrievalVariant,
+) -> tuple[tuple[DesktopEvidenceRef, ...], str | None]:
+    """Build one evaluation candidate set without adding unrequested channels."""
+    if variant == "fts":
+        return _fuse_candidates(_fts_candidates(connection, terms)), None
+    if variant == "page_tree":
+        return _fuse_candidates(_page_tree_candidates(connection, terms)), None
+    if variant == "wiki":
+        return _fuse_candidates(
+            _wiki_candidates(connection, terms)
+            + _knowledge_generation_candidates(connection, terms)
+        ), None
+
+    baseline = _fuse_candidates(
+        _fts_candidates(connection, terms)
+        + _page_tree_candidates(connection, terms)
+        + _wiki_candidates(connection, terms)
+        + _knowledge_generation_candidates(connection, terms)
+    )
+    if variant == "baseline":
+        return baseline, None
+    try:
+        graph_candidates = _graph_candidates(connection, terms, baseline)
+    except DesktopKnowledgeGraphQueryError as error:
+        # A failed graph capability is never user-visible and never removes
+        # the independently retrieved baseline.
+        return _with_graph_budget(baseline, ()), error.code
+    return _with_graph_budget(baseline, graph_candidates), None
 
 
 def _scored_rows(

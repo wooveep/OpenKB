@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Lock
 
 from openkb.desktop_answer_store import DesktopGroundedAnswerStore, new_answer
-from openkb.desktop_answer_types import DesktopGroundedAnswer
+from openkb.desktop_answer_types import DesktopEvidencePack, DesktopGroundedAnswer
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -25,9 +25,14 @@ _STREAM_CHUNK_CHARS = 96
 
 
 @dataclass(frozen=True)
-class _AnswerGeneration:
+class DesktopGroundedAnswerGeneration:
+    """One non-persistent run of the same answer generation used by Desktop."""
+
     answer_text: str | None
     degradations: tuple[str, ...]
+    model_calls: int = 0
+    model_input_characters: int = 0
+    model_output_characters: int = 0
     interruption_code: str | None = None
     interruption_reason: str | None = None
 
@@ -141,9 +146,10 @@ class DesktopGroundedAnswerService:
                 created_at=created_at,
             )
 
-        generation = self._answer_text(
+        generation = generate_grounded_answer(
             question,
             pack,
+            model_gateway=self._model_gateway,
             on_delta=lambda attempt, delta: emit(delta, attempt),
             on_reset=reset,
             is_cancelled=is_cancelled,
@@ -186,55 +192,76 @@ class DesktopGroundedAnswerService:
     def list(self) -> tuple[DesktopGroundedAnswer, ...]:
         return self._store.list()
 
-    def _answer_text(
-        self,
-        question: str,
-        pack,
-        *,
-        on_delta: Callable[[int, str], None],
-        on_reset: Callable[[int], None],
-        is_cancelled: AnswerCancellationCallback | None,
-    ) -> _AnswerGeneration:
-        if is_cancelled is not None and is_cancelled():
-            return _AnswerGeneration(
-                None,
+
+def generate_grounded_answer(
+    question: str,
+    pack: DesktopEvidencePack,
+    *,
+    model_gateway: DesktopModelGateway | None,
+    on_delta: Callable[[int, str], None] | None = None,
+    on_reset: Callable[[int], None] | None = None,
+    is_cancelled: AnswerCancellationCallback | None = None,
+) -> DesktopGroundedAnswerGeneration:
+    """Generate from an already-retrieved pack without saving an answer record.
+
+    The workbench and retrieval evaluator share this seam, so the latter
+    measures the exact grounded-answer prompt and Model Gateway policy users
+    receive rather than a synthetic evidence concatenation.
+    """
+    if _is_cancelled(is_cancelled):
+        return _cancelled_generation()
+    if model_gateway is None:
+        return DesktopGroundedAnswerGeneration(
+            _deterministic_answer(question, pack.evidence), ("answer_model_unavailable",)
+        )
+
+    prompt = _answer_prompt(question, pack.evidence)
+    attempts = 0
+
+    def observe(event) -> None:
+        nonlocal attempts
+        if event.status == "running":
+            attempts = max(attempts, event.attempt)
+
+    try:
+        result = model_gateway.stream(
+            DesktopModelRequest("grounded_answer", "Grounded answer", prompt),
+            on_event=observe,
+            on_delta=on_delta or (lambda _attempt, _delta: None),
+            on_reset=on_reset,
+            is_cancelled=is_cancelled,
+        )
+        attempts = max(attempts, result.attempt_count)
+        answer_text = result.content.strip()
+        if _is_cancelled(is_cancelled):
+            return _cancelled_generation(model_calls=attempts, prompt=prompt)
+        if answer_text:
+            return DesktopGroundedAnswerGeneration(
+                answer_text,
                 (),
-                interruption_code="answer_cancelled",
-                interruption_reason="Answer generation was stopped.",
+                model_calls=attempts,
+                model_input_characters=len(prompt) * attempts,
+                model_output_characters=len(result.content),
             )
-        if self._model_gateway is None:
-            return _AnswerGeneration(
-                _deterministic_answer(question, pack.evidence), ("answer_model_unavailable",)
-            )
-        try:
-            result = self._model_gateway.stream(
-                DesktopModelRequest(
-                    "grounded_answer",
-                    "Grounded answer",
-                    _answer_prompt(question, pack.evidence),
-                ),
-                on_event=lambda _event: None,
-                on_delta=on_delta,
-                on_reset=on_reset,
-                is_cancelled=is_cancelled,
-            )
-            answer_text = result.content.strip()
-            if _is_cancelled(is_cancelled):
-                return _cancelled_generation()
-            if answer_text:
-                return _AnswerGeneration(answer_text, ())
-            return _AnswerGeneration(
-                _deterministic_answer(question, pack.evidence), ("answer_model_fallback",)
-            )
-        except DesktopModelCancelledError:
-            return _cancelled_generation()
-        except DesktopModelCallError as error:
-            return _AnswerGeneration(
-                None,
-                (),
-                interruption_code=error.failure.code,
-                interruption_reason=error.failure.reason,
-            )
+        return DesktopGroundedAnswerGeneration(
+            _deterministic_answer(question, pack.evidence),
+            ("answer_model_fallback",),
+            model_calls=attempts,
+            model_input_characters=len(prompt) * attempts,
+            model_output_characters=len(result.content),
+        )
+    except DesktopModelCancelledError:
+        return _cancelled_generation(model_calls=attempts, prompt=prompt)
+    except DesktopModelCallError as error:
+        attempts = max(attempts, 1)
+        return DesktopGroundedAnswerGeneration(
+            None,
+            (),
+            model_calls=attempts,
+            model_input_characters=len(prompt) * attempts,
+            interruption_code=error.failure.code,
+            interruption_reason=error.failure.reason,
+        )
 
 
 def _answer_prompt(question: str, evidence) -> str:
@@ -258,10 +285,14 @@ def _deterministic_answer(question: str, evidence) -> str:
     return f"Available source evidence for “{question}”:\n\n{excerpts}"
 
 
-def _cancelled_generation() -> _AnswerGeneration:
-    return _AnswerGeneration(
+def _cancelled_generation(
+    *, model_calls: int = 0, prompt: str | None = None
+) -> DesktopGroundedAnswerGeneration:
+    return DesktopGroundedAnswerGeneration(
         None,
         (),
+        model_calls=model_calls,
+        model_input_characters=(len(prompt) * model_calls) if prompt is not None else 0,
         interruption_code="answer_cancelled",
         interruption_reason="Answer generation was stopped.",
     )

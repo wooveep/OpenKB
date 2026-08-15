@@ -17,6 +17,19 @@ from openkb.desktop_workspace import (
 )
 
 
+def _drop_retrieval_corpus_revision_schema(connection: sqlite3.Connection) -> None:
+    """Return a test fixture to the state before migration 17."""
+    triggers = connection.execute(
+        """
+        SELECT name FROM sqlite_master
+        WHERE type = 'trigger' AND name LIKE 'desktop_retrieval_corpus_%'
+        """
+    ).fetchall()
+    for (trigger_name,) in triggers:
+        connection.execute(f'DROP TRIGGER "{trigger_name}"')
+    connection.execute("DROP TABLE desktop_retrieval_corpus_state")
+
+
 def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_one(tmp_path):
     """One Engine owns one active SQLite knowledge base and checkpoints before a switch."""
     runtime = DesktopKnowledgeBaseRuntime()
@@ -24,7 +37,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 16
+    assert first.knowledge_base.schema_version == 17
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
@@ -47,6 +60,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
             (14,),
             (15,),
             (16,),
+            (17,),
         ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
@@ -85,6 +99,8 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
         connection.execute("DROP TABLE knowledge_graph_diagnostics")
         connection.execute("DROP TABLE knowledge_graph_edges")
         connection.execute("DROP TABLE knowledge_graph_nodes")
+        _drop_retrieval_corpus_revision_schema(connection)
+        connection.execute("DROP TABLE desktop_graph_feature_flags")
         connection.execute("DROP TABLE knowledge_generation_items")
         connection.execute("DROP TABLE knowledge_generation_state")
         connection.execute("DROP TABLE knowledge_generations")
@@ -118,6 +134,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 14")
         connection.execute("DELETE FROM schema_migrations WHERE version = 15")
         connection.execute("DELETE FROM schema_migrations WHERE version = 16")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 17")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
@@ -168,6 +185,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
             (14,),
             (15,),
             (16,),
+            (17,),
         ]
         assert connection.execute(
             "SELECT status FROM import_job_runtime WHERE job_id = 'legacy-job'"
@@ -199,6 +217,8 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
         connection.execute("DROP TABLE knowledge_graph_diagnostics")
         connection.execute("DROP TABLE knowledge_graph_edges")
         connection.execute("DROP TABLE knowledge_graph_nodes")
+        _drop_retrieval_corpus_revision_schema(connection)
+        connection.execute("DROP TABLE desktop_graph_feature_flags")
         connection.execute("DROP TABLE knowledge_generation_items")
         connection.execute("DROP TABLE knowledge_generation_state")
         connection.execute("DROP TABLE knowledge_generations")
@@ -230,6 +250,7 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 14")
         connection.execute("DELETE FROM schema_migrations WHERE version = 15")
         connection.execute("DELETE FROM schema_migrations WHERE version = 16")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 17")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
@@ -276,6 +297,8 @@ def test_migration_backfills_independent_version_sources_for_existing_documents(
         connection.execute("DROP TABLE knowledge_graph_diagnostics")
         connection.execute("DROP TABLE knowledge_graph_edges")
         connection.execute("DROP TABLE knowledge_graph_nodes")
+        _drop_retrieval_corpus_revision_schema(connection)
+        connection.execute("DROP TABLE desktop_graph_feature_flags")
         connection.execute("DROP TABLE knowledge_generation_items")
         connection.execute("DROP TABLE knowledge_generation_state")
         connection.execute("DROP TABLE knowledge_generations")
@@ -287,6 +310,7 @@ def test_migration_backfills_independent_version_sources_for_existing_documents(
         connection.execute("DELETE FROM schema_migrations WHERE version = 14")
         connection.execute("DELETE FROM schema_migrations WHERE version = 15")
         connection.execute("DELETE FROM schema_migrations WHERE version = 16")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 17")
 
     DesktopKnowledgeBaseRuntime().open(kb_dir)
 

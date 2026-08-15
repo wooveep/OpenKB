@@ -163,7 +163,9 @@ def test_graph_failures_keep_baseline_answers_and_only_record_safe_diagnostics(
         ),
     )
 
-    pack = DesktopEvidenceRetriever(kb_dir).retrieve("What does the Meridian protocol keep?")
+    pack = DesktopEvidenceRetriever(kb_dir).retrieve_variant(
+        "What does the Meridian protocol keep?", variant="local_graph"
+    )
 
     assert pack.evidence
     assert "knowledge_graph_query_timeout" not in pack.degradations

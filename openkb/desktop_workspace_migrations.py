@@ -599,3 +599,67 @@ KNOWLEDGE_GRAPH_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON knowledge_graph_diagnostics(created_at DESC)
     """,
 )
+
+
+# Every retrieval-affecting write advances one cheap revision.  The graph
+# approval check can therefore stay O(1) on the normal answer path, while the
+# evaluation/promotion path retains its full corpus fingerprint.
+_RETRIEVAL_CORPUS_TABLES = (
+    "source_documents",
+    "document_ir_blocks",
+    "evidence_refs",
+    "evidence_occurrences",
+    "knowledge_graph_nodes",
+    "knowledge_graph_edges",
+    "knowledge_generation_state",
+    "knowledge_generation_items",
+)
+
+
+def _retrieval_corpus_revision_triggers() -> tuple[str, ...]:
+    return tuple(
+        f"""
+        CREATE TRIGGER desktop_retrieval_corpus_{table_name}_{event}
+        AFTER {event.upper()} ON {table_name}
+        BEGIN
+            UPDATE desktop_retrieval_corpus_state
+            SET revision = revision + 1
+            WHERE singleton = 1;
+        END
+        """
+        for table_name in _RETRIEVAL_CORPUS_TABLES
+        for event in ("insert", "update", "delete")
+    )
+
+
+# Only the evidence-anchored local graph has a switch in this release.  The
+# constrained key set makes Community, Global GraphRAG, and DRIFT impossible to
+# turn on until they have their own approved schema and evaluation gate.
+GRAPH_FEATURE_FLAG_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE desktop_retrieval_corpus_state (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        revision INTEGER NOT NULL CHECK(revision >= 0)
+    )
+    """,
+    """
+    INSERT INTO desktop_retrieval_corpus_state (singleton, revision) VALUES (1, 1)
+    """,
+    """
+    CREATE TABLE desktop_graph_feature_flags (
+        feature_key TEXT PRIMARY KEY CHECK(feature_key IN ('local_graph')),
+        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+        approved_suite_digest TEXT,
+        approved_snapshot_digest TEXT,
+        approved_snapshot_revision INTEGER CHECK(approved_snapshot_revision >= 0),
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    INSERT INTO desktop_graph_feature_flags (
+        feature_key, enabled, approved_suite_digest, approved_snapshot_digest,
+        approved_snapshot_revision, updated_at
+    ) VALUES ('local_graph', 0, NULL, NULL, NULL, '1970-01-01T00:00:00+00:00')
+    """,
+    *_retrieval_corpus_revision_triggers(),
+)
