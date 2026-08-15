@@ -14,8 +14,10 @@ def test_source_inspection_expands_directories_deduplicates_and_sorts(tmp_path):
     nested.mkdir(parents=True)
     (sources / "zeta.txt").write_text("zeta", encoding="utf-8")
     (sources / "alpha.md").write_text("alpha", encoding="utf-8")
+    (sources / "archive.doc").write_bytes(b"legacy document")
     (sources / "ledger.xlsx").write_bytes(b"workbook")
     (sources / "legacy.xls").write_bytes(b"legacy workbook")
+    (sources / "slides.ppt").write_bytes(b"legacy presentation")
     (sources / "briefing.pptx").write_bytes(b"presentation")
     (sources / "report.pdf").write_bytes(b"pdf")
     (nested / "beta.txt").write_text("beta", encoding="utf-8")
@@ -28,11 +30,13 @@ def test_source_inspection_expands_directories_deduplicates_and_sorts(tmp_path):
 
     assert [Path(source.path).name for source in inspection.supported] == [
         "alpha.md",
+        "archive.doc",
         "briefing.pptx",
         "ledger.xlsx",
         "legacy.xls",
         "beta.txt",
         "report.pdf",
+        "slides.ppt",
         "zeta.txt",
     ]
     assert [(source.name, source.error_code) for source in inspection.unsupported] == [
@@ -43,9 +47,11 @@ def test_source_inspection_expands_directories_deduplicates_and_sorts(tmp_path):
         ".txt",
         ".md",
         ".markdown",
+        ".doc",
         ".docx",
         ".xls",
         ".xlsx",
+        ".ppt",
         ".pptx",
         ".pdf",
     ]

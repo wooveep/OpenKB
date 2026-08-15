@@ -31,6 +31,7 @@ from openkb.desktop_import_artifacts import (
     validate_text_source,
 )
 from openkb.desktop_import_model_ledger import DesktopImportModelLedger
+from openkb.desktop_import_quarantine import DesktopImportQuarantineStore
 from openkb.desktop_import_recovery import DesktopImportRecoveryStore
 from openkb.desktop_import_store import IMPORT_STAGES, DesktopImportStore, ImportJobState
 from openkb.desktop_import_types import (
@@ -50,6 +51,10 @@ from openkb.locks import kb_ingest_lock
 
 StageProgressCallback = Callable[[dict[str, object]], None]
 _CONTROL_CODES = {"import_paused", "import_cancelled"}
+_DIRECT_QUARANTINE_CODES = {
+    "legacy_office_parse_failed",
+    "legacy_office_runtime_unavailable",
+}
 
 
 class DesktopImportControl:
@@ -87,6 +92,7 @@ class DesktopTextImportService:
     ) -> None:
         self._store = DesktopImportStore(kb_dir, on_stage_progress=on_stage_progress)
         self._model_ledger = DesktopImportModelLedger(kb_dir)
+        self._quarantine = DesktopImportQuarantineStore(kb_dir)
         self._recovery = DesktopImportRecoveryStore(kb_dir, on_stage_progress=on_stage_progress)
         self._control = control or DesktopImportControl()
         self._model_gateway = model_gateway
@@ -286,6 +292,25 @@ class DesktopTextImportService:
             )
             raise DesktopImportError("document_quarantined", error.failure.reason) from error
         except DesktopImportError as error:
+            if error.code in _DIRECT_QUARANTINE_CODES:
+                self._quarantine.quarantine(
+                    job_id=state.job_id,
+                    stage_run_id=state.stage_ids[active_stage],
+                    stage=active_stage,
+                    error_code=error.code,
+                    reason=str(error),
+                    suggested_action=error.suggested_action
+                    or "Convert the document to DOCX or PPTX and import it again.",
+                )
+                self._recovery.mark_finished(state, "failed")
+                self._store.emit_stage(
+                    state,
+                    active_stage,
+                    "failed",
+                    100,
+                    error_code=error.code,
+                )
+                raise
             if error.code not in _CONTROL_CODES and not terminal_state_committed:
                 self._store.fail_job(state, active_stage, error.code)
                 self._recovery.mark_failed(state, active_stage, error.code)

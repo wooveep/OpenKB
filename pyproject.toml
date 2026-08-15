@@ -39,6 +39,7 @@ dependencies = [
     "xlrd==2.0.2",
     "pymupdf==1.27.2.3",
     "rapidocr-onnxruntime==1.4.4; python_version < '3.13'",
+    "tika==3.3.2",
     "trafilatura==2.0.0",
     "click==8.4.0",
     "watchdog==6.0.0",

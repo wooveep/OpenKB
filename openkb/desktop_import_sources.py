@@ -10,9 +10,11 @@ SUPPORTED_DESKTOP_IMPORT_SUFFIXES = (
     ".txt",
     ".md",
     ".markdown",
+    ".doc",
     ".docx",
     ".xls",
     ".xlsx",
+    ".ppt",
     ".pptx",
     ".pdf",
 )

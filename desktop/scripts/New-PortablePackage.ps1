@@ -90,6 +90,8 @@ $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force -Path $buildRoot, $OutputDirectory | Out-Null
 
 & (Join-Path $PSScriptRoot "Prepare-WebView2FixedRuntime.ps1")
+$legacyOfficeRuntime = & (Join-Path $PSScriptRoot "Prepare-LegacyOfficeRuntime.ps1") `
+    -DestinationDirectory (Join-Path $buildRoot "legacy-office")
 
 Push-Location $repoRoot
 try {
@@ -138,6 +140,8 @@ try {
             --paths $repoRoot `
             --collect-data openkb `
             --collect-data rapidocr_onnxruntime `
+            --collect-all tika `
+            --add-data "$legacyOfficeRuntime;legacy-office" `
             (Join-Path $repoRoot "openkb\desktop_engine.py")
     }
 }
@@ -164,7 +168,9 @@ foreach ($requiredPath in @(
     (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\config.yaml"),
     (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_det_infer.onnx"),
     (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_rec_infer.onnx"),
-    (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\models\ch_ppocr_mobile_v2.0_cls_infer.onnx")
+    (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\models\ch_ppocr_mobile_v2.0_cls_infer.onnx"),
+    (Join-Path $engineDirectory "_internal\legacy-office\tika\tika-server-standard-3.3.2.jar"),
+    (Join-Path $engineDirectory "_internal\legacy-office\java\bin\java.exe")
 )) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Portable package prerequisite is missing: $requiredPath"

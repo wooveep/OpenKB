@@ -47,6 +47,10 @@ def parse_structured_document(source: Path, raw_bytes: bytes) -> ParsedDocument:
         return _parse_markdown(source, decode_text(raw_bytes, source))
     if source_format == "docx":
         return _parse_docx(source, raw_bytes)
+    if source_format in {"doc", "ppt"}:
+        from openkb.desktop_legacy_office_parsers import parse_legacy_office_document
+
+        return parse_legacy_office_document(source, raw_bytes, source_format)
     if source_format in {"xls", "xlsx"}:
         from openkb.desktop_spreadsheet_parsers import parse_spreadsheet_document
 

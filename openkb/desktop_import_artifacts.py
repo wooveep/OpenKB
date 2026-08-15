@@ -17,27 +17,33 @@ _SOURCE_FORMATS = {
     ".txt": "txt",
     ".md": "markdown",
     ".markdown": "markdown",
+    ".doc": "doc",
     ".docx": "docx",
     ".xls": "xls",
     ".xlsx": "xlsx",
+    ".ppt": "ppt",
     ".pptx": "pptx",
     ".pdf": "pdf",
 }
 _SOURCE_MEDIA_TYPES = {
     "txt": "text/plain",
     "markdown": "text/markdown",
+    "doc": "application/msword",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "xls": "application/vnd.ms-excel",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "ppt": "application/vnd.ms-powerpoint",
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "pdf": "application/pdf",
 }
 _SOURCE_SUFFIXES = {
     "txt": (".txt",),
     "markdown": (".md", ".markdown"),
+    "doc": (".doc",),
     "docx": (".docx",),
     "xls": (".xls",),
     "xlsx": (".xlsx",),
+    "ppt": (".ppt",),
     "pptx": (".pptx",),
     "pdf": (".pdf",),
 }
@@ -48,10 +54,12 @@ class DesktopImportError(RuntimeError):
     """A stable domain error for Desktop document import."""
 
     code: str
+    suggested_action: str | None
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, suggested_action: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.suggested_action = suggested_action
 
 
 @dataclass(frozen=True)
@@ -98,7 +106,8 @@ def validate_text_source(source_path: Path) -> Path:
     if source.suffix.lower() not in SUPPORTED_DESKTOP_IMPORT_SUFFIXES:
         raise DesktopImportError(
             "unsupported_import_format",
-            "Desktop import supports TXT, Markdown, DOCX, XLS, XLSX, PPTX, and PDF files.",
+            "Desktop import supports TXT, Markdown, DOC, DOCX, XLS, XLSX, "
+            "PPT, PPTX, and PDF files.",
         )
     if not source.is_file():
         raise DesktopImportError(

@@ -63,6 +63,7 @@ export function DesktopDocumentImportPanel({
 }) {
   const { t } = useTranslation("common")
   const supportedCount = inspection?.supported.length ?? 0
+  const hasLegacyOfficeSource = inspection?.supported.some((source) => /\.(doc|ppt)$/i.test(source.name))
   return (
     <section className="mt-6 rounded-apple-lg border border-border/70 bg-background p-6">
       <div className="flex items-start gap-3">
@@ -148,6 +149,11 @@ export function DesktopDocumentImportPanel({
                   formats: inspection.supportedExtensions.join(", "),
                 })}
               </p>
+              {hasLegacyOfficeSource ? (
+                <p className="mt-1 text-sm text-amber-700 dark:text-amber-300">
+                  {t("desktop.knowledgeBases.legacyOfficeNotice")}
+                </p>
+              ) : null}
             </div>
             <Button disabled={importing || supportedCount === 0} onClick={onSubmit}>
               {importing ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}

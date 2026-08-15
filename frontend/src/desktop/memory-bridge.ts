@@ -128,7 +128,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     return {
       supported,
       unsupported,
-      supportedExtensions: [".txt", ".md", ".markdown", ".docx", ".xls", ".xlsx", ".pptx", ".pdf"],
+      supportedExtensions: [".txt", ".md", ".markdown", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".pdf"],
     }
   }
 
@@ -352,14 +352,16 @@ export class MemoryDesktopBridge implements DesktopBridge {
 }
 
 function isSupportedImportSource(sourcePath: string): boolean {
-  return /\.(txt|md|markdown|docx|xls|xlsx|pptx|pdf)$/i.test(sourcePath)
+  return /\.(txt|md|markdown|doc|docx|xls|xlsx|ppt|pptx|pdf)$/i.test(sourcePath)
 }
 
-function sourceFormat(sourcePath: string): "txt" | "markdown" | "docx" | "xls" | "xlsx" | "pptx" | "pdf" {
+function sourceFormat(sourcePath: string): "txt" | "markdown" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "pdf" {
   if (/\.(md|markdown)$/i.test(sourcePath)) return "markdown"
+  if (/\.doc$/i.test(sourcePath)) return "doc"
   if (/\.docx$/i.test(sourcePath)) return "docx"
   if (/\.xlsx$/i.test(sourcePath)) return "xlsx"
   if (/\.xls$/i.test(sourcePath)) return "xls"
+  if (/\.ppt$/i.test(sourcePath)) return "ppt"
   if (/\.pptx$/i.test(sourcePath)) return "pptx"
   if (/\.pdf$/i.test(sourcePath)) return "pdf"
   return "txt"

@@ -109,9 +109,11 @@ pub enum ImportSourceStatus {
 pub enum ImportedDocumentSourceFormat {
     Txt,
     Markdown,
+    Doc,
     Docx,
     Xls,
     Xlsx,
+    Ppt,
     Pptx,
     Pdf,
 }

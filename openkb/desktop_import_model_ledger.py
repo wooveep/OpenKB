@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from openkb.desktop_import_quarantine import quarantine_import_in
 from openkb.desktop_import_types import (
     DesktopModelAttempt,
     DesktopModelCall,
@@ -117,40 +118,6 @@ class DesktopImportModelLedger:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
                     """
-                    UPDATE stage_runs
-                    SET status = 'failed', progress = 100, error_code = ?,
-                        completed_at = COALESCE(completed_at, ?)
-                    WHERE stage_run_id = ? AND job_id = ?
-                    """,
-                    (failure.code, now, stage_run_id, job_id),
-                )
-                connection.execute(
-                    """
-                    UPDATE stage_run_runtime
-                    SET status = 'failed', error_code = ?, updated_at = ?
-                    WHERE stage_run_id = ? AND job_id = ?
-                    """,
-                    (failure.code, now, stage_run_id, job_id),
-                )
-                connection.execute(
-                    """
-                    UPDATE import_jobs
-                    SET status = 'failed', progress = 100, error_code = ?, completed_at = ?
-                    WHERE job_id = ?
-                    """,
-                    (failure.code, now, job_id),
-                )
-                connection.execute(
-                    """
-                    UPDATE import_job_runtime
-                    SET status = 'failed', lease_owner = NULL, lease_expires_at = NULL,
-                        updated_at = ?
-                    WHERE job_id = ?
-                    """,
-                    (now, job_id),
-                )
-                connection.execute(
-                    """
                     UPDATE model_calls
                     SET status = 'failed', error_code = ?, reason = ?, suggested_action = ?,
                         completed_at = COALESCE(completed_at, ?)
@@ -158,31 +125,16 @@ class DesktopImportModelLedger:
                     """,
                     (failure.code, failure.reason, failure.suggested_action, now, call_id),
                 )
-                connection.execute(
-                    """
-                    INSERT INTO quarantined_documents (
-                        job_id, stage_run_id, stage, error_code, reason, suggested_action,
-                        attempt_count, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(job_id) DO UPDATE SET
-                        stage_run_id = excluded.stage_run_id,
-                        stage = excluded.stage,
-                        error_code = excluded.error_code,
-                        reason = excluded.reason,
-                        suggested_action = excluded.suggested_action,
-                        attempt_count = excluded.attempt_count,
-                        created_at = excluded.created_at
-                    """,
-                    (
-                        job_id,
-                        stage_run_id,
-                        stage,
-                        failure.code,
-                        failure.reason,
-                        failure.suggested_action,
-                        attempt_count,
-                        now,
-                    ),
+                quarantine_import_in(
+                    connection,
+                    job_id=job_id,
+                    stage_run_id=stage_run_id,
+                    stage=stage,
+                    error_code=failure.code,
+                    reason=failure.reason,
+                    suggested_action=failure.suggested_action,
+                    attempt_count=attempt_count,
+                    now=now,
                 )
                 connection.commit()
             except BaseException:

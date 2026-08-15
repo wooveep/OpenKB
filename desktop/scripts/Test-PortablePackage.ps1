@@ -332,6 +332,8 @@ function Assert-PackageLayout {
         (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_det_infer.onnx"),
         (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_rec_infer.onnx"),
         (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_ppocr_mobile_v2.0_cls_infer.onnx"),
+        (Join-Path $PackageRoot "runtime\engine\_internal\legacy-office\tika\tika-server-standard-3.3.2.jar"),
+        (Join-Path $PackageRoot "runtime\engine\_internal\legacy-office\java\bin\java.exe"),
         (Join-Path $PackageRoot "runtime\webview2\msedgewebview2.exe"),
         $manifestPath
     )) {

@@ -125,6 +125,7 @@
       "inspectingSources": "Checking selected sources…",
       "importPreview": "Import preview",
       "supportedFormats": "Currently supported: {{formats}}",
+      "legacyOfficeNotice": "Legacy DOC/PPT imports preserve only best-effort text and metadata; images, tables, pages, slides, and layout are not retained.",
       "importableSources": "Ready to import ({{count}})",
       "unprocessableSources": "Not importable in this version ({{count}})",
       "removeSource": "Remove {{name}} from this import",

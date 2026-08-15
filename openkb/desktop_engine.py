@@ -26,6 +26,7 @@ from openkb.desktop_import import (
 )
 from openkb.desktop_import_sources import inspect_import_sources
 from openkb.desktop_import_types import DesktopRecoveryOverride
+from openkb.desktop_legacy_office_parsers import shutdown_legacy_office_runtime
 from openkb.desktop_model_gateway import MODEL_CALL_DEADLINE_SECONDS, DesktopModelGateway
 from openkb.desktop_model_transport import desktop_model_gateway_for
 from openkb.desktop_raw_assets import DesktopRawAssetService
@@ -221,6 +222,7 @@ class DesktopEngineServer:
             for cancel_event in self._active_requests.values():
                 cancel_event.set()
         self._join_workers()
+        shutdown_legacy_office_runtime()
 
     def _start_request(self, request: DesktopRequest) -> None:
         request_key = str(request.request_id)

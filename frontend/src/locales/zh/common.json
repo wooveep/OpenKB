@@ -125,6 +125,7 @@
       "inspectingSources": "正在检查所选来源…",
       "importPreview": "导入预览",
       "supportedFormats": "当前支持：{{formats}}",
+      "legacyOfficeNotice": "旧版 DOC/PPT 仅保证导入正文和元数据；图片、表格、页码、幻灯片和版面不会保留。",
       "importableSources": "可导入（{{count}}）",
       "unprocessableSources": "此版本暂不能导入（{{count}}）",
       "removeSource": "从本次导入中移除 {{name}}",

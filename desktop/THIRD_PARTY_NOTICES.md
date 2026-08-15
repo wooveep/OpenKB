@@ -13,6 +13,12 @@ release package or their distributed runtime directories.
 - PyMuPDF 1.27.2.3 — AGPL-3.0-or-later, unless covered by a commercial
   PyMuPDF license.
 - RapidOCR ONNX Runtime 1.4.4 and its bundled PP-OCRv4 models — Apache-2.0.
+- python-tika 3.3.2 and Apache Tika Server 3.3.2 — Apache-2.0. The Tika
+  distribution's NOTICE is retained with the packaged server runtime.
+- Eclipse Temurin OpenJDK Runtime 17.0.16+8 x64 — GPL-2.0-only with the
+  Classpath Exception; its license and notice files are retained with the
+  packaged Java runtime.
 
-This package does not ship the optional DeepDoc or legacy Office compatibility
-runtimes; later tickets add those components and their notices.
+This package does not ship the optional DeepDoc runtime. It does not include
+LibreOffice; legacy binary DOC/PPT compatibility uses only the private,
+package-local Tika and Java runtime above.
