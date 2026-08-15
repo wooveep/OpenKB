@@ -32,6 +32,7 @@ import {
 } from "./DesktopDocumentImportPanel"
 import { DesktopGroundedAnswerPanel } from "./DesktopGroundedAnswerPanel"
 import { DesktopKnowledgePagePanel } from "./DesktopKnowledgePagePanel"
+import { DesktopModelSettingsPanel } from "./DesktopModelSettingsPanel"
 import { DesktopReviewPanel } from "./DesktopReviewPanel"
 import { FailedDocumentsDialog } from "./FailedDocumentsDialog"
 import { DesktopRawDocumentDialog } from "./DesktopRawDocumentDialog"
@@ -774,6 +775,7 @@ function ActiveKnowledgeBaseView({
       {section === "answers" ? <DesktopGroundedAnswerPanel onOpenOriginal={onOpenRawDocument} /> : null}
       {section === "knowledge" ? <DesktopKnowledgePagePanel /> : null}
       {section === "review" ? <DesktopReviewPanel /> : null}
+      {section === "settings" ? <DesktopModelSettingsPanel key={knowledgeBase.kbDir} /> : null}
     </section>
   )
 }

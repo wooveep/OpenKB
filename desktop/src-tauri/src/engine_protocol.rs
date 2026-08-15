@@ -8,13 +8,14 @@ use crate::engine_wire::{
 };
 pub use crate::engine_wire::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, BridgeResult,
-    CancelResult, DocumentVersionCandidate, DocumentVersionCandidateDecision,
-    DocumentVersionCandidatesResult, EngineHealth, GroundedAnswer, GroundedAnswersResult,
-    ImportControlResult, ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
-    KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind, KnowledgePagesResult,
-    KnowledgeReconciliationCommit, KnowledgeReconciliationConflict,
-    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision, RawDocument,
-    RecoveryOverride, TextDocumentImportResult,
+    CancelResult, DiagnosticBundleResult, DocumentVersionCandidate,
+    DocumentVersionCandidateDecision, DocumentVersionCandidatesResult, EngineHealth,
+    GroundedAnswer, GroundedAnswersResult, ImportControlResult, ImportJobsResult,
+    ImportSourceInspection, InspectKnowledgeBaseResult, KnowledgeBaseActivationResult,
+    KnowledgePage, KnowledgePageKind, KnowledgePagesResult, KnowledgeReconciliationCommit,
+    KnowledgeReconciliationConflict, KnowledgeReconciliationConflictsResult,
+    KnowledgeReconciliationDecision, ModelSettings, RawDocument, RecoveryOverride,
+    TextDocumentImportResult,
 };
 use serde_json::{json, Value};
 use std::{
@@ -39,6 +40,8 @@ mod document_versions;
 mod knowledge_pages;
 #[path = "engine_protocol_knowledge_reconciliation.rs"]
 mod knowledge_reconciliation;
+#[path = "engine_protocol_settings.rs"]
+mod settings;
 
 const PROTOCOL_VERSION: u32 = 1;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);

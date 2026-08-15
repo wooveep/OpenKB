@@ -151,6 +151,117 @@ def test_gateway_stream_timeout_does_not_wait_for_a_blocking_delta_callback(monk
     assert error.value.failure.code == "model_timeout"
 
 
+def test_configured_concurrency_queue_does_not_consume_the_api_response_timeout(monkeypatch):
+    """A queued request begins its response-time budget only after an API slot opens."""
+    monkeypatch.setattr(desktop_model_gateway, "MAX_AUTOMATIC_RETRIES", 0)
+    gate = desktop_model_transport._DesktopModelConcurrencyGate(1)
+    first_provider_started = threading.Event()
+    release_first_provider = threading.Event()
+    first_finished = threading.Event()
+    second_finished = threading.Event()
+    second_result: list[str] = []
+
+    def first_provider(_request, _timeout_seconds):
+        first_provider_started.set()
+        assert release_first_provider.wait(timeout=1)
+        return "first"
+
+    first_gateway = DesktopModelGateway(
+        desktop_model_transport._ConcurrentDesktopModelTransport(first_provider, gate),
+        initial_timeout_seconds=0.01,
+    )
+    second_gateway = DesktopModelGateway(
+        desktop_model_transport._ConcurrentDesktopModelTransport(
+            lambda _request, _timeout_seconds: "second", gate
+        ),
+        initial_timeout_seconds=0.01,
+    )
+
+    def run_first() -> None:
+        with pytest.raises(DesktopModelCallError):
+            first_gateway.analyze(
+                DesktopModelRequest("document_analysis", "first.txt", "source"),
+                on_event=lambda _event: None,
+            )
+        first_finished.set()
+
+    def run_second() -> None:
+        result = second_gateway.analyze(
+            DesktopModelRequest("document_analysis", "second.txt", "source"),
+            on_event=lambda _event: None,
+        )
+        second_result.append(result.content)
+        second_finished.set()
+
+    first_thread = threading.Thread(target=run_first)
+    first_thread.start()
+    assert first_provider_started.wait(timeout=1)
+    assert first_finished.wait(timeout=1)
+    second_thread = threading.Thread(target=run_second)
+    second_thread.start()
+    time.sleep(0.03)
+    assert not second_finished.is_set()
+
+    release_first_provider.set()
+    second_thread.join(timeout=1)
+    first_thread.join(timeout=1)
+
+    assert second_finished.is_set()
+    assert second_result == ["second"]
+
+
+def test_configured_concurrency_queue_respects_the_logical_model_call_deadline(monkeypatch):
+    """Queue time is not API response time, but it is inside the 60-second call budget."""
+    monkeypatch.setattr(desktop_model_gateway, "MODEL_CALL_DEADLINE_SECONDS", 0.01)
+    gate = desktop_model_transport._DesktopModelConcurrencyGate(1)
+    assert gate.acquire(None, remaining_seconds=1)
+    gateway = DesktopModelGateway(
+        desktop_model_transport._ConcurrentDesktopModelTransport(
+            lambda _request, _timeout_seconds: "unreachable", gate
+        ),
+        initial_timeout_seconds=0.01,
+    )
+
+    try:
+        with pytest.raises(DesktopModelCallError) as error:
+            gateway.analyze(
+                DesktopModelRequest("document_analysis", "queued.txt", "source"),
+                on_event=lambda _event: None,
+            )
+    finally:
+        gate.release()
+
+    assert error.value.failure.code == "model_deadline_exceeded"
+
+
+def test_prepared_concurrency_slot_is_released_at_the_logical_deadline():
+    """A slot acquired just before expiry does not strand later model calls."""
+    clock = FakeClock()
+    gate = desktop_model_transport._DesktopModelConcurrencyGate(1)
+
+    class DeadlineTransport:
+        def prepare_model_attempt(self, _is_cancelled, remaining_seconds):
+            assert gate.acquire(None, remaining_seconds)
+            clock.value = desktop_model_gateway.MODEL_CALL_DEADLINE_SECONDS
+            return True
+
+        def release_prepared_model_attempt(self):
+            gate.release()
+
+        def __call__(self, _request, _timeout_seconds):
+            pytest.fail("provider must not run after the logical deadline")
+
+    with pytest.raises(DesktopModelCallError) as error:
+        DesktopModelGateway(DeadlineTransport(), clock=clock).analyze(
+            DesktopModelRequest("document_analysis", "expired.txt", "source"),
+            on_event=lambda _event: None,
+        )
+
+    assert error.value.failure.code == "model_deadline_exceeded"
+    assert gate.acquire(None, remaining_seconds=1)
+    gate.release()
+
+
 def test_configured_desktop_gateway_turns_invalid_model_config_into_direct_failure(
     tmp_path, monkeypatch
 ):

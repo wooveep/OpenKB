@@ -171,6 +171,9 @@ class DesktopEngineServer:
         "workbench.knowledge_reconciliation_conflicts",
         "workbench.stage_knowledge_reconciliation_decisions",
         "workbench.commit_knowledge_reconciliation_decisions",
+        "workbench.model_settings",
+        "workbench.save_model_settings",
+        "workbench.export_diagnostic_bundle",
     }
     _INTERRUPTION_PRESERVING_METHODS = {
         "workbench.ask_grounded",
@@ -185,6 +188,8 @@ class DesktopEngineServer:
         "workbench.resolve_document_version_candidate",
         "workbench.stage_knowledge_reconciliation_decisions",
         "workbench.commit_knowledge_reconciliation_decisions",
+        "workbench.save_model_settings",
+        "workbench.export_diagnostic_bundle",
     }
 
     def __init__(
@@ -427,16 +432,32 @@ class DesktopEngineServer:
             "workbench.knowledge_page",
             "workbench.save_knowledge_page",
         }:
-            return self._dispatch_knowledge_page_request(request, cancel_event)
+            from openkb.desktop_engine_knowledge_pages import dispatch_knowledge_page_request
+
+            return dispatch_knowledge_page_request(self, request, cancel_event)
         if request.method in {
             "workbench.document_version_candidates",
             "workbench.resolve_document_version_candidate",
         }:
-            return self._dispatch_document_version_request(request, cancel_event)
+            from openkb.desktop_engine_document_versions import dispatch_document_version_request
+
+            return dispatch_document_version_request(self, request, cancel_event)
         if "knowledge_reconciliation" in request.method:
-            return self._dispatch_knowledge_reconciliation_request(request, cancel_event)
+            from openkb.desktop_engine_knowledge_reconciliation import (
+                dispatch_knowledge_reconciliation_request,
+            )
+
+            return dispatch_knowledge_reconciliation_request(self, request, cancel_event)
         if request.method in self._INTERRUPTION_PRESERVING_METHODS:
             return self._dispatch_grounded_answer_request(request, cancel_event)
+        if request.method in {
+            "workbench.model_settings",
+            "workbench.save_model_settings",
+            "workbench.export_diagnostic_bundle",
+        }:
+            from openkb.desktop_engine_model_settings import dispatch_model_settings_request
+
+            return dispatch_model_settings_request(self, request, cancel_event)
         if request.method in {
             "workbench.import_text_document",
             "workbench.resume_import_job",
@@ -474,7 +495,6 @@ class DesktopEngineServer:
                 return inspect_import_sources(
                     Path(path) for path in _required_path_list_param(request, "source_paths")
                 ).as_dict()
-
             active = self._workspace.active()
             return {"knowledge_base": active.as_dict() if active is not None else None}
 
@@ -484,26 +504,6 @@ class DesktopEngineServer:
         from openkb.desktop_engine_answers import dispatch_grounded_answer_request
 
         return dispatch_grounded_answer_request(self, request, cancel_event)
-
-    def _dispatch_knowledge_page_request(
-        self, request: DesktopRequest, cancel_event: threading.Event | None
-    ) -> dict[str, object]:
-        from openkb.desktop_engine_knowledge_pages import dispatch_knowledge_page_request
-        return dispatch_knowledge_page_request(self, request, cancel_event)
-
-    def _dispatch_document_version_request(
-        self, request: DesktopRequest, cancel_event: threading.Event | None
-    ) -> dict[str, object]:
-        from openkb.desktop_engine_document_versions import dispatch_document_version_request
-        return dispatch_document_version_request(self, request, cancel_event)
-
-    def _dispatch_knowledge_reconciliation_request(
-        self, request: DesktopRequest, cancel_event: threading.Event | None
-    ) -> dict[str, object]:
-        from openkb.desktop_engine_knowledge_reconciliation import (
-            dispatch_knowledge_reconciliation_request,
-        )
-        return dispatch_knowledge_reconciliation_request(self, request, cancel_event)
 
     def _dispatch_import_request(
         self, request: DesktopRequest, cancel_event: threading.Event | None

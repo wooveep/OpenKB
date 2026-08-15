@@ -2,19 +2,31 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 import yaml
 
-from openkb.config import LlmCredentialBundle, load_config, resolve_credential_bundle
+from openkb.config import LlmCredentialBundle, resolve_credential_bundle
 from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_model_gateway import (
     INITIAL_RESPONSE_TIMEOUT_SECONDS,
+    DesktopModelCancelledError,
     DesktopModelGateway,
     DesktopModelRequest,
     DesktopModelTransportError,
 )
+from openkb.desktop_model_settings import (
+    DEFAULT_MAX_CONCURRENT_MODEL_CALLS,
+    DesktopModelSettings,
+    DesktopModelSettingsError,
+    read_desktop_model_settings,
+)
+
+_concurrency_gates: dict[Path, _DesktopModelConcurrencyGate] = {}
+_concurrency_gates_lock = threading.Lock()
 
 
 def desktop_model_gateway_for(
@@ -34,30 +46,144 @@ def desktop_model_gateway_for(
     except (OSError, TypeError, ValueError, yaml.YAMLError):
         bundle = LlmCredentialBundle()
     try:
-        config = load_config(config_path)
-    except (OSError, TypeError, ValueError, yaml.YAMLError):
-        return _gateway_for(override.model if override is not None else None, bundle, override)
+        settings = read_desktop_model_settings(resolved)
+    except (DesktopModelSettingsError, OSError, TypeError, ValueError, yaml.YAMLError):
+        return _gateway_for(
+            override.model if override is not None else None,
+            bundle,
+            override,
+            kb_dir=resolved,
+            settings=None,
+        )
     model = (
-        override.model
-        if override is not None and override.model is not None
-        else config.get("model")
+        override.model if override is not None and override.model is not None else settings.model
     )
     if bundle.api_key is None and not config_path.exists() and override is None:
         return None
-    return _gateway_for(model, bundle, override)
+    return _gateway_for(model, bundle, override, kb_dir=resolved, settings=settings)
 
 
 def _gateway_for(
-    model: object, bundle: LlmCredentialBundle, override: DesktopRecoveryOverride | None
+    model: object,
+    bundle: LlmCredentialBundle,
+    override: DesktopRecoveryOverride | None,
+    *,
+    kb_dir: Path,
+    settings: DesktopModelSettings | None,
 ) -> DesktopModelGateway:
     timeout = (
         override.initial_timeout_seconds
         if override is not None and override.initial_timeout_seconds is not None
-        else INITIAL_RESPONSE_TIMEOUT_SECONDS
+        else (
+            settings.initial_timeout_seconds
+            if settings is not None
+            else INITIAL_RESPONSE_TIMEOUT_SECONDS
+        )
+    )
+    concurrency = (
+        settings.max_concurrent_model_calls
+        if settings is not None
+        else DEFAULT_MAX_CONCURRENT_MODEL_CALLS
     )
     return DesktopModelGateway(
-        DesktopLiteLLMTransport(model=model, bundle=bundle), initial_timeout_seconds=timeout
+        _ConcurrentDesktopModelTransport(
+            DesktopLiteLLMTransport(model=model, bundle=bundle),
+            _concurrency_gate_for(kb_dir, concurrency),
+        ),
+        initial_timeout_seconds=timeout,
     )
+
+
+class _DesktopModelConcurrencyGate:
+    """A small KB-local limiter; it holds no model config or credentials."""
+
+    def __init__(self, maximum: int) -> None:
+        self._maximum = maximum
+        self._active = 0
+        self._condition = threading.Condition()
+
+    def configure(self, maximum: int) -> None:
+        with self._condition:
+            self._maximum = maximum
+            self._condition.notify_all()
+
+    def acquire(
+        self, is_cancelled: Callable[[], bool] | None, remaining_seconds: float
+    ) -> bool:
+        deadline = time.monotonic() + remaining_seconds
+        with self._condition:
+            while self._active >= self._maximum:
+                if is_cancelled is not None and is_cancelled():
+                    raise DesktopModelCancelledError()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(min(0.05, remaining))
+            self._active += 1
+            return True
+
+    def release(self) -> None:
+        with self._condition:
+            self._active -= 1
+            self._condition.notify()
+
+
+def _concurrency_gate_for(kb_dir: Path, maximum: int) -> _DesktopModelConcurrencyGate:
+    with _concurrency_gates_lock:
+        gate = _concurrency_gates.get(kb_dir)
+        if gate is None:
+            gate = _DesktopModelConcurrencyGate(maximum)
+            _concurrency_gates[kb_dir] = gate
+        else:
+            gate.configure(maximum)
+        return gate
+
+
+class _ConcurrentDesktopModelTransport:
+    """Apply the configured limit around both ordinary and streaming requests."""
+
+    def __init__(
+        self,
+        transport: Callable[[DesktopModelRequest, float], object],
+        gate: _DesktopModelConcurrencyGate,
+    ) -> None:
+        self._transport = transport
+        self._gate = gate
+
+    def __call__(self, request: DesktopModelRequest, timeout_seconds: float) -> object:
+        return self._run(lambda: self._transport(request, timeout_seconds))
+
+    def prepare_model_attempt(
+        self, is_cancelled: Callable[[], bool] | None, remaining_seconds: float
+    ) -> bool:
+        return self._gate.acquire(is_cancelled, remaining_seconds)
+
+    def release_prepared_model_attempt(self) -> None:
+        self._gate.release()
+
+    def stream(
+        self,
+        request: DesktopModelRequest,
+        timeout_seconds: float,
+        on_delta: Callable[[str], None],
+    ) -> object:
+        stream = getattr(self._transport, "stream", None)
+        if callable(stream):
+            return self._run(lambda: stream(request, timeout_seconds, on_delta))
+
+        def call() -> object:
+            response = self._transport(request, timeout_seconds)
+            if isinstance(response, str):
+                on_delta(response)
+            return response
+
+        return self._run(call)
+
+    def _run(self, call: Callable[[], object]) -> object:
+        try:
+            return call()
+        finally:
+            self._gate.release()
 
 
 class DesktopLiteLLMTransport:

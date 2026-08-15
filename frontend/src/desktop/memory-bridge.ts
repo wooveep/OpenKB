@@ -3,6 +3,7 @@ import type {
   DesktopBridgeEvent,
   DesktopBridgeHandshake,
   DesktopCancelResult,
+  DesktopDiagnosticBundle,
   DesktopImportControlResult,
   DesktopImportDropEvent,
   DesktopImportSourceInspection,
@@ -18,6 +19,7 @@ import type {
   DesktopKnowledgePage,
   DesktopKnowledgePages,
   DesktopKnowledgePageKind,
+  DesktopModelSettings,
   DesktopDocumentVersionCandidate,
   DesktopDocumentVersionCandidates,
   DesktopDocumentVersionCandidateDecision,
@@ -41,6 +43,14 @@ export class MemoryDesktopBridge implements DesktopBridge {
   private knowledgePageResults: DesktopKnowledgePage[] = []
   private documentVersionCandidateResults: DesktopDocumentVersionCandidate[] = []
   private knowledgeReconciliationConflictResults: DesktopKnowledgeReconciliationConflict[] = []
+  private modelSettingsResult: DesktopModelSettings = {
+    model: "gpt-5.4",
+    credentialReference: "env:LLM_API_KEY",
+    credentialAvailable: false,
+    maxConcurrentModelCalls: 1,
+    initialTimeoutSeconds: 20,
+    modelCallDeadlineSeconds: 60,
+  }
 
   constructor(
     handshakeResult: DesktopBridgeHandshake = {
@@ -116,6 +126,39 @@ export class MemoryDesktopBridge implements DesktopBridge {
 
   async activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase> {
     return { knowledgeBase: this.activeKnowledgeBaseResult }
+  }
+
+  async modelSettings(): Promise<DesktopModelSettings> {
+    return this.modelSettingsResult
+  }
+
+  async saveModelSettings(
+    model: string,
+    credentialReference: string,
+    maxConcurrentModelCalls: number,
+    initialTimeoutSeconds: number,
+    requestId: string,
+  ): Promise<DesktopModelSettings> {
+    void requestId
+    this.modelSettingsResult = {
+      ...this.modelSettingsResult,
+      model,
+      credentialReference,
+      maxConcurrentModelCalls,
+      initialTimeoutSeconds,
+    }
+    return this.modelSettingsResult
+  }
+
+  async exportDiagnosticBundle(
+    destination: string,
+    requestId: string,
+  ): Promise<DesktopDiagnosticBundle> {
+    void requestId
+    return {
+      path: destination,
+      files: ["manifest.json", "model-settings.json", "import-jobs.json", "model-calls.json"],
+    }
   }
 
   async inspectImportSources(

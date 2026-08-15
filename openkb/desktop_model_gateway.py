@@ -246,20 +246,29 @@ class DesktopModelGateway:
                 raise DesktopModelCancelledError()
             remaining = _remaining_seconds(started_at, self._clock())
             if remaining <= 0:
-                raise self._deadline_error(call_id, attempt_index, on_event)
-            scheduled_timeout = self._initial_timeout_seconds + (
-                attempt_index * RETRY_TIMEOUT_INCREMENT_SECONDS
-            )
-            timeout_seconds = min(scheduled_timeout, remaining)
-            on_event(
-                DesktopModelAttemptEvent(
-                    call_id=call_id,
-                    attempt=attempt_index + 1,
-                    status="running",
-                    timeout_seconds=timeout_seconds,
-                    remaining_seconds=remaining,
+                raise self._deadline_error(call_id, attempt_index + 1, on_event)
+            if not _prepare_transport_attempt(self._transport, is_cancelled, remaining):
+                raise self._deadline_error(call_id, attempt_index + 1, on_event)
+            try:
+                remaining = _remaining_seconds(started_at, self._clock())
+                if remaining <= 0:
+                    raise self._deadline_error(call_id, attempt_index + 1, on_event)
+                scheduled_timeout = self._initial_timeout_seconds + (
+                    attempt_index * RETRY_TIMEOUT_INCREMENT_SECONDS
                 )
-            )
+                timeout_seconds = min(scheduled_timeout, remaining)
+                on_event(
+                    DesktopModelAttemptEvent(
+                        call_id=call_id,
+                        attempt=attempt_index + 1,
+                        status="running",
+                        timeout_seconds=timeout_seconds,
+                        remaining_seconds=remaining,
+                    )
+                )
+            except BaseException:
+                _release_prepared_transport_attempt(self._transport)
+                raise
             try:
                 response = attempt_call(request, timeout_seconds, attempt_index + 1)
             except DesktopModelCancelledError:
@@ -462,6 +471,23 @@ def _wait_for_model_response(
             if _is_cancelled(is_cancelled):
                 raise DesktopModelCancelledError()
             return
+
+
+def _prepare_transport_attempt(
+    transport: object, is_cancelled: CancellationCallback | None, remaining_seconds: float
+) -> bool:
+    """Queue a provider slot before, rather than inside, response-time accounting."""
+    prepare = getattr(transport, "prepare_model_attempt", None)
+    if callable(prepare):
+        return prepare(is_cancelled, remaining_seconds) is not False
+    return True
+
+
+def _release_prepared_transport_attempt(transport: object) -> None:
+    """Return a slot reserved before the provider call could begin."""
+    release = getattr(transport, "release_prepared_model_attempt", None)
+    if callable(release):
+        release()
 
 
 def _is_cancelled(callback: CancellationCallback | None) -> bool:

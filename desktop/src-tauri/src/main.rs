@@ -6,12 +6,13 @@ mod process_tree;
 
 use engine_protocol::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
-    DocumentVersionCandidate, DocumentVersionCandidateDecision, DocumentVersionCandidatesResult,
-    EngineHealth, EngineSupervisor, GroundedAnswer, GroundedAnswersResult, ImportControlResult,
-    ImportJobsResult, ImportSourceInspection, InspectKnowledgeBaseResult,
-    KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind, KnowledgePagesResult,
-    KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
-    KnowledgeReconciliationDecision, RawDocument, RecoveryOverride, TextDocumentImportResult,
+    DiagnosticBundleResult, DocumentVersionCandidate, DocumentVersionCandidateDecision,
+    DocumentVersionCandidatesResult, EngineHealth, EngineSupervisor, GroundedAnswer,
+    GroundedAnswersResult, ImportControlResult, ImportJobsResult, ImportSourceInspection,
+    InspectKnowledgeBaseResult, KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind,
+    KnowledgePagesResult, KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
+    KnowledgeReconciliationDecision, ModelSettings, RawDocument, RecoveryOverride,
+    TextDocumentImportResult,
 };
 use process_tree::ProcessTreeJob;
 use std::{path::Path, sync::Arc};
@@ -193,6 +194,62 @@ async fn desktop_grounded_answers(
             code: "desktop_command_failed".to_owned(),
             message: format!("Desktop grounded answer history stopped unexpectedly: {error}"),
         })?
+}
+
+#[tauri::command]
+async fn desktop_model_settings(
+    state: State<'_, DesktopState>,
+) -> Result<ModelSettings, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.model_settings())
+        .await
+        .map_err(|error| BridgeError {
+            code: "desktop_command_failed".to_owned(),
+            message: format!("Desktop model-settings lookup stopped unexpectedly: {error}"),
+        })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_save_model_settings(
+    state: State<'_, DesktopState>,
+    model: String,
+    credential_reference: String,
+    max_concurrent_model_calls: u32,
+    initial_timeout_seconds: f64,
+    request_id: String,
+) -> Result<ModelSettings, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.save_model_settings(
+            model,
+            credential_reference,
+            max_concurrent_model_calls,
+            initial_timeout_seconds,
+            request_id,
+        )
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop model-settings save stopped unexpectedly: {error}"),
+    })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_export_diagnostic_bundle(
+    state: State<'_, DesktopState>,
+    destination: String,
+    request_id: String,
+) -> Result<DiagnosticBundleResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.export_diagnostic_bundle(destination, request_id)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop diagnostic-bundle export stopped unexpectedly: {error}"),
+    })?
 }
 
 #[tauri::command]
@@ -464,6 +521,9 @@ fn main() {
             desktop_ask_grounded,
             desktop_retry_interrupted_answer,
             desktop_grounded_answers,
+            desktop_model_settings,
+            desktop_save_model_settings,
+            desktop_export_diagnostic_bundle,
             desktop_knowledge_pages,
             desktop_get_knowledge_page,
             desktop_save_knowledge_page,

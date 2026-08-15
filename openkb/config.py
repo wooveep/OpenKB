@@ -31,12 +31,28 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model": "gpt-5.4",
     "language": "en",
     "pageindex_threshold": 20,
-    # A GLOBAL_SCALAR_KEY like the three above, so the merged `effective` dict
-    # always carries it (the layering/`sources` logic is type-agnostic). A
-    # global/KB list overrides it wholesale; resolve_entity_types cleans the
-    # effective value on read.
+    # A global/KB list overrides it wholesale; resolve_entity_types cleans it on read.
     "entity_types": list(DEFAULT_ENTITY_TYPES),
 }
+
+_DESKTOP_CREDENTIAL_REFERENCE_RE = re.compile(r"env:([A-Za-z_][A-Za-z0-9_]*)\Z")
+DEFAULT_DESKTOP_CREDENTIAL_REFERENCE = "env:LLM_API_KEY"
+
+
+def credential_reference_environment_variable(value: object) -> str | None:
+    """Return an environment-variable name for one non-secret credential reference."""
+    if not isinstance(value, str):
+        return None
+    match = _DESKTOP_CREDENTIAL_REFERENCE_RE.fullmatch(value.strip())
+    return match.group(1) if match else None
+
+
+def resolve_desktop_credential_environment(config: dict[str, Any]) -> str:
+    """Resolve the configured key name, retaining the established LLM_API_KEY default."""
+    desktop = config.get("desktop")
+    reference = desktop.get("credential_reference") if isinstance(desktop, dict) else None
+    return credential_reference_environment_variable(reference) or "LLM_API_KEY"
+
 
 GLOBAL_CONFIG_DIR = Path.home() / ".config" / "openkb"
 GLOBAL_CONFIG_PATH = GLOBAL_CONFIG_DIR / "global.yaml"
@@ -441,13 +457,11 @@ def resolve_credential_bundle(kb_dir: Path) -> LlmCredentialBundle:
         # .env; empty values are treated as unset so they fall through.
         return kb_values.get(key) or os.environ.get(key) or global_values.get(key) or None
 
-    api_key = _resolve_env("LLM_API_KEY")
-    base_url = _resolve_env("OPENAI_API_BASE")
-
     extra_headers: dict[str, str] = {}
     timeout: float | None = None
     parallel_tool_calls: bool | None = None
     parallel_tool_calls_explicit = False
+    config: dict[str, Any] = {}
     config_path = kb_dir / ".openkb" / "config.yaml"
     if config_path.exists():
         config = load_config(config_path)
@@ -457,6 +471,9 @@ def resolve_credential_bundle(kb_dir: Path) -> LlmCredentialBundle:
         # server runs multiple KBs in one process, so they cannot be isolated.
         extra_headers, timeout, _ = resolve_per_request_overrides(config)
         parallel_tool_calls, parallel_tool_calls_explicit = resolve_parallel_tool_calls(config)
+
+    api_key = _resolve_env(resolve_desktop_credential_environment(config))
+    base_url = _resolve_env("OPENAI_API_BASE")
 
     return LlmCredentialBundle(
         api_key=api_key,
@@ -474,11 +491,19 @@ def load_config(config_path: Path) -> dict[str, Any]:
     If the file does not exist, returns a copy of the defaults.
     """
     config = dict(DEFAULT_CONFIG)
+    config.update(load_config_mapping(config_path))
+    return config
+
+
+def load_config_mapping(config_path: Path) -> dict[str, Any]:
+    """Read exactly the user-provided config mapping, with no default injection."""
     if config_path.exists():
         with config_path.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
-        config.update(data)
-    return config
+        if not isinstance(data, dict):
+            raise ValueError("OpenKB config must be a YAML mapping.")
+        return dict(data)
+    return {}
 
 
 def save_config(config_path: Path, config: dict) -> None:

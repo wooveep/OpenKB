@@ -15,6 +15,9 @@ pub use knowledge_reconciliation::{
     KnowledgeReconciliationCommit, KnowledgeReconciliationConflict,
     KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision,
 };
+#[path = "engine_wire_settings.rs"]
+mod settings;
+pub use settings::{DiagnosticBundleResult, ModelSettings};
 
 pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 

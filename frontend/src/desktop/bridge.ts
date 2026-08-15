@@ -5,6 +5,7 @@ import {
   type DesktopBridgeEvent,
   type DesktopActiveKnowledgeBase,
   type DesktopBridgeHandshake,
+  type DesktopDiagnosticBundle,
   type DesktopCancelResult,
   type DesktopEngineHealth,
   type DesktopGroundedAnswer,
@@ -15,6 +16,7 @@ import {
   type DesktopImportSourcePicker,
   type DesktopKnowledgeBaseActivation,
   type DesktopKnowledgeBaseInspection,
+  type DesktopModelSettings,
   type DesktopKnowledgePage,
   type DesktopKnowledgePages,
   type DesktopKnowledgePageKind,
@@ -88,6 +90,36 @@ export class TauriDesktopBridge implements DesktopBridge {
 
   async activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase> {
     return this.call<DesktopActiveKnowledgeBase>("desktop_active_knowledge_base")
+  }
+
+  async modelSettings(): Promise<DesktopModelSettings> {
+    return this.call<DesktopModelSettings>("desktop_model_settings")
+  }
+
+  async saveModelSettings(
+    model: string,
+    credentialReference: string,
+    maxConcurrentModelCalls: number,
+    initialTimeoutSeconds: number,
+    requestId: string,
+  ): Promise<DesktopModelSettings> {
+    return this.call<DesktopModelSettings>("desktop_save_model_settings", {
+      model,
+      credentialReference,
+      maxConcurrentModelCalls,
+      initialTimeoutSeconds,
+      requestId,
+    })
+  }
+
+  async exportDiagnosticBundle(
+    destination: string,
+    requestId: string,
+  ): Promise<DesktopDiagnosticBundle> {
+    return this.call<DesktopDiagnosticBundle>("desktop_export_diagnostic_bundle", {
+      destination,
+      requestId,
+    })
   }
 
   async inspectImportSources(
@@ -330,6 +362,34 @@ class UnavailableDesktopBridge implements DesktopBridge {
   }
 
   activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase> {
+    return this.unavailable()
+  }
+
+  modelSettings(): Promise<DesktopModelSettings> {
+    return this.unavailable()
+  }
+
+  saveModelSettings(
+    model: string,
+    credentialReference: string,
+    maxConcurrentModelCalls: number,
+    initialTimeoutSeconds: number,
+    requestId: string,
+  ): Promise<DesktopModelSettings> {
+    void model
+    void credentialReference
+    void maxConcurrentModelCalls
+    void initialTimeoutSeconds
+    void requestId
+    return this.unavailable()
+  }
+
+  exportDiagnosticBundle(
+    destination: string,
+    requestId: string,
+  ): Promise<DesktopDiagnosticBundle> {
+    void destination
+    void requestId
     return this.unavailable()
   }
 

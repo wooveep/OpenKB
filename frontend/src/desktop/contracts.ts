@@ -393,6 +393,21 @@ export class DesktopBridgeError extends Error {
   }
 }
 
+/** KB-local defaults only; the referenced credential value never crosses the Bridge. */
+export interface DesktopModelSettings {
+  model: string
+  credentialReference: string
+  credentialAvailable: boolean
+  maxConcurrentModelCalls: number
+  initialTimeoutSeconds: number
+  modelCallDeadlineSeconds: number
+}
+
+export interface DesktopDiagnosticBundle {
+  path: string
+  files: string[]
+}
+
 export interface DesktopBridge {
   handshake(): Promise<DesktopBridgeHandshake>
   health(): Promise<DesktopEngineHealth>
@@ -407,6 +422,15 @@ export interface DesktopBridge {
   ): Promise<DesktopKnowledgeBaseActivation>
   openKnowledgeBase(kbDir: string, requestId: string): Promise<DesktopKnowledgeBaseActivation>
   activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase>
+  modelSettings(): Promise<DesktopModelSettings>
+  saveModelSettings(
+    model: string,
+    credentialReference: string,
+    maxConcurrentModelCalls: number,
+    initialTimeoutSeconds: number,
+    requestId: string,
+  ): Promise<DesktopModelSettings>
+  exportDiagnosticBundle(destination: string, requestId: string): Promise<DesktopDiagnosticBundle>
   inspectImportSources(
     sourcePaths: string[],
     requestId: string,
