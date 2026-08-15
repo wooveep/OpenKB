@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from openkb.desktop_document_parsers import materialize_reader_markdown
-from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
+from openkb.desktop_import_artifacts import (
+    DesktopImportError,
+    DocumentIRBlock,
+    source_format_uses_structured_ir,
+    source_suffixes_for_format,
+)
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -242,7 +247,7 @@ class DesktopRawAssetService:
                 raise DesktopImportError(
                     "raw_asset_content_invalid", "The saved original is not valid text."
                 ) from error
-        if record.source_format in {"markdown", "docx"}:
+        if source_format_uses_structured_ir(record.source_format):
             blocks = self._document_blocks(connection, record.document_id)
             return materialize_reader_markdown(blocks)
         raise DesktopImportError(
@@ -385,11 +390,10 @@ def _record_from_row(row: tuple[object, ...]) -> _RawAssetRecord:
 
 
 def _expected_raw_paths(record: _RawAssetRecord) -> set[str]:
-    suffixes = {
-        "txt": {".txt"},
-        "markdown": {".md", ".markdown"},
-        "docx": {".docx"},
-    }.get(record.source_format, set())
+    try:
+        suffixes = source_suffixes_for_format(record.source_format)
+    except DesktopImportError:
+        return set()
     return {f"raw/{record.asset_sha256}{suffix}" for suffix in suffixes}
 
 

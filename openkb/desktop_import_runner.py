@@ -24,6 +24,8 @@ from openkb.desktop_import_artifacts import (
     evidence_checkpoint,
     evidence_from_checkpoint,
     source_format_for_path,
+    source_format_is_textual,
+    source_format_uses_structured_ir,
     source_images_from_checkpoint,
     source_media_type,
     validate_text_source,
@@ -164,7 +166,7 @@ class DesktopTextImportService:
                 self._honor_control(state, active_stage)
                 self._store.set_stage(state, active_stage, "running", 40)
                 source_images: tuple[SourceImage, ...]
-                if source_format == "txt":
+                if not source_format_uses_structured_ir(source_format):
                     blocks = build_document_ir(text)
                     source_images = ()
                 else:
@@ -357,7 +359,10 @@ class DesktopTextImportService:
                 raise DesktopImportError(
                     "raw_asset_integrity_failed", "Saved raw asset fails checkpoint."
                 )
-            text = decode_text(raw_bytes, state.source) if source_format != "docx" else ""
+            if source_format_is_textual(source_format):
+                text = decode_text(raw_bytes, state.source)
+            else:
+                text = ""
             return raw_bytes, text, source_format, actual_hash, raw_path
 
         active_stage = "preflight"
@@ -365,7 +370,10 @@ class DesktopTextImportService:
         if not preflight_completed:
             self._honor_control(state, active_stage)
         raw_bytes = state.source.read_bytes()
-        text = decode_text(raw_bytes, state.source) if source_format != "docx" else ""
+        if source_format_is_textual(source_format):
+            text = decode_text(raw_bytes, state.source)
+        else:
+            text = ""
         asset_sha256 = hashlib.sha256(raw_bytes).hexdigest()
         if not preflight_completed or not self._matches_preflight_checkpoint(
             self._checkpoint(state, active_stage), asset_sha256, len(raw_bytes)

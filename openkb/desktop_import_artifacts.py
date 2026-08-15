@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import mimetypes
 import re
 import uuid
 from dataclasses import dataclass
@@ -16,12 +18,24 @@ _SOURCE_FORMATS = {
     ".md": "markdown",
     ".markdown": "markdown",
     ".docx": "docx",
+    ".xls": "xls",
+    ".xlsx": "xlsx",
 }
 _SOURCE_MEDIA_TYPES = {
     "txt": "text/plain",
     "markdown": "text/markdown",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
+_SOURCE_SUFFIXES = {
+    "txt": (".txt",),
+    "markdown": (".md", ".markdown"),
+    "docx": (".docx",),
+    "xls": (".xls",),
+    "xlsx": (".xlsx",),
+}
+_TEXT_SOURCE_FORMATS = {"txt", "markdown"}
 
 
 class DesktopImportError(RuntimeError):
@@ -64,13 +78,21 @@ class SourceImage:
     content: bytes = b""
 
 
+@dataclass(frozen=True)
+class ParsedDocument:
+    """Document IR and extracted original images before the publish transaction."""
+
+    blocks: tuple[DocumentIRBlock, ...]
+    source_images: tuple[SourceImage, ...]
+
+
 def validate_text_source(source_path: Path) -> Path:
     """Resolve and validate a source handled by the current Desktop import path."""
     source = source_path.expanduser().resolve()
     if source.suffix.lower() not in SUPPORTED_DESKTOP_IMPORT_SUFFIXES:
         raise DesktopImportError(
             "unsupported_import_format",
-            "Desktop import supports TXT, Markdown, and DOCX files.",
+            "Desktop import supports TXT, Markdown, DOCX, XLS, and XLSX files.",
         )
     if not source.is_file():
         raise DesktopImportError(
@@ -97,6 +119,51 @@ def source_media_type(source_format: str) -> str:
         raise DesktopImportError(
             "unsupported_import_format", f"Unsupported import source format: {source_format}"
         ) from error
+
+
+def source_suffixes_for_format(source_format: str) -> tuple[str, ...]:
+    """Return all accepted original suffixes for an already-classified format."""
+    try:
+        return _SOURCE_SUFFIXES[source_format]
+    except KeyError as error:
+        raise DesktopImportError(
+            "unsupported_import_format", f"Unsupported import source format: {source_format}"
+        ) from error
+
+
+def source_format_is_textual(source_format: str) -> bool:
+    """Whether a raw asset must be decoded before its document-IR parser runs."""
+    return source_format in _TEXT_SOURCE_FORMATS
+
+
+def source_format_uses_structured_ir(source_format: str) -> bool:
+    """Whether the reader and model analysis must use persisted Document IR."""
+    return source_format in _SOURCE_SUFFIXES and source_format != "txt"
+
+
+def source_image_from_content(
+    *,
+    content: bytes,
+    filename: str,
+    alt_text: str | None,
+    ordinal: int,
+    locator: dict[str, object],
+) -> SourceImage:
+    """Build one retained Source Image record from extracted original bytes."""
+    extension = Path(filename).suffix.lower() or ".bin"
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    return SourceImage(
+        image_id=uuid.uuid4().hex,
+        ordinal=ordinal,
+        image_sha256=hashlib.sha256(content).hexdigest(),
+        byte_size=len(content),
+        media_type=media_type,
+        filename=filename or f"image-{ordinal}{extension}",
+        extension=extension,
+        alt_text=alt_text,
+        locator=locator,
+        content=content,
+    )
 
 
 def decode_text(content: bytes, source: Path) -> str:

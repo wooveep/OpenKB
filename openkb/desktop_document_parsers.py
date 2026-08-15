@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
-import mimetypes
 import posixpath
 import re
 import uuid
 import zipfile
-from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import cast
@@ -18,9 +15,11 @@ from xml.etree import ElementTree
 from openkb.desktop_import_artifacts import (
     DesktopImportError,
     DocumentIRBlock,
+    ParsedDocument,
     SourceImage,
     decode_text,
     source_format_for_path,
+    source_image_from_content,
 )
 
 _HEADING_PATTERN = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*$")
@@ -41,21 +40,17 @@ _REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _NS = {"w": _W_NS, "r": _R_NS, "a": _A_NS, "rel": _REL_NS}
 
 
-@dataclass(frozen=True)
-class ParsedDocument:
-    """Document IR and extracted original images before the publish transaction."""
-
-    blocks: tuple[DocumentIRBlock, ...]
-    source_images: tuple[SourceImage, ...]
-
-
 def parse_structured_document(source: Path, raw_bytes: bytes) -> ParsedDocument:
-    """Parse a Markdown or DOCX Raw Asset directly into structured authority data."""
+    """Parse a structured Raw Asset directly into Document IR authority data."""
     source_format = source_format_for_path(source)
     if source_format == "markdown":
         return _parse_markdown(source, decode_text(raw_bytes, source))
     if source_format == "docx":
         return _parse_docx(source, raw_bytes)
+    if source_format in {"xls", "xlsx"}:
+        from openkb.desktop_spreadsheet_parsers import parse_spreadsheet_document
+
+        return parse_spreadsheet_document(source, raw_bytes, source_format)
     raise DesktopImportError(
         "unsupported_import_format", f"No structured parser is registered for {source.name}."
     )
@@ -229,7 +224,7 @@ def _append_markdown_images(
             content = image_path.read_bytes()
         except OSError:
             continue
-        image = _source_image(
+        image = source_image_from_content(
             content=content,
             filename=image_path.name,
             alt_text=alt_text or None,
@@ -482,7 +477,7 @@ def _append_docx_images(
             content = archive.read(archive_path)
         except KeyError:
             continue
-        image = _source_image(
+        image = source_image_from_content(
             content=content,
             filename=Path(archive_path).name,
             alt_text=None,
@@ -507,30 +502,6 @@ def _append_docx_images(
                 },
             )
         )
-
-
-def _source_image(
-    *,
-    content: bytes,
-    filename: str,
-    alt_text: str | None,
-    ordinal: int,
-    locator: dict[str, object],
-) -> SourceImage:
-    extension = Path(filename).suffix.lower() or ".bin"
-    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    return SourceImage(
-        image_id=uuid.uuid4().hex,
-        ordinal=ordinal,
-        image_sha256=hashlib.sha256(content).hexdigest(),
-        byte_size=len(content),
-        media_type=media_type,
-        filename=filename or f"image-{ordinal}{extension}",
-        extension=extension,
-        alt_text=alt_text,
-        locator=locator,
-        content=content,
-    )
 
 
 def _docx_relationships(archive: zipfile.ZipFile) -> dict[str, str]:

@@ -110,6 +110,8 @@ pub enum ImportedDocumentSourceFormat {
     Txt,
     Markdown,
     Docx,
+    Xls,
+    Xlsx,
 }
 
 #[derive(Clone, Debug, Serialize)]

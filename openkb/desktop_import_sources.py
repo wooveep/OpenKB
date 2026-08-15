@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-SUPPORTED_DESKTOP_IMPORT_SUFFIXES = (".txt", ".md", ".markdown", ".docx")
+SUPPORTED_DESKTOP_IMPORT_SUFFIXES = (".txt", ".md", ".markdown", ".docx", ".xls", ".xlsx")
 
 
 @dataclass(frozen=True)

@@ -14,6 +14,8 @@ def test_source_inspection_expands_directories_deduplicates_and_sorts(tmp_path):
     nested.mkdir(parents=True)
     (sources / "zeta.txt").write_text("zeta", encoding="utf-8")
     (sources / "alpha.md").write_text("alpha", encoding="utf-8")
+    (sources / "ledger.xlsx").write_bytes(b"workbook")
+    (sources / "legacy.xls").write_bytes(b"legacy workbook")
     (nested / "beta.txt").write_text("beta", encoding="utf-8")
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -24,6 +26,8 @@ def test_source_inspection_expands_directories_deduplicates_and_sorts(tmp_path):
 
     assert [Path(source.path).name for source in inspection.supported] == [
         "alpha.md",
+        "ledger.xlsx",
+        "legacy.xls",
         "beta.txt",
         "zeta.txt",
     ]
@@ -31,4 +35,11 @@ def test_source_inspection_expands_directories_deduplicates_and_sorts(tmp_path):
         ("empty", "import_directory_empty"),
         ("missing.pdf", "import_source_not_found"),
     ]
-    assert inspection.as_dict()["supported_extensions"] == [".txt", ".md", ".markdown", ".docx"]
+    assert inspection.as_dict()["supported_extensions"] == [
+        ".txt",
+        ".md",
+        ".markdown",
+        ".docx",
+        ".xls",
+        ".xlsx",
+    ]

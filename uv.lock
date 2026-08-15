@@ -1986,6 +1986,7 @@ dependencies = [
     { name = "markitdown", extra = ["docx", "pptx", "xls", "xlsx"] },
     { name = "openai" },
     { name = "openai-agents" },
+    { name = "openpyxl" },
     { name = "pageindex" },
     { name = "portalocker" },
     { name = "prompt-toolkit" },
@@ -1994,6 +1995,7 @@ dependencies = [
     { name = "rich" },
     { name = "trafilatura" },
     { name = "watchdog" },
+    { name = "xlrd" },
 ]
 
 [package.optional-dependencies]
@@ -2031,6 +2033,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = "==1.15.0" },
     { name = "openai", specifier = "==2.44.0" },
     { name = "openai-agents", specifier = "==0.17.3" },
+    { name = "openpyxl", specifier = "==3.1.5" },
     { name = "pageindex", specifier = "==0.3.0.dev3" },
     { name = "portalocker", specifier = "==3.2.0" },
     { name = "prompt-toolkit", specifier = "==3.0.52" },
@@ -2048,6 +2051,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'api'" },
     { name = "uvicorn", marker = "extra == 'web'" },
     { name = "watchdog", specifier = "==6.0.0" },
+    { name = "xlrd", specifier = "==2.0.2" },
 ]
 provides-extras = ["api", "desktop-build", "dev", "web"]
 

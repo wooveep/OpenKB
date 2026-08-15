@@ -125,7 +125,11 @@ export class MemoryDesktopBridge implements DesktopBridge {
         status: "unsupported" as const,
         errorCode: "unsupported_import_format",
       }))
-    return { supported, unsupported, supportedExtensions: [".txt", ".md", ".markdown", ".docx"] }
+    return {
+      supported,
+      unsupported,
+      supportedExtensions: [".txt", ".md", ".markdown", ".docx", ".xls", ".xlsx"],
+    }
   }
 
   async chooseImportSources(picker: DesktopImportSourcePicker): Promise<string[]> {
@@ -348,12 +352,14 @@ export class MemoryDesktopBridge implements DesktopBridge {
 }
 
 function isSupportedImportSource(sourcePath: string): boolean {
-  return /\.(txt|md|markdown|docx)$/i.test(sourcePath)
+  return /\.(txt|md|markdown|docx|xls|xlsx)$/i.test(sourcePath)
 }
 
-function sourceFormat(sourcePath: string): "txt" | "markdown" | "docx" {
+function sourceFormat(sourcePath: string): "txt" | "markdown" | "docx" | "xls" | "xlsx" {
   if (/\.(md|markdown)$/i.test(sourcePath)) return "markdown"
   if (/\.docx$/i.test(sourcePath)) return "docx"
+  if (/\.xlsx$/i.test(sourcePath)) return "xlsx"
+  if (/\.xls$/i.test(sourcePath)) return "xls"
   return "txt"
 }
 

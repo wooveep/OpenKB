@@ -13,23 +13,24 @@ from typing import Callable
 
 from portalocker import LockException
 
-from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock, SourceImage
+from openkb.desktop_import_artifacts import (
+    DesktopImportError,
+    DocumentIRBlock,
+    SourceImage,
+)
 from openkb.desktop_import_queries import (
     find_available_document_in,
     stages_for_job,
     task_from_row,
 )
+from openkb.desktop_import_sources import SUPPORTED_DESKTOP_IMPORT_SUFFIXES
 from openkb.desktop_import_types import (
     DesktopImportedDocument,
     DesktopImportTask,
     DesktopStageRun,
 )
-from openkb.desktop_source_image_assets import (
-    persist_source_images,
-)
-from openkb.desktop_source_image_assets import (
-    write_source_images as write_source_image_files,
-)
+from openkb.desktop_source_image_assets import persist_source_images
+from openkb.desktop_source_image_assets import write_source_images as write_source_image_files
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import atomic_write_bytes, kb_ingest_lock
 
@@ -364,7 +365,7 @@ class DesktopImportStore:
     ) -> str:
         """Persist exactly one complete input asset under its original format suffix."""
         suffix = source_suffix.lower()
-        if suffix not in {".txt", ".md", ".markdown", ".docx"}:
+        if suffix not in SUPPORTED_DESKTOP_IMPORT_SUFFIXES:
             raise DesktopImportError("unsupported_import_format", "Unsupported raw asset suffix.")
         raw_relative_path = Path("raw") / f"{asset_sha256}{suffix}"
         with kb_ingest_lock(self.state_dir):
