@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 from openkb.desktop_grounded_answer import DesktopGroundedAnswerService
 from openkb.desktop_import import DesktopTextImportService
@@ -66,6 +67,54 @@ def test_grounded_answer_excludes_unavailable_source_documents(tmp_path):
         available_document.document_id
     }
     assert "restricted secret" not in answer.answer_text
+
+
+def test_grounded_answer_persists_only_source_images_bound_to_its_citations(tmp_path):
+    """Answer images retain a citation link and disappear with an unavailable source."""
+    kb_dir = tmp_path / "desktop-kb"
+    image = tmp_path / "evidence-pipeline.png"
+    source = tmp_path / "evidence-pipeline.md"
+    unrelated_image = tmp_path / "unrelated.png"
+    unrelated_source = tmp_path / "unrelated.md"
+    image_bytes = b"\x89PNG\r\n\x1a\nsource-image"
+    image.write_bytes(image_bytes)
+    unrelated_image.write_bytes(b"\x89PNG\r\n\x1a\nunrelated-image")
+    source.write_text(
+        "# Evidence pipeline\n\n"
+        "The evidence pipeline diagram explains grounded answers.\n\n"
+        "![Evidence pipeline diagram](evidence-pipeline.png)\n",
+        encoding="utf-8",
+    )
+    unrelated_source.write_text(
+        "# Separate notes\n\n![Satellite](unrelated.png)\n",
+        encoding="utf-8",
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source).document
+    DesktopTextImportService(kb_dir).import_text(unrelated_source)
+
+    answer = DesktopGroundedAnswerService(kb_dir).answer(
+        "What does the evidence pipeline diagram explain?"
+    )
+
+    assert len(answer.source_images) == 1
+    source_image = answer.source_images[0]
+    assert source_image.document_id == imported.document_id
+    assert source_image.evidence_id in {citation.evidence_id for citation in answer.citations}
+    assert source_image.locator["line_start"] == 5
+    assert Path(source_image.file_path).read_bytes() == image_bytes
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT source_image_id, evidence_id FROM grounded_answer_source_images"
+        ).fetchall() == [(source_image.source_image_id, source_image.evidence_id)]
+        connection.execute(
+            "UPDATE source_documents SET availability = 'failed' WHERE document_id = ?",
+            (imported.document_id,),
+        )
+        connection.commit()
+
+    assert DesktopGroundedAnswerService(kb_dir).list()[0].source_images == ()
 
 
 def test_grounded_answer_falls_back_when_optional_model_calls_fail(tmp_path):

@@ -93,6 +93,7 @@ class DesktopGroundedAnswerService:
             retrieval_plan=pack.retrieval_plan,
             citations=pack.evidence,
             degradations=tuple((*pack.degradations, *answer_degradation)),
+            source_images=pack.source_images,
         )
         return self._store.save(answer)
 

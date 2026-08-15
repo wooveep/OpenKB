@@ -56,12 +56,41 @@ class DesktopEvidenceRef:
 
 
 @dataclass(frozen=True)
+class DesktopAnswerSourceImage:
+    """One retained original image explicitly associated with a cited evidence fragment."""
+
+    source_image_id: str
+    evidence_id: str
+    document_id: str
+    document_name: str
+    name: str
+    media_type: str
+    file_path: str
+    alt_text: str | None
+    locator: dict[str, object]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "source_image_id": self.source_image_id,
+            "evidence_id": self.evidence_id,
+            "document_id": self.document_id,
+            "document_name": self.document_name,
+            "name": self.name,
+            "media_type": self.media_type,
+            "file_path": self.file_path,
+            "alt_text": self.alt_text,
+            "locator": self.locator,
+        }
+
+
+@dataclass(frozen=True)
 class DesktopEvidencePack:
     """The source-only context passed to the optional answer model."""
 
     retrieval_plan: DesktopRetrievalPlan
     evidence: tuple[DesktopEvidenceRef, ...]
     degradations: tuple[str, ...] = ()
+    source_images: tuple[DesktopAnswerSourceImage, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -75,6 +104,7 @@ class DesktopGroundedAnswer:
     citations: tuple[DesktopEvidenceRef, ...]
     degradations: tuple[str, ...]
     created_at: str
+    source_images: tuple[DesktopAnswerSourceImage, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -85,4 +115,5 @@ class DesktopGroundedAnswer:
             "citations": [citation.as_dict() for citation in self.citations],
             "degradations": list(self.degradations),
             "created_at": self.created_at,
+            "source_images": [image.as_dict() for image in self.source_images],
         }

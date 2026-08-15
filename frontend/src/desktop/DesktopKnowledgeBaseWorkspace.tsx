@@ -126,6 +126,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
   const [importBatchSummary, setImportBatchSummary] = useState<DesktopImportBatchSummary | null>(null)
   const [importTasks, setImportTasks] = useState<DesktopImportTask[]>([])
   const [rawDocument, setRawDocument] = useState<DesktopRawDocument | null>(null)
+  const [rawDocumentFocus, setRawDocumentFocus] = useState<Record<string, unknown> | null>(null)
   const [loadingRawDocument, setLoadingRawDocument] = useState(false)
   const [failedDocumentsOpen, setFailedDocumentsOpen] = useState(false)
   const [controllingJobId, setControllingJobId] = useState<string | null>(null)
@@ -209,6 +210,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setFormError(null)
     setImportTasks([])
     setRawDocument(null)
+    setRawDocumentFocus(null)
     setLoadingRawDocument(false)
     setImportSources([])
     setExcludedImportSources([])
@@ -363,8 +365,12 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setImporting(false)
   }
 
-  const openRawDocument = async (documentId: string) => {
+  const openRawDocument = async (
+    documentId: string,
+    locator: Record<string, unknown> | null = null,
+  ) => {
     setImportError(null)
+    setRawDocumentFocus(locator)
     setLoadingRawDocument(true)
     try {
       setRawDocument(await bridge.readRawDocument(documentId, nextRequestId()))
@@ -564,7 +570,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
               onRemoveImportSource={removeImportSource}
               onSubmitImport={() => void submitImportBatch()}
               onControlImportJob={(jobId, action) => void controlImportJob(jobId, action)}
-              onOpenRawDocument={(documentId) => void openRawDocument(documentId)}
+              onOpenRawDocument={(documentId, locator) => void openRawDocument(documentId, locator)}
             />
           )}
         </main>
@@ -642,11 +648,13 @@ export default function DesktopKnowledgeBaseWorkspace() {
       />
       <DesktopRawDocumentDialog
         document={rawDocument}
+        focusLocator={rawDocumentFocus}
         loadingMore={loadingRawDocument}
         onLoadMore={() => void loadMoreRawDocument()}
         onOpenChange={(open) => {
           if (!open) {
             setRawDocument(null)
+            setRawDocumentFocus(null)
             setLoadingRawDocument(false)
           }
         }}
@@ -719,7 +727,7 @@ function ActiveKnowledgeBaseView({
   onRemoveImportSource: (path: string) => void
   onSubmitImport: () => void
   onControlImportJob: (jobId: string, action: ImportTaskAction) => void
-  onOpenRawDocument: (documentId: string) => void
+  onOpenRawDocument: (documentId: string, locator?: Record<string, unknown>) => void
 }) {
   const { t } = useTranslation("common")
   const sectionTitle = t(`desktop.knowledgeBases.navigationItems.${section}`)
@@ -765,7 +773,7 @@ function ActiveKnowledgeBaseView({
           onOpenOriginal={onOpenRawDocument}
         />
       ) : null}
-      {section === "answers" ? <DesktopGroundedAnswerPanel /> : null}
+      {section === "answers" ? <DesktopGroundedAnswerPanel onOpenOriginal={onOpenRawDocument} /> : null}
     </section>
   )
 }

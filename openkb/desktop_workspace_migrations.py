@@ -216,3 +216,22 @@ GROUNDED_ANSWER_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON grounded_answer_citations(answer_id, ordinal)
     """,
 )
+
+
+GROUNDED_ANSWER_SOURCE_IMAGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE grounded_answer_source_images (
+        answer_id TEXT NOT NULL REFERENCES grounded_answers(answer_id) ON DELETE CASCADE,
+        source_image_id TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        PRIMARY KEY(answer_id, source_image_id),
+        FOREIGN KEY(answer_id, evidence_id)
+            REFERENCES grounded_answer_citations(answer_id, evidence_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE INDEX grounded_answer_source_images_answer_idx
+        ON grounded_answer_source_images(answer_id, ordinal)
+    """,
+)

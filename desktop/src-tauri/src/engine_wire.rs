@@ -309,10 +309,33 @@ pub struct GroundedAnswer {
     #[serde(alias = "retrieval_plan")]
     pub retrieval_plan: RetrievalPlan,
     pub citations: Vec<EvidenceRef>,
+    #[serde(default, alias = "source_images")]
+    pub source_images: Vec<AnswerSourceImage>,
     #[serde(default)]
     pub degradations: Vec<String>,
     #[serde(alias = "created_at")]
     pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnswerSourceImage {
+    #[serde(alias = "source_image_id")]
+    pub source_image_id: String,
+    #[serde(alias = "evidence_id")]
+    pub evidence_id: String,
+    #[serde(alias = "document_id")]
+    pub document_id: String,
+    #[serde(alias = "document_name")]
+    pub document_name: String,
+    pub name: String,
+    #[serde(alias = "media_type")]
+    pub media_type: String,
+    #[serde(alias = "file_path")]
+    pub file_path: String,
+    #[serde(alias = "alt_text")]
+    pub alt_text: Option<String>,
+    pub locator: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from openkb.desktop_answer_types import (
     DesktopAnswerError,
+    DesktopAnswerSourceImage,
     DesktopEvidenceRef,
     DesktopGroundedAnswer,
     DesktopRetrievalPlan,
@@ -68,6 +69,22 @@ class DesktopGroundedAnswerStore:
                             for ordinal, citation in enumerate(answer.citations)
                         ],
                     )
+                    connection.executemany(
+                        """
+                        INSERT INTO grounded_answer_source_images (
+                            answer_id, source_image_id, evidence_id, ordinal
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        [
+                            (
+                                answer.answer_id,
+                                image.source_image_id,
+                                image.evidence_id,
+                                ordinal,
+                            )
+                            for ordinal, image in enumerate(answer.source_images)
+                        ],
+                    )
             finally:
                 connection.close()
         return answer
@@ -83,7 +100,7 @@ class DesktopGroundedAnswerStore:
                 ORDER BY created_at DESC
                 """
             ).fetchall()
-            return tuple(_answer_from_row(connection, row) for row in rows)
+            return tuple(_answer_from_row(connection, row, self._state_dir.parent) for row in rows)
         finally:
             connection.close()
 
@@ -96,6 +113,7 @@ def new_answer(
     retrieval_plan: DesktopRetrievalPlan,
     citations: tuple[DesktopEvidenceRef, ...],
     degradations: tuple[str, ...],
+    source_images: tuple[DesktopAnswerSourceImage, ...] = (),
 ) -> DesktopGroundedAnswer:
     return DesktopGroundedAnswer(
         answer_id=answer_id,
@@ -105,11 +123,12 @@ def new_answer(
         citations=citations,
         degradations=degradations,
         created_at=_timestamp(),
+        source_images=source_images,
     )
 
 
 def _answer_from_row(
-    connection: sqlite3.Connection, row: tuple[object, ...]
+    connection: sqlite3.Connection, row: tuple[object, ...], kb_dir: Path
 ) -> DesktopGroundedAnswer:
     answer_id = str(row[0])
     plan_payload = _json_object(str(row[3]))
@@ -147,7 +166,52 @@ def _answer_from_row(
         citations=citations,
         degradations=tuple(value for value in _json_list(str(row[4])) if isinstance(value, str)),
         created_at=str(row[5]),
+        source_images=_source_images_for_answer(connection, answer_id, kb_dir),
     )
+
+
+def _source_images_for_answer(
+    connection: sqlite3.Connection, answer_id: str, kb_dir: Path
+) -> tuple[DesktopAnswerSourceImage, ...]:
+    """Hydrate only image snapshots whose cited source remains available."""
+    rows = connection.execute(
+        """
+        SELECT snapshots.source_image_id, snapshots.evidence_id,
+            source_images.document_id, source_documents.display_name,
+            source_images.display_name, source_images.media_type,
+            source_images.storage_path, source_images.alt_text, source_images.locator_json
+        FROM grounded_answer_source_images AS snapshots
+        JOIN grounded_answer_citations AS citations
+            ON citations.answer_id = snapshots.answer_id
+            AND citations.evidence_id = snapshots.evidence_id
+        JOIN source_images
+            ON source_images.source_image_id = snapshots.source_image_id
+            AND source_images.document_id = citations.document_id
+        JOIN source_documents ON source_documents.document_id = source_images.document_id
+        WHERE snapshots.answer_id = ? AND source_documents.availability = 'available'
+        ORDER BY snapshots.ordinal
+        """,
+        (answer_id,),
+    ).fetchall()
+    images: list[DesktopAnswerSourceImage] = []
+    for row in rows:
+        file_path = kb_dir / str(row[6])
+        if not file_path.is_file():
+            continue
+        images.append(
+            DesktopAnswerSourceImage(
+                source_image_id=str(row[0]),
+                evidence_id=str(row[1]),
+                document_id=str(row[2]),
+                document_name=str(row[3]),
+                name=str(row[4]),
+                media_type=str(row[5]),
+                file_path=str(file_path),
+                alt_text=str(row[7]) if row[7] is not None else None,
+                locator=_json_object(str(row[8])),
+            )
+        )
+    return tuple(images)
 
 
 def _connect(database_path: Path) -> sqlite3.Connection:

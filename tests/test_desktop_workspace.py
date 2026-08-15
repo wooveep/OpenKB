@@ -24,7 +24,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 8
+    assert first.knowledge_base.schema_version == 9
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
@@ -39,6 +39,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
             (6,),
             (7,),
             (8,),
+            (9,),
         ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
@@ -73,6 +74,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
         connection.execute("DROP TABLE source_images")
+        connection.execute("DROP TABLE grounded_answer_source_images")
         connection.execute("DROP TABLE grounded_answer_citations")
         connection.execute("DROP TABLE grounded_answers")
         connection.execute("DROP TABLE stage_run_runtime")
@@ -84,6 +86,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
         connection.execute("DROP TRIGGER raw_assets_create_integrity")
         connection.execute("DROP TABLE raw_asset_integrity")
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
         connection.execute("DELETE FROM schema_migrations WHERE version = 5")
@@ -125,6 +128,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
             (6,),
             (7,),
             (8,),
+            (9,),
         ]
         assert connection.execute(
             "SELECT status FROM import_job_runtime WHERE job_id = 'legacy-job'"
@@ -152,6 +156,7 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
 
     with sqlite3.connect(database_path) as connection:
         connection.execute("DROP TABLE source_images")
+        connection.execute("DROP TABLE grounded_answer_source_images")
         connection.execute("DROP TABLE grounded_answer_citations")
         connection.execute("DROP TABLE grounded_answers")
         connection.execute("DROP TABLE model_attempts")
@@ -161,6 +166,7 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
         connection.execute("DROP TRIGGER raw_assets_create_integrity")
         connection.execute("DROP TABLE raw_asset_integrity")
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
         connection.execute("DELETE FROM schema_migrations WHERE version = 5")

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from openkb.desktop_answer_types import (
     DesktopAnswerError,
+    DesktopAnswerSourceImage,
     DesktopEvidencePack,
     DesktopEvidenceRef,
     DesktopRetrievalPlan,
@@ -29,6 +30,7 @@ _CHANNEL_LIMIT = 12
 _EVIDENCE_PACK_LIMIT = 6
 _RRF_OFFSET = 60
 _TERM_PATTERN = re.compile(r"[A-Za-z0-9_]{2,}|[\u3400-\u9fff]+")
+_CELL_RANGE_PATTERN = re.compile(r"^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -42,7 +44,8 @@ class DesktopEvidenceRetriever:
     """Build an Evidence Pack from Available Knowledge with safe fallbacks."""
 
     def __init__(self, kb_dir: Path, *, model_gateway: DesktopModelGateway | None = None) -> None:
-        self._database_path = desktop_state_database_path(kb_dir)
+        self._kb_dir = kb_dir.expanduser().resolve()
+        self._database_path = desktop_state_database_path(self._kb_dir)
         self._model_gateway = model_gateway
 
     def retrieve(self, question: str) -> DesktopEvidencePack:
@@ -56,12 +59,15 @@ class DesktopEvidenceRetriever:
                 + _page_tree_candidates(connection, plan.terms)
                 + _wiki_candidates(connection, plan.terms)
             )
+            evidence = _fuse_candidates(candidates)
+            source_images = _source_images_for_evidence(connection, evidence, self._kb_dir)
         finally:
             connection.close()
         return DesktopEvidencePack(
             retrieval_plan=plan,
-            evidence=_fuse_candidates(candidates),
+            evidence=evidence,
             degradations=tuple(degradations),
+            source_images=source_images,
         )
 
     def _plan(self, question: str) -> tuple[DesktopRetrievalPlan, list[str]]:
@@ -355,3 +361,163 @@ def _fuse_candidates(candidates: tuple[_Candidate, ...]) -> tuple[DesktopEvidenc
         )
         for key in selected
     )
+
+
+def _source_images_for_evidence(
+    connection: sqlite3.Connection,
+    evidence: tuple[DesktopEvidenceRef, ...],
+    kb_dir: Path,
+) -> tuple[DesktopAnswerSourceImage, ...]:
+    """Select only original images that share an exact source location with a citation."""
+    document_ids = tuple(dict.fromkeys(reference.document_id for reference in evidence))
+    if not document_ids:
+        return ()
+    placeholders = ", ".join("?" for _ in document_ids)
+    rows = connection.execute(
+        f"""
+        SELECT source_images.source_image_id, source_images.document_id,
+            source_documents.display_name, source_images.display_name,
+            source_images.media_type, source_images.storage_path, source_images.alt_text,
+            source_images.locator_json
+        FROM source_images
+        JOIN source_documents ON source_documents.document_id = source_images.document_id
+        WHERE source_documents.availability = 'available'
+            AND source_images.document_id IN ({placeholders})
+        ORDER BY source_images.document_id, source_images.ordinal
+        """,
+        document_ids,
+    ).fetchall()
+    images_by_document: defaultdict[str, list[tuple[object, ...]]] = defaultdict(list)
+    for row in rows:
+        images_by_document[str(row[1])].append(row)
+
+    selected: list[DesktopAnswerSourceImage] = []
+    selected_ids: set[str] = set()
+    for reference in evidence:
+        for row in images_by_document[reference.document_id]:
+            source_image_id = str(row[0])
+            if source_image_id in selected_ids:
+                continue
+            locator = _json_object(str(row[7]))
+            if not _source_image_matches_evidence(source_image_id, locator, reference.locator):
+                continue
+            file_path = kb_dir / str(row[5])
+            if not file_path.is_file():
+                continue
+            selected_ids.add(source_image_id)
+            selected.append(
+                DesktopAnswerSourceImage(
+                    source_image_id=source_image_id,
+                    evidence_id=reference.evidence_id,
+                    document_id=str(row[1]),
+                    document_name=str(row[2]),
+                    name=str(row[3]),
+                    media_type=str(row[4]),
+                    file_path=str(file_path),
+                    alt_text=str(row[6]) if row[6] is not None else None,
+                    locator=locator,
+                )
+            )
+    return tuple(selected)
+
+
+def _source_image_matches_evidence(
+    source_image_id: str,
+    image_locator: dict[str, object],
+    evidence_locator: dict[str, object],
+) -> bool:
+    """Keep image display tied to a stable source position, never document affinity alone."""
+    if evidence_locator.get("source_image_id") == source_image_id:
+        return True
+    if _same_locator_value(image_locator, evidence_locator, "body_order"):
+        return True
+    if _same_locator_value(image_locator, evidence_locator, "slide"):
+        return True
+    if _same_locator_value(image_locator, evidence_locator, "page"):
+        return _bbox_matches(image_locator, evidence_locator)
+    if _same_locator_value(image_locator, evidence_locator, "sheet"):
+        return _cell_ranges_overlap(
+            image_locator.get("cell_range"), evidence_locator.get("cell_range")
+        )
+    return _line_ranges_overlap(image_locator, evidence_locator)
+
+
+def _same_locator_value(
+    image_locator: dict[str, object], evidence_locator: dict[str, object], key: str
+) -> bool:
+    value = image_locator.get(key)
+    return value is not None and value == evidence_locator.get(key)
+
+
+def _bbox_matches(image_locator: dict[str, object], evidence_locator: dict[str, object]) -> bool:
+    image_bbox = image_locator.get("bbox")
+    evidence_bbox = evidence_locator.get("bbox")
+    if not isinstance(image_bbox, list) or not isinstance(evidence_bbox, list):
+        return True
+    if len(image_bbox) != 4 or len(evidence_bbox) != 4:
+        return True
+    try:
+        image_values = tuple(float(value) for value in image_bbox)
+        evidence_values = tuple(float(value) for value in evidence_bbox)
+    except (TypeError, ValueError):
+        return True
+    return not (
+        image_values[2] <= evidence_values[0]
+        or image_values[0] >= evidence_values[2]
+        or image_values[3] <= evidence_values[1]
+        or image_values[1] >= evidence_values[3]
+    )
+
+
+def _line_ranges_overlap(
+    image_locator: dict[str, object], evidence_locator: dict[str, object]
+) -> bool:
+    image_start = image_locator.get("line_start")
+    image_end = image_locator.get("line_end")
+    evidence_start = evidence_locator.get("line_start")
+    evidence_end = evidence_locator.get("line_end")
+    if not (
+        isinstance(image_start, int)
+        and isinstance(image_end, int)
+        and isinstance(evidence_start, int)
+        and isinstance(evidence_end, int)
+    ):
+        return False
+    return max(image_start, evidence_start) <= min(image_end, evidence_end)
+
+
+def _cell_ranges_overlap(left: object, right: object) -> bool:
+    left_bounds = _cell_range_bounds(left)
+    right_bounds = _cell_range_bounds(right)
+    if left_bounds is None or right_bounds is None:
+        return False
+    return not (
+        left_bounds[2] < right_bounds[0]
+        or left_bounds[0] > right_bounds[2]
+        or left_bounds[3] < right_bounds[1]
+        or left_bounds[1] > right_bounds[3]
+    )
+
+
+def _cell_range_bounds(value: object) -> tuple[int, int, int, int] | None:
+    if not isinstance(value, str):
+        return None
+    match = _CELL_RANGE_PATTERN.match(value.strip())
+    if match is None:
+        return None
+    start_column, start_row, end_column, end_row = match.groups()
+    end_column = end_column or start_column
+    end_row = end_row or start_row
+    return (
+        _column_number(start_column),
+        int(start_row),
+        _column_number(end_column),
+        int(end_row),
+    )
+
+
+def _column_number(value: str) -> int:
+    result = 0
+    for character in value.upper():
+        result = result * 26 + ord(character) - ord("A") + 1
+    return result

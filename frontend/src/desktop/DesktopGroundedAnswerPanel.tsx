@@ -1,9 +1,10 @@
-import { Loader2, SendHorizontal } from "lucide-react"
+import { convertFileSrc } from "@tauri-apps/api/core"
+import { Images, Loader2, SendHorizontal } from "lucide-react"
 import { useCallback, useEffect, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
 import { useDesktopBridge } from "./bridge-context"
-import type { DesktopGroundedAnswer } from "./contracts"
+import type { DesktopAnswerSourceImage, DesktopGroundedAnswer } from "./contracts"
 
 let requestSequence = 0
 
@@ -23,7 +24,11 @@ type StreamingAnswer = {
 }
 
 /** Ask over the persisted Available Knowledge evidence pack, never browser state. */
-export function DesktopGroundedAnswerPanel() {
+export function DesktopGroundedAnswerPanel({
+  onOpenOriginal,
+}: {
+  onOpenOriginal: (documentId: string, locator: Record<string, unknown>) => void
+}) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
   const [question, setQuestion] = useState("")
@@ -132,7 +137,9 @@ export function DesktopGroundedAnswerPanel() {
           title={t("desktop.knowledgeBases.answerStreaming")}
         />
       ) : null}
-      {answers.length ? answers.map((answer) => <CompletedAnswerCard key={answer.answerId} answer={answer} />) : (
+      {answers.length ? answers.map((answer) => (
+        <CompletedAnswerCard key={answer.answerId} answer={answer} onOpenOriginal={onOpenOriginal} />
+      )) : (
         <p className="rounded-apple-lg border border-dashed border-border/80 p-5 text-sm text-muted-foreground">
           {t("desktop.knowledgeBases.noAnswers")}
         </p>
@@ -141,10 +148,23 @@ export function DesktopGroundedAnswerPanel() {
   )
 }
 
-function CompletedAnswerCard({ answer }: { answer: DesktopGroundedAnswer }) {
+function CompletedAnswerCard({
+  answer,
+  onOpenOriginal,
+}: {
+  answer: DesktopGroundedAnswer
+  onOpenOriginal: (documentId: string, locator: Record<string, unknown>) => void
+}) {
   const { t } = useTranslation("common")
   return (
     <AnswerCard answerText={answer.answerText} title={answer.question}>
+      {answer.sourceImages.length ? (
+        <AnswerSourceImages
+          images={answer.sourceImages}
+          citations={answer.citations}
+          onOpenOriginal={onOpenOriginal}
+        />
+      ) : null}
       {answer.citations.length ? (
         <div className="mt-4 border-t border-border/70 pt-4">
           <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
@@ -153,20 +173,92 @@ function CompletedAnswerCard({ answer }: { answer: DesktopGroundedAnswer }) {
           <ol className="mt-2 space-y-2">
             {answer.citations.map((citation, index) => (
               <li key={citation.evidenceId} className="rounded-md bg-muted/60 px-3 py-2 text-sm">
-                <p className="font-medium">
-                  [{index + 1}] {citation.documentName} · {citation.section}
-                </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {t("desktop.knowledgeBases.answerCitationLocation", {
-                    location: formatLocator(citation.locator),
-                  })}
-                </p>
+                <button
+                  type="button"
+                  onClick={() => onOpenOriginal(citation.documentId, citation.locator)}
+                  className="block w-full rounded-sm text-left outline-none hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <p className="font-medium">
+                    [{index + 1}] {citation.documentName} · {citation.section}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {t("desktop.knowledgeBases.answerCitationLocation", {
+                      location: formatLocator(citation.locator),
+                    })}
+                  </p>
+                </button>
               </li>
             ))}
           </ol>
         </div>
       ) : null}
     </AnswerCard>
+  )
+}
+
+function AnswerSourceImages({
+  images,
+  citations,
+  onOpenOriginal,
+}: {
+  images: DesktopAnswerSourceImage[]
+  citations: DesktopGroundedAnswer["citations"]
+  onOpenOriginal: (documentId: string, locator: Record<string, unknown>) => void
+}) {
+  const { t } = useTranslation("common")
+  const [showAll, setShowAll] = useState(false)
+  const visibleImages = showAll ? images : images.slice(0, 3)
+  return (
+    <section className="mt-4 border-t border-border/70 pt-4">
+      <h3 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+        <Images className="size-3.5" />
+        {t("desktop.knowledgeBases.answerSourceImages")}
+      </h3>
+      <div className="mt-2 grid gap-3 sm:grid-cols-3">
+        {visibleImages.map((image) => {
+          const source = image.filePath ? convertFileSrc(image.filePath) : ""
+          const citationIndex = citations.findIndex(
+            (citation) => citation.evidenceId === image.evidenceId,
+          )
+          return source ? (
+            <button
+              key={image.sourceImageId}
+              type="button"
+              onClick={() => onOpenOriginal(image.documentId, image.locator)}
+              className="overflow-hidden rounded-md border border-border/70 bg-muted/20 text-left outline-none transition-colors hover:border-primary/60 focus-visible:ring-2 focus-visible:ring-ring"
+              title={image.altText ?? image.name}
+            >
+              <img
+                src={source}
+                alt={image.altText ?? image.name}
+                className="h-36 w-full object-contain"
+              />
+              <span className="block truncate border-t border-border/70 px-2 py-1 text-xs text-muted-foreground">
+                {image.altText ?? image.name}
+              </span>
+              {citationIndex >= 0 ? (
+                <span className="block px-2 pb-2 text-[11px] text-muted-foreground">
+                  {t("desktop.knowledgeBases.answerImageCitation", { index: citationIndex + 1 })}
+                </span>
+              ) : null}
+            </button>
+          ) : null
+        })}
+      </div>
+      {images.length > 3 ? (
+        <Button
+          className="mt-3"
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => setShowAll((current) => !current)}
+        >
+          {showAll
+            ? t("desktop.knowledgeBases.answerShowFewerSourceImages")
+            : t("desktop.knowledgeBases.answerViewAllSourceImages", { count: images.length })}
+        </Button>
+      ) : null}
+    </section>
   )
 }
 
@@ -189,7 +281,19 @@ function AnswerCard({
 }
 
 function formatLocator(locator: Record<string, unknown>): string {
-  const values = ["page", "slide", "sheet", "cell", "ordinal"]
+  const values = [
+    "page",
+    "slide",
+    "sheet",
+    "cell_range",
+    "cell",
+    "line_start",
+    "line_end",
+    "paragraph",
+    "table",
+    "body_order",
+    "ordinal",
+  ]
     .flatMap((key) => locator[key] === undefined ? [] : [`${key}: ${String(locator[key])}`])
   return values.length ? values.join(" · ") : "document"
 }

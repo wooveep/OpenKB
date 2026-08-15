@@ -138,6 +138,7 @@
       "originalUnavailable": "The saved original failed its integrity check and this document is excluded from answers.",
       "originalTitle": "Original document",
       "originalMetadata": "{{bytes}} bytes · SHA-256 {{sha256}}",
+      "originalFocusLocation": "Viewing source position · {{location}}",
       "importSourceErrors": {
         "unsupported_import_format": "This format is not supported yet.",
         "import_directory_empty": "This folder contains no files.",
@@ -209,6 +210,10 @@
       "askingQuestion": "Answering…",
       "answerStreaming": "Generating answer…",
       "noAnswers": "Ask a question to begin a grounded answer history.",
+      "answerSourceImages": "Relevant source images",
+      "answerImageCitation": "Source for citation [{{index}}]",
+      "answerViewAllSourceImages": "View all {{count}} images",
+      "answerShowFewerSourceImages": "Show fewer images",
       "answerSources": "Source evidence",
       "answerCitationLocation": "Original position · {{location}}"
     }

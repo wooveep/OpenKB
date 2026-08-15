@@ -202,12 +202,25 @@ export interface DesktopEvidenceRef {
   channels: string[]
 }
 
+export interface DesktopAnswerSourceImage {
+  sourceImageId: string
+  evidenceId: string
+  documentId: string
+  documentName: string
+  name: string
+  mediaType: string
+  filePath: string
+  altText: string | null
+  locator: Record<string, unknown>
+}
+
 export interface DesktopGroundedAnswer {
   answerId: string
   question: string
   answerText: string
   retrievalPlan: DesktopRetrievalPlan
   citations: DesktopEvidenceRef[]
+  sourceImages: DesktopAnswerSourceImage[]
   degradations: string[]
   createdAt: string
 }

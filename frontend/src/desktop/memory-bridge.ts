@@ -270,6 +270,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
         source: "deterministic",
       },
       citations,
+      sourceImages: [],
       degradations: ["answer_model_unavailable"],
       createdAt: new Date().toISOString(),
     }
@@ -367,7 +368,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 8,
+      schemaVersion: 9,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []
