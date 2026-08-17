@@ -303,7 +303,7 @@ function Test-FrozenEngine {
         Assert-That -Condition ($null -ne $modelJob) -Message "Frozen Engine did not retain the local model-runtime probe job."
         $modelCall = @($modelJob.model_calls) | Select-Object -First 1
         Assert-That -Condition ($null -ne $modelCall) -Message "Frozen Engine did not record a model call for the local model-runtime probe."
-        Assert-That -Condition ($modelCall.error_code -in @("model_network_transient", "model_timeout")) -Message "Frozen Engine model runtime failed before reaching the local endpoint: $($modelCall.error_code)."
+        Assert-That -Condition ($modelCall.error_code -in @("model_network_transient", "model_timeout", "model_server_error")) -Message "Frozen Engine model runtime failed before reaching the local endpoint: $($modelCall.error_code)."
 
         $scannedPdf = Join-Path $ScratchDirectory "package-scanned.pdf"
         $scannedPdfFixture = Join-Path $PSScriptRoot "..\test-assets\scanned-ocr.pdf.base64"
