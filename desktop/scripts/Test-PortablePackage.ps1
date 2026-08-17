@@ -267,6 +267,42 @@ function Test-FrozenEngine {
         Assert-That -Condition ($readImported.result.name -eq "package-source.md") -Message "Frozen Engine returned the wrong imported source document."
         Assert-That -Condition (@($readImported.result.source_images).Count -eq 1) -Message "Frozen Engine did not preserve a relative Markdown source image."
 
+        $modelProbeSource = Join-Path $ScratchDirectory "package-model-probe.txt"
+        [System.IO.File]::WriteAllText(
+            $modelProbeSource,
+            "Portable model-runtime probe.",
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        Write-Frame -Stream $input -Message @{
+            jsonrpc = "2.0"; id = "package-model-settings"; method = "workbench.save_model_settings"; params = @{
+                model = "gpt-4o-mini"
+                api_base_url = "http://127.0.0.1:9/v1"
+                api_key = "package-model-probe-key"
+                max_concurrent_model_calls = 1
+                initial_timeout_seconds = 1
+            }
+        }
+        $modelSettings = Read-Response -Stream $output -RequestId "package-model-settings" -Events $events
+        Assert-SuccessResponse -Response $modelSettings -RequestId "package-model-settings"
+
+        Write-Frame -Stream $input -Message @{
+            jsonrpc = "2.0"; id = "package-model-import"; method = "workbench.import_text_document"; params = @{ source_path = $modelProbeSource }
+        }
+        $modelImport = Read-Response -Stream $output -RequestId "package-model-import" -Events $events -TimeoutSeconds 30
+        Assert-That -Condition ($modelImport.PSObject.Properties.Name -contains "error") -Message "Frozen Engine unexpectedly completed the local model-runtime probe."
+        Assert-That -Condition ($modelImport.error.code -eq "document_quarantined") -Message "Frozen Engine returned the wrong local model-runtime probe error."
+
+        Write-Frame -Stream $input -Message @{
+            jsonrpc = "2.0"; id = "package-model-jobs"; method = "workbench.import_jobs"; params = @{}
+        }
+        $modelJobs = Read-Response -Stream $output -RequestId "package-model-jobs" -Events $events
+        Assert-SuccessResponse -Response $modelJobs -RequestId "package-model-jobs"
+        $modelJob = @($modelJobs.result.jobs | Where-Object { $_.job.source_name -eq "package-model-probe.txt" }) | Select-Object -First 1
+        Assert-That -Condition ($null -ne $modelJob) -Message "Frozen Engine did not retain the local model-runtime probe job."
+        $modelCall = @($modelJob.model_calls) | Select-Object -First 1
+        Assert-That -Condition ($null -ne $modelCall) -Message "Frozen Engine did not record a model call for the local model-runtime probe."
+        Assert-That -Condition ($modelCall.error_code -in @("model_network_transient", "model_timeout")) -Message "Frozen Engine model runtime failed before reaching the local endpoint: $($modelCall.error_code)."
+
         $scannedPdf = Join-Path $ScratchDirectory "package-scanned.pdf"
         $scannedPdfFixture = Join-Path $PSScriptRoot "..\test-assets\scanned-ocr.pdf.base64"
         Assert-That -Condition (Test-Path -LiteralPath $scannedPdfFixture -PathType Leaf) -Message "The portable package scan fixture is missing."

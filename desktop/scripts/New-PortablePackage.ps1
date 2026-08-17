@@ -168,6 +168,7 @@ try {
             --paths $repoRoot `
             --collect-data openkb `
             --collect-data litellm `
+            --collect-submodules tiktoken_ext `
             --collect-data rapidocr_onnxruntime `
             --collect-all tika `
             --add-data "$deepDocRuntime;deepdoc" `
