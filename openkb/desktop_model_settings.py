@@ -29,6 +29,7 @@ MODEL_PROVIDER_CUSTOM = "custom"
 MODEL_PROVIDER_DEEPSEEK = "deepseek"
 _SUPPORTED_MODEL_PROVIDERS = frozenset({MODEL_PROVIDER_CUSTOM, MODEL_PROVIDER_DEEPSEEK})
 _DEEPSEEK_API_HOST = "api.deepseek.com"
+_OPENAI_COMPATIBLE_PROVIDER = "openai"
 
 
 class DesktopModelSettingsError(DesktopKnowledgeBaseError):
@@ -161,19 +162,36 @@ def _required_provider(value: object, api_base_url: str) -> str:
 
 def litellm_model_identifier(provider: str, model: object) -> object:
     """Return LiteLLM's routed model identifier without changing the saved model name."""
-    if provider != MODEL_PROVIDER_DEEPSEEK or not isinstance(model, str):
+    if not isinstance(model, str):
         return model
     normalized_model = model.strip()
-    if not normalized_model or normalized_model.startswith(f"{MODEL_PROVIDER_DEEPSEEK}/"):
+    if not normalized_model:
         return model
-    return f"{MODEL_PROVIDER_DEEPSEEK}/{normalized_model}"
+    if provider == MODEL_PROVIDER_DEEPSEEK:
+        return _with_litellm_provider(MODEL_PROVIDER_DEEPSEEK, normalized_model)
+    if provider == MODEL_PROVIDER_CUSTOM:
+        return _with_litellm_provider(_OPENAI_COMPATIBLE_PROVIDER, normalized_model)
+    return model
 
 
 def _display_model_for_provider(provider: str, model: str) -> str:
-    prefix = f"{MODEL_PROVIDER_DEEPSEEK}/"
-    if provider == MODEL_PROVIDER_DEEPSEEK and model.startswith(prefix):
-        return model.removeprefix(prefix)
+    routed_provider = (
+        MODEL_PROVIDER_DEEPSEEK
+        if provider == MODEL_PROVIDER_DEEPSEEK
+        else _OPENAI_COMPATIBLE_PROVIDER
+        if provider == MODEL_PROVIDER_CUSTOM
+        else None
+    )
+    if routed_provider is not None:
+        prefix = f"{routed_provider}/"
+        if model.startswith(prefix):
+            return model.removeprefix(prefix)
     return model
+
+
+def _with_litellm_provider(provider: str, model: str) -> str:
+    prefix = f"{provider}/"
+    return model if model.startswith(prefix) else f"{prefix}{model}"
 
 
 def _required_model(value: object) -> str:

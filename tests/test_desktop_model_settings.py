@@ -58,7 +58,7 @@ def test_model_defaults_store_a_direct_connection_and_drive_the_gateway(tmp_path
         ).content
         == "complete"
     )
-    assert calls == [("test/model", "persisted-test-key", 25.0)]
+    assert calls == [("openai/test/model", "persisted-test-key", 25.0)]
     config = (kb_dir / ".openkb" / "config.yaml").read_text()
     assert "persisted-test-key" in config
     assert "https://models.example.test/v1" in config

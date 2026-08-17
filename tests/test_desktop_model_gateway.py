@@ -344,7 +344,7 @@ def test_recovery_override_uses_its_model_and_timeout_without_writing_config(tmp
     )
 
     assert result.content == "Recovered"
-    assert models == ["recovery/model"]
+    assert models == ["openai/recovery/model"]
     assert timeouts == [30.0]
     assert config_path.read_text(encoding="utf-8") == "model: default/model\n"
 
