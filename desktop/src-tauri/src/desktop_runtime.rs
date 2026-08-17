@@ -13,7 +13,7 @@ use std::{
         Mutex,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
     menu::{Menu, MenuItem},
@@ -28,6 +28,7 @@ const QUIT_MENU_ID: &str = "desktop.quit";
 const LAUNCH_INTENTS_READY_EVENT: &str = "desktop://launch-intents-ready";
 const TASK_CENTER_EVENT: &str = "desktop://task-center";
 const TRAY_RESTORED_EVENT: &str = "desktop://tray-restored";
+const ACTIVE_KNOWLEDGE_BASE_RESTORED_EVENT: &str = "desktop://active-knowledge-base-restored";
 const SHELL_LOG_FILE: &str = "openkb-shell.log";
 const MAX_SHELL_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
@@ -96,6 +97,7 @@ pub(crate) enum DesktopLaunchIntent {
     OpenKnowledgeBase { kb_dir: String },
     ImportSources { source_paths: Vec<String> },
     PreviousKnowledgeBaseUnavailable { kb_dir: String },
+    ActiveKnowledgeBaseRestored,
 }
 
 pub(crate) fn initialize(app: &App) -> tauri::Result<()> {
@@ -211,6 +213,8 @@ fn start_engine_supervision(app: AppHandle) {
     let startup_handle = app.clone();
     thread::spawn(move || {
         let state = startup_handle.state::<DesktopState>();
+        let started_at = Instant::now();
+        append_application_log(&startup_handle, "OpenKB Desktop Engine startup initiated.");
         if let Err(error) = state.engine.start() {
             append_application_log(
                 &startup_handle,
@@ -223,22 +227,74 @@ fn start_engine_supervision(app: AppHandle) {
                 "OpenKB Desktop Engine did not start during shell setup: {}",
                 error.message
             );
+            return;
         }
+        append_application_log(
+            &startup_handle,
+            &format!(
+                "OpenKB Desktop Engine handshake completed in {} ms.",
+                started_at.elapsed().as_millis()
+            ),
+        );
+        restore_active_knowledge_base(&startup_handle, "startup");
     });
     thread::spawn(move || loop {
         thread::sleep(Duration::from_millis(250));
-        let state = app.state::<DesktopState>();
-        if !state.runtime.should_hide_main_window() {
-            return;
-        }
-        if state.engine.restart_after_unexpected_exit() {
+        let restarted = {
+            let state = app.state::<DesktopState>();
+            if !state.runtime.should_hide_main_window() {
+                return;
+            }
+            state.engine.restart_after_unexpected_exit()
+        };
+        if restarted {
             append_application_log(
                 &app,
                 "OpenKB Desktop Engine restarted after an unexpected exit.",
             );
+            restore_active_knowledge_base(&app, "restart");
             let _ = app.emit("desktop://engine-restarted", ());
         }
     });
+}
+
+fn restore_active_knowledge_base(app: &AppHandle, reason: &str) {
+    let started_at = Instant::now();
+    match app
+        .state::<DesktopState>()
+        .engine
+        .restore_active_knowledge_base()
+    {
+        Ok(true) => {
+            append_application_log(
+                app,
+                &format!(
+                    "OpenKB active knowledge base restored after {reason} in {} ms.",
+                    started_at.elapsed().as_millis()
+                ),
+            );
+            app.state::<DesktopState>()
+                .runtime
+                .enqueue_launch_intents(vec![DesktopLaunchIntent::ActiveKnowledgeBaseRestored]);
+            let _ = app.emit(ACTIVE_KNOWLEDGE_BASE_RESTORED_EVENT, ());
+        }
+        Ok(false) => {
+            append_application_log(app, "No active knowledge base needs restoration.");
+        }
+        Err(error) => {
+            append_application_log(
+                app,
+                &format!(
+                    "OpenKB active knowledge base restoration failed after {reason}: {}",
+                    error.message
+                ),
+            );
+            eprintln!(
+                "OpenKB active knowledge base restoration failed after {reason}: {}",
+                error.message
+            );
+        }
+    }
 }
 
 fn launch_paths(args: Vec<String>, cwd: &Path) -> (Vec<String>, Vec<String>) {

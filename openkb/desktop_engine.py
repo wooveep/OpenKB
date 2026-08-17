@@ -272,6 +272,11 @@ class DesktopEngineServer:
         worker.start()
 
     def _run_request(self, request: DesktopRequest, cancel_event: threading.Event | None) -> None:
+        logger.info(
+            "engine_request_started request_id=%s method=%s",
+            request.request_id,
+            request.method,
+        )
         self._emit_event("engine.request_started", {"request_id": request.request_id})
         completed_data: dict[str, object] = {"request_id": request.request_id, "ok": False}
         try:
@@ -289,6 +294,13 @@ class DesktopEngineServer:
             completed_data["ok"] = True
         except DesktopRequestError as error:
             completed_data["error_code"] = error.code
+            logger.warning(
+                "engine_request_failed request_id=%s method=%s error_code=%s detail=%r",
+                request.request_id,
+                request.method,
+                error.code,
+                str(error),
+            )
             self._write_error(request.request_id, error.code, str(error))
         except (
             DesktopAnswerError,
@@ -297,11 +309,30 @@ class DesktopEngineServer:
             DesktopImportError,
         ) as error:
             completed_data["error_code"] = error.code
+            logger.warning(
+                "engine_request_failed request_id=%s method=%s error_code=%s detail=%r",
+                request.request_id,
+                request.method,
+                error.code,
+                str(error),
+            )
             self._write_error(request.request_id, error.code, str(error))
         except Exception as error:  # Keep unexpected Engine failures behind a stable boundary.
             completed_data["error_code"] = "engine_request_failed"
+            logger.exception(
+                "engine_request_failed request_id=%s method=%s error_code=engine_request_failed",
+                request.request_id,
+                request.method,
+            )
             self._write_error(request.request_id, "engine_request_failed", str(error))
         finally:
+            logger.info(
+                "engine_request_completed request_id=%s method=%s ok=%s error_code=%s",
+                request.request_id,
+                request.method,
+                completed_data["ok"],
+                completed_data.get("error_code"),
+            )
             if cancel_event is not None:
                 with self._active_lock:
                     request_key = str(request.request_id)

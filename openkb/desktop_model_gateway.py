@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import uuid
@@ -23,6 +24,8 @@ ModelDeltaCallback = Callable[[int, str], None]
 ModelStreamTransport = Callable[["DesktopModelRequest", float, ModelTransportDeltaCallback], object]
 RetryCallback = Callable[[int], None]
 CancellationCallback = Callable[[], bool]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -70,10 +73,19 @@ class DesktopModelFailure:
 class DesktopModelTransportError(RuntimeError):
     """Adapter-visible provider failure with a deliberately narrow category."""
 
-    def __init__(self, category: str, *, retry_after_seconds: float | None = None) -> None:
+    def __init__(
+        self,
+        category: str,
+        *,
+        retry_after_seconds: float | None = None,
+        diagnostic_type: str | None = None,
+        diagnostic_detail: str | None = None,
+    ) -> None:
         super().__init__(category)
         self.category = category
         self.retry_after_seconds = retry_after_seconds
+        self.diagnostic_type = diagnostic_type
+        self.diagnostic_detail = diagnostic_detail
 
 
 class DesktopModelCallError(RuntimeError):
@@ -276,6 +288,19 @@ class DesktopModelGateway:
             except Exception as error:
                 failure = classify_model_error(error)
                 remaining = _remaining_seconds(started_at, self._clock())
+                exception_type, diagnostic_detail = _diagnostic_error_detail(error)
+                logger.warning(
+                    "model_attempt_failed call_id=%s operation=%s document=%r attempt=%s "
+                    "category=%s retryable=%s exception_type=%s detail=%r",
+                    call_id,
+                    request.operation,
+                    request.document_name,
+                    attempt_index + 1,
+                    failure.code,
+                    failure.retryable,
+                    exception_type,
+                    diagnostic_detail,
+                )
                 if remaining <= 0:
                     raise self._deadline_error(call_id, attempt_index + 1, on_event) from error
                 if failure.retryable and attempt_index < MAX_AUTOMATIC_RETRIES:
@@ -515,6 +540,17 @@ def classify_model_error(error: Exception) -> DesktopModelFailure:
     if isinstance(error, (TypeError, ValueError, json.JSONDecodeError)):
         return _FAILURES["model_response_invalid"]
     return _FAILURES["model_service_unavailable"]
+
+
+def _diagnostic_error_detail(error: Exception) -> tuple[str, str]:
+    """Return local-log detail without changing the stable user-facing failure text."""
+    if isinstance(error, DesktopModelTransportError):
+        return (
+            error.diagnostic_type or type(error).__name__,
+            error.diagnostic_detail or error.category,
+        )
+    detail = str(error).strip() or type(error).__name__
+    return type(error).__name__, detail[:500]
 
 
 def _remaining_seconds(started_at: float, now: float) -> float:

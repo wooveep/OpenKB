@@ -428,7 +428,6 @@ impl EngineSupervisor {
         *stored = Some(handshake.clone());
         drop(stored);
         self.has_started.store(true, Ordering::Release);
-        self.restore_active_knowledge_base()?;
         Ok(handshake)
     }
 

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
@@ -27,6 +29,8 @@ from openkb.desktop_model_settings import (
 
 _concurrency_gates: dict[Path, _DesktopModelConcurrencyGate] = {}
 _concurrency_gates_lock = threading.Lock()
+
+logger = logging.getLogger(__name__)
 
 
 def desktop_model_gateway_for(
@@ -222,6 +226,16 @@ class DesktopLiteLLMTransport:
         if not self._bundle.api_key:
             raise DesktopModelTransportError("configuration")
 
+        logger.info(
+            "model_provider_request operation=%s document=%r model=%r endpoint=%r "
+            "timeout_seconds=%.1f stream=%s",
+            request.operation,
+            request.document_name,
+            self._model,
+            _diagnostic_endpoint(self._bundle.base_url),
+            timeout_seconds,
+            stream,
+        )
         try:
             from litellm import completion
 
@@ -241,7 +255,23 @@ class DesktopLiteLLMTransport:
         except Exception as error:
             category = _provider_error_category(error)
             if category is not None:
-                raise DesktopModelTransportError(category) from error
+                diagnostic_detail = _provider_error_detail(error, self._bundle.api_key)
+                logger.warning(
+                    "model_provider_request_failed operation=%s document=%r model=%r "
+                    "endpoint=%r category=%s exception_type=%s detail=%r",
+                    request.operation,
+                    request.document_name,
+                    self._model,
+                    _diagnostic_endpoint(self._bundle.base_url),
+                    category,
+                    type(error).__name__,
+                    diagnostic_detail,
+                )
+                raise DesktopModelTransportError(
+                    category,
+                    diagnostic_type=type(error).__name__,
+                    diagnostic_detail=diagnostic_detail,
+                ) from error
             raise
         return response
 
@@ -352,6 +382,24 @@ def _provider_error_category(error: Exception) -> str | None:
     if any(fragment in name for fragment in ("internalserver", "serviceunavailable")):
         return "server"
     return None
+
+
+def _diagnostic_endpoint(base_url: str | None) -> str | None:
+    """Keep a useful provider address in local logs without query credentials."""
+    if not base_url:
+        return None
+    parsed = urlsplit(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        return "<invalid-api-base-url>"
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _provider_error_detail(error: Exception, api_key: str | None) -> str:
+    """Bound provider diagnostics and remove the directly configured API Key."""
+    detail = str(error).strip() or type(error).__name__
+    if api_key:
+        detail = detail.replace(api_key, "<REDACTED>")
+    return detail[:500]
 
 
 def _value(value: object, key: str) -> object:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -54,6 +55,25 @@ def test_gateway_retries_transient_failures_after_the_initial_attempt():
         "running",
         "failed",
     ]
+
+
+def test_gateway_logs_each_network_attempt_with_diagnostic_detail(caplog):
+    """A quarantined model-analysis failure remains diagnosable in the application log."""
+
+    def network_transport(_request, _timeout_seconds):
+        raise ConnectionError("connection reset by peer")
+
+    with caplog.at_level(logging.INFO, logger="openkb.desktop_model_gateway"):
+        with pytest.raises(DesktopModelCallError):
+            DesktopModelGateway(network_transport).analyze(
+                DesktopModelRequest("document_analysis", "guide.txt", "source"),
+                on_event=lambda _event: None,
+            )
+
+    assert "model_attempt_failed" in caplog.text
+    assert "category=model_network_transient" in caplog.text
+    assert "exception_type=ConnectionError" in caplog.text
+    assert "connection reset by peer" in caplog.text
 
 
 def test_gateway_deadline_truncates_remaining_retries():

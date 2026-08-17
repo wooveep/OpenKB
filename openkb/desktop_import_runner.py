@@ -336,6 +336,16 @@ class DesktopTextImportService:
         except _DuplicateImport as duplicate:
             return self._result(state.job_id, duplicate.document_id, deduplicated=True)
         except DesktopModelCallError as error:
+            logger.warning(
+                "import_model_analysis_quarantined job_id=%s document=%r stage=%s "
+                "call_id=%s attempts=%s category=%s",
+                state.job_id,
+                state.source.name,
+                active_stage,
+                error.call_id,
+                error.attempt_count,
+                error.failure.code,
+            )
             self._model_ledger.quarantine(
                 job_id=state.job_id,
                 stage_run_id=state.stage_ids[active_stage],
@@ -395,6 +405,21 @@ class DesktopTextImportService:
             )
 
         def record_attempt(event: DesktopModelAttemptEvent) -> None:
+            logger.info(
+                "import_model_attempt job_id=%s document=%r stage=%s call_id=%s "
+                "attempt=%s status=%s timeout_seconds=%.1f remaining_seconds=%.1f "
+                "error_code=%s next_timeout_seconds=%s",
+                state.job_id,
+                state.source.name,
+                stage,
+                event.call_id,
+                event.attempt,
+                event.status,
+                event.timeout_seconds,
+                event.remaining_seconds,
+                event.error_code,
+                event.next_timeout_seconds,
+            )
             self._model_ledger.record_attempt(
                 job_id=state.job_id,
                 stage_run_id=state.stage_ids[stage],

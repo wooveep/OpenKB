@@ -47,6 +47,9 @@ export function useDesktopRuntimeEvents({
         onRuntimeNotice("previousKnowledgeBaseUnavailable")
         return Promise.resolve()
       }
+      if (intent.kind === "activeKnowledgeBaseRestored") {
+        return refreshActiveKnowledgeBase()
+      }
       importSourcesRef.current(intent.sourcePaths)
       setSection("documents")
       return Promise.resolve()
@@ -61,6 +64,8 @@ export function useDesktopRuntimeEvents({
         drainLaunchIntents()
       } else if (event.kind === "tasks.requested") {
         setSection("documents")
+      } else if (event.kind === "activeKnowledgeBaseRestored") {
+        void refreshActiveKnowledgeBase()
       } else if (event.kind === "tray.restored") {
         onRuntimeNotice("trayRestored")
       } else {

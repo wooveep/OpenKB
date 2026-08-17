@@ -174,6 +174,7 @@ export class TauriDesktopBridge implements DesktopBridge {
       listen("desktop://launch-intents-ready", () => listener({ kind: "launch_intents_available" })),
       listen("desktop://task-center", () => listener({ kind: "tasks.requested" })),
       listen("desktop://engine-restarted", () => listener({ kind: "engine.restarted" })),
+      listen("desktop://active-knowledge-base-restored", () => listener({ kind: "activeKnowledgeBaseRestored" })),
       listen("desktop://tray-restored", () => listener({ kind: "tray.restored" })),
     ])
     return () => listeners.forEach((remove) => remove())
@@ -637,6 +638,12 @@ function runtimeLaunchIntent(payload: Record<string, unknown>): DesktopRuntimeLa
   if (payload.kind === "importSources" && Array.isArray(payload.sourcePaths)) {
     const sourcePaths = payload.sourcePaths.filter(nonEmptyString)
     return sourcePaths.length ? { kind: "importSources", sourcePaths } : null
+  }
+  if (payload.kind === "previousKnowledgeBaseUnavailable" && nonEmptyString(payload.kbDir)) {
+    return { kind: "previousKnowledgeBaseUnavailable", kbDir: payload.kbDir }
+  }
+  if (payload.kind === "activeKnowledgeBaseRestored") {
+    return { kind: "activeKnowledgeBaseRestored" }
   }
   return null
 }

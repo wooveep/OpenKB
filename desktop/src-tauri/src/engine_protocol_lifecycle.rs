@@ -61,7 +61,7 @@ impl EngineSupervisor {
         let _ = self.stop_child_with_grace(SHUTDOWN_TIMEOUT);
     }
 
-    pub(super) fn restore_active_knowledge_base(&self) -> BridgeResult<()> {
+    pub(crate) fn restore_active_knowledge_base(&self) -> BridgeResult<bool> {
         let active_kb_dir = self
             .active_kb_dir
             .lock()
@@ -78,8 +78,9 @@ impl EngineSupervisor {
                 json!({ "kb_dir": kb_dir }),
                 None,
             )?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 }
 

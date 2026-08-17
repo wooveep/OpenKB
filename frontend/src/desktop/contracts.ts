@@ -161,11 +161,13 @@ export type DesktopRuntimeLaunchIntent =
   | { kind: "openKnowledgeBase"; kbDir: string }
   | { kind: "importSources"; sourcePaths: string[] }
   | { kind: "previousKnowledgeBaseUnavailable"; kbDir: string }
+  | { kind: "activeKnowledgeBaseRestored" }
 
 export type DesktopRuntimeEvent =
   | { kind: "launch_intents_available" }
   | { kind: "tasks.requested" }
   | { kind: "engine.restarted" }
+  | { kind: "activeKnowledgeBaseRestored" }
   | { kind: "tray.restored" }
 
 export interface DesktopRawDocument {
