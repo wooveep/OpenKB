@@ -360,6 +360,7 @@ export class DesktopBridgeError extends Error {
 
 /** KB-local model connection values passed only through the private Desktop Bridge. */
 export interface DesktopModelSettings {
+  provider: string
   model: string
   apiBaseUrl: string
   apiKey: string
@@ -389,6 +390,7 @@ export interface DesktopBridge {
   revealApplicationLogDirectory(): Promise<void>
   modelSettings(): Promise<DesktopModelSettings>
   saveModelSettings(
+    provider: string,
     model: string,
     apiBaseUrl: string,
     apiKey: string,

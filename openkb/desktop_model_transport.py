@@ -24,6 +24,7 @@ from openkb.desktop_model_settings import (
     DEFAULT_MAX_CONCURRENT_MODEL_CALLS,
     DesktopModelSettings,
     DesktopModelSettingsError,
+    litellm_model_identifier,
     read_desktop_model_settings,
 )
 
@@ -64,7 +65,13 @@ def desktop_model_gateway_for(
     )
     if bundle.api_key is None and not config_path.exists() and override is None:
         return None
-    return _gateway_for(model, bundle, override, kb_dir=resolved, settings=settings)
+    return _gateway_for(
+        litellm_model_identifier(settings.provider, model),
+        bundle,
+        override,
+        kb_dir=resolved,
+        settings=settings,
+    )
 
 
 def _gateway_for(
@@ -111,9 +118,7 @@ class _DesktopModelConcurrencyGate:
             self._maximum = maximum
             self._condition.notify_all()
 
-    def acquire(
-        self, is_cancelled: Callable[[], bool] | None, remaining_seconds: float
-    ) -> bool:
+    def acquire(self, is_cancelled: Callable[[], bool] | None, remaining_seconds: float) -> bool:
         deadline = time.monotonic() + remaining_seconds
         with self._condition:
             while self._active >= self._maximum:

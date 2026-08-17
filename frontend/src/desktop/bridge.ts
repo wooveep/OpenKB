@@ -102,6 +102,7 @@ export class TauriDesktopBridge implements DesktopBridge {
   }
 
   async saveModelSettings(
+    provider: string,
     model: string,
     apiBaseUrl: string,
     apiKey: string,
@@ -110,6 +111,7 @@ export class TauriDesktopBridge implements DesktopBridge {
     requestId: string,
   ): Promise<DesktopModelSettings> {
     return this.call<DesktopModelSettings>("desktop_save_model_settings", {
+      provider,
       model,
       apiBaseUrl,
       apiKey,
@@ -402,6 +404,7 @@ class UnavailableDesktopBridge implements DesktopBridge {
   }
 
   saveModelSettings(
+    provider: string,
     model: string,
     apiBaseUrl: string,
     apiKey: string,
@@ -409,6 +412,7 @@ class UnavailableDesktopBridge implements DesktopBridge {
     initialTimeoutSeconds: number,
     requestId: string,
   ): Promise<DesktopModelSettings> {
+    void provider
     void model
     void apiBaseUrl
     void apiKey

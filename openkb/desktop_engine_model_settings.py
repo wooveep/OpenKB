@@ -38,6 +38,7 @@ def dispatch_model_settings_request(
             server._begin_workspace_mutation(request, cancel_event)
             return save_desktop_model_settings(
                 kb_dir,
+                provider=request.params.get("provider"),
                 model=request.params.get("model"),
                 api_base_url=request.params.get("api_base_url"),
                 api_key=request.params.get("api_key"),

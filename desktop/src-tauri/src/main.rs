@@ -227,6 +227,7 @@ async fn desktop_model_settings(
 #[tauri::command(rename_all = "camelCase")]
 async fn desktop_save_model_settings(
     state: State<'_, DesktopState>,
+    provider: String,
     model: String,
     api_base_url: String,
     api_key: String,
@@ -237,6 +238,7 @@ async fn desktop_save_model_settings(
     let engine = Arc::clone(&state.engine);
     tauri::async_runtime::spawn_blocking(move || {
         engine.save_model_settings(
+            provider,
             model,
             api_base_url,
             api_key,

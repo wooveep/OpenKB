@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSettings {
+    #[serde(default = "default_model_provider")]
+    pub provider: String,
     pub model: String,
     #[serde(alias = "api_base_url")]
     pub api_base_url: String,
@@ -18,6 +20,10 @@ pub struct ModelSettings {
     pub initial_timeout_seconds: f64,
     #[serde(alias = "model_call_deadline_seconds")]
     pub model_call_deadline_seconds: f64,
+}
+
+fn default_model_provider() -> String {
+    "custom".to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

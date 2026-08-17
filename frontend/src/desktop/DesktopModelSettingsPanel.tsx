@@ -16,6 +16,7 @@ import { nextDesktopRequestId } from "./request-id"
 import type { DesktopModelSettings } from "./contracts"
 
 type ModelSettingsDraft = {
+  provider: string
   model: string
   apiBaseUrl: string
   apiKey: string
@@ -34,6 +35,7 @@ const diagnosticFiles = [
 
 function draftFrom(settings: DesktopModelSettings): ModelSettingsDraft {
   return {
+    provider: settings.provider,
     model: settings.model,
     apiBaseUrl: settings.apiBaseUrl,
     apiKey: settings.apiKey,
@@ -90,6 +92,7 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
     setNotice(null)
     try {
       const result = await bridge.saveModelSettings(
+        draft.provider,
         draft.model,
         draft.apiBaseUrl,
         draft.apiKey,
@@ -175,6 +178,29 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
         {notice ? <p className="mt-4 rounded-lg border border-emerald-600/25 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300">{notice}</p> : null}
 
         <div className="mt-5 grid gap-4 md:grid-cols-2">
+          <label className="block text-sm font-medium">
+            {t("desktop.knowledgeBases.modelSettings.provider")}
+            <select
+              className="mt-1.5 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
+              value={draft.provider}
+              disabled={saving}
+              onChange={(event) => setDraft((current) => {
+                if (!current) return current
+                const provider = event.target.value
+                return {
+                  ...current,
+                  provider,
+                  apiBaseUrl: provider === "deepseek" ? "https://api.deepseek.com" : current.apiBaseUrl,
+                }
+              })}
+            >
+              <option value="deepseek">{t("desktop.knowledgeBases.modelSettings.providerDeepSeek")}</option>
+              <option value="custom">{t("desktop.knowledgeBases.modelSettings.providerCustom")}</option>
+            </select>
+            <span className="mt-1 block text-xs font-normal leading-5 text-muted-foreground">
+              {t("desktop.knowledgeBases.modelSettings.providerHelp")}
+            </span>
+          </label>
           <label className="block text-sm font-medium">
             {t("desktop.knowledgeBases.modelSettings.model")}
             <Input className="mt-1.5" value={draft.model} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, model: event.target.value } : current)} />

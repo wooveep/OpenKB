@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -24,6 +25,10 @@ from openkb.locks import kb_ingest_lock
 
 DEFAULT_MAX_CONCURRENT_MODEL_CALLS = 1
 _MAX_CONCURRENT_MODEL_CALLS = 8
+MODEL_PROVIDER_CUSTOM = "custom"
+MODEL_PROVIDER_DEEPSEEK = "deepseek"
+_SUPPORTED_MODEL_PROVIDERS = frozenset({MODEL_PROVIDER_CUSTOM, MODEL_PROVIDER_DEEPSEEK})
+_DEEPSEEK_API_HOST = "api.deepseek.com"
 
 
 class DesktopModelSettingsError(DesktopKnowledgeBaseError):
@@ -37,6 +42,7 @@ class DesktopModelSettingsError(DesktopKnowledgeBaseError):
 class DesktopModelSettings:
     """The complete model configuration shown by the Desktop Settings workbench."""
 
+    provider: str
     model: str
     api_base_url: str
     api_key: str
@@ -46,6 +52,7 @@ class DesktopModelSettings:
 
     def as_dict(self) -> dict[str, object]:
         return {
+            "provider": self.provider,
             "model": self.model,
             "api_base_url": self.api_base_url,
             "api_key": self.api_key,
@@ -68,10 +75,12 @@ def read_desktop_model_settings(kb_dir: Path) -> DesktopModelSettings:
     config = _config_mapping(resolved / ".openkb" / "config.yaml")
     desktop = config.get("desktop")
     desktop_values = desktop if isinstance(desktop, dict) else {}
-    model = _default_model(config.get("model"))
+    api_base_url = _default_api_base_url(desktop_values.get("api_base_url"))
+    provider = _default_provider(desktop_values.get("provider"), api_base_url)
     return DesktopModelSettings(
-        model=model,
-        api_base_url=_default_api_base_url(desktop_values.get("api_base_url")),
+        provider=provider,
+        model=_display_model_for_provider(provider, _default_model(config.get("model"))),
+        api_base_url=api_base_url,
         api_key=_default_api_key(desktop_values.get("api_key")),
         max_concurrent_model_calls=_default_concurrency(
             desktop_values.get("max_concurrent_model_calls")
@@ -83,6 +92,7 @@ def read_desktop_model_settings(kb_dir: Path) -> DesktopModelSettings:
 def save_desktop_model_settings(
     kb_dir: Path,
     *,
+    provider: object = None,
     model: object,
     api_base_url: object,
     api_key: object,
@@ -90,8 +100,9 @@ def save_desktop_model_settings(
     initial_timeout_seconds: object,
 ) -> DesktopModelSettings:
     """Persist the user-selected model connection in this Desktop Knowledge Base."""
-    normalized_model = _required_model(model)
     normalized_api_base_url = _required_api_base_url(api_base_url)
+    normalized_provider = _required_provider(provider, normalized_api_base_url)
+    normalized_model = _display_model_for_provider(normalized_provider, _required_model(model))
     normalized_api_key = _required_api_key(api_key)
     normalized_concurrency = _required_concurrency(max_concurrent_model_calls)
     normalized_timeout = _required_timeout(initial_timeout_seconds)
@@ -104,6 +115,7 @@ def save_desktop_model_settings(
         config["model"] = normalized_model
         desktop_values.update(
             {
+                "provider": normalized_provider,
                 "api_base_url": normalized_api_base_url,
                 "api_key": normalized_api_key,
                 "max_concurrent_model_calls": normalized_concurrency,
@@ -129,6 +141,41 @@ def _default_model(value: object) -> str:
     return str(DEFAULT_CONFIG["model"])
 
 
+def _default_provider(value: object, api_base_url: str) -> str:
+    if isinstance(value, str) and value.strip() in _SUPPORTED_MODEL_PROVIDERS:
+        return value.strip()
+    return (
+        MODEL_PROVIDER_DEEPSEEK
+        if _is_deepseek_api_base_url(api_base_url)
+        else MODEL_PROVIDER_CUSTOM
+    )
+
+
+def _required_provider(value: object, api_base_url: str) -> str:
+    if value is None:
+        return _default_provider(value, api_base_url)
+    if isinstance(value, str) and value.strip() in _SUPPORTED_MODEL_PROVIDERS:
+        return value.strip()
+    raise DesktopModelSettingsError("Choose a supported model provider.")
+
+
+def litellm_model_identifier(provider: str, model: object) -> object:
+    """Return LiteLLM's routed model identifier without changing the saved model name."""
+    if provider != MODEL_PROVIDER_DEEPSEEK or not isinstance(model, str):
+        return model
+    normalized_model = model.strip()
+    if not normalized_model or normalized_model.startswith(f"{MODEL_PROVIDER_DEEPSEEK}/"):
+        return model
+    return f"{MODEL_PROVIDER_DEEPSEEK}/{normalized_model}"
+
+
+def _display_model_for_provider(provider: str, model: str) -> str:
+    prefix = f"{MODEL_PROVIDER_DEEPSEEK}/"
+    if provider == MODEL_PROVIDER_DEEPSEEK and model.startswith(prefix):
+        return model.removeprefix(prefix)
+    return model
+
+
 def _required_model(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise DesktopModelSettingsError("Choose a non-empty default model.")
@@ -139,6 +186,10 @@ def _default_api_base_url(value: object) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return DEFAULT_API_BASE_URL
+
+
+def _is_deepseek_api_base_url(api_base_url: str) -> bool:
+    return urlsplit(api_base_url).hostname == _DEEPSEEK_API_HOST
 
 
 def _required_api_base_url(value: object) -> str:

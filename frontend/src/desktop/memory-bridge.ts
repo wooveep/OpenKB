@@ -45,6 +45,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
   private documentVersionCandidateResults: DesktopDocumentVersionCandidate[] = []
   private knowledgeReconciliationConflictResults: DesktopKnowledgeReconciliationConflict[] = []
   private modelSettingsResult: DesktopModelSettings = {
+    provider: "custom",
     model: "gpt-5.4",
     apiBaseUrl: "https://api.openai.com/v1",
     apiKey: "",
@@ -114,6 +115,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
   }
 
   async saveModelSettings(
+    provider: string,
     model: string,
     apiBaseUrl: string,
     apiKey: string,
@@ -124,6 +126,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     void requestId
     this.modelSettingsResult = {
       ...this.modelSettingsResult,
+      provider,
       model,
       apiBaseUrl,
       apiKey,

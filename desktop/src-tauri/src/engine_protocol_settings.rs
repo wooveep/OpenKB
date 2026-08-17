@@ -10,6 +10,7 @@ impl EngineSupervisor {
 
     pub fn save_model_settings(
         &self,
+        provider: String,
         model: String,
         api_base_url: String,
         api_key: String,
@@ -20,6 +21,7 @@ impl EngineSupervisor {
         self.request_model_settings(
             "workbench.save_model_settings",
             json!({
+                "provider": provider,
                 "model": model,
                 "api_base_url": api_base_url,
                 "api_key": api_key,
