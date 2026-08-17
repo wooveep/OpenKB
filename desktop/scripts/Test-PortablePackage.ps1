@@ -267,6 +267,26 @@ function Test-FrozenEngine {
         Assert-That -Condition ($readImported.result.name -eq "package-source.md") -Message "Frozen Engine returned the wrong imported source document."
         Assert-That -Condition (@($readImported.result.source_images).Count -eq 1) -Message "Frozen Engine did not preserve a relative Markdown source image."
 
+        $scannedPdf = Join-Path $ScratchDirectory "package-scanned.pdf"
+        $scannedPdfFixture = Join-Path $PSScriptRoot "..\test-assets\scanned-ocr.pdf.base64"
+        Assert-That -Condition (Test-Path -LiteralPath $scannedPdfFixture -PathType Leaf) -Message "The portable package scan fixture is missing."
+        [System.IO.File]::WriteAllBytes(
+            $scannedPdf,
+            [Convert]::FromBase64String((Get-Content -Raw -LiteralPath $scannedPdfFixture))
+        )
+        Write-Frame -Stream $input -Message @{
+            jsonrpc = "2.0"; id = "package-scan-import"; method = "workbench.import_text_document"; params = @{ source_path = $scannedPdf }
+        }
+        # First-run ONNX initialization is a packaging smoke check, not the Desktop
+        # model-response budget. Allow slower clean Windows machines to load it once.
+        Write-Host "Testing frozen scanned-PDF import..."
+        $scannedImport = Read-Response -Stream $output -RequestId "package-scan-import" -Events $events -TimeoutSeconds 180
+        Assert-SuccessResponse -Response $scannedImport -RequestId "package-scan-import"
+        Assert-That -Condition ($scannedImport.result.job.status -eq "completed") -Message "Frozen Engine did not complete an offline scanned-PDF import."
+        Assert-That -Condition ($scannedImport.result.document.availability -eq "available") -Message "Frozen Engine did not publish the scanned-PDF import."
+
+        # Keep this last: the deliberately invalid endpoint becomes KB-local
+        # configuration, and must not affect the offline parser smoke checks.
         $modelProbeSource = Join-Path $ScratchDirectory "package-model-probe.txt"
         [System.IO.File]::WriteAllText(
             $modelProbeSource,
@@ -304,24 +324,6 @@ function Test-FrozenEngine {
         $modelCall = @($modelJob.model_calls) | Select-Object -First 1
         Assert-That -Condition ($null -ne $modelCall) -Message "Frozen Engine did not record a model call for the local model-runtime probe."
         Assert-That -Condition ($modelCall.error_code -in @("model_network_transient", "model_timeout", "model_server_error")) -Message "Frozen Engine model runtime failed before reaching the local endpoint: $($modelCall.error_code)."
-
-        $scannedPdf = Join-Path $ScratchDirectory "package-scanned.pdf"
-        $scannedPdfFixture = Join-Path $PSScriptRoot "..\test-assets\scanned-ocr.pdf.base64"
-        Assert-That -Condition (Test-Path -LiteralPath $scannedPdfFixture -PathType Leaf) -Message "The portable package scan fixture is missing."
-        [System.IO.File]::WriteAllBytes(
-            $scannedPdf,
-            [Convert]::FromBase64String((Get-Content -Raw -LiteralPath $scannedPdfFixture))
-        )
-        Write-Frame -Stream $input -Message @{
-            jsonrpc = "2.0"; id = "package-scan-import"; method = "workbench.import_text_document"; params = @{ source_path = $scannedPdf }
-        }
-        # First-run ONNX initialization is a packaging smoke check, not the Desktop
-        # model-response budget. Allow slower clean Windows machines to load it once.
-        Write-Host "Testing frozen scanned-PDF import..."
-        $scannedImport = Read-Response -Stream $output -RequestId "package-scan-import" -Events $events -TimeoutSeconds 180
-        Assert-SuccessResponse -Response $scannedImport -RequestId "package-scan-import"
-        Assert-That -Condition ($scannedImport.result.job.status -eq "completed") -Message "Frozen Engine did not complete an offline scanned-PDF import."
-        Assert-That -Condition ($scannedImport.result.document.availability -eq "available") -Message "Frozen Engine did not publish the scanned-PDF import."
 
         Write-Frame -Stream $input -Message @{
             jsonrpc = "2.0"; id = "package-no-legacy-workbench"; method = "workbench.inspect_knowledge_base"; params = @{}
