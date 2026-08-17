@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 //! OpenKB Desktop Shell: native window ownership and typed Engine mediation.
 
 mod desktop_runtime;
@@ -99,6 +101,22 @@ async fn desktop_active_knowledge_base(
             code: "desktop_command_failed".to_owned(),
             message: format!("Desktop active knowledge-base task stopped unexpectedly: {error}"),
         })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn desktop_reveal_knowledge_base_directory(kb_dir: String) -> Result<(), BridgeError> {
+    desktop_runtime::reveal_directory(Path::new(&kb_dir)).map_err(|message| BridgeError {
+        code: "desktop_directory_open_failed".to_owned(),
+        message,
+    })
+}
+
+#[tauri::command]
+fn desktop_reveal_application_log_directory(app: tauri::AppHandle) -> Result<(), BridgeError> {
+    desktop_runtime::reveal_application_log_directory(&app).map_err(|message| BridgeError {
+        code: "desktop_directory_open_failed".to_owned(),
+        message,
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -210,7 +228,8 @@ async fn desktop_model_settings(
 async fn desktop_save_model_settings(
     state: State<'_, DesktopState>,
     model: String,
-    credential_reference: String,
+    api_base_url: String,
+    api_key: String,
     max_concurrent_model_calls: u32,
     initial_timeout_seconds: f64,
     request_id: String,
@@ -219,7 +238,8 @@ async fn desktop_save_model_settings(
     tauri::async_runtime::spawn_blocking(move || {
         engine.save_model_settings(
             model,
-            credential_reference,
+            api_base_url,
+            api_key,
             max_concurrent_model_calls,
             initial_timeout_seconds,
             request_id,
@@ -503,7 +523,13 @@ fn main() {
                 if state.runtime.should_hide_main_window() {
                     api.prevent_close();
                     if let Err(error) = window.hide() {
+                        desktop_runtime::append_application_log(
+                            window.app_handle(),
+                            &format!("Could not hide OpenKB Desktop window to the tray: {error}"),
+                        );
                         eprintln!("Could not hide OpenKB Desktop window to the tray: {error}");
+                    } else {
+                        state.runtime.note_main_window_hidden();
                     }
                 }
             }
@@ -515,6 +541,8 @@ fn main() {
             desktop_open_knowledge_base,
             desktop_take_launch_intents,
             desktop_active_knowledge_base,
+            desktop_reveal_knowledge_base_directory,
+            desktop_reveal_application_log_directory,
             desktop_inspect_import_sources,
             desktop_import_text_document,
             desktop_import_jobs,

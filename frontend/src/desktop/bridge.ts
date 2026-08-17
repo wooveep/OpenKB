@@ -83,20 +83,36 @@ export class TauriDesktopBridge implements DesktopBridge {
     return this.call<DesktopActiveKnowledgeBase>("desktop_active_knowledge_base")
   }
 
+  async chooseKnowledgeBaseDirectory(): Promise<string | null> {
+    const { open } = await import("@tauri-apps/plugin-dialog")
+    const selection = await open({ directory: true, multiple: false })
+    return typeof selection === "string" ? selection : null
+  }
+
+  async revealKnowledgeBaseDirectory(kbDir: string): Promise<void> {
+    return this.call<void>("desktop_reveal_knowledge_base_directory", { kbDir })
+  }
+
+  async revealApplicationLogDirectory(): Promise<void> {
+    return this.call<void>("desktop_reveal_application_log_directory")
+  }
+
   async modelSettings(): Promise<DesktopModelSettings> {
     return this.call<DesktopModelSettings>("desktop_model_settings")
   }
 
   async saveModelSettings(
     model: string,
-    credentialReference: string,
+    apiBaseUrl: string,
+    apiKey: string,
     maxConcurrentModelCalls: number,
     initialTimeoutSeconds: number,
     requestId: string,
   ): Promise<DesktopModelSettings> {
     return this.call<DesktopModelSettings>("desktop_save_model_settings", {
       model,
-      credentialReference,
+      apiBaseUrl,
+      apiKey,
       maxConcurrentModelCalls,
       initialTimeoutSeconds,
       requestId,
@@ -158,6 +174,7 @@ export class TauriDesktopBridge implements DesktopBridge {
       listen("desktop://launch-intents-ready", () => listener({ kind: "launch_intents_available" })),
       listen("desktop://task-center", () => listener({ kind: "tasks.requested" })),
       listen("desktop://engine-restarted", () => listener({ kind: "engine.restarted" })),
+      listen("desktop://tray-restored", () => listener({ kind: "tray.restored" })),
     ])
     return () => listeners.forEach((remove) => remove())
   }
@@ -366,19 +383,34 @@ class UnavailableDesktopBridge implements DesktopBridge {
     return this.unavailable()
   }
 
+  chooseKnowledgeBaseDirectory(): Promise<string | null> {
+    return this.unavailable()
+  }
+
+  revealKnowledgeBaseDirectory(kbDir: string): Promise<void> {
+    void kbDir
+    return this.unavailable()
+  }
+
+  revealApplicationLogDirectory(): Promise<void> {
+    return this.unavailable()
+  }
+
   modelSettings(): Promise<DesktopModelSettings> {
     return this.unavailable()
   }
 
   saveModelSettings(
     model: string,
-    credentialReference: string,
+    apiBaseUrl: string,
+    apiKey: string,
     maxConcurrentModelCalls: number,
     initialTimeoutSeconds: number,
     requestId: string,
   ): Promise<DesktopModelSettings> {
     void model
-    void credentialReference
+    void apiBaseUrl
+    void apiKey
     void maxConcurrentModelCalls
     void initialTimeoutSeconds
     void requestId

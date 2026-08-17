@@ -466,6 +466,7 @@ impl EngineSupervisor {
 
     fn spawn_engine(&self) -> BridgeResult<()> {
         let mut command = engine_command();
+        suppress_console_window(&mut command);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -669,6 +670,20 @@ fn engine_command() -> Command {
         .arg("openkb-desktop-engine")
         .current_dir(env!("CARGO_MANIFEST_DIR"));
     command
+}
+
+fn suppress_console_window(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
 }
 
 fn spawn_stdout_reader(transport: Arc<SharedTransport>, mut stdout: ChildStdout) {

@@ -86,6 +86,11 @@ function importSourceKey(sourcePath: string): string {
   return sourcePath.trim().toLowerCase()
 }
 
+function isKnowledgeBaseDirectoryName(value: string): boolean {
+  const candidate = value.trim()
+  return Boolean(candidate) && candidate !== "." && candidate !== ".." && !/[\\/]/.test(candidate)
+}
+
 function withoutExcludedImportSources(
   inspection: DesktopImportSourceInspection,
   excludedSourcePaths: string[],
@@ -105,6 +110,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
   const [knowledgeBase, setKnowledgeBase] = useState<DesktopKnowledgeBase | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [runtimeNotice, setRuntimeNotice] = useState<string | null>(null)
   const [section, setSection] = useState<WorkspaceSection>("overview")
   const [dialogMode, setDialogMode] = useState<DialogMode | null>(null)
   const [path, setPath] = useState("")
@@ -127,6 +133,8 @@ export default function DesktopKnowledgeBaseWorkspace() {
   const [failedDocumentsOpen, setFailedDocumentsOpen] = useState(false)
   const [controllingJobId, setControllingJobId] = useState<string | null>(null)
   const activeKnowledgeBaseRead = useRef(0)
+  const initialActiveKnowledgeBaseRead = useRef(true)
+  const trayTipShown = useRef(false)
   const importInspectionRead = useRef(0)
   const addImportSourcesRef = useRef<(paths: string[]) => void>(() => undefined)
 
@@ -139,16 +147,35 @@ export default function DesktopKnowledgeBaseWorkspace() {
         ? []
         : (await bridge.importJobs()).jobs
       if (read !== activeKnowledgeBaseRead.current) return
+      const shouldAnnounceRestoration = initialActiveKnowledgeBaseRead.current
+      initialActiveKnowledgeBaseRead.current = false
       setKnowledgeBase(result.knowledgeBase)
       setImportTasks(importTask)
       setLoadError(null)
+      if (shouldAnnounceRestoration && result.knowledgeBase !== null) {
+        setRuntimeNotice(t("desktop.knowledgeBases.runtimeRestored", { name: result.knowledgeBase.name }))
+      }
     } catch (error) {
       if (read !== activeKnowledgeBaseRead.current) return
       setLoadError(error instanceof Error ? error.message : String(error))
     } finally {
       if (read === activeKnowledgeBaseRead.current) setLoading(false)
     }
-  }, [bridge])
+  }, [bridge, t])
+
+  const handleRuntimeNotice = useCallback((notice: "previousKnowledgeBaseUnavailable" | "trayRestored" | "engineRestarted") => {
+    if (notice === "previousKnowledgeBaseUnavailable") {
+      setRuntimeNotice(t("desktop.knowledgeBases.previousKnowledgeBaseUnavailable"))
+      return
+    }
+    if (notice === "trayRestored") {
+      if (trayTipShown.current) return
+      trayTipShown.current = true
+      setRuntimeNotice(t("desktop.knowledgeBases.trayRestored"))
+      return
+    }
+    setRuntimeNotice(t("desktop.knowledgeBases.engineRestarted"))
+  }, [t])
 
   useEffect(() => {
     void Promise.resolve().then(refreshActiveKnowledgeBase)
@@ -196,10 +223,26 @@ export default function DesktopKnowledgeBaseWorkspace() {
     }
   }
 
+  const chooseKnowledgeBaseDirectory = async () => {
+    try {
+      const selected = await bridge.chooseKnowledgeBaseDirectory()
+      if (selected) {
+        setPath(selected)
+        setFormError(null)
+      }
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
   const submitSelection = async () => {
     if (dialogMode === null) return
     if (!path.trim()) {
-      setFormError(t("desktop.knowledgeBases.pathRequired"))
+      setFormError(t("desktop.knowledgeBases.directoryRequired"))
+      return
+    }
+    if (dialogMode === "create" && !isKnowledgeBaseDirectoryName(name)) {
+      setFormError(t("desktop.knowledgeBases.nameRequired"))
       return
     }
     setSubmitting(true)
@@ -216,7 +259,9 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setImportBatchSummary(null)
     try {
       if (dialogMode === "create") {
-        await bridge.createKnowledgeBase(path.trim(), name.trim() || undefined, nextDesktopRequestId("knowledge-base"))
+        const { join } = await import("@tauri-apps/api/path")
+        const kbDir = await join(path.trim(), name.trim())
+        await bridge.createKnowledgeBase(kbDir, name.trim(), nextDesktopRequestId("knowledge-base"))
       } else {
         await bridge.openKnowledgeBase(path.trim(), nextDesktopRequestId("knowledge-base"))
       }
@@ -282,6 +327,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setLoading,
     setLoadError,
     setSection,
+    onRuntimeNotice: handleRuntimeNotice,
   })
 
   useEffect(() => {
@@ -451,6 +497,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
   }
 
   const failedDocumentCount = importTasks.filter((task) => task.job.status === "quarantined").length
+  const visibleRuntimeNotice = runtimeNotice ?? t("desktop.knowledgeBases.trayAvailable")
 
   return (
     <div className="min-h-screen bg-background text-foreground" data-testid="desktop-workbench">
@@ -536,6 +583,11 @@ export default function DesktopKnowledgeBaseWorkspace() {
         </aside>
 
         <main className="min-w-0 p-5 md:p-8">
+          {visibleRuntimeNotice ? (
+            <div className="mb-5 rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 text-sm text-foreground" role="status">
+              {visibleRuntimeNotice}
+            </div>
+          ) : null}
           {loading ? (
             <div className="flex min-h-60 items-center justify-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" />
@@ -607,16 +659,23 @@ export default function DesktopKnowledgeBaseWorkspace() {
           >
             <div>
               <label className="text-sm font-medium" htmlFor="desktop-kb-path">
-                {t("desktop.knowledgeBases.pathLabel")}
+                {dialogMode === "create"
+                  ? t("desktop.knowledgeBases.parentDirectoryLabel")
+                  : t("desktop.knowledgeBases.pathLabel")}
               </label>
-              <input
-                id="desktop-kb-path"
-                autoFocus
-                value={path}
-                onChange={(event) => setPath(event.target.value)}
-                placeholder={t("desktop.knowledgeBases.pathPlaceholder")}
-                className="mt-2 h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              />
+              <div className="mt-2 flex gap-2">
+                <input
+                  id="desktop-kb-path"
+                  readOnly
+                  value={path}
+                  placeholder={t("desktop.knowledgeBases.pathPlaceholder")}
+                  className="h-10 min-w-0 flex-1 rounded-md border border-input bg-muted/20 px-3 text-sm text-muted-foreground outline-none"
+                />
+                <Button type="button" variant="outline" onClick={() => void chooseKnowledgeBaseDirectory()}>
+                  <FolderOpen className="size-4" />
+                  {t("desktop.knowledgeBases.chooseDirectory")}
+                </Button>
+              </div>
             </div>
             {dialogMode === "create" ? (
               <div>
@@ -625,6 +684,7 @@ export default function DesktopKnowledgeBaseWorkspace() {
                 </label>
                 <input
                   id="desktop-kb-name"
+                  autoFocus
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                   placeholder={t("desktop.knowledgeBases.namePlaceholder")}
@@ -784,7 +844,7 @@ function ActiveKnowledgeBaseView({
       {section === "answers" ? <DesktopGroundedAnswerPanel onOpenOriginal={onOpenRawDocument} /> : null}
       {section === "knowledge" ? <DesktopKnowledgePagePanel /> : null}
       {section === "review" ? <DesktopReviewPanel /> : null}
-      {section === "settings" ? <DesktopModelSettingsPanel key={knowledgeBase.kbDir} /> : null}
+      {section === "settings" ? <DesktopModelSettingsPanel key={knowledgeBase.kbDir} kbDir={knowledgeBase.kbDir} /> : null}
     </section>
   )
 }

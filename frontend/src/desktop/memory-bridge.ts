@@ -46,8 +46,9 @@ export class MemoryDesktopBridge implements DesktopBridge {
   private knowledgeReconciliationConflictResults: DesktopKnowledgeReconciliationConflict[] = []
   private modelSettingsResult: DesktopModelSettings = {
     model: "gpt-5.4",
-    credentialReference: "env:LLM_API_KEY",
-    credentialAvailable: false,
+    apiBaseUrl: "https://api.openai.com/v1",
+    apiKey: "",
+    apiKeyConfigured: false,
     maxConcurrentModelCalls: 1,
     initialTimeoutSeconds: 20,
     modelCallDeadlineSeconds: 60,
@@ -96,13 +97,26 @@ export class MemoryDesktopBridge implements DesktopBridge {
     return { knowledgeBase: this.activeKnowledgeBaseResult }
   }
 
+  async chooseKnowledgeBaseDirectory(): Promise<string | null> {
+    return null
+  }
+
+  async revealKnowledgeBaseDirectory(kbDir: string): Promise<void> {
+    void kbDir
+  }
+
+  async revealApplicationLogDirectory(): Promise<void> {
+    return undefined
+  }
+
   async modelSettings(): Promise<DesktopModelSettings> {
     return this.modelSettingsResult
   }
 
   async saveModelSettings(
     model: string,
-    credentialReference: string,
+    apiBaseUrl: string,
+    apiKey: string,
     maxConcurrentModelCalls: number,
     initialTimeoutSeconds: number,
     requestId: string,
@@ -111,7 +125,9 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.modelSettingsResult = {
       ...this.modelSettingsResult,
       model,
-      credentialReference,
+      apiBaseUrl,
+      apiKey,
+      apiKeyConfigured: Boolean(apiKey),
       maxConcurrentModelCalls,
       initialTimeoutSeconds,
     }

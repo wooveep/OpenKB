@@ -11,7 +11,8 @@ impl EngineSupervisor {
     pub fn save_model_settings(
         &self,
         model: String,
-        credential_reference: String,
+        api_base_url: String,
+        api_key: String,
         max_concurrent_model_calls: u32,
         initial_timeout_seconds: f64,
         request_id: String,
@@ -20,7 +21,8 @@ impl EngineSupervisor {
             "workbench.save_model_settings",
             json!({
                 "model": model,
-                "credential_reference": credential_reference,
+                "api_base_url": api_base_url,
+                "api_key": api_key,
                 "max_concurrent_model_calls": max_concurrent_model_calls,
                 "initial_timeout_seconds": initial_timeout_seconds,
             }),

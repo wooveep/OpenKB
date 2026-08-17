@@ -1,4 +1,4 @@
-import { Download, KeyRound, Loader2, Save, SlidersHorizontal } from "lucide-react"
+import { Download, Eye, EyeOff, FolderOpen, KeyRound, Loader2, Save, SlidersHorizontal } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
@@ -17,7 +17,8 @@ import type { DesktopModelSettings } from "./contracts"
 
 type ModelSettingsDraft = {
   model: string
-  credentialReference: string
+  apiBaseUrl: string
+  apiKey: string
   maxConcurrentModelCalls: string
   initialTimeoutSeconds: string
 }
@@ -34,14 +35,15 @@ const diagnosticFiles = [
 function draftFrom(settings: DesktopModelSettings): ModelSettingsDraft {
   return {
     model: settings.model,
-    credentialReference: settings.credentialReference,
+    apiBaseUrl: settings.apiBaseUrl,
+    apiKey: settings.apiKey,
     maxConcurrentModelCalls: String(settings.maxConcurrentModelCalls),
     initialTimeoutSeconds: String(settings.initialTimeoutSeconds),
   }
 }
 
-/** Model defaults, local credential reference, and opt-in support diagnostics. */
-export function DesktopModelSettingsPanel() {
+/** Model connection defaults and opt-in support diagnostics for the active knowledge base. */
+export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
   const [settings, setSettings] = useState<DesktopModelSettings | null>(null)
@@ -50,6 +52,7 @@ export function DesktopModelSettingsPanel() {
   const [saving, setSaving] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [diagnosticReviewOpen, setDiagnosticReviewOpen] = useState(false)
+  const [showApiKey, setShowApiKey] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
@@ -88,7 +91,8 @@ export function DesktopModelSettingsPanel() {
     try {
       const result = await bridge.saveModelSettings(
         draft.model,
-        draft.credentialReference,
+        draft.apiBaseUrl,
+        draft.apiKey,
         maxConcurrentModelCalls,
         initialTimeoutSeconds,
         nextDesktopRequestId("model-settings"),
@@ -127,6 +131,24 @@ export function DesktopModelSettingsPanel() {
     }
   }
 
+  const revealKnowledgeBaseDirectory = async () => {
+    setError(null)
+    try {
+      await bridge.revealKnowledgeBaseDirectory(kbDir)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
+
+  const revealApplicationLogDirectory = async () => {
+    setError(null)
+    try {
+      await bridge.revealApplicationLogDirectory()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
+
   if (loading || !draft || !settings) {
     return (
       <div className="mt-8 flex items-center gap-2 rounded-apple-lg border border-border/70 bg-muted/20 p-5 text-sm text-muted-foreground">
@@ -158,8 +180,17 @@ export function DesktopModelSettingsPanel() {
             <Input className="mt-1.5" value={draft.model} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, model: event.target.value } : current)} />
           </label>
           <label className="block text-sm font-medium">
-            {t("desktop.knowledgeBases.modelSettings.credentialReference")}
-            <Input className="mt-1.5 font-mono2" value={draft.credentialReference} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, credentialReference: event.target.value } : current)} />
+            {t("desktop.knowledgeBases.modelSettings.apiBaseUrl")}
+            <Input className="mt-1.5 font-mono2" value={draft.apiBaseUrl} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, apiBaseUrl: event.target.value } : current)} />
+          </label>
+          <label className="block text-sm font-medium md:col-span-2">
+            {t("desktop.knowledgeBases.modelSettings.apiKey")}
+            <span className="mt-1.5 flex gap-2">
+              <Input type={showApiKey ? "text" : "password"} className="font-mono2" value={draft.apiKey} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, apiKey: event.target.value } : current)} />
+              <Button type="button" variant="outline" size="icon" disabled={saving} onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? t("desktop.knowledgeBases.modelSettings.hideApiKey") : t("desktop.knowledgeBases.modelSettings.showApiKey")}>
+                {showApiKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+              </Button>
+            </span>
           </label>
           <label className="block text-sm font-medium">
             {t("desktop.knowledgeBases.modelSettings.concurrency")}
@@ -171,10 +202,25 @@ export function DesktopModelSettingsPanel() {
           </label>
         </div>
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/20 px-4 py-3 text-sm">
-          <span className="flex items-center gap-2 text-muted-foreground"><KeyRound className="size-4" />{settings.credentialAvailable ? t("desktop.knowledgeBases.modelSettings.credentialAvailable") : t("desktop.knowledgeBases.modelSettings.credentialUnavailable")}</span>
+          <span className="flex items-center gap-2 text-muted-foreground"><KeyRound className="size-4" />{settings.apiKeyConfigured ? t("desktop.knowledgeBases.modelSettings.apiKeyConfigured") : t("desktop.knowledgeBases.modelSettings.apiKeyRequired")}</span>
           <span className="text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.deadline", { seconds: settings.modelCallDeadlineSeconds })}</span>
         </div>
         <div className="mt-5 flex justify-end"><Button disabled={saving} onClick={() => void save()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}{saving ? t("desktop.knowledgeBases.modelSettings.saving") : t("desktop.knowledgeBases.modelSettings.save")}</Button></div>
+      </section>
+
+      <section className="rounded-apple-lg border border-border/70 bg-muted/20 p-5 shadow-sm">
+        <h2 className="font-semibold">{t("desktop.knowledgeBases.modelSettings.storageTitle")}</h2>
+        <p className="mt-1 text-sm leading-6 text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.storageDescription")}</p>
+        <div className="mt-4 flex flex-wrap gap-3">
+          <Button variant="outline" onClick={() => void revealKnowledgeBaseDirectory()}>
+            <FolderOpen className="size-4" />
+            {t("desktop.knowledgeBases.modelSettings.openKnowledgeBaseDirectory")}
+          </Button>
+          <Button variant="outline" onClick={() => void revealApplicationLogDirectory()}>
+            <FolderOpen className="size-4" />
+            {t("desktop.knowledgeBases.modelSettings.openLogDirectory")}
+          </Button>
+        </div>
       </section>
 
       <section className="rounded-apple-lg border border-border/70 bg-muted/20 p-5 shadow-sm">

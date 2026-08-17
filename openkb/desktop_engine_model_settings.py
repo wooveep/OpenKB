@@ -1,4 +1,4 @@
-"""Desktop Engine routes for non-secret model defaults and diagnostics."""
+"""Desktop Engine routes for KB-local model configuration and diagnostics."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def dispatch_model_settings_request(
     request: DesktopRequest,
     cancel_event: Event | None,
 ) -> dict[str, object]:
-    """Keep model config local to the active KB and never accept a secret value."""
+    """Keep model config local to the active KB and pass it only over the private Bridge."""
     from openkb.desktop_engine import DesktopRequestError, _required_path_param
 
     with server._workspace_requests_lock:
@@ -39,7 +39,8 @@ def dispatch_model_settings_request(
             return save_desktop_model_settings(
                 kb_dir,
                 model=request.params.get("model"),
-                credential_reference=request.params.get("credential_reference"),
+                api_base_url=request.params.get("api_base_url"),
+                api_key=request.params.get("api_key"),
                 max_concurrent_model_calls=request.params.get("max_concurrent_model_calls"),
                 initial_timeout_seconds=request.params.get("initial_timeout_seconds"),
             ).as_dict()

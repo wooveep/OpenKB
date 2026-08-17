@@ -32,6 +32,7 @@ from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_knowledge_generations import materialize_current_generation
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageError, DesktopKnowledgePageService
 from openkb.desktop_legacy_office_parsers import shutdown_legacy_office_runtime
+from openkb.desktop_logging import configure_desktop_engine_logging
 from openkb.desktop_model_gateway import MODEL_CALL_DEADLINE_SECONDS, DesktopModelGateway
 from openkb.desktop_model_transport import desktop_model_gateway_for
 from openkb.desktop_raw_assets import DesktopRawAssetService
@@ -247,6 +248,7 @@ class DesktopEngineServer:
         shutdown_legacy_office_runtime()
 
     def _start_request(self, request: DesktopRequest) -> None:
+        _preload_frozen_ocr_for_pdf_import(request)
         request_key = str(request.request_id)
         with self._active_lock:
             if request_key in self._active_requests:
@@ -762,23 +764,35 @@ def _parse_request(frame: dict[str, object]) -> DesktopRequest:
 
 def main() -> int:
     """Run the packaged Engine child process."""
-    _preload_frozen_ocr_dependencies()
+    configure_desktop_engine_logging()
+    logger.info("OpenKB Desktop Engine started.")
     try:
         DesktopEngineServer(sys.stdin.buffer, sys.stdout.buffer).serve()
     except Exception as error:
+        logger.exception("OpenKB Desktop Engine failed.")
         print(f"OpenKB Desktop Engine failed: {error}", file=sys.stderr, flush=True)
         return 1
+    logger.info("OpenKB Desktop Engine stopped.")
     return 0
 
 
 def _preload_frozen_ocr_dependencies() -> None:
-    """Load native OCR imports on the Engine main thread before worker dispatch."""
+    """Load native OCR imports on the Engine main thread only when an import needs them."""
     if getattr(sys, "_MEIPASS", None) is None:
         return
     try:
         import_module("rapidocr_onnxruntime")
     except ImportError:
         return
+
+
+def _preload_frozen_ocr_for_pdf_import(request: DesktopRequest) -> None:
+    """Defer frozen OCR imports until the first PDF import, preserving safe native startup."""
+    if request.method != "workbench.import_text_document":
+        return
+    source_path = request.params.get("source_path")
+    if isinstance(source_path, str) and Path(source_path).suffix.lower() == ".pdf":
+        _preload_frozen_ocr_dependencies()
 
 
 if __name__ == "__main__":

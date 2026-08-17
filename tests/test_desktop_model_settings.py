@@ -23,15 +23,13 @@ def _create_desktop_kb(kb_dir):
     return kb_dir
 
 
-def test_model_defaults_store_only_an_environment_reference_and_drive_the_gateway(
-    tmp_path, monkeypatch
-):
+def test_model_defaults_store_a_direct_connection_and_drive_the_gateway(tmp_path, monkeypatch):
     kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
-    monkeypatch.setenv("OPENKB_DESKTOP_TEST_KEY", "do-not-persist-this-key")
     saved = save_desktop_model_settings(
         kb_dir,
         model="test/model",
-        credential_reference="env:OPENKB_DESKTOP_TEST_KEY",
+        api_base_url="https://models.example.test/v1",
+        api_key="persisted-test-key",
         max_concurrent_model_calls=2,
         initial_timeout_seconds=25,
     )
@@ -49,7 +47,7 @@ def test_model_defaults_store_only_an_environment_reference_and_drive_the_gatewa
     monkeypatch.setattr(desktop_model_transport, "DesktopLiteLLMTransport", FakeTransport)
     gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
 
-    assert saved.credential_available
+    assert saved.api_key == "persisted-test-key"
     assert read_desktop_model_settings(kb_dir) == saved
     assert gateway is not None
     assert (
@@ -59,22 +57,22 @@ def test_model_defaults_store_only_an_environment_reference_and_drive_the_gatewa
         ).content
         == "complete"
     )
-    assert calls == [("test/model", "do-not-persist-this-key", 25.0)]
-    assert "do-not-persist-this-key" not in (kb_dir / ".openkb" / "config.yaml").read_text()
-    assert "do-not-persist-this-key" not in (
+    assert calls == [("test/model", "persisted-test-key", 25.0)]
+    config = (kb_dir / ".openkb" / "config.yaml").read_text()
+    assert "persisted-test-key" in config
+    assert "https://models.example.test/v1" in config
+    assert "persisted-test-key" not in (
         kb_dir / ".openkb" / "state.sqlite3"
     ).read_bytes().decode("latin-1")
 
 
-def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_content(
-    tmp_path, monkeypatch
-):
+def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_content(tmp_path):
     kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
-    monkeypatch.setenv("OPENKB_DIAGNOSTIC_TEST_KEY", "diagnostic-credential-secret")
     save_desktop_model_settings(
         kb_dir,
         model="test/model",
-        credential_reference="env:OPENKB_DIAGNOSTIC_TEST_KEY",
+        api_base_url="https://models.example.test/v1",
+        api_key="diagnostic-credential-secret",
         max_concurrent_model_calls=1,
         initial_timeout_seconds=20,
     )
@@ -102,10 +100,10 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
     assert "private-source-content" not in content
     assert "private-model-response" not in content
     assert "diagnostic-credential-secret" not in content
-    assert "OPENKB_DIAGNOSTIC_TEST_KEY" in content
+    assert '"api_key_configured": true' in content
 
 
-def test_engine_settings_routes_do_not_accept_a_credential_value(tmp_path):
+def test_engine_settings_routes_accept_a_direct_api_key_without_persisting_it_in_sqlite(tmp_path):
     kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
     workspace = DesktopKnowledgeBaseRuntime()
     workspace.open(kb_dir)
@@ -118,7 +116,8 @@ def test_engine_settings_routes_do_not_accept_a_credential_value(tmp_path):
             method="workbench.save_model_settings",
             params={
                 "model": "test/model",
-                "credential_reference": "env:OPENKB_DESKTOP_TEST_KEY",
+                "api_base_url": "https://models.example.test/v1",
+                "api_key": "engine-settings-key",
                 "max_concurrent_model_calls": 2,
                 "initial_timeout_seconds": 30,
             },
@@ -134,9 +133,9 @@ def test_engine_settings_routes_do_not_accept_a_credential_value(tmp_path):
         cancel_event=None,
     )
 
-    assert saved["credential_reference"] == "env:OPENKB_DESKTOP_TEST_KEY"
-    assert saved["credential_available"] is False
+    assert saved["api_key"] == "engine-settings-key"
+    assert saved["api_base_url"] == "https://models.example.test/v1"
     assert exported["path"] == str(tmp_path / "engine-diagnostics.zip")
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         values = connection.execute("SELECT value FROM metadata").fetchall()
-    assert all("OPENKB_DESKTOP_TEST_KEY" not in value[0] for value in values)
+    assert all("engine-settings-key" not in value[0] for value in values)

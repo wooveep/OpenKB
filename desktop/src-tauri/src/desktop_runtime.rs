@@ -3,14 +3,17 @@
 use crate::DesktopState;
 use serde::Serialize;
 use std::{
-    fs,
+    env, fs,
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
     menu::{Menu, MenuItem},
@@ -24,9 +27,13 @@ const TASKS_MENU_ID: &str = "desktop.tasks";
 const QUIT_MENU_ID: &str = "desktop.quit";
 const LAUNCH_INTENTS_READY_EVENT: &str = "desktop://launch-intents-ready";
 const TASK_CENTER_EVENT: &str = "desktop://task-center";
+const TRAY_RESTORED_EVENT: &str = "desktop://tray-restored";
+const SHELL_LOG_FILE: &str = "openkb-shell.log";
+const MAX_SHELL_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
 pub(crate) struct DesktopRuntimeState {
     explicit_exit: AtomicBool,
+    hidden_to_tray: AtomicBool,
     pending_launch_intents: Mutex<Vec<DesktopLaunchIntent>>,
     tray: Mutex<Option<TrayIcon>>,
 }
@@ -35,6 +42,7 @@ impl Default for DesktopRuntimeState {
     fn default() -> Self {
         Self {
             explicit_exit: AtomicBool::new(false),
+            hidden_to_tray: AtomicBool::new(false),
             pending_launch_intents: Mutex::new(Vec::new()),
             tray: Mutex::new(None),
         }
@@ -48,6 +56,14 @@ impl DesktopRuntimeState {
 
     fn begin_explicit_exit(&self) -> bool {
         !self.explicit_exit.swap(true, Ordering::AcqRel)
+    }
+
+    pub(crate) fn note_main_window_hidden(&self) {
+        self.hidden_to_tray.store(true, Ordering::Release);
+    }
+
+    fn take_tray_restore_notice(&self) -> bool {
+        self.hidden_to_tray.swap(false, Ordering::AcqRel)
     }
 
     fn retain_tray(&self, tray: TrayIcon) {
@@ -79,14 +95,23 @@ impl DesktopRuntimeState {
 pub(crate) enum DesktopLaunchIntent {
     OpenKnowledgeBase { kb_dir: String },
     ImportSources { source_paths: Vec<String> },
+    PreviousKnowledgeBaseUnavailable { kb_dir: String },
 }
 
 pub(crate) fn initialize(app: &App) -> tauri::Result<()> {
     let app_handle = app.handle().clone();
     let state = app.state::<DesktopState>();
     if let Some(kb_dir) = load_active_knowledge_base(&app_handle) {
-        state.engine.remember_active_knowledge_base(kb_dir);
+        if is_desktop_knowledge_base(Path::new(&kb_dir)) {
+            state.engine.remember_active_knowledge_base(kb_dir);
+        } else {
+            clear_active_knowledge_base(&app_handle);
+            state.runtime.enqueue_launch_intents(vec![
+                DesktopLaunchIntent::PreviousKnowledgeBaseUnavailable { kb_dir },
+            ]);
+        }
     }
+    append_application_log(&app_handle, "OpenKB Desktop Shell started.");
     install_tray(app)?;
     start_engine_supervision(app_handle);
     Ok(())
@@ -97,6 +122,10 @@ pub(crate) fn remember_active_knowledge_base(app: &AppHandle, kb_dir: &str) {
         .engine
         .remember_active_knowledge_base(kb_dir.to_owned());
     if let Err(error) = persist_active_knowledge_base(app, kb_dir) {
+        append_application_log(
+            app,
+            &format!("Could not remember active OpenKB Desktop Knowledge Base: {error}"),
+        );
         eprintln!("Could not remember active OpenKB Desktop Knowledge Base: {error}");
     }
 }
@@ -138,6 +167,13 @@ pub(crate) fn show_main_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+    if app
+        .state::<DesktopState>()
+        .runtime
+        .take_tray_restore_notice()
+    {
+        let _ = app.emit(TRAY_RESTORED_EVENT, ());
+    }
 }
 
 fn install_tray(app: &App) -> tauri::Result<()> {
@@ -176,6 +212,13 @@ fn start_engine_supervision(app: AppHandle) {
     thread::spawn(move || {
         let state = startup_handle.state::<DesktopState>();
         if let Err(error) = state.engine.start() {
+            append_application_log(
+                &startup_handle,
+                &format!(
+                    "OpenKB Desktop Engine did not start during shell setup: {}",
+                    error.message
+                ),
+            );
             eprintln!(
                 "OpenKB Desktop Engine did not start during shell setup: {}",
                 error.message
@@ -189,6 +232,10 @@ fn start_engine_supervision(app: AppHandle) {
             return;
         }
         if state.engine.restart_after_unexpected_exit() {
+            append_application_log(
+                &app,
+                "OpenKB Desktop Engine restarted after an unexpected exit.",
+            );
             let _ = app.emit("desktop://engine-restarted", ());
         }
     });
@@ -247,6 +294,100 @@ fn persist_active_knowledge_base(app: &AppHandle, kb_dir: &str) -> std::io::Resu
         fs::create_dir_all(parent)?;
     }
     fs::write(path, kb_dir)
+}
+
+fn clear_active_knowledge_base(app: &AppHandle) {
+    let Some(path) = active_knowledge_base_file(app) else {
+        return;
+    };
+    if let Err(error) = fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            append_application_log(
+                app,
+                &format!("Could not clear unavailable knowledge base: {error}"),
+            );
+        }
+    }
+}
+
+pub(crate) fn reveal_directory(directory: &Path) -> Result<(), String> {
+    if !directory.is_dir() {
+        return Err(format!("Directory is unavailable: {}", directory.display()));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+        let mut command = Command::new("explorer.exe");
+        command.arg(directory).creation_flags(CREATE_NO_WINDOW);
+        command
+            .spawn()
+            .map_err(|error| format!("Could not open directory in Explorer: {error}"))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(directory)
+            .spawn()
+            .map_err(|error| format!("Could not open directory: {error}"))?;
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(directory)
+            .spawn()
+            .map_err(|error| format!("Could not open directory: {error}"))?;
+        Ok(())
+    }
+}
+
+pub(crate) fn reveal_application_log_directory(app: &AppHandle) -> Result<(), String> {
+    let directory = application_log_directory(app)
+        .ok_or_else(|| "OpenKB application log location is unavailable.".to_owned())?;
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("Could not create OpenKB log directory: {error}"))?;
+    reveal_directory(&directory)
+}
+
+pub(crate) fn append_application_log(app: &AppHandle, message: &str) {
+    let Some(directory) = application_log_directory(app) else {
+        return;
+    };
+    if fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let path = directory.join(SHELL_LOG_FILE);
+    let _ = rotate_shell_log(&path);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{timestamp} {message}");
+    }
+}
+
+fn application_log_directory(app: &AppHandle) -> Option<PathBuf> {
+    env::var_os("LOCALAPPDATA")
+        .map(|directory| PathBuf::from(directory).join("OpenKB").join("logs"))
+        .or_else(|| {
+            app.path()
+                .app_data_dir()
+                .ok()
+                .map(|directory| directory.join("logs"))
+        })
+}
+
+fn rotate_shell_log(path: &Path) -> std::io::Result<()> {
+    if path.metadata()?.len() < MAX_SHELL_LOG_BYTES {
+        return Ok(());
+    }
+    let backup = path.with_extension("log.1");
+    let _ = fs::remove_file(&backup);
+    fs::rename(path, backup)
 }
 
 #[cfg(test)]

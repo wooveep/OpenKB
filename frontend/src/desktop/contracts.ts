@@ -160,11 +160,13 @@ export interface DesktopImportDropEvent {
 export type DesktopRuntimeLaunchIntent =
   | { kind: "openKnowledgeBase"; kbDir: string }
   | { kind: "importSources"; sourcePaths: string[] }
+  | { kind: "previousKnowledgeBaseUnavailable"; kbDir: string }
 
 export type DesktopRuntimeEvent =
   | { kind: "launch_intents_available" }
   | { kind: "tasks.requested" }
   | { kind: "engine.restarted" }
+  | { kind: "tray.restored" }
 
 export interface DesktopRawDocument {
   documentId: string
@@ -354,11 +356,12 @@ export class DesktopBridgeError extends Error {
   }
 }
 
-/** KB-local defaults only; the referenced credential value never crosses the Bridge. */
+/** KB-local model connection values passed only through the private Desktop Bridge. */
 export interface DesktopModelSettings {
   model: string
-  credentialReference: string
-  credentialAvailable: boolean
+  apiBaseUrl: string
+  apiKey: string
+  apiKeyConfigured: boolean
   maxConcurrentModelCalls: number
   initialTimeoutSeconds: number
   modelCallDeadlineSeconds: number
@@ -379,10 +382,14 @@ export interface DesktopBridge {
   ): Promise<DesktopKnowledgeBaseActivation>
   openKnowledgeBase(kbDir: string, requestId: string): Promise<DesktopKnowledgeBaseActivation>
   activeKnowledgeBase(): Promise<DesktopActiveKnowledgeBase>
+  chooseKnowledgeBaseDirectory(): Promise<string | null>
+  revealKnowledgeBaseDirectory(kbDir: string): Promise<void>
+  revealApplicationLogDirectory(): Promise<void>
   modelSettings(): Promise<DesktopModelSettings>
   saveModelSettings(
     model: string,
-    credentialReference: string,
+    apiBaseUrl: string,
+    apiKey: string,
     maxConcurrentModelCalls: number,
     initialTimeoutSeconds: number,
     requestId: string,

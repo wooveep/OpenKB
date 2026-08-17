@@ -100,7 +100,9 @@ class DesktopDiagnosticBundleService:
                             "credentials_and_headers": "excluded",
                         },
                     },
-                    "model-settings.json": read_desktop_model_settings(self._kb_dir).as_dict(),
+                    "model-settings.json": read_desktop_model_settings(
+                        self._kb_dir
+                    ).as_diagnostic_dict(),
                     "import-jobs.json": {
                         "jobs": _rows(
                             connection,

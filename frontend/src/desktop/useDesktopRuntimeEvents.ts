@@ -13,6 +13,9 @@ interface DesktopRuntimeEventOptions {
   setLoading: (loading: boolean) => void
   setLoadError: (error: string | null) => void
   setSection: (section: "overview" | "documents") => void
+  onRuntimeNotice: (
+    notice: "previousKnowledgeBaseUnavailable" | "trayRestored" | "engineRestarted",
+  ) => void
 }
 
 /** Applies Shell lifecycle events through the typed Desktop Bridge. */
@@ -23,6 +26,7 @@ export function useDesktopRuntimeEvents({
   setLoading,
   setLoadError,
   setSection,
+  onRuntimeNotice,
 }: DesktopRuntimeEventOptions): void {
   useEffect(() => {
     let disposed = false
@@ -39,6 +43,10 @@ export function useDesktopRuntimeEvents({
           setSection,
         )
       }
+      if (intent.kind === "previousKnowledgeBaseUnavailable") {
+        onRuntimeNotice("previousKnowledgeBaseUnavailable")
+        return Promise.resolve()
+      }
       importSourcesRef.current(intent.sourcePaths)
       setSection("documents")
       return Promise.resolve()
@@ -53,7 +61,10 @@ export function useDesktopRuntimeEvents({
         drainLaunchIntents()
       } else if (event.kind === "tasks.requested") {
         setSection("documents")
+      } else if (event.kind === "tray.restored") {
+        onRuntimeNotice("trayRestored")
       } else {
+        onRuntimeNotice("engineRestarted")
         void refreshActiveKnowledgeBase()
       }
     }
@@ -70,7 +81,15 @@ export function useDesktopRuntimeEvents({
       disposed = true
       unsubscribe?.()
     }
-  }, [bridge, importSourcesRef, refreshActiveKnowledgeBase, setLoading, setLoadError, setSection])
+  }, [
+    bridge,
+    importSourcesRef,
+    onRuntimeNotice,
+    refreshActiveKnowledgeBase,
+    setLoading,
+    setLoadError,
+    setSection,
+  ])
 }
 
 async function openKnowledgeBase(

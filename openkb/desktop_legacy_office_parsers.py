@@ -59,6 +59,7 @@ class _LegacyOfficeTikaRuntime:
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
             except OSError as error:
                 raise _legacy_runtime_error(source) from error

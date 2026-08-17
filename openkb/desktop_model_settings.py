@@ -1,4 +1,4 @@
-"""Safe, KB-local Desktop model defaults and credential references."""
+"""KB-local Desktop model configuration entered directly in the workbench."""
 
 from __future__ import annotations
 
@@ -10,11 +10,9 @@ from typing import Any
 import yaml
 
 from openkb.config import (
+    DEFAULT_API_BASE_URL,
     DEFAULT_CONFIG,
-    DEFAULT_DESKTOP_CREDENTIAL_REFERENCE,
-    credential_reference_environment_variable,
     load_config_mapping,
-    resolve_credential_bundle,
     save_config,
 )
 from openkb.desktop_model_gateway import (
@@ -37,11 +35,11 @@ class DesktopModelSettingsError(DesktopKnowledgeBaseError):
 
 @dataclass(frozen=True)
 class DesktopModelSettings:
-    """The non-secret defaults shown by the Desktop Settings workbench."""
+    """The complete model configuration shown by the Desktop Settings workbench."""
 
     model: str
-    credential_reference: str
-    credential_available: bool
+    api_base_url: str
+    api_key: str
     max_concurrent_model_calls: int
     initial_timeout_seconds: float
     model_call_deadline_seconds: float = MODEL_CALL_DEADLINE_SECONDS
@@ -49,26 +47,32 @@ class DesktopModelSettings:
     def as_dict(self) -> dict[str, object]:
         return {
             "model": self.model,
-            "credential_reference": self.credential_reference,
-            "credential_available": self.credential_available,
+            "api_base_url": self.api_base_url,
+            "api_key": self.api_key,
+            "api_key_configured": bool(self.api_key),
             "max_concurrent_model_calls": self.max_concurrent_model_calls,
             "initial_timeout_seconds": self.initial_timeout_seconds,
             "model_call_deadline_seconds": self.model_call_deadline_seconds,
         }
 
+    def as_diagnostic_dict(self) -> dict[str, object]:
+        """Return settings metadata without including the directly stored API Key."""
+        payload = self.as_dict()
+        payload.pop("api_key", None)
+        return payload
+
 
 def read_desktop_model_settings(kb_dir: Path) -> DesktopModelSettings:
-    """Read settings without exposing the credential value itself."""
+    """Read the KB-local model configuration for direct editing in Desktop."""
     resolved = kb_dir.expanduser().resolve()
     config = _config_mapping(resolved / ".openkb" / "config.yaml")
     desktop = config.get("desktop")
     desktop_values = desktop if isinstance(desktop, dict) else {}
     model = _default_model(config.get("model"))
-    credential_reference = _default_credential_reference(desktop_values.get("credential_reference"))
     return DesktopModelSettings(
         model=model,
-        credential_reference=credential_reference,
-        credential_available=_credential_available(resolved),
+        api_base_url=_default_api_base_url(desktop_values.get("api_base_url")),
+        api_key=_default_api_key(desktop_values.get("api_key")),
         max_concurrent_model_calls=_default_concurrency(
             desktop_values.get("max_concurrent_model_calls")
         ),
@@ -80,13 +84,15 @@ def save_desktop_model_settings(
     kb_dir: Path,
     *,
     model: object,
-    credential_reference: object,
+    api_base_url: object,
+    api_key: object,
     max_concurrent_model_calls: object,
     initial_timeout_seconds: object,
 ) -> DesktopModelSettings:
-    """Persist only safe defaults; secrets stay in environment-backed references."""
+    """Persist the user-selected model connection in this Desktop Knowledge Base."""
     normalized_model = _required_model(model)
-    normalized_reference = _required_credential_reference(credential_reference)
+    normalized_api_base_url = _required_api_base_url(api_base_url)
+    normalized_api_key = _required_api_key(api_key)
     normalized_concurrency = _required_concurrency(max_concurrent_model_calls)
     normalized_timeout = _required_timeout(initial_timeout_seconds)
     resolved = kb_dir.expanduser().resolve()
@@ -98,11 +104,13 @@ def save_desktop_model_settings(
         config["model"] = normalized_model
         desktop_values.update(
             {
-                "credential_reference": normalized_reference,
+                "api_base_url": normalized_api_base_url,
+                "api_key": normalized_api_key,
                 "max_concurrent_model_calls": normalized_concurrency,
                 "initial_timeout_seconds": normalized_timeout,
             }
         )
+        desktop_values.pop("credential_reference", None)
         config["desktop"] = desktop_values
         save_config(config_path, config)
     return read_desktop_model_settings(resolved)
@@ -127,22 +135,26 @@ def _required_model(value: object) -> str:
     return value.strip()
 
 
-def _default_credential_reference(value: object) -> str:
-    if _credential_env_name(value) is not None:
-        assert isinstance(value, str)
+def _default_api_base_url(value: object) -> str:
+    if isinstance(value, str) and value.strip():
         return value.strip()
-    return DEFAULT_DESKTOP_CREDENTIAL_REFERENCE
+    return DEFAULT_API_BASE_URL
 
 
-def _required_credential_reference(value: object) -> str:
-    if _credential_env_name(value) is None:
-        raise DesktopModelSettingsError("Credential reference must use the form env:VARIABLE_NAME.")
-    assert isinstance(value, str)
+def _required_api_base_url(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise DesktopModelSettingsError("Enter a non-empty API Base URL.")
     return value.strip()
 
 
-def _credential_env_name(value: object) -> str | None:
-    return credential_reference_environment_variable(value)
+def _default_api_key(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _required_api_key(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise DesktopModelSettingsError("Enter a non-empty API Key.")
+    return value.strip()
 
 
 def _default_concurrency(value: object) -> int:
@@ -188,10 +200,3 @@ def _valid_timeout(value: object) -> bool:
         and math.isfinite(float(value))
         and 0 < float(value) <= MODEL_CALL_DEADLINE_SECONDS
     )
-
-
-def _credential_available(kb_dir: Path) -> bool:
-    try:
-        return bool(resolve_credential_bundle(kb_dir).api_key)
-    except (OSError, TypeError, ValueError, yaml.YAMLError):
-        return False

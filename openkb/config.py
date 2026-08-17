@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,18 +12,7 @@ import yaml
 from openkb.locks import atomic_write_text
 
 DEFAULT_CONFIG: dict[str, Any] = {"model": "gpt-5.4"}
-DEFAULT_DESKTOP_CREDENTIAL_REFERENCE = "env:LLM_API_KEY"
-GLOBAL_CONFIG_DIR = Path.home() / ".config" / "openkb"
-
-_CREDENTIAL_REFERENCE_RE = re.compile(r"env:([A-Za-z_][A-Za-z0-9_]*)\Z")
-
-
-def credential_reference_environment_variable(value: object) -> str | None:
-    """Return the variable name encoded by a non-secret ``env:NAME`` reference."""
-    if not isinstance(value, str):
-        return None
-    match = _CREDENTIAL_REFERENCE_RE.fullmatch(value.strip())
-    return match.group(1) if match else None
+DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
 
 
 def load_config_mapping(config_path: Path) -> dict[str, Any]:
@@ -57,46 +44,23 @@ class LlmCredentialBundle:
 
 
 def resolve_credential_bundle(kb_dir: Path) -> LlmCredentialBundle:
-    """Resolve the active KB's environment-backed LLM configuration.
-
-    The KB-local ``.env`` wins over the host environment, followed by the
-    optional application-wide ``~/.config/openkb/.env`` fallback. Credentials
-    never cross the Desktop Bridge or get written to ``config.yaml``.
-    """
+    """Resolve the active KB's directly configured provider connection."""
     resolved = kb_dir.expanduser().resolve()
     config = load_config_mapping(resolved / ".openkb" / "config.yaml")
-    values = _environment_values(resolved)
     desktop = config.get("desktop")
-    reference = desktop.get("credential_reference") if isinstance(desktop, dict) else None
-    credential_name = credential_reference_environment_variable(reference) or "LLM_API_KEY"
+    desktop_values = desktop if isinstance(desktop, dict) else {}
     return LlmCredentialBundle(
-        api_key=values.get(credential_name),
-        base_url=values.get("OPENAI_API_BASE"),
+        api_key=_configured_text(desktop_values.get("api_key")),
+        base_url=_configured_text(desktop_values.get("api_base_url")) or DEFAULT_API_BASE_URL,
         extra_headers=_extra_headers(config),
     )
 
 
-def _environment_values(kb_dir: Path) -> dict[str, str]:
-    local = _dotenv_values(kb_dir / ".env")
-    global_values = _dotenv_values(GLOBAL_CONFIG_DIR / ".env")
-    names = set(global_values) | set(os.environ) | set(local)
-    return {
-        name: value
-        for name in names
-        if (value := local.get(name) or os.environ.get(name) or global_values.get(name))
-    }
-
-
-def _dotenv_values(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-    from dotenv import dotenv_values
-
-    return {
-        key: value
-        for key, value in dotenv_values(path).items()
-        if isinstance(key, str) and isinstance(value, str) and value
-    }
+def _configured_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    return candidate or None
 
 
 def _extra_headers(config: dict[str, Any]) -> dict[str, str]:

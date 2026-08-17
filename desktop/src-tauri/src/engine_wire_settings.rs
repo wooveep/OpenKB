@@ -1,4 +1,4 @@
-//! Non-secret model defaults and user-exported diagnostic bundle wire values.
+//! Model settings and user-exported diagnostic bundle wire values.
 
 use serde::{Deserialize, Serialize};
 
@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct ModelSettings {
     pub model: String,
-    #[serde(alias = "credential_reference")]
-    pub credential_reference: String,
-    #[serde(alias = "credential_available")]
-    pub credential_available: bool,
+    #[serde(alias = "api_base_url")]
+    pub api_base_url: String,
+    #[serde(alias = "api_key")]
+    pub api_key: String,
+    #[serde(alias = "api_key_configured")]
+    pub api_key_configured: bool,
     #[serde(alias = "max_concurrent_model_calls")]
     pub max_concurrent_model_calls: u32,
     #[serde(alias = "initial_timeout_seconds")]

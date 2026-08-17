@@ -14,24 +14,12 @@ export default function DesktopWorkbenchRoot({ bridge }: { bridge?: DesktopBridg
   return (
     <DesktopBridgeProvider bridge={bridge}>
       <MotionConfig reducedMotion="user">
-        {engineReady ? (
-          <DesktopKnowledgeBaseWorkspace />
-        ) : (
-          <main className="ambient-ground flex min-h-screen items-center justify-center p-6">
-            <div className="w-full max-w-2xl">
-              <div className="mb-7">
-                <p className="font-mono2 text-xs font-medium tracking-[0.18em] text-accent-brand">OPENKB</p>
-                <h2 className="mt-2 text-3xl font-semibold tracking-tight text-foreground">
-                  {t("desktop.workbench.title")}
-                </h2>
-                <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
-                  {t("desktop.workbench.detail")}
-                </p>
-              </div>
-              <DesktopStartup onReadyChange={setEngineReady} />
-            </div>
-          </main>
-        )}
+        <DesktopKnowledgeBaseWorkspace />
+        {!engineReady ? (
+          <aside className="fixed bottom-4 right-4 z-50 w-[min(32rem,calc(100vw-2rem))]" aria-label={t("desktop.workbench.title")}>
+            <DesktopStartup onReadyChange={setEngineReady} />
+          </aside>
+        ) : null}
         <Toaster />
       </MotionConfig>
     </DesktopBridgeProvider>
