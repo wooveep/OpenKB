@@ -407,6 +407,7 @@ function Assert-PackageLayout {
         (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_det_infer.onnx"),
         (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_rec_infer.onnx"),
         (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_ppocr_mobile_v2.0_cls_infer.onnx"),
+        (Join-Path $PackageRoot "runtime\engine\_internal\litellm\model_prices_and_context_window_backup.json"),
         (Join-Path $PackageRoot "runtime\engine\_internal\deepdoc\det.onnx"),
         (Join-Path $PackageRoot "runtime\engine\_internal\deepdoc\rec.onnx"),
         (Join-Path $PackageRoot "runtime\engine\_internal\deepdoc\ocr.res"),
