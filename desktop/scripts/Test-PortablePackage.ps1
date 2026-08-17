@@ -288,7 +288,9 @@ function Test-FrozenEngine {
         Write-Frame -Stream $input -Message @{
             jsonrpc = "2.0"; id = "package-model-import"; method = "workbench.import_text_document"; params = @{ source_path = $modelProbeSource }
         }
-        $modelImport = Read-Response -Stream $output -RequestId "package-model-import" -Events $events -TimeoutSeconds 30
+        # The Desktop model call has a 60-second logical deadline. Allow a small
+        # process/IPC margin while the package proves its dynamic model runtime.
+        $modelImport = Read-Response -Stream $output -RequestId "package-model-import" -Events $events -TimeoutSeconds 75
         Assert-That -Condition ($modelImport.PSObject.Properties.Name -contains "error") -Message "Frozen Engine unexpectedly completed the local model-runtime probe."
         Assert-That -Condition ($modelImport.error.code -eq "document_quarantined") -Message "Frozen Engine returned the wrong local model-runtime probe error."
 
