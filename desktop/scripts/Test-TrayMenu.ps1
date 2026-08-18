@@ -37,6 +37,8 @@ public static class OpenKBTrayNativeMethods
 "@
 
 $WM_CLOSE = 0x0010
+$MOUSEEVENTF_LEFTDOWN = 0x0002
+$MOUSEEVENTF_LEFTUP = 0x0004
 $MOUSEEVENTF_RIGHTDOWN = 0x0008
 $MOUSEEVENTF_RIGHTUP = 0x0010
 $KEYEVENTF_KEYUP = 0x0002
@@ -169,6 +171,19 @@ function Send-RightClick {
     [OpenKBTrayNativeMethods]::mouse_event($MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 40
     [OpenKBTrayNativeMethods]::mouse_event($MOUSEEVENTF_RIGHTUP, 0, 0, 0, [UIntPtr]::Zero)
+}
+
+function Send-LeftClick {
+    param([Parameter(Mandatory = $true)] $Element)
+
+    $bounds = $Element.Current.BoundingRectangle
+    Assert-That -Condition (-not $bounds.IsEmpty) -Message "TRAY_MENU_ITEM_BOUNDS_EMPTY: Quit OpenKB has no clickable bounds."
+    $x = [int] [Math]::Round($bounds.X + ($bounds.Width / 2))
+    $y = [int] [Math]::Round($bounds.Y + ($bounds.Height / 2))
+    Assert-That -Condition ([OpenKBTrayNativeMethods]::SetCursorPos($x, $y)) -Message "TRAY_MENU_ITEM_CURSOR_FAILED: Could not move the cursor to Quit OpenKB."
+    [OpenKBTrayNativeMethods]::mouse_event($MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 40
+    [OpenKBTrayNativeMethods]::mouse_event($MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
 }
 
 function Find-QuitMenuItem {
@@ -381,7 +396,7 @@ try {
         }
 
         $trackedProcessIds = @($process.Id) + @(Get-DescendantProcessIds -RootProcessId $process.Id)
-        Assert-That -Condition (Invoke-UiElement -Element $quitMenuItem) -Message "TRAY_QUIT_NOT_INVOKABLE: Quit OpenKB does not expose an invoke action."
+        Send-LeftClick -Element $quitMenuItem
         $deadline = [DateTime]::UtcNow.AddSeconds(15)
         $remainingProcessIds = $trackedProcessIds
         while ([DateTime]::UtcNow -lt $deadline) {
