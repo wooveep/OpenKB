@@ -15,12 +15,16 @@ import type {
   DesktopEngineHealth,
   DesktopGroundedAnswer,
   DesktopGroundedAnswers,
+  DesktopConversation,
+  DesktopConversationList,
   DesktopKnowledgeBase,
   DesktopKnowledgeBaseActivation,
   DesktopKnowledgePage,
   DesktopKnowledgePages,
   DesktopKnowledgePageKind,
+  DesktopGlobalSearchResults,
   DesktopModelSettings,
+  DesktopModelConnectionTest,
   DesktopDocumentVersionCandidate,
   DesktopDocumentVersionCandidates,
   DesktopDocumentVersionCandidateDecision,
@@ -32,6 +36,14 @@ import type {
   DesktopRecoveryOverride,
   DesktopTextDocumentImport,
 } from "./contracts"
+import {
+  emitBridgeEvent,
+  isSupportedImportSource,
+  requireConversation,
+  sourceFormat,
+  sourceName,
+  updateImportTasks,
+} from "./memory-bridge-helpers"
 
 /** In-memory Bridge for React component tests; it never touches Tauri or Python. */
 export class MemoryDesktopBridge implements DesktopBridge {
@@ -41,6 +53,8 @@ export class MemoryDesktopBridge implements DesktopBridge {
   private activeKnowledgeBaseResult: DesktopKnowledgeBase | null = null
   private importJobResults: DesktopImportTask[] = []
   private groundedAnswerResults: DesktopGroundedAnswer[] = []
+  private conversationResults: DesktopConversation[] = []
+  private lastConversationId: string | null = null
   private knowledgePageResults: DesktopKnowledgePage[] = []
   private documentVersionCandidateResults: DesktopDocumentVersionCandidate[] = []
   private knowledgeReconciliationConflictResults: DesktopKnowledgeReconciliationConflict[] = []
@@ -137,6 +151,24 @@ export class MemoryDesktopBridge implements DesktopBridge {
     return this.modelSettingsResult
   }
 
+  async testModelConnection(
+    provider: string,
+    model: string,
+    apiBaseUrl: string,
+    apiKey: string,
+    maxConcurrentModelCalls: number,
+    initialTimeoutSeconds: number,
+    requestId: string,
+  ): Promise<DesktopModelConnectionTest> {
+    void provider
+    void apiBaseUrl
+    void apiKey
+    void maxConcurrentModelCalls
+    void initialTimeoutSeconds
+    void requestId
+    return { ok: true, model, latencyMs: 42, attemptCount: 1 }
+  }
+
   async exportDiagnosticBundle(
     destination: string,
     requestId: string,
@@ -230,7 +262,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     const stages = ["preflight", "raw_asset", "document_ir", "evidence", "model_analysis", "search"] as const
     const progress = [20, 35, 55, 75, 85, 100]
     for (const [index, stage] of stages.entries()) {
-      this.emit({
+      emitBridgeEvent(this.listeners, {
         sequence: index + 1,
         kind: "import.stage_progress",
         data: {
@@ -301,7 +333,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     const answerText = citations.length
       ? `Available source evidence for “${question}”:\n\n[1] ${citations[0].excerpt}`
       : `No available source evidence was found for: ${question}`
-    this.emit({
+    emitBridgeEvent(this.listeners, {
       sequence: this.importJobResults.length + 1,
       kind: "answer.delta",
       data: { requestId, answerId, delta: answerText, replace: true, attempt: 1 },
@@ -351,6 +383,175 @@ export class MemoryDesktopBridge implements DesktopBridge {
 
   async groundedAnswers(): Promise<DesktopGroundedAnswers> {
     return { answers: this.groundedAnswerResults }
+  }
+
+  async conversations(search = ""): Promise<DesktopConversationList> {
+    const normalized = search.trim().toLowerCase()
+    const conversations = this.conversationResults.filter((conversation) => (
+      !normalized
+      || conversation.title.toLowerCase().includes(normalized)
+      || conversation.messages.some((message) => message.role === "user" && message.content.toLowerCase().includes(normalized))
+    )).map((conversation) => ({
+      conversationId: conversation.conversationId,
+      title: conversation.title,
+      draftText: conversation.draftText,
+      createdAt: conversation.createdAt,
+      updatedAt: conversation.updatedAt,
+      generating: conversation.messages.some((message) => message.status === "generating"),
+    }))
+    return { conversations, lastConversationId: this.lastConversationId }
+  }
+
+  async globalSearch(query: string): Promise<DesktopGlobalSearchResults> {
+    const normalized = query.trim().toLowerCase()
+    if (!normalized) return { query: "", results: [] }
+    const conversations = this.conversationResults.filter((item) => (
+      item.title.toLowerCase().includes(normalized)
+      || item.messages.some((message) => message.role === "user" && message.content.toLowerCase().includes(normalized))
+    )).map((item) => ({
+      resultId: `conversation:${item.conversationId}`,
+      kind: "conversation" as const,
+      title: item.title,
+      snippet: item.messages.find((message) => message.role === "user")?.content ?? "Conversation",
+      status: "available" as const,
+      documentId: null,
+      pageId: null,
+      conversationId: item.conversationId,
+      messageId: item.messages.find((message) => (
+        message.role === "user" && message.content.toLowerCase().includes(normalized)
+      ))?.messageId ?? null,
+    }))
+    return { query, results: conversations }
+  }
+
+  async getConversation(conversationId: string): Promise<DesktopConversation> {
+    const conversation = requireConversation(this.conversationResults, conversationId)
+    this.lastConversationId = conversationId
+    return conversation
+  }
+
+  async createConversation(title: string | undefined, requestId: string): Promise<DesktopConversation> {
+    const now = new Date().toISOString()
+    const conversation: DesktopConversation = {
+      conversationId: `conversation-${requestId}`,
+      title: title?.trim() || "New conversation",
+      draftText: "",
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+    }
+    this.conversationResults = [conversation, ...this.conversationResults]
+    this.lastConversationId = conversation.conversationId
+    return conversation
+  }
+
+  async renameConversation(conversationId: string, title: string, requestId: string): Promise<DesktopConversation> {
+    void requestId
+    return this.updateConversation(conversationId, (conversation) => ({ ...conversation, title: title.trim(), updatedAt: new Date().toISOString() }))
+  }
+
+  async deleteConversation(conversationId: string, requestId: string): Promise<DesktopConversationList> {
+    void requestId
+    requireConversation(this.conversationResults, conversationId)
+    this.conversationResults = this.conversationResults.filter((item) => item.conversationId !== conversationId)
+    if (this.lastConversationId === conversationId) this.lastConversationId = this.conversationResults[0]?.conversationId ?? null
+    return this.conversations()
+  }
+
+  async saveConversationDraft(conversationId: string, draftText: string, requestId: string): Promise<DesktopConversation> {
+    void requestId
+    return this.updateConversation(conversationId, (conversation) => ({ ...conversation, draftText }))
+  }
+
+  async askConversation(conversationId: string, question: string, requestId: string): Promise<DesktopConversation> {
+    const conversation = requireConversation(this.conversationResults, conversationId)
+    const now = new Date().toISOString()
+    const userMessageId = `user-${requestId}`
+    const assistantMessageId = `assistant-${requestId}`
+    const source = this.importJobResults.find((task) => task.document?.availability === "available")?.document
+    const citations = source ? [{
+      evidenceId: `evidence-${source.documentId}`,
+      documentId: source.documentId,
+      documentName: source.name,
+      section: "Document",
+      locator: { ordinal: 0 },
+      excerpt: `Original content for ${source.name}.`,
+      channels: ["fts"],
+      sourceAvailable: true,
+    }] : []
+    const answerText = citations.length ? `## Answer\n\n${citations[0].excerpt} [1]` : `No available source evidence was found for: ${question}`
+    emitBridgeEvent(this.listeners, { sequence: Date.now(), kind: "answer.delta", data: { requestId, answerId: assistantMessageId, delta: answerText, replace: true, attempt: 1 } })
+    const answerVersionId = `version-${requestId}`
+    const next: DesktopConversation = {
+      ...conversation,
+      title: conversation.messages.length ? conversation.title : question.slice(0, 60),
+      draftText: "",
+      updatedAt: now,
+      messages: [...conversation.messages, {
+        messageId: userMessageId,
+        ordinal: conversation.messages.length,
+        role: "user",
+        content: question,
+        status: "completed",
+        selectedAnswerVersionId: null,
+        createdAt: now,
+        updatedAt: now,
+        answerVersions: [],
+      }, {
+        messageId: assistantMessageId,
+        ordinal: conversation.messages.length + 1,
+        role: "assistant",
+        content: "",
+        status: "completed",
+        selectedAnswerVersionId: answerVersionId,
+        createdAt: now,
+        updatedAt: now,
+        answerVersions: [{
+          answerVersionId,
+          versionNumber: 1,
+          answerText,
+          retrievalPlan: { query: question, terms: question.split(/\s+/), source: "deterministic" },
+          citations,
+          sourceImages: [],
+          degradations: [],
+          status: "completed",
+          interruptionCode: null,
+          interruptionReason: null,
+          createdAt: now,
+        }],
+      }],
+    }
+    return this.replaceConversation(next)
+  }
+
+  async regenerateConversationAnswer(conversationId: string, assistantMessageId: string, requestId: string): Promise<DesktopConversation> {
+    const conversation = requireConversation(this.conversationResults, conversationId)
+    const message = conversation.messages.find((item) => item.messageId === assistantMessageId && item.role === "assistant")
+    if (!message) throw new Error("The assistant message was not found.")
+    const selected = message.answerVersions.find((version) => version.answerVersionId === message.selectedAnswerVersionId)
+    if (!selected) throw new Error("This answer cannot be regenerated.")
+    const now = new Date().toISOString()
+    const answerVersionId = `version-${requestId}`
+    const answerText = `${selected.answerText}\n\n_Regenerated_`
+    emitBridgeEvent(this.listeners, { sequence: Date.now(), kind: "answer.delta", data: { requestId, answerId: assistantMessageId, delta: answerText, replace: true, attempt: 1 } })
+    return this.updateConversation(conversationId, (current) => ({
+      ...current,
+      updatedAt: now,
+      messages: current.messages.map((item) => item.messageId === assistantMessageId ? {
+        ...item,
+        status: "completed",
+        selectedAnswerVersionId: answerVersionId,
+        answerVersions: [...item.answerVersions, { ...selected, answerVersionId, versionNumber: item.answerVersions.length + 1, answerText, createdAt: now }],
+      } : item),
+    }))
+  }
+
+  async selectAnswerVersion(conversationId: string, assistantMessageId: string, answerVersionId: string, requestId: string): Promise<DesktopConversation> {
+    void requestId
+    return this.updateConversation(conversationId, (conversation) => ({
+      ...conversation,
+      messages: conversation.messages.map((message) => message.messageId === assistantMessageId ? { ...message, selectedAnswerVersionId: answerVersionId } : message),
+    }))
   }
 
   async knowledgePages(): Promise<DesktopKnowledgePages> {
@@ -468,7 +669,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
   }
 
   async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {
-    this.updateImportTask(jobId, "paused")
+    this.importJobResults = updateImportTasks(this.importJobResults, jobId, "paused")
     return { jobId, accepted: true }
   }
 
@@ -530,7 +731,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
   }
 
   async cancelImportJob(jobId: string): Promise<DesktopImportControlResult> {
-    this.updateImportTask(jobId, "cancelled")
+    this.importJobResults = updateImportTasks(this.importJobResults, jobId, "cancelled")
     return { jobId, accepted: true }
   }
 
@@ -554,8 +755,20 @@ export class MemoryDesktopBridge implements DesktopBridge {
     return () => this.listeners.delete(listener)
   }
 
-  emit(event: DesktopBridgeEvent): void {
-    for (const listener of this.listeners) listener(event)
+  private replaceConversation(conversation: DesktopConversation): DesktopConversation {
+    this.conversationResults = [
+      conversation,
+      ...this.conversationResults.filter((item) => item.conversationId !== conversation.conversationId),
+    ]
+    this.lastConversationId = conversation.conversationId
+    return conversation
+  }
+
+  private updateConversation(
+    conversationId: string,
+    update: (conversation: DesktopConversation) => DesktopConversation,
+  ): DesktopConversation {
+    return this.replaceConversation(update(requireConversation(this.conversationResults, conversationId)))
   }
 
   private activate(kbDir: string, name: string): DesktopKnowledgeBaseActivation {
@@ -564,11 +777,13 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 11,
+      schemaVersion: 18,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []
     this.groundedAnswerResults = []
+    this.conversationResults = []
+    this.lastConversationId = null
     this.knowledgePageResults = []
     return {
       knowledgeBase: this.activeKnowledgeBaseResult,
@@ -581,40 +796,4 @@ export class MemoryDesktopBridge implements DesktopBridge {
     }
   }
 
-  private updateImportTask(jobId: string, status: "paused" | "cancelled"): void {
-    this.importJobResults = this.importJobResults.map((task) => {
-      if (task.job.jobId !== jobId) return task
-      const activeStage = task.stages.find((stage) => stage.status === "running")
-        ?? task.stages.find((stage) => stage.status === "pending")
-      return {
-        ...task,
-        job: { ...task.job, status },
-        stages: task.stages.map((stage) => (
-          stage.stageRunId === activeStage?.stageRunId
-            ? { ...stage, status, errorCode: `import_${status}` }
-            : stage
-        )),
-      }
-    })
-  }
-}
-
-function isSupportedImportSource(sourcePath: string): boolean {
-  return /\.(txt|md|markdown|doc|docx|xls|xlsx|ppt|pptx|pdf)$/i.test(sourcePath)
-}
-
-function sourceFormat(sourcePath: string): "txt" | "markdown" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "pdf" {
-  if (/\.(md|markdown)$/i.test(sourcePath)) return "markdown"
-  if (/\.doc$/i.test(sourcePath)) return "doc"
-  if (/\.docx$/i.test(sourcePath)) return "docx"
-  if (/\.xlsx$/i.test(sourcePath)) return "xlsx"
-  if (/\.xls$/i.test(sourcePath)) return "xls"
-  if (/\.ppt$/i.test(sourcePath)) return "ppt"
-  if (/\.pptx$/i.test(sourcePath)) return "pptx"
-  if (/\.pdf$/i.test(sourcePath)) return "pdf"
-  return "txt"
-}
-
-function sourceName(sourcePath: string): string {
-  return sourcePath.split(/[\\/]/).filter(Boolean).at(-1) || ""
 }

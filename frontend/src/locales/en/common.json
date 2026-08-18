@@ -24,11 +24,13 @@
     "engine": {
       "starting": {
         "title": "Starting local Engine",
-        "detail": "The Desktop Shell is completing its private connection to OpenKB."
+        "detail": "The Desktop Shell is completing its private connection to OpenKB.",
+        "short": "Starting"
       },
       "ready": {
         "title": "Local Engine is ready",
-        "detail": "The Desktop Workbench can now safely load knowledge and begin work."
+        "detail": "The Desktop Workbench can now safely load knowledge and begin work.",
+        "short": "Ready"
       },
       "unavailable": {
         "title": "Local Engine is unavailable",
@@ -41,7 +43,10 @@
       "version": "Engine {{version}}",
       "protocol": "Bridge protocol {{version}}",
       "eventSequence": "Event {{sequence}}",
-      "retry": "Retry Engine"
+      "retry": "Retry Engine",
+      "openLogs": "Open logs",
+      "exit": "Exit OpenKB",
+      "logsAvailableBeforeEngine": "Application logs and local appearance settings remain available while the Engine is offline."
     },
     "knowledgeBases": {
       "chooseKnowledgeBase": "Choose knowledge base",
@@ -49,11 +54,17 @@
       "navigationItems": {
         "overview": "Overview",
         "documents": "Documents",
+        "conversations": "Conversations",
         "answers": "Answers",
         "knowledge": "Knowledge pages",
         "review": "Review",
         "settings": "Settings"
       },
+      "globalSearch": "Search",
+      "searchComingSoon": "Global search is being prepared for this knowledge base.",
+      "tasks": "Tasks",
+      "expandNavigation": "Expand navigation",
+      "collapseNavigation": "Collapse navigation",
       "create": "Create knowledge base",
       "open": "Open knowledge base",
       "loading": "Reading the active knowledge base…",
@@ -222,6 +233,16 @@
         "save": "Save defaults",
         "saving": "Saving…",
         "saved": "Model defaults saved.",
+        "testConnection": "Test connection",
+        "testing": "Testing…",
+        "testSucceeded": "Connected in {{latency}} ms ({{attempts}} attempt).",
+        "testRejected": "The model provider did not accept the connection test.",
+        "appearanceTitle": "Appearance & language",
+        "appearanceDescription": "These preferences apply to the desktop workbench on this device.",
+        "theme": "Theme",
+        "language": "Language",
+        "zoom": "Interface zoom",
+        "zoomHelp": "80%–200%. Use Ctrl+Plus, Ctrl+Minus, or Ctrl+0.",
         "diagnosticsTitle": "Diagnostic bundle",
         "diagnosticsDescription": "Export only when you choose to. The ZIP excludes source-file content, model request and response bodies, credentials, and headers.",
         "exportDiagnostics": "Export diagnostic bundle",
@@ -289,6 +310,93 @@
       "answerShowFewerSourceImages": "Show fewer images",
       "answerSources": "Source evidence",
       "answerCitationLocation": "Original position · {{location}}"
+    },
+    "overview": {
+      "title": "Overview",
+      "description": "Current knowledge and work that needs attention.",
+      "available": "Available",
+      "processing": "Processing",
+      "failed": "Failed",
+      "review": "Needs review",
+      "importDocuments": "Import documents",
+      "startConversation": "Start conversation",
+      "recentActivity": "Recent activity",
+      "noActivity": "No recent activity. Import a document to begin."
+    },
+    "knowledge": {
+      "tabs": {
+        "pages": "Knowledge pages",
+        "review": "Review",
+        "conflicts": "Knowledge conflicts",
+        "versions": "Document versions"
+      }
+    },
+    "tasks": {
+      "title": "Tasks",
+      "description": "Import jobs and their current stage progress.",
+      "empty": "There are no import tasks in this knowledge base.",
+      "batch": "Import batch",
+      "batchSummary": "{{total}} documents · {{completed}} completed · {{active}} active · {{failed}} failed",
+      "stages": "Import stages"
+    },
+    "documents": {
+      "search": "Search documents",
+      "details": "Document status, processing stages, and original-source actions.",
+      "sourceUnavailable": "This document is currently unavailable and cannot be used for answers. Re-import or repair the raw source before using it again.",
+      "importHistory": "Import history",
+      "source": "Source",
+      "format": "Format",
+      "evidenceUnits": "Evidence locations",
+      "assetHash": "Raw asset",
+      "empty": "No documents match this filter.",
+      "filters": {
+        "all": "All statuses",
+        "available": "Available",
+        "processing": "Processing",
+        "quarantined": "Isolated"
+      }
+    },
+    "globalSearch": {
+      "title": "Search this knowledge base",
+      "description": "Find documents, knowledge pages, and conversations in the active knowledge base.",
+      "placeholder": "Search documents, knowledge, and conversations…",
+      "searching": "Searching…",
+      "empty": "No matching workspace content.",
+      "hint": "Type to search the active knowledge base.",
+      "unavailable": "Unavailable",
+      "openKnowledgeBaseFirst": "Open a knowledge base before searching.",
+      "groups": {
+        "document": "Documents",
+        "knowledge_page": "Knowledge pages",
+        "conversation": "Conversations"
+      }
+    },
+    "conversations": {
+      "new": "New conversation",
+      "search": "Search conversations",
+      "loading": "Loading conversations…",
+      "empty": "Ask a question to begin this conversation.",
+      "expand": "Expand conversation list",
+      "collapse": "Collapse conversation list",
+      "rename": "Rename conversation",
+      "renamePrompt": "Conversation title",
+      "delete": "Delete conversation",
+      "deleteConfirm": "Delete this conversation and all of its messages?",
+      "placeholder": "Ask about your knowledge base…",
+      "generating": "Generating answer…",
+      "interrupted": "This answer was interrupted.",
+      "regenerate": "Regenerate answer",
+      "evidence": "Sources {{citations}} · Images {{images}}",
+      "evidenceTitle": "Answer evidence",
+      "evidenceDescription": "Only sources that were sent to the answer model for this version.",
+      "sources": "Sources {{count}}",
+      "images": "Images {{count}}",
+      "sourceUnavailable": "This historical source is currently unavailable.",
+      "groups": {
+        "today": "Today",
+        "week": "Last 7 days",
+        "older": "Older"
+      }
     }
   }
 }

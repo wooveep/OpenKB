@@ -74,6 +74,25 @@ def desktop_model_gateway_for(
     )
 
 
+def desktop_model_gateway_for_settings(
+    kb_dir: Path, settings: DesktopModelSettings
+) -> DesktopModelGateway:
+    """Build a gateway from an unsaved Settings draft for connection testing."""
+    return DesktopModelGateway(
+        _ConcurrentDesktopModelTransport(
+            DesktopLiteLLMTransport(
+                model=litellm_model_identifier(settings.provider, settings.model),
+                bundle=LlmCredentialBundle(
+                    api_key=settings.api_key,
+                    base_url=settings.api_base_url,
+                ),
+            ),
+            _DesktopModelConcurrencyGate(settings.max_concurrent_model_calls),
+        ),
+        initial_timeout_seconds=settings.initial_timeout_seconds,
+    )
+
+
 def _gateway_for(
     model: object,
     bundle: LlmCredentialBundle,

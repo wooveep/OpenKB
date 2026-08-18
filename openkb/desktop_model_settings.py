@@ -101,32 +101,60 @@ def save_desktop_model_settings(
     initial_timeout_seconds: object,
 ) -> DesktopModelSettings:
     """Persist the user-selected model connection in this Desktop Knowledge Base."""
-    normalized_api_base_url = _required_api_base_url(api_base_url)
-    normalized_provider = _required_provider(provider, normalized_api_base_url)
-    normalized_model = _display_model_for_provider(normalized_provider, _required_model(model))
-    normalized_api_key = _required_api_key(api_key)
-    normalized_concurrency = _required_concurrency(max_concurrent_model_calls)
-    normalized_timeout = _required_timeout(initial_timeout_seconds)
+    settings = validate_desktop_model_settings(
+        provider=provider,
+        model=model,
+        api_base_url=api_base_url,
+        api_key=api_key,
+        max_concurrent_model_calls=max_concurrent_model_calls,
+        initial_timeout_seconds=initial_timeout_seconds,
+    )
     resolved = kb_dir.expanduser().resolve()
     config_path = resolved / ".openkb" / "config.yaml"
     with kb_ingest_lock(desktop_state_dir(resolved)):
         config = _config_mapping(config_path)
         desktop = config.get("desktop")
         desktop_values = dict(desktop) if isinstance(desktop, dict) else {}
-        config["model"] = normalized_model
+        config["model"] = settings.model
         desktop_values.update(
             {
-                "provider": normalized_provider,
-                "api_base_url": normalized_api_base_url,
-                "api_key": normalized_api_key,
-                "max_concurrent_model_calls": normalized_concurrency,
-                "initial_timeout_seconds": normalized_timeout,
+                "provider": settings.provider,
+                "api_base_url": settings.api_base_url,
+                "api_key": settings.api_key,
+                "max_concurrent_model_calls": settings.max_concurrent_model_calls,
+                "initial_timeout_seconds": settings.initial_timeout_seconds,
             }
         )
         desktop_values.pop("credential_reference", None)
         config["desktop"] = desktop_values
         save_config(config_path, config)
     return read_desktop_model_settings(resolved)
+
+
+def validate_desktop_model_settings(
+    *,
+    provider: object = None,
+    model: object,
+    api_base_url: object,
+    api_key: object,
+    max_concurrent_model_calls: object,
+    initial_timeout_seconds: object,
+) -> DesktopModelSettings:
+    """Validate a Settings draft without persisting it."""
+    normalized_api_base_url = _required_api_base_url(api_base_url)
+    normalized_provider = _required_provider(provider, normalized_api_base_url)
+    normalized_model = _display_model_for_provider(normalized_provider, _required_model(model))
+    normalized_api_key = _required_api_key(api_key)
+    normalized_concurrency = _required_concurrency(max_concurrent_model_calls)
+    normalized_timeout = _required_timeout(initial_timeout_seconds)
+    return DesktopModelSettings(
+        provider=normalized_provider,
+        model=normalized_model,
+        api_base_url=normalized_api_base_url,
+        api_key=normalized_api_key,
+        max_concurrent_model_calls=normalized_concurrency,
+        initial_timeout_seconds=normalized_timeout,
+    )
 
 
 def _config_mapping(path: Path) -> dict[str, Any]:

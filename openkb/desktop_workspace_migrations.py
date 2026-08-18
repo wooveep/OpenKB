@@ -262,6 +262,112 @@ INTERRUPTED_ANSWER_MIGRATION_STATEMENTS: tuple[str, ...] = (
 )
 
 
+# Conversations deliberately do not backfill the earlier flat grounded_answers
+# history: there is no reliable way to infer message ordering or ownership.
+CONVERSATION_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE conversations (
+        conversation_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        draft_text TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE conversation_messages (
+        message_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id)
+            ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+        content TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL CHECK(status IN (
+            'completed', 'generating', 'interrupted'
+        )),
+        reply_to_message_id TEXT REFERENCES conversation_messages(message_id)
+            ON DELETE CASCADE,
+        selected_answer_version_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(conversation_id, ordinal)
+    )
+    """,
+    """
+    CREATE TABLE conversation_answer_versions (
+        answer_version_id TEXT PRIMARY KEY,
+        assistant_message_id TEXT NOT NULL
+            REFERENCES conversation_messages(message_id) ON DELETE CASCADE,
+        version_number INTEGER NOT NULL CHECK(version_number >= 1),
+        answer_text TEXT NOT NULL,
+        retrieval_plan_json TEXT NOT NULL,
+        degradations_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('completed', 'interrupted')),
+        interruption_code TEXT,
+        interruption_reason TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(assistant_message_id, version_number)
+    )
+    """,
+    """
+    CREATE TABLE conversation_answer_citations (
+        answer_version_id TEXT NOT NULL
+            REFERENCES conversation_answer_versions(answer_version_id) ON DELETE CASCADE,
+        evidence_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        document_id TEXT NOT NULL,
+        document_name TEXT NOT NULL,
+        section TEXT NOT NULL,
+        locator_json TEXT NOT NULL,
+        excerpt TEXT NOT NULL,
+        channels_json TEXT NOT NULL,
+        PRIMARY KEY(answer_version_id, evidence_id)
+    )
+    """,
+    """
+    CREATE TABLE conversation_answer_source_images (
+        answer_version_id TEXT NOT NULL,
+        source_image_id TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        document_id TEXT NOT NULL,
+        document_name TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        media_type TEXT NOT NULL,
+        storage_path TEXT NOT NULL,
+        alt_text TEXT,
+        locator_json TEXT NOT NULL,
+        PRIMARY KEY(answer_version_id, source_image_id),
+        FOREIGN KEY(answer_version_id, evidence_id)
+            REFERENCES conversation_answer_citations(answer_version_id, evidence_id)
+            ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE conversation_ui_state (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        last_conversation_id TEXT REFERENCES conversations(conversation_id)
+            ON DELETE SET NULL
+    )
+    """,
+    """
+    INSERT INTO conversation_ui_state (singleton, last_conversation_id)
+    VALUES (1, NULL)
+    """,
+    """
+    CREATE INDEX conversations_updated_idx ON conversations(updated_at DESC)
+    """,
+    """
+    CREATE INDEX conversation_messages_order_idx
+        ON conversation_messages(conversation_id, ordinal)
+    """,
+    """
+    CREATE INDEX conversation_answer_versions_message_idx
+        ON conversation_answer_versions(assistant_message_id, version_number)
+    """,
+)
+
+
 KNOWLEDGE_PAGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE knowledge_pages (

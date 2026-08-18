@@ -5,6 +5,10 @@ use serde_json::json;
 use std::sync::atomic::Ordering;
 
 impl EngineSupervisor {
+    pub(crate) fn remembered_active_knowledge_base(&self) -> Option<String> {
+        self.active_kb_dir.lock().ok()?.clone()
+    }
+
     /// Remember the current workbench so one automatic child restart can reopen it.
     pub fn remember_active_knowledge_base(&self, kb_dir: String) {
         if let Ok(mut active_kb_dir) = self.active_kb_dir.lock() {

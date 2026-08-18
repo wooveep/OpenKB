@@ -9,7 +9,11 @@ from pathlib import Path
 from threading import Lock
 
 from openkb.desktop_answer_store import DesktopGroundedAnswerStore, new_answer
-from openkb.desktop_answer_types import DesktopEvidencePack, DesktopGroundedAnswer
+from openkb.desktop_answer_types import (
+    DesktopEvidencePack,
+    DesktopEvidenceRef,
+    DesktopGroundedAnswer,
+)
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -58,6 +62,7 @@ class DesktopGroundedAnswerService:
             answer_id=uuid.uuid4().hex,
             on_delta=on_delta,
             is_cancelled=is_cancelled,
+            conversation_context=(),
         )
         return self._store.save(answer)
 
@@ -76,10 +81,28 @@ class DesktopGroundedAnswerService:
             created_at=interrupted.created_at,
             on_delta=on_delta,
             is_cancelled=is_cancelled,
+            conversation_context=(),
         )
         if replacement.status == "interrupted":
             return interrupted
         return self._store.replace_interrupted(replacement)
+
+    def generate(
+        self,
+        question: str,
+        *,
+        conversation_context: tuple[tuple[str, str], ...] = (),
+        on_delta: AnswerDeltaCallback | None = None,
+        is_cancelled: AnswerCancellationCallback | None = None,
+    ) -> DesktopGroundedAnswer:
+        """Generate an auditable answer without writing the legacy flat-answer tables."""
+        return self._attempt(
+            question,
+            answer_id=uuid.uuid4().hex,
+            on_delta=on_delta,
+            is_cancelled=is_cancelled,
+            conversation_context=conversation_context,
+        )
 
     def _attempt(
         self,
@@ -89,8 +112,19 @@ class DesktopGroundedAnswerService:
         created_at: str | None = None,
         on_delta: AnswerDeltaCallback | None,
         is_cancelled: AnswerCancellationCallback | None,
+        conversation_context: tuple[tuple[str, str], ...],
     ) -> DesktopGroundedAnswer:
         pack = self._retriever.retrieve(question, is_cancelled=is_cancelled)
+        sent_evidence = _evidence_for_prompt(pack.evidence)
+        sent_evidence_ids = {reference.evidence_id for reference in sent_evidence}
+        pack = DesktopEvidencePack(
+            retrieval_plan=pack.retrieval_plan,
+            evidence=sent_evidence,
+            degradations=pack.degradations,
+            source_images=tuple(
+                image for image in pack.source_images if image.evidence_id in sent_evidence_ids
+            ),
+        )
         emitted = False
         visible_attempt = 0
         replace_pending = False
@@ -153,6 +187,7 @@ class DesktopGroundedAnswerService:
             on_delta=lambda attempt, delta: emit(delta, attempt),
             on_reset=reset,
             is_cancelled=is_cancelled,
+            conversation_context=conversation_context,
         )
         if generation.answer_text is None:
             return interrupted_answer(
@@ -201,6 +236,7 @@ def generate_grounded_answer(
     on_delta: Callable[[int, str], None] | None = None,
     on_reset: Callable[[int], None] | None = None,
     is_cancelled: AnswerCancellationCallback | None = None,
+    conversation_context: tuple[tuple[str, str], ...] = (),
 ) -> DesktopGroundedAnswerGeneration:
     """Generate from an already-retrieved pack without saving an answer record.
 
@@ -215,7 +251,7 @@ def generate_grounded_answer(
             _deterministic_answer(question, pack.evidence), ("answer_model_unavailable",)
         )
 
-    prompt = _answer_prompt(question, pack.evidence)
+    prompt = _answer_prompt(question, pack.evidence, conversation_context)
     attempts = 0
 
     def observe(event) -> None:
@@ -264,16 +300,35 @@ def generate_grounded_answer(
         )
 
 
-def _answer_prompt(question: str, evidence) -> str:
-    context: list[str] = []
+def _evidence_for_prompt(
+    evidence: tuple[DesktopEvidenceRef, ...],
+) -> tuple[DesktopEvidenceRef, ...]:
+    included: list[DesktopEvidenceRef] = []
     used = 0
     for ordinal, reference in enumerate(evidence, start=1):
         item = f"[{ordinal}] {reference.document_name} — {reference.section}\n{reference.excerpt}\n"
         if used + len(item) > _MAX_CONTEXT_CHARS:
             break
-        context.append(item)
+        included.append(reference)
         used += len(item)
-    return f"Question: {question}\n\nEvidence:\n" + "\n".join(context)
+    return tuple(included)
+
+
+def _answer_prompt(
+    question: str,
+    evidence,
+    conversation_context: tuple[tuple[str, str], ...] = (),
+) -> str:
+    prior = "\n\n".join(
+        f"Previous user: {user}\nPrevious assistant: {assistant}"
+        for user, assistant in conversation_context[-4:]
+    )
+    context = "\n".join(
+        f"[{ordinal}] {reference.document_name} — {reference.section}\n{reference.excerpt}\n"
+        for ordinal, reference in enumerate(evidence, start=1)
+    )
+    history = f"Conversation context:\n{prior}\n\n" if prior else ""
+    return f"{history}Current question: {question}\n\nEvidence:\n{context}"
 
 
 def _deterministic_answer(question: str, evidence) -> str:

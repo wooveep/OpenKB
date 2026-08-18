@@ -1,18 +1,10 @@
 import {
-  BookOpen,
-  CheckCircle2,
-  CircleAlert,
-  ClipboardCheck,
-  FileText,
   FolderOpen,
-  LayoutDashboard,
   Loader2,
-  MessageSquare,
-  Plus,
-  Settings,
 } from "lucide-react"
-import { useCallback, useEffect, useRef, useState, type ComponentType } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -22,26 +14,25 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { LanguageToggle } from "@/lib/language"
-import { ThemeToggle } from "@/lib/theme"
-import { cn } from "@/lib/utils"
 import { useDesktopBridge } from "./bridge-context"
-import {
-  DesktopDocumentImportPanel,
-  type DesktopImportBatchSummary,
-} from "./DesktopDocumentImportPanel"
-import { DesktopGroundedAnswerPanel } from "./DesktopGroundedAnswerPanel"
-import { DesktopKnowledgePagePanel } from "./DesktopKnowledgePagePanel"
-import { DesktopModelSettingsPanel } from "./DesktopModelSettingsPanel"
-import { DesktopReviewPanel } from "./DesktopReviewPanel"
+import type { DesktopImportBatchSummary } from "./DesktopDocumentImportPanel"
+import { DesktopGlobalSearchDialog } from "./DesktopGlobalSearchDialog"
+import { ActiveKnowledgeBaseView, EmptyKnowledgeBase } from "./DesktopKnowledgeBaseViews"
+import DesktopLocalSettingsPanel from "./DesktopLocalSettingsPanel"
+import { DesktopTaskDrawer } from "./DesktopTaskDrawer"
 import { FailedDocumentsDialog } from "./FailedDocumentsDialog"
 import { DesktopRawDocumentDialog } from "./DesktopRawDocumentDialog"
+import {
+  DesktopWorkbenchShell,
+  type WorkspaceSection,
+} from "./DesktopWorkbenchShell"
 import { DesktopBridgeError } from "./contracts"
 import { nextDesktopRequestId } from "./request-id"
 import { useDeferredImportSources } from "./useDeferredImportSources"
 import { useDesktopRuntimeEvents } from "./useDesktopRuntimeEvents"
 import type {
   DesktopImportTask,
+  DesktopGlobalSearchResult,
   DesktopImportSourceInspection,
   DesktopImportSourcePicker,
   DesktopKnowledgeBase,
@@ -49,22 +40,17 @@ import type {
   DesktopRecoveryOverride,
 } from "./contracts"
 
-type WorkspaceSection = "overview" | "documents" | "answers" | "knowledge" | "review" | "settings"
 type DialogMode = "create" | "open"
 type ImportTaskAction = "pause" | "resume" | "cancel"
 
-const navigation: Array<{
-  id: WorkspaceSection
-  icon: ComponentType<{ className?: string }>
-  labelKey: string
-}> = [
-  { id: "overview", icon: LayoutDashboard, labelKey: "overview" },
-  { id: "documents", icon: FileText, labelKey: "documents" },
-  { id: "answers", icon: MessageSquare, labelKey: "answers" },
-  { id: "knowledge", icon: BookOpen, labelKey: "knowledge" },
-  { id: "review", icon: ClipboardCheck, labelKey: "review" },
-  { id: "settings", icon: Settings, labelKey: "settings" },
-]
+const LAST_SECTION_PREFIX = "openkb.desktop.last-section."
+
+function storedSection(kbDir: string): WorkspaceSection {
+  const value = window.localStorage.getItem(`${LAST_SECTION_PREFIX}${kbDir}`)
+  return ["overview", "documents", "conversations", "knowledge", "settings"].includes(value ?? "")
+    ? value as WorkspaceSection
+    : "overview"
+}
 
 function isImportControlError(error: unknown): boolean {
   return error instanceof DesktopBridgeError
@@ -104,13 +90,12 @@ function withoutExcludedImportSources(
 }
 
 /** The first real Desktop Workbench: one active SQLite knowledge base at a time. */
-export default function DesktopKnowledgeBaseWorkspace() {
+export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { engineReady?: boolean }) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
   const [knowledgeBase, setKnowledgeBase] = useState<DesktopKnowledgeBase | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [runtimeNotice, setRuntimeNotice] = useState<string | null>(null)
   const [section, setSection] = useState<WorkspaceSection>("overview")
   const [dialogMode, setDialogMode] = useState<DialogMode | null>(null)
   const [path, setPath] = useState("")
@@ -131,8 +116,18 @@ export default function DesktopKnowledgeBaseWorkspace() {
   const [rawDocumentFocus, setRawDocumentFocus] = useState<Record<string, unknown> | null>(null)
   const [loadingRawDocument, setLoadingRawDocument] = useState(false)
   const [failedDocumentsOpen, setFailedDocumentsOpen] = useState(false)
+  const [taskDrawerOpen, setTaskDrawerOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [requestedConversationId, setRequestedConversationId] = useState<string | null>(null)
+  const [requestedConversationMessageId, setRequestedConversationMessageId] = useState<string | null>(null)
+  const [requestedDocumentId, setRequestedDocumentId] = useState<string | null>(null)
+  const [requestedKnowledgePageId, setRequestedKnowledgePageId] = useState<string | null>(null)
+  const [knowledgeInitialTab, setKnowledgeInitialTab] = useState<"pages" | "review">("pages")
+  const [navigationRequestSequence, setNavigationRequestSequence] = useState(0)
+  const [reviewCount, setReviewCount] = useState(0)
   const [controllingJobId, setControllingJobId] = useState<string | null>(null)
   const activeKnowledgeBaseRead = useRef(0)
+  const activeKnowledgeBasePath = useRef<string | null>(null)
   const initialActiveKnowledgeBaseRead = useRef(true)
   const trayTipShown = useRef(false)
   const importInspectionRead = useRef(0)
@@ -149,11 +144,22 @@ export default function DesktopKnowledgeBaseWorkspace() {
       if (read !== activeKnowledgeBaseRead.current) return
       const shouldAnnounceRestoration = initialActiveKnowledgeBaseRead.current
       initialActiveKnowledgeBaseRead.current = false
+      if (activeKnowledgeBasePath.current !== result.knowledgeBase?.kbDir) {
+        activeKnowledgeBasePath.current = result.knowledgeBase?.kbDir ?? null
+        setSection(result.knowledgeBase ? storedSection(result.knowledgeBase.kbDir) : "overview")
+        setRequestedConversationId(null)
+        setRequestedConversationMessageId(null)
+        setRequestedDocumentId(null)
+        setRequestedKnowledgePageId(null)
+        setKnowledgeInitialTab("pages")
+        setReviewCount(0)
+        setSearchOpen(false)
+      }
       setKnowledgeBase(result.knowledgeBase)
       setImportTasks(importTask)
       setLoadError(null)
       if (shouldAnnounceRestoration && result.knowledgeBase !== null) {
-        setRuntimeNotice(t("desktop.knowledgeBases.runtimeRestored", { name: result.knowledgeBase.name }))
+        toast.success(t("desktop.knowledgeBases.runtimeRestored", { name: result.knowledgeBase.name }))
       }
     } catch (error) {
       if (read !== activeKnowledgeBaseRead.current) return
@@ -165,21 +171,86 @@ export default function DesktopKnowledgeBaseWorkspace() {
 
   const handleRuntimeNotice = useCallback((notice: "previousKnowledgeBaseUnavailable" | "trayRestored" | "engineRestarted") => {
     if (notice === "previousKnowledgeBaseUnavailable") {
-      setRuntimeNotice(t("desktop.knowledgeBases.previousKnowledgeBaseUnavailable"))
+      toast.error(t("desktop.knowledgeBases.previousKnowledgeBaseUnavailable"))
       return
     }
     if (notice === "trayRestored") {
       if (trayTipShown.current) return
       trayTipShown.current = true
-      setRuntimeNotice(t("desktop.knowledgeBases.trayRestored"))
+      toast.success(t("desktop.knowledgeBases.trayRestored"))
       return
     }
-    setRuntimeNotice(t("desktop.knowledgeBases.engineRestarted"))
+    toast.info(t("desktop.knowledgeBases.engineRestarted"))
   }, [t])
+
+  const openTaskDrawer = useCallback(() => setTaskDrawerOpen(true), [])
+
+  const changeSection = useCallback((next: WorkspaceSection) => {
+    setSection(next)
+    if (knowledgeBase) {
+      window.localStorage.setItem(`${LAST_SECTION_PREFIX}${knowledgeBase.kbDir}`, next)
+    }
+  }, [knowledgeBase])
+
+  const openSearch = useCallback(() => {
+    if (knowledgeBase === null) {
+      toast.info(t("desktop.globalSearch.openKnowledgeBaseFirst"))
+      return
+    }
+    setSearchOpen(true)
+  }, [knowledgeBase, t])
+
+  const selectSearchResult = (result: DesktopGlobalSearchResult) => {
+    setNavigationRequestSequence((current) => current + 1)
+    if (result.kind === "document") {
+      setRequestedDocumentId(result.documentId)
+      changeSection("documents")
+      if (!result.documentId && result.status === "failed") setFailedDocumentsOpen(true)
+      return
+    }
+    if (result.kind === "knowledge_page" && result.pageId) {
+      setRequestedKnowledgePageId(result.pageId)
+      setKnowledgeInitialTab("pages")
+      changeSection("knowledge")
+      return
+    }
+    if (result.conversationId) {
+      setRequestedConversationId(result.conversationId)
+      setRequestedConversationMessageId(result.messageId)
+      changeSection("conversations")
+    }
+  }
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault()
+        openSearch()
+      }
+    }
+    window.addEventListener("keydown", handleShortcut)
+    return () => window.removeEventListener("keydown", handleShortcut)
+  }, [openSearch])
 
   useEffect(() => {
     void Promise.resolve().then(refreshActiveKnowledgeBase)
   }, [refreshActiveKnowledgeBase])
+
+  useEffect(() => {
+    let disposed = false
+    if (knowledgeBase === null || !engineReady) {
+      return
+    }
+    void Promise.all([
+      bridge.knowledgeReconciliationConflicts(),
+      bridge.documentVersionCandidates(),
+    ]).then(([conflicts, versions]) => {
+      if (!disposed) {
+        setReviewCount(conflicts.conflicts.length + versions.candidates.filter((item) => item.status === "pending").length)
+      }
+    }).catch(() => undefined)
+    return () => { disposed = true }
+  }, [bridge, engineReady, importTasks, knowledgeBase])
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined
@@ -258,15 +329,20 @@ export default function DesktopKnowledgeBaseWorkspace() {
     setInspectingImportSources(false)
     setImportBatchSummary(null)
     try {
+      let activatedKbDir = path.trim()
       if (dialogMode === "create") {
         const { join } = await import("@tauri-apps/api/path")
-        const kbDir = await join(path.trim(), name.trim())
-        await bridge.createKnowledgeBase(kbDir, name.trim(), nextDesktopRequestId("knowledge-base"))
+        activatedKbDir = await join(path.trim(), name.trim())
+        await bridge.createKnowledgeBase(activatedKbDir, name.trim(), nextDesktopRequestId("knowledge-base"))
       } else {
-        await bridge.openKnowledgeBase(path.trim(), nextDesktopRequestId("knowledge-base"))
+        await bridge.openKnowledgeBase(activatedKbDir, nextDesktopRequestId("knowledge-base"))
       }
       await refreshActiveKnowledgeBase()
-      setSection("overview")
+      const nextSection: WorkspaceSection = dialogMode === "create"
+        ? "documents"
+        : storedSection(activatedKbDir)
+      setSection(nextSection)
+      window.localStorage.setItem(`${LAST_SECTION_PREFIX}${activatedKbDir}`, nextSection)
       setDialogMode(null)
     } catch (error) {
       await refreshActiveKnowledgeBase()
@@ -326,7 +402,8 @@ export default function DesktopKnowledgeBaseWorkspace() {
     refreshActiveKnowledgeBase,
     setLoading,
     setLoadError,
-    setSection,
+    setSection: changeSection,
+    onOpenTasks: openTaskDrawer,
     onRuntimeNotice: handleRuntimeNotice,
   })
 
@@ -383,7 +460,8 @@ export default function DesktopKnowledgeBaseWorkspace() {
     }
     setImporting(true)
     setImportError(null)
-    setImportBatchSummary(null)
+    const batchTotal = importInspection.supported.length
+    setImportBatchSummary({ total: batchTotal, completed: 0, failures: [], running: true })
     let completed = 0
     const failures: Array<{ name: string; reason: string }> = []
     for (const source of importInspection.supported) {
@@ -406,8 +484,14 @@ export default function DesktopKnowledgeBaseWorkspace() {
       } catch {
         // The batch summary still reports the document failure when task refresh is unavailable.
       }
+      setImportBatchSummary({
+        total: batchTotal,
+        completed,
+        failures: [...failures],
+        running: true,
+      })
     }
-    setImportBatchSummary({ completed, failures })
+    setImportBatchSummary({ total: batchTotal, completed, failures, running: false })
     setImportSources([])
     setExcludedImportSources([])
     setImportInspection(null)
@@ -496,99 +580,34 @@ export default function DesktopKnowledgeBaseWorkspace() {
     }
   }
 
-  const failedDocumentCount = importTasks.filter((task) => task.job.status === "quarantined").length
-  const visibleRuntimeNotice = runtimeNotice ?? t("desktop.knowledgeBases.trayAvailable")
+  const activeTaskCount = importTasks.filter((task) => ["pending", "running", "paused", "recoverable"].includes(task.job.status)).length
 
   return (
-    <div className="min-h-screen bg-background text-foreground" data-testid="desktop-workbench">
-      <header className="flex min-h-16 items-center justify-between gap-3 border-b border-border/70 bg-background/85 px-4 backdrop-blur md:px-6">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary text-primary-foreground shadow-sm">
-            <BookOpen className="size-4" />
-          </div>
-          <div className="min-w-0">
-            <p className="font-mono2 text-[10px] font-semibold tracking-[0.2em] text-muted-foreground">
-              OPENKB
-            </p>
-            <button
-              type="button"
-              onClick={() => beginSelection("open")}
-              className="mt-0.5 flex max-w-[min(58vw,34rem)] items-center gap-1.5 rounded-md text-left text-sm font-semibold outline-none transition-colors hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
-              aria-haspopup="dialog"
-            >
-              <span className="truncate">
-                {knowledgeBase?.name ?? t("desktop.knowledgeBases.chooseKnowledgeBase")}
-              </span>
-              <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" />
-            </button>
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-1 rounded-full border border-border/70 bg-muted/45 p-1">
-          <ThemeToggle className="text-muted-foreground hover:text-foreground" />
-          <LanguageToggle className="text-muted-foreground hover:text-foreground" />
-        </div>
-      </header>
-
-      <div className="grid min-h-[calc(100vh-4rem)] grid-cols-[13rem_minmax(0,1fr)]">
-        <aside className="border-r border-border/70 bg-muted/20 p-3" aria-label={t("desktop.knowledgeBases.navigation")}>
-          <nav className="space-y-1">
-            {navigation.map(({ id, icon: Icon, labelKey }) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setSection(id)}
-                aria-current={section === id ? "page" : undefined}
-                className={cn(
-                  "flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
-                  section === id
-                    ? "bg-primary text-primary-foreground shadow-sm"
-                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-                )}
-              >
-                <Icon className="size-4" />
-                {t(`desktop.knowledgeBases.navigationItems.${labelKey}`)}
-              </button>
-            ))}
-          </nav>
-          <div className="mt-6 border-t border-border/70 pt-4">
-            <Button
-              className="w-full justify-start"
-              size="sm"
-              variant="outline"
-              disabled={knowledgeBase === null}
-              onClick={() => setFailedDocumentsOpen(true)}
-            >
-              <CircleAlert className="size-4" />
-              {t("desktop.knowledgeBases.failedDocuments")}
-              {failedDocumentCount ? (
-                <span className="ml-auto rounded-full bg-destructive/10 px-1.5 py-0.5 text-xs text-destructive">
-                  {failedDocumentCount}
-                </span>
-              ) : null}
-            </Button>
-            <Button className="w-full justify-start" size="sm" onClick={() => beginSelection("create")}>
-              <Plus className="size-4" />
-              {t("desktop.knowledgeBases.create")}
-            </Button>
-            <Button
-              className="mt-2 w-full justify-start"
-              size="sm"
-              variant="outline"
-              onClick={() => beginSelection("open")}
-            >
-              <FolderOpen className="size-4" />
-              {t("desktop.knowledgeBases.open")}
-            </Button>
-          </div>
-        </aside>
-
-        <main className="min-w-0 p-5 md:p-8">
-          {visibleRuntimeNotice ? (
-            <div className="mb-5 rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 text-sm text-foreground" role="status">
-              {visibleRuntimeNotice}
-            </div>
-          ) : null}
-          {loading ? (
+    <>
+      <DesktopWorkbenchShell
+        activeSection={section}
+        knowledgeBaseName={knowledgeBase?.name ?? null}
+        engineReady={engineReady}
+        activeTaskCount={activeTaskCount}
+        reviewCount={reviewCount}
+        onSectionChange={(next) => {
+          if (next === "knowledge") setKnowledgeInitialTab("pages")
+          changeSection(next)
+        }}
+        onOpenReview={() => {
+          setKnowledgeInitialTab("review")
+          setNavigationRequestSequence((current) => current + 1)
+          changeSection("knowledge")
+        }}
+        onOpenKnowledgeBase={() => beginSelection("open")}
+        onCreateKnowledgeBase={() => beginSelection("create")}
+        onOpenSearch={openSearch}
+        onOpenTasks={() => setTaskDrawerOpen(true)}
+      >
+        <div className="min-h-[calc(100vh-3.5rem)] p-4 md:p-6">
+          {section === "settings" && knowledgeBase === null ? (
+            <DesktopLocalSettingsPanel />
+          ) : loading ? (
             <div className="flex min-h-60 items-center justify-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" />
               {t("desktop.knowledgeBases.loading")}
@@ -624,6 +643,12 @@ export default function DesktopKnowledgeBaseWorkspace() {
               importBatchSummary={importBatchSummary}
               importTasks={importTasks}
               controllingJobId={controllingJobId}
+              requestedConversationId={requestedConversationId}
+              requestedConversationMessageId={requestedConversationMessageId}
+              requestedDocumentId={requestedDocumentId}
+              requestedKnowledgePageId={requestedKnowledgePageId}
+              knowledgeInitialTab={knowledgeInitialTab}
+              navigationRequestSequence={navigationRequestSequence}
               onImportPathChange={setImportPath}
               onAddImportPath={addManualImportSource}
               onChooseImportSources={(picker) => void chooseImportSources(picker)}
@@ -631,10 +656,24 @@ export default function DesktopKnowledgeBaseWorkspace() {
               onSubmitImport={() => void submitImportBatch()}
               onControlImportJob={(jobId, action) => void controlImportJob(jobId, action)}
               onOpenRawDocument={(documentId, locator) => void openRawDocument(documentId, locator)}
+              onNavigate={changeSection}
+              onOpenReview={() => {
+                setKnowledgeInitialTab("review")
+                setNavigationRequestSequence((current) => current + 1)
+                changeSection("knowledge")
+              }}
+              onOpenFailedDocuments={() => setFailedDocumentsOpen(true)}
             />
           )}
-        </main>
-      </div>
+        </div>
+      </DesktopWorkbenchShell>
+
+      <DesktopGlobalSearchDialog
+        key={knowledgeBase?.kbDir ?? "no-knowledge-base"}
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        onSelect={selectSearchResult}
+      />
 
       <Dialog open={dialogMode !== null} onOpenChange={closeSelection}>
         <DialogContent className="sm:max-w-lg">
@@ -714,6 +753,14 @@ export default function DesktopKnowledgeBaseWorkspace() {
         onOpenChange={setFailedDocumentsOpen}
         onRecover={(jobId, override) => void recoverImportJob(jobId, override)}
       />
+      <DesktopTaskDrawer
+        open={taskDrawerOpen}
+        batchSummary={importBatchSummary}
+        tasks={importTasks}
+        controllingJobId={controllingJobId}
+        onOpenChange={setTaskDrawerOpen}
+        onControl={(jobId, action) => void controlImportJob(jobId, action)}
+      />
       <DesktopRawDocumentDialog
         document={rawDocument}
         focusLocator={rawDocumentFocus}
@@ -727,133 +774,6 @@ export default function DesktopKnowledgeBaseWorkspace() {
           }
         }}
       />
-    </div>
-  )
-}
-
-function EmptyKnowledgeBase({ onCreate, onOpen }: { onCreate: () => void; onOpen: () => void }) {
-  const { t } = useTranslation("common")
-  return (
-    <section className="mx-auto flex min-h-80 max-w-2xl flex-col justify-center rounded-apple-lg border border-border/70 bg-muted/20 p-8 shadow-sm">
-      <span className="grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary">
-        <BookOpen className="size-6" />
-      </span>
-      <h1 className="mt-5 text-2xl font-semibold tracking-tight">{t("desktop.knowledgeBases.emptyTitle")}</h1>
-      <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
-        {t("desktop.knowledgeBases.emptyDescription")}
-      </p>
-      <div className="mt-6 flex flex-wrap gap-3">
-        <Button onClick={onCreate}>
-          <Plus className="size-4" />
-          {t("desktop.knowledgeBases.create")}
-        </Button>
-        <Button variant="outline" onClick={onOpen}>
-          <FolderOpen className="size-4" />
-          {t("desktop.knowledgeBases.open")}
-        </Button>
-      </div>
-    </section>
-  )
-}
-
-function ActiveKnowledgeBaseView({
-  knowledgeBase,
-  section,
-  importError,
-  importing,
-  importPath,
-  importSources,
-  importInspection,
-  inspectingImportSources,
-  importDropActive,
-  importBatchSummary,
-  importTasks,
-  controllingJobId,
-  onImportPathChange,
-  onAddImportPath,
-  onChooseImportSources,
-  onRemoveImportSource,
-  onSubmitImport,
-  onControlImportJob,
-  onOpenRawDocument,
-}: {
-  knowledgeBase: DesktopKnowledgeBase
-  section: WorkspaceSection
-  importError: string | null
-  importing: boolean
-  importPath: string
-  importSources: string[]
-  importInspection: DesktopImportSourceInspection | null
-  inspectingImportSources: boolean
-  importDropActive: boolean
-  importBatchSummary: DesktopImportBatchSummary | null
-  importTasks: DesktopImportTask[]
-  controllingJobId: string | null
-  onImportPathChange: (value: string) => void
-  onAddImportPath: () => void
-  onChooseImportSources: (picker: DesktopImportSourcePicker) => void
-  onRemoveImportSource: (path: string) => void
-  onSubmitImport: () => void
-  onControlImportJob: (jobId: string, action: ImportTaskAction) => void
-  onOpenRawDocument: (documentId: string, locator?: Record<string, unknown>) => void
-}) {
-  const { t } = useTranslation("common")
-  const sectionTitle = t(`desktop.knowledgeBases.navigationItems.${section}`)
-  return (
-    <section className="mx-auto max-w-4xl">
-      <p className="font-mono2 text-xs font-semibold tracking-[0.18em] text-primary">{sectionTitle}</p>
-      <h1 className="mt-2 text-3xl font-semibold tracking-tight">{knowledgeBase.name}</h1>
-      <p className="mt-2 break-all text-sm text-muted-foreground">{knowledgeBase.kbDir}</p>
-      <div className="mt-7 grid gap-4 sm:grid-cols-3">
-        <StatusCard label={t("desktop.knowledgeBases.schemaVersion")} value={`v${knowledgeBase.schemaVersion}`} />
-        <StatusCard label={t("desktop.knowledgeBases.checkpoint")} value={knowledgeBase.lastCheckpointAt ?? t("desktop.knowledgeBases.notYet")} />
-        <StatusCard label={t("desktop.knowledgeBases.runtime")} value={t("desktop.knowledgeBases.active")} />
-      </div>
-      <div className="mt-8 rounded-apple-lg border border-border/70 bg-muted/20 p-6">
-        <div className="flex items-start gap-3">
-          <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-          <div>
-            <h2 className="font-semibold">{t("desktop.knowledgeBases.readyTitle", { section: sectionTitle })}</h2>
-            <p className="mt-1 text-sm leading-6 text-muted-foreground">
-              {t("desktop.knowledgeBases.readyDescription")}
-            </p>
-          </div>
-        </div>
-      </div>
-      {section === "documents" ? (
-        <DesktopDocumentImportPanel
-          error={importError}
-          importing={importing}
-          manualPath={importPath}
-          sources={importSources}
-          inspection={importInspection}
-          inspecting={inspectingImportSources}
-          dropActive={importDropActive}
-          summary={importBatchSummary}
-          tasks={importTasks}
-          controllingJobId={controllingJobId}
-          onManualPathChange={onImportPathChange}
-          onAddManualPath={onAddImportPath}
-          onChooseSources={onChooseImportSources}
-          onRemoveSource={onRemoveImportSource}
-          onSubmit={onSubmitImport}
-          onControl={onControlImportJob}
-          onOpenOriginal={onOpenRawDocument}
-        />
-      ) : null}
-      {section === "answers" ? <DesktopGroundedAnswerPanel onOpenOriginal={onOpenRawDocument} /> : null}
-      {section === "knowledge" ? <DesktopKnowledgePagePanel /> : null}
-      {section === "review" ? <DesktopReviewPanel /> : null}
-      {section === "settings" ? <DesktopModelSettingsPanel key={knowledgeBase.kbDir} kbDir={knowledgeBase.kbDir} /> : null}
-    </section>
-  )
-}
-
-function StatusCard({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border border-border/70 bg-background p-4 shadow-sm">
-      <p className="text-xs font-medium text-muted-foreground">{label}</p>
-      <p className="mt-2 break-all text-sm font-semibold text-foreground">{value}</p>
-    </div>
+    </>
   )
 }

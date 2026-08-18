@@ -3,6 +3,7 @@ import { Images, Loader2, RotateCcw, SendHorizontal, Square } from "lucide-react
 import { useCallback, useEffect, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
+import MarkdownView from "@/components/MarkdownView"
 import { useDesktopBridge } from "./bridge-context"
 import type { DesktopAnswerSourceImage, DesktopGroundedAnswer } from "./contracts"
 import { nextDesktopRequestId } from "./request-id"
@@ -162,6 +163,7 @@ export function DesktopGroundedAnswerPanel({
       {streaming ? (
         <AnswerCard
           answerText={streaming.content}
+          finalized={false}
           title={t(
             streaming.retrying
               ? "desktop.knowledgeBases.answerRetrying"
@@ -329,15 +331,19 @@ function AnswerCard({
   answerText,
   title,
   children,
+  finalized = true,
 }: {
   answerText: string
   title: string
   children?: ReactNode
+  finalized?: boolean
 }) {
   return (
     <article className="rounded-apple-lg border border-border/70 bg-background p-5 shadow-sm">
       <h2 className="font-semibold">{title}</h2>
-      <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-foreground">{answerText}</p>
+      <div className="mt-3 text-sm leading-6 text-foreground">
+        <MarkdownView source={answerText} finalized={finalized} />
+      </div>
       {children}
     </article>
   )

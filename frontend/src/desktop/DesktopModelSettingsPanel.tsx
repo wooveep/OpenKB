@@ -1,6 +1,7 @@
-import { Download, Eye, EyeOff, FolderOpen, KeyRound, Loader2, Save, SlidersHorizontal } from "lucide-react"
+import { CheckCircle2, Download, Eye, EyeOff, FolderOpen, KeyRound, Loader2, Save, SlidersHorizontal } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -11,6 +12,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { useLanguage } from "@/lib/language"
+import { useTheme } from "@/lib/theme"
+import { useZoom } from "@/lib/zoom"
 import { useDesktopBridge } from "./bridge-context"
 import { nextDesktopRequestId } from "./request-id"
 import type { DesktopModelSettings } from "./contracts"
@@ -48,15 +52,19 @@ function draftFrom(settings: DesktopModelSettings): ModelSettingsDraft {
 export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
+  const { language, setLanguage } = useLanguage()
+  const { theme, setTheme } = useTheme()
+  const { zoom, setZoom } = useZoom()
   const [settings, setSettings] = useState<DesktopModelSettings | null>(null)
   const [draft, setDraft] = useState<ModelSettingsDraft | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
   const [diagnosticReviewOpen, setDiagnosticReviewOpen] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
     let disposed = false
@@ -89,7 +97,6 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
     }
     setSaving(true)
     setError(null)
-    setNotice(null)
     try {
       const result = await bridge.saveModelSettings(
         draft.provider,
@@ -102,7 +109,7 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
       )
       setSettings(result)
       setDraft(draftFrom(result))
-      setNotice(t("desktop.knowledgeBases.modelSettings.saved"))
+      toast.success(t("desktop.knowledgeBases.modelSettings.saved"))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -110,10 +117,48 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
     }
   }
 
+  const testConnection = async () => {
+    if (!draft || testing) return
+    const maxConcurrentModelCalls = Number(draft.maxConcurrentModelCalls)
+    const initialTimeoutSeconds = Number(draft.initialTimeoutSeconds)
+    if (!Number.isInteger(maxConcurrentModelCalls) || maxConcurrentModelCalls < 1 || maxConcurrentModelCalls > 8) {
+      setError(t("desktop.knowledgeBases.modelSettings.invalidConcurrency"))
+      return
+    }
+    if (!Number.isFinite(initialTimeoutSeconds) || initialTimeoutSeconds <= 0 || initialTimeoutSeconds > 60) {
+      setError(t("desktop.knowledgeBases.modelSettings.invalidTimeout"))
+      return
+    }
+    setTesting(true)
+    setError(null)
+    setTestResult(null)
+    try {
+      const result = await bridge.testModelConnection(
+        draft.provider,
+        draft.model,
+        draft.apiBaseUrl,
+        draft.apiKey,
+        maxConcurrentModelCalls,
+        initialTimeoutSeconds,
+        nextDesktopRequestId("model-connection-test"),
+      )
+      if (!result.ok) throw new Error(t("desktop.knowledgeBases.modelSettings.testRejected"))
+      const message = t("desktop.knowledgeBases.modelSettings.testSucceeded", {
+        latency: result.latencyMs,
+        attempts: result.attemptCount,
+      })
+      setTestResult(message)
+      toast.success(message)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setTesting(false)
+    }
+  }
+
   const exportDiagnostics = async () => {
     if (exporting) return
     setError(null)
-    setNotice(null)
     try {
       const { save: chooseDestination } = await import("@tauri-apps/plugin-dialog")
       const destination = await chooseDestination({
@@ -126,7 +171,7 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
         destination,
         nextDesktopRequestId("diagnostic-bundle"),
       )
-      setNotice(t("desktop.knowledgeBases.modelSettings.diagnosticsExported", { path: bundle.path }))
+      toast.success(t("desktop.knowledgeBases.modelSettings.diagnosticsExported", { path: bundle.path }))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -175,7 +220,7 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
         </div>
 
         {error ? <p className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">{error}</p> : null}
-        {notice ? <p className="mt-4 rounded-lg border border-emerald-600/25 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300">{notice}</p> : null}
+        {testResult ? <p className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-600/25 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-4" />{testResult}</p> : null}
 
         <div className="mt-5 grid gap-4 md:grid-cols-2">
           <label className="block text-sm font-medium">
@@ -231,7 +276,37 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
           <span className="flex items-center gap-2 text-muted-foreground"><KeyRound className="size-4" />{settings.apiKeyConfigured ? t("desktop.knowledgeBases.modelSettings.apiKeyConfigured") : t("desktop.knowledgeBases.modelSettings.apiKeyRequired")}</span>
           <span className="text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.deadline", { seconds: settings.modelCallDeadlineSeconds })}</span>
         </div>
-        <div className="mt-5 flex justify-end"><Button disabled={saving} onClick={() => void save()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}{saving ? t("desktop.knowledgeBases.modelSettings.saving") : t("desktop.knowledgeBases.modelSettings.save")}</Button></div>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="outline" disabled={saving || testing} onClick={() => void testConnection()}>{testing ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{testing ? t("desktop.knowledgeBases.modelSettings.testing") : t("desktop.knowledgeBases.modelSettings.testConnection")}</Button>
+          <Button disabled={saving || testing} onClick={() => void save()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}{saving ? t("desktop.knowledgeBases.modelSettings.saving") : t("desktop.knowledgeBases.modelSettings.save")}</Button>
+        </div>
+      </section>
+
+      <section className="rounded-apple-lg border border-border/70 bg-muted/20 p-5 shadow-sm">
+        <h2 className="font-semibold">{t("desktop.knowledgeBases.modelSettings.appearanceTitle")}</h2>
+        <p className="mt-1 text-sm leading-6 text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.appearanceDescription")}</p>
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <label className="block text-sm font-medium">
+            {t("desktop.knowledgeBases.modelSettings.theme")}
+            <select className="mt-1.5 flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm" value={theme} onChange={(event) => setTheme(event.target.value as "light" | "dark" | "system")}>
+              <option value="system">{t("theme.system")}</option>
+              <option value="light">{t("theme.light")}</option>
+              <option value="dark">{t("theme.dark")}</option>
+            </select>
+          </label>
+          <label className="block text-sm font-medium">
+            {t("desktop.knowledgeBases.modelSettings.language")}
+            <select className="mt-1.5 flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm" value={language} onChange={(event) => setLanguage(event.target.value as "zh" | "en")}>
+              <option value="zh">{t("language.zh")}</option>
+              <option value="en">{t("language.en")}</option>
+            </select>
+          </label>
+          <label className="block text-sm font-medium md:col-span-2">
+            <span className="flex items-center justify-between"><span>{t("desktop.knowledgeBases.modelSettings.zoom")}</span><output>{zoom}%</output></span>
+            <input className="mt-2 w-full accent-primary" type="range" min="80" max="200" step="10" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} />
+            <span className="mt-1 block text-xs font-normal text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.zoomHelp")}</span>
+          </label>
+        </div>
       </section>
 
       <section className="rounded-apple-lg border border-border/70 bg-muted/20 p-5 shadow-sm">
@@ -247,15 +322,14 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
             {t("desktop.knowledgeBases.modelSettings.openLogDirectory")}
           </Button>
         </div>
-      </section>
-
-      <section className="rounded-apple-lg border border-border/70 bg-muted/20 p-5 shadow-sm">
-        <h2 className="font-semibold">{t("desktop.knowledgeBases.modelSettings.diagnosticsTitle")}</h2>
-        <p className="mt-1 text-sm leading-6 text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.diagnosticsDescription")}</p>
-        <Button className="mt-4" variant="outline" disabled={exporting} onClick={() => setDiagnosticReviewOpen(true)}>
-          {exporting ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
-          {exporting ? t("desktop.knowledgeBases.modelSettings.exporting") : t("desktop.knowledgeBases.modelSettings.exportDiagnostics")}
-        </Button>
+        <div className="mt-6 border-t border-border/70 pt-5">
+          <h3 className="font-semibold">{t("desktop.knowledgeBases.modelSettings.diagnosticsTitle")}</h3>
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.diagnosticsDescription")}</p>
+          <Button className="mt-4" variant="outline" disabled={exporting} onClick={() => setDiagnosticReviewOpen(true)}>
+            {exporting ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
+            {exporting ? t("desktop.knowledgeBases.modelSettings.exporting") : t("desktop.knowledgeBases.modelSettings.exportDiagnostics")}
+          </Button>
+        </div>
       </section>
 
       <Dialog open={diagnosticReviewOpen} onOpenChange={setDiagnosticReviewOpen}>

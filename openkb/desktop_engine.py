@@ -20,7 +20,9 @@ from pathlib import Path
 from typing import BinaryIO
 
 from openkb import __version__
+from openkb import desktop_engine_methods as engine_methods
 from openkb.desktop_answer_types import DesktopAnswerError
+from openkb.desktop_conversations import DesktopConversationError
 from openkb.desktop_grounded_answer import DesktopGroundedAnswerService
 from openkb.desktop_import import (
     DesktopImportControl,
@@ -141,53 +143,10 @@ class DesktopRequest:
 class DesktopEngineServer:
     """Serve one private Desktop Shell connection until stdin closes or shutdown arrives."""
 
-    _CONTROL_METHODS = {
-        "engine.handshake",
-        "engine.health",
-        "engine.cancel",
-        "engine.shutdown",
-    }
-    _WORKSPACE_METHODS = {
-        "workbench.create_knowledge_base",
-        "workbench.open_knowledge_base",
-        "workbench.active_knowledge_base",
-        "workbench.inspect_import_sources",
-        "workbench.import_text_document",
-        "workbench.resume_import_job",
-        "workbench.recover_import_job",
-        "workbench.import_jobs",
-        "workbench.read_raw_document",
-        "workbench.ask_grounded",
-        "workbench.retry_interrupted_answer",
-        "workbench.grounded_answers",
-        "workbench.knowledge_pages",
-        "workbench.knowledge_page",
-        "workbench.save_knowledge_page",
-        "workbench.document_version_candidates",
-        "workbench.resolve_document_version_candidate",
-        "workbench.knowledge_reconciliation_conflicts",
-        "workbench.stage_knowledge_reconciliation_decisions",
-        "workbench.commit_knowledge_reconciliation_decisions",
-        "workbench.model_settings",
-        "workbench.save_model_settings",
-        "workbench.export_diagnostic_bundle",
-    }
-    _INTERRUPTION_PRESERVING_METHODS = {
-        "workbench.ask_grounded",
-        "workbench.retry_interrupted_answer",
-    }
-    _NON_CANCELABLE_MUTATION_METHODS = {
-        "workbench.create_knowledge_base",
-        "workbench.open_knowledge_base",
-        "workbench.import_text_document",
-        "workbench.read_raw_document",
-        "workbench.save_knowledge_page",
-        "workbench.resolve_document_version_candidate",
-        "workbench.stage_knowledge_reconciliation_decisions",
-        "workbench.commit_knowledge_reconciliation_decisions",
-        "workbench.save_model_settings",
-        "workbench.export_diagnostic_bundle",
-    }
+    _CONTROL_METHODS = engine_methods.CONTROL_METHODS
+    _WORKSPACE_METHODS = engine_methods.WORKSPACE_METHODS
+    _INTERRUPTION_PRESERVING_METHODS = engine_methods.INTERRUPTION_PRESERVING_METHODS
+    _NON_CANCELABLE_MUTATION_METHODS = engine_methods.NON_CANCELABLE_MUTATION_METHODS
 
     def __init__(
         self,
@@ -304,6 +263,7 @@ class DesktopEngineServer:
             self._write_error(request.request_id, error.code, str(error))
         except (
             DesktopAnswerError,
+            DesktopConversationError,
             DesktopKnowledgePageError,
             DesktopKnowledgeBaseError,
             DesktopImportError,
@@ -435,6 +395,16 @@ class DesktopEngineServer:
                 return {"answers": []}
             answers = DesktopGroundedAnswerService(Path(active.kb_dir)).list()
             return {"answers": [answer.as_dict() for answer in answers]}
+        if (
+            request.method.startswith("workbench.") and "conversation" in request.method
+        ) or request.method == "workbench.select_answer_version":
+            from openkb.desktop_engine_conversations import dispatch_conversation_request
+
+            return dispatch_conversation_request(self, request, cancel_event)
+        if request.method == "workbench.global_search":
+            from openkb.desktop_engine_search import dispatch_global_search_request
+
+            return dispatch_global_search_request(self, request)
         if request.method in {
             "workbench.knowledge_pages",
             "workbench.knowledge_page",
@@ -458,11 +428,7 @@ class DesktopEngineServer:
             return dispatch_knowledge_reconciliation_request(self, request, cancel_event)
         if request.method in self._INTERRUPTION_PRESERVING_METHODS:
             return self._dispatch_grounded_answer_request(request, cancel_event)
-        if request.method in {
-            "workbench.model_settings",
-            "workbench.save_model_settings",
-            "workbench.export_diagnostic_bundle",
-        }:
+        if request.method in engine_methods.MODEL_SETTINGS_METHODS:
             from openkb.desktop_engine_model_settings import dispatch_model_settings_request
 
             return dispatch_model_settings_request(self, request, cancel_event)
@@ -493,6 +459,9 @@ class DesktopEngineServer:
                 self._begin_workspace_mutation(request, cancel_event)
                 activation = self._workspace.open(Path(kb_dir))
                 active_kb_dir = Path(activation.knowledge_base.kb_dir)
+                from openkb.desktop_conversations import recover_stale_conversation_generations
+
+                recover_stale_conversation_generations(active_kb_dir)
                 DesktopRawAssetService(active_kb_dir).verify_available_documents()
                 DesktopKnowledgePageService(active_kb_dir).materialize_current_pages()
                 materialize_current_generation(active_kb_dir)

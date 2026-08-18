@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from threading import Event
 from typing import TYPE_CHECKING
 
 from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
+from openkb.desktop_model_gateway import (
+    DesktopModelCallError,
+    DesktopModelCancelledError,
+    DesktopModelRequest,
+)
 from openkb.desktop_model_settings import (
     read_desktop_model_settings,
     save_desktop_model_settings,
+    validate_desktop_model_settings,
 )
+from openkb.desktop_model_transport import desktop_model_gateway_for_settings
 
 if TYPE_CHECKING:
     from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
@@ -45,6 +53,38 @@ def dispatch_model_settings_request(
                 max_concurrent_model_calls=request.params.get("max_concurrent_model_calls"),
                 initial_timeout_seconds=request.params.get("initial_timeout_seconds"),
             ).as_dict()
+        if request.method == "workbench.test_model_connection":
+            settings = validate_desktop_model_settings(
+                provider=request.params.get("provider"),
+                model=request.params.get("model"),
+                api_base_url=request.params.get("api_base_url"),
+                api_key=request.params.get("api_key"),
+                max_concurrent_model_calls=request.params.get("max_concurrent_model_calls"),
+                initial_timeout_seconds=request.params.get("initial_timeout_seconds"),
+            )
+            started_at = time.monotonic()
+            try:
+                result = desktop_model_gateway_for_settings(kb_dir, settings).analyze(
+                    DesktopModelRequest(
+                        operation="connection_test",
+                        document_name="OpenKB connection test",
+                        content="Reply with the single word OK.",
+                    ),
+                    on_event=lambda _event: None,
+                    is_cancelled=cancel_event.is_set if cancel_event is not None else None,
+                )
+            except DesktopModelCallError as error:
+                raise DesktopRequestError(error.failure.code, error.failure.reason) from error
+            except DesktopModelCancelledError as error:
+                raise DesktopRequestError(
+                    "request_cancelled", "Connection test cancelled."
+                ) from error
+            return {
+                "ok": True,
+                "model": settings.model,
+                "latency_ms": round((time.monotonic() - started_at) * 1000),
+                "attempt_count": result.attempt_count,
+            }
         if request.method == "workbench.export_diagnostic_bundle":
             return (
                 DesktopDiagnosticBundleService(kb_dir)

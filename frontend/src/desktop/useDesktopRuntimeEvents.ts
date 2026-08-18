@@ -13,6 +13,7 @@ interface DesktopRuntimeEventOptions {
   setLoading: (loading: boolean) => void
   setLoadError: (error: string | null) => void
   setSection: (section: "overview" | "documents") => void
+  onOpenTasks: () => void
   onRuntimeNotice: (
     notice: "previousKnowledgeBaseUnavailable" | "trayRestored" | "engineRestarted",
   ) => void
@@ -26,6 +27,7 @@ export function useDesktopRuntimeEvents({
   setLoading,
   setLoadError,
   setSection,
+  onOpenTasks,
   onRuntimeNotice,
 }: DesktopRuntimeEventOptions): void {
   useEffect(() => {
@@ -64,6 +66,7 @@ export function useDesktopRuntimeEvents({
         drainLaunchIntents()
       } else if (event.kind === "tasks.requested") {
         setSection("documents")
+        onOpenTasks()
       } else if (event.kind === "activeKnowledgeBaseRestored") {
         void refreshActiveKnowledgeBase()
       } else if (event.kind === "tray.restored") {
@@ -90,6 +93,7 @@ export function useDesktopRuntimeEvents({
     bridge,
     importSourcesRef,
     onRuntimeNotice,
+    onOpenTasks,
     refreshActiveKnowledgeBase,
     setLoading,
     setLoadError,

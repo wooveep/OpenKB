@@ -1,7 +1,20 @@
 //! Model-settings and diagnostic-bundle requests for the private Engine transport.
 
-use super::{BridgeError, BridgeResult, DiagnosticBundleResult, EngineSupervisor, ModelSettings};
-use serde_json::json;
+use super::{
+    validated_response, BridgeError, BridgeResult, DiagnosticBundleResult, EngineSupervisor,
+    ModelSettings, IMPORT_REQUEST_TIMEOUT,
+};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct ModelConnectionTest {
+    ok: bool,
+    model: String,
+    latency_ms: u64,
+    attempt_count: u64,
+}
 
 impl EngineSupervisor {
     pub fn model_settings(&self) -> BridgeResult<ModelSettings> {
@@ -30,6 +43,34 @@ impl EngineSupervisor {
             }),
             Some(request_id),
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn test_model_connection(
+        &self,
+        provider: String,
+        model: String,
+        api_base_url: String,
+        api_key: String,
+        max_concurrent_model_calls: u32,
+        initial_timeout_seconds: f64,
+        request_id: String,
+    ) -> BridgeResult<Value> {
+        self.ensure_started()?;
+        let value = self.request_started_with_timeout(
+            "workbench.test_model_connection",
+            json!({
+                "provider": provider,
+                "model": model,
+                "api_base_url": api_base_url,
+                "api_key": api_key,
+                "max_concurrent_model_calls": max_concurrent_model_calls,
+                "initial_timeout_seconds": initial_timeout_seconds,
+            }),
+            Some(request_id),
+            IMPORT_REQUEST_TIMEOUT,
+        )?;
+        validated_response::<ModelConnectionTest>(value, "model connection test")
     }
 
     pub fn export_diagnostic_bundle(

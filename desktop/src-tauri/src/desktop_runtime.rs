@@ -17,7 +17,7 @@ use std::{
 };
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::{TrayIcon, TrayIconBuilder, TrayIconEvent},
+    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     App, AppHandle, Emitter, Manager,
 };
 
@@ -31,6 +31,18 @@ const TRAY_RESTORED_EVENT: &str = "desktop://tray-restored";
 const ACTIVE_KNOWLEDGE_BASE_RESTORED_EVENT: &str = "desktop://active-knowledge-base-restored";
 const SHELL_LOG_FILE: &str = "openkb-shell.log";
 const MAX_SHELL_LOG_BYTES: u64 = 5 * 1024 * 1024;
+
+pub(crate) fn allow_source_image_directory(
+    app: &AppHandle,
+    knowledge_base_dir: &str,
+) -> Result<(), String> {
+    let image_dir = Path::new(knowledge_base_dir)
+        .join("derived")
+        .join("source-images");
+    app.asset_protocol_scope()
+        .allow_directory(image_dir, true)
+        .map_err(|error| format!("Could not enable source images for this knowledge base: {error}"))
+}
 
 pub(crate) struct DesktopRuntimeState {
     explicit_exit: AtomicBool,
@@ -197,7 +209,14 @@ fn install_tray(app: &App) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if matches!(event, TrayIconEvent::Click { .. }) {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
                 show_main_window(tray.app_handle());
             }
         });
@@ -266,6 +285,18 @@ fn restore_active_knowledge_base(app: &AppHandle, reason: &str) {
         .restore_active_knowledge_base()
     {
         Ok(true) => {
+            if let Some(kb_dir) = app
+                .state::<DesktopState>()
+                .engine
+                .remembered_active_knowledge_base()
+            {
+                if let Err(error) = allow_source_image_directory(app, &kb_dir) {
+                    append_application_log(
+                        app,
+                        &format!("OpenKB source image restoration failed: {error}"),
+                    );
+                }
+            }
             append_application_log(
                 app,
                 &format!(

@@ -10,6 +10,8 @@ import {
   type DesktopEngineHealth,
   type DesktopGroundedAnswer,
   type DesktopGroundedAnswers,
+  type DesktopConversation,
+  type DesktopConversationList,
   type DesktopImportControlResult,
   type DesktopImportDropEvent,
   type DesktopRuntimeEvent,
@@ -17,7 +19,9 @@ import {
   type DesktopImportSourceInspection,
   type DesktopImportSourcePicker,
   type DesktopKnowledgeBaseActivation,
+  type DesktopGlobalSearchResults,
   type DesktopModelSettings,
+  type DesktopModelConnectionTest,
   type DesktopKnowledgePage,
   type DesktopKnowledgePages,
   type DesktopKnowledgePageKind,
@@ -32,8 +36,14 @@ import {
   type DesktopRecoveryOverride,
   type DesktopTextDocumentImport,
 } from "./contracts"
-
-let subscriptionSequence = 0
+import {
+  conversation,
+  conversationList,
+  globalSearchResults,
+  nextSubscriptionId,
+  runtimeLaunchIntents,
+  toDesktopBridgeError,
+} from "./bridge-normalizers"
 
 type DesktopWindow = Window & {
   __OPENKB_DESKTOP__?: unknown
@@ -119,6 +129,32 @@ export class TauriDesktopBridge implements DesktopBridge {
       initialTimeoutSeconds,
       requestId,
     })
+  }
+
+  async testModelConnection(
+    provider: string,
+    model: string,
+    apiBaseUrl: string,
+    apiKey: string,
+    maxConcurrentModelCalls: number,
+    initialTimeoutSeconds: number,
+    requestId: string,
+  ): Promise<DesktopModelConnectionTest> {
+    const result = await this.call<Record<string, unknown>>("desktop_test_model_connection", {
+      provider,
+      model,
+      apiBaseUrl,
+      apiKey,
+      maxConcurrentModelCalls,
+      initialTimeoutSeconds,
+      requestId,
+    })
+    return {
+      ok: Boolean(result.ok),
+      model: typeof result.model === "string" ? result.model : model,
+      latencyMs: typeof result.latency_ms === "number" ? result.latency_ms : 0,
+      attemptCount: typeof result.attempt_count === "number" ? result.attempt_count : 0,
+    }
   }
 
   async exportDiagnosticBundle(
@@ -226,6 +262,49 @@ export class TauriDesktopBridge implements DesktopBridge {
 
   async groundedAnswers(): Promise<DesktopGroundedAnswers> {
     return this.call<DesktopGroundedAnswers>("desktop_grounded_answers")
+  }
+
+  async conversations(search = ""): Promise<DesktopConversationList> {
+    return conversationList(await this.call<unknown>("desktop_conversations", { search }))
+  }
+
+  async globalSearch(query: string): Promise<DesktopGlobalSearchResults> {
+    return globalSearchResults(
+      await this.call<unknown>("desktop_global_search", { query }),
+      query,
+    )
+  }
+
+  async getConversation(conversationId: string): Promise<DesktopConversation> {
+    return conversation(await this.call<unknown>("desktop_conversation", { conversationId }))
+  }
+
+  async createConversation(title: string | undefined, requestId: string): Promise<DesktopConversation> {
+    return conversation(await this.call<unknown>("desktop_create_conversation", { title, requestId }))
+  }
+
+  async renameConversation(conversationId: string, title: string, requestId: string): Promise<DesktopConversation> {
+    return conversation(await this.call<unknown>("desktop_rename_conversation", { conversationId, title, requestId }))
+  }
+
+  async deleteConversation(conversationId: string, requestId: string): Promise<DesktopConversationList> {
+    return conversationList(await this.call<unknown>("desktop_delete_conversation", { conversationId, requestId }))
+  }
+
+  async saveConversationDraft(conversationId: string, draftText: string, requestId: string): Promise<DesktopConversation> {
+    return conversation(await this.call<unknown>("desktop_save_conversation_draft", { conversationId, draftText, requestId }))
+  }
+
+  async askConversation(conversationId: string, question: string, requestId: string): Promise<DesktopConversation> {
+    return conversation(await this.call<unknown>("desktop_ask_conversation", { conversationId, question, requestId }))
+  }
+
+  async regenerateConversationAnswer(conversationId: string, assistantMessageId: string, requestId: string): Promise<DesktopConversation> {
+    return conversation(await this.call<unknown>("desktop_regenerate_conversation_answer", { conversationId, assistantMessageId, requestId }))
+  }
+
+  async selectAnswerVersion(conversationId: string, assistantMessageId: string, answerVersionId: string, requestId: string): Promise<DesktopConversation> {
+    return conversation(await this.call<unknown>("desktop_select_answer_version", { conversationId, assistantMessageId, answerVersionId, requestId }))
   }
 
   async knowledgePages(): Promise<DesktopKnowledgePages> {
@@ -422,6 +501,25 @@ class UnavailableDesktopBridge implements DesktopBridge {
     return this.unavailable()
   }
 
+  testModelConnection(
+    provider: string,
+    model: string,
+    apiBaseUrl: string,
+    apiKey: string,
+    maxConcurrentModelCalls: number,
+    initialTimeoutSeconds: number,
+    requestId: string,
+  ): Promise<DesktopModelConnectionTest> {
+    void provider
+    void model
+    void apiBaseUrl
+    void apiKey
+    void maxConcurrentModelCalls
+    void initialTimeoutSeconds
+    void requestId
+    return this.unavailable()
+  }
+
   exportDiagnosticBundle(
     destination: string,
     requestId: string,
@@ -499,6 +597,69 @@ class UnavailableDesktopBridge implements DesktopBridge {
   }
 
   groundedAnswers(): Promise<DesktopGroundedAnswers> {
+    return this.unavailable()
+  }
+
+  conversations(search?: string): Promise<DesktopConversationList> {
+    void search
+    return this.unavailable()
+  }
+
+  globalSearch(query: string): Promise<DesktopGlobalSearchResults> {
+    void query
+    return this.unavailable()
+  }
+
+  getConversation(conversationId: string): Promise<DesktopConversation> {
+    void conversationId
+    return this.unavailable()
+  }
+
+  createConversation(title: string | undefined, requestId: string): Promise<DesktopConversation> {
+    void title
+    void requestId
+    return this.unavailable()
+  }
+
+  renameConversation(conversationId: string, title: string, requestId: string): Promise<DesktopConversation> {
+    void conversationId
+    void title
+    void requestId
+    return this.unavailable()
+  }
+
+  deleteConversation(conversationId: string, requestId: string): Promise<DesktopConversationList> {
+    void conversationId
+    void requestId
+    return this.unavailable()
+  }
+
+  saveConversationDraft(conversationId: string, draftText: string, requestId: string): Promise<DesktopConversation> {
+    void conversationId
+    void draftText
+    void requestId
+    return this.unavailable()
+  }
+
+  askConversation(conversationId: string, question: string, requestId: string): Promise<DesktopConversation> {
+    void conversationId
+    void question
+    void requestId
+    return this.unavailable()
+  }
+
+  regenerateConversationAnswer(conversationId: string, assistantMessageId: string, requestId: string): Promise<DesktopConversation> {
+    void conversationId
+    void assistantMessageId
+    void requestId
+    return this.unavailable()
+  }
+
+  selectAnswerVersion(conversationId: string, assistantMessageId: string, answerVersionId: string, requestId: string): Promise<DesktopConversation> {
+    void conversationId
+    void assistantMessageId
+    void answerVersionId
+    void requestId
     return this.unavailable()
   }
 
@@ -603,59 +764,4 @@ class UnavailableDesktopBridge implements DesktopBridge {
 
 export function createDesktopBridge(): DesktopBridge {
   return isDesktopShell() ? new TauriDesktopBridge() : new UnavailableDesktopBridge()
-}
-
-function nextSubscriptionId(): string {
-  subscriptionSequence += 1
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID()
-  }
-  return `desktop-subscription-${Date.now()}-${subscriptionSequence}`
-}
-
-function toDesktopBridgeError(error: unknown): DesktopBridgeError {
-  if (error instanceof DesktopBridgeError) return error
-  if (error && typeof error === "object") {
-    const candidate = error as { code?: unknown; message?: unknown }
-    if (typeof candidate.code === "string" && typeof candidate.message === "string") {
-      return new DesktopBridgeError(candidate.code, candidate.message)
-    }
-  }
-  return new DesktopBridgeError(
-    "desktop_bridge_failed",
-    error instanceof Error ? error.message : String(error),
-  )
-}
-
-function runtimeLaunchIntents(payload: unknown): DesktopRuntimeLaunchIntent[] {
-  if (!Array.isArray(payload)) return []
-  return payload.filter(isRecord).flatMap((intent) => {
-    const normalized = runtimeLaunchIntent(intent)
-    return normalized === null ? [] : [normalized]
-  })
-}
-
-function runtimeLaunchIntent(payload: Record<string, unknown>): DesktopRuntimeLaunchIntent | null {
-  if (payload.kind === "openKnowledgeBase" && nonEmptyString(payload.kbDir)) {
-    return { kind: "openKnowledgeBase", kbDir: payload.kbDir }
-  }
-  if (payload.kind === "importSources" && Array.isArray(payload.sourcePaths)) {
-    const sourcePaths = payload.sourcePaths.filter(nonEmptyString)
-    return sourcePaths.length ? { kind: "importSources", sourcePaths } : null
-  }
-  if (payload.kind === "previousKnowledgeBaseUnavailable" && nonEmptyString(payload.kbDir)) {
-    return { kind: "previousKnowledgeBaseUnavailable", kbDir: payload.kbDir }
-  }
-  if (payload.kind === "activeKnowledgeBaseRestored") {
-    return { kind: "activeKnowledgeBaseRestored" }
-  }
-  return null
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null
-}
-
-function nonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0
 }

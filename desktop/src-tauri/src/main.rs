@@ -5,6 +5,7 @@
 mod desktop_runtime;
 mod engine_protocol;
 mod engine_wire;
+mod external_url;
 mod process_tree;
 
 use desktop_runtime::DesktopRuntimeState;
@@ -26,6 +27,15 @@ pub(crate) struct DesktopState {
     pub(crate) engine: Arc<EngineSupervisor>,
     _process_tree: ProcessTreeJob,
     pub(crate) runtime: DesktopRuntimeState,
+}
+
+macro_rules! desktop_join_error {
+    ($operation:literal) => {
+        |error| BridgeError {
+            code: "desktop_command_failed".to_owned(),
+            message: format!("Desktop {} task stopped unexpectedly: {error}", $operation),
+        }
+    };
 }
 
 #[tauri::command]
@@ -117,6 +127,18 @@ fn desktop_reveal_application_log_directory(app: tauri::AppHandle) -> Result<(),
         code: "desktop_directory_open_failed".to_owned(),
         message,
     })
+}
+
+#[tauri::command]
+fn desktop_quit_application(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_open_external_url(url: String) -> Result<(), BridgeError> {
+    tauri::async_runtime::spawn_blocking(move || external_url::open_in_system_browser(&url))
+        .await
+        .map_err(desktop_join_error!("external URL open"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -211,6 +233,146 @@ async fn desktop_grounded_answers(
         })?
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_conversations(
+    state: State<'_, DesktopState>,
+    search: String,
+) -> Result<serde_json::Value, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.conversations(search))
+        .await
+        .map_err(desktop_join_error!("conversation list"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_global_search(
+    state: State<'_, DesktopState>,
+    query: String,
+) -> Result<serde_json::Value, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.global_search(query))
+        .await
+        .map_err(desktop_join_error!("global search"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_conversation(
+    state: State<'_, DesktopState>,
+    conversation_id: String,
+) -> Result<serde_json::Value, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.conversation(conversation_id))
+        .await
+        .map_err(desktop_join_error!("conversation read"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_create_conversation(
+    state: State<'_, DesktopState>,
+    title: Option<String>,
+    request_id: String,
+) -> Result<serde_json::Value, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.create_conversation(title, request_id))
+        .await
+        .map_err(desktop_join_error!("conversation creation"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_rename_conversation(
+    state: State<'_, DesktopState>,
+    conversation_id: String,
+    title: String,
+    request_id: String,
+) -> Result<serde_json::Value, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.rename_conversation(conversation_id, title, request_id)
+    })
+    .await
+    .map_err(desktop_join_error!("conversation rename"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_delete_conversation(
+    state: State<'_, DesktopState>,
+    conversation_id: String,
+    request_id: String,
+) -> Result<serde_json::Value, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.delete_conversation(conversation_id, request_id)
+    })
+    .await
+    .map_err(desktop_join_error!("conversation deletion"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_save_conversation_draft(
+    state: State<'_, DesktopState>,
+    conversation_id: String,
+    draft_text: String,
+    request_id: String,
+) -> Result<serde_json::Value, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.save_conversation_draft(conversation_id, draft_text, request_id)
+    })
+    .await
+    .map_err(desktop_join_error!("conversation draft save"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_ask_conversation(
+    state: State<'_, DesktopState>,
+    conversation_id: String,
+    question: String,
+    request_id: String,
+) -> Result<serde_json::Value, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.ask_conversation(conversation_id, question, request_id)
+    })
+    .await
+    .map_err(desktop_join_error!("conversation answer"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_regenerate_conversation_answer(
+    state: State<'_, DesktopState>,
+    conversation_id: String,
+    assistant_message_id: String,
+    request_id: String,
+) -> Result<serde_json::Value, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.regenerate_conversation_answer(conversation_id, assistant_message_id, request_id)
+    })
+    .await
+    .map_err(desktop_join_error!("conversation answer regeneration"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn desktop_select_answer_version(
+    state: State<'_, DesktopState>,
+    conversation_id: String,
+    assistant_message_id: String,
+    answer_version_id: String,
+    request_id: String,
+) -> Result<serde_json::Value, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.select_answer_version(
+            conversation_id,
+            assistant_message_id,
+            answer_version_id,
+            request_id,
+        )
+    })
+    .await
+    .map_err(desktop_join_error!("answer version selection"))?
+}
+
 #[tauri::command]
 async fn desktop_model_settings(
     state: State<'_, DesktopState>,
@@ -252,6 +414,34 @@ async fn desktop_save_model_settings(
         code: "desktop_command_failed".to_owned(),
         message: format!("Desktop model-settings save stopped unexpectedly: {error}"),
     })?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
+async fn desktop_test_model_connection(
+    state: State<'_, DesktopState>,
+    provider: String,
+    model: String,
+    api_base_url: String,
+    api_key: String,
+    max_concurrent_model_calls: u32,
+    initial_timeout_seconds: f64,
+    request_id: String,
+) -> Result<serde_json::Value, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.test_model_connection(
+            provider,
+            model,
+            api_base_url,
+            api_key,
+            max_concurrent_model_calls,
+            initial_timeout_seconds,
+            request_id,
+        )
+    })
+    .await
+    .map_err(desktop_join_error!("model connection test"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -492,15 +682,12 @@ fn allow_source_images(
     app: &tauri::AppHandle,
     activation: &KnowledgeBaseActivationResult,
 ) -> Result<(), BridgeError> {
-    let image_dir = Path::new(&activation.knowledge_base.kb_dir)
-        .join("derived")
-        .join("source-images");
-    app.asset_protocol_scope()
-        .allow_directory(image_dir, true)
-        .map_err(|error| BridgeError {
+    desktop_runtime::allow_source_image_directory(app, &activation.knowledge_base.kb_dir).map_err(
+        |message| BridgeError {
             code: "desktop_source_image_scope_failed".to_owned(),
-            message: format!("Could not enable source images for this knowledge base: {error}"),
-        })
+            message,
+        },
+    )
 }
 
 fn main() {
@@ -545,14 +732,27 @@ fn main() {
             desktop_active_knowledge_base,
             desktop_reveal_knowledge_base_directory,
             desktop_reveal_application_log_directory,
+            desktop_quit_application,
+            desktop_open_external_url,
             desktop_inspect_import_sources,
             desktop_import_text_document,
             desktop_import_jobs,
             desktop_ask_grounded,
             desktop_retry_interrupted_answer,
             desktop_grounded_answers,
+            desktop_conversations,
+            desktop_global_search,
+            desktop_conversation,
+            desktop_create_conversation,
+            desktop_rename_conversation,
+            desktop_delete_conversation,
+            desktop_save_conversation_draft,
+            desktop_ask_conversation,
+            desktop_regenerate_conversation_answer,
+            desktop_select_answer_version,
             desktop_model_settings,
             desktop_save_model_settings,
+            desktop_test_model_connection,
             desktop_export_diagnostic_bundle,
             desktop_knowledge_pages,
             desktop_get_knowledge_page,

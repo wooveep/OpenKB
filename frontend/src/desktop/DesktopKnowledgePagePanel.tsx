@@ -26,7 +26,7 @@ function newDraft(kind: DesktopKnowledgePageKind): KnowledgePageDraft {
 }
 
 /** Browse and revise SQLite-authoritative Concept and Entity pages. */
-export function DesktopKnowledgePagePanel() {
+export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId?: string | null }) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
   const [pages, setPages] = useState<DesktopKnowledgePageSummary[]>([])
@@ -60,7 +60,7 @@ export function DesktopKnowledgePagePanel() {
     return () => { disposed = true }
   }, [bridge])
 
-  const selectPage = async (pageId: string) => {
+  const selectPage = useCallback(async (pageId: string) => {
     const read = pageRead.current + 1
     pageRead.current = read
     setLoadingPage(true)
@@ -77,7 +77,13 @@ export function DesktopKnowledgePagePanel() {
     } finally {
       if (read === pageRead.current) setLoadingPage(false)
     }
-  }
+  }, [bridge])
+
+  useEffect(() => {
+    if (requestedPageId) {
+      void Promise.resolve().then(() => selectPage(requestedPageId))
+    }
+  }, [requestedPageId, selectPage])
 
   const beginNew = (kind: DesktopKnowledgePageKind) => {
     pageRead.current += 1

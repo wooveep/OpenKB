@@ -24,11 +24,13 @@
     "engine": {
       "starting": {
         "title": "正在启动本地引擎",
-        "detail": "桌面外壳正在完成与 OpenKB 的私有连接。"
+        "detail": "桌面外壳正在完成与 OpenKB 的私有连接。",
+        "short": "启动中"
       },
       "ready": {
         "title": "本地引擎已就绪",
-        "detail": "桌面工作台现在可以安全地加载知识并开始工作。"
+        "detail": "桌面工作台现在可以安全地加载知识并开始工作。",
+        "short": "已就绪"
       },
       "unavailable": {
         "title": "本地引擎暂不可用",
@@ -41,7 +43,10 @@
       "version": "引擎 {{version}}",
       "protocol": "桥接协议 {{version}}",
       "eventSequence": "事件 {{sequence}}",
-      "retry": "重试引擎"
+      "retry": "重试引擎",
+      "openLogs": "打开日志",
+      "exit": "退出 OpenKB",
+      "logsAvailableBeforeEngine": "引擎离线时仍可查看应用日志并调整本地界面设置。"
     },
     "knowledgeBases": {
       "chooseKnowledgeBase": "选择知识库",
@@ -49,11 +54,17 @@
       "navigationItems": {
         "overview": "总览",
         "documents": "文档",
+        "conversations": "对话",
         "answers": "问答",
         "knowledge": "知识页",
         "review": "审核",
         "settings": "设置"
       },
+      "globalSearch": "搜索",
+      "searchComingSoon": "正在为当前知识库准备全局搜索。",
+      "tasks": "任务",
+      "expandNavigation": "展开导航",
+      "collapseNavigation": "收起导航",
       "create": "新建知识库",
       "open": "打开知识库",
       "loading": "正在读取活动知识库…",
@@ -222,6 +233,16 @@
         "save": "保存默认设置",
         "saving": "正在保存…",
         "saved": "模型默认设置已保存。",
+        "testConnection": "测试连接",
+        "testing": "正在测试…",
+        "testSucceeded": "连接成功，用时 {{latency}} 毫秒（{{attempts}} 次尝试）。",
+        "testRejected": "模型提供商未通过连接测试。",
+        "appearanceTitle": "外观与语言",
+        "appearanceDescription": "这些偏好只应用于此设备上的桌面工作台。",
+        "theme": "主题",
+        "language": "语言",
+        "zoom": "界面缩放",
+        "zoomHelp": "支持 80%–200%，也可使用 Ctrl+加号、Ctrl+减号或 Ctrl+0。",
         "diagnosticsTitle": "诊断包",
         "diagnosticsDescription": "只有在你主动导出时才会生成。ZIP 不包含原文内容、模型请求与响应正文、凭据或请求头。",
         "exportDiagnostics": "导出诊断包",
@@ -289,6 +310,93 @@
       "answerShowFewerSourceImages": "收起图片",
       "answerSources": "来源证据",
       "answerCitationLocation": "原文位置 · {{location}}"
+    },
+    "overview": {
+      "title": "总览",
+      "description": "查看当前可用知识与需要处理的工作。",
+      "available": "可用",
+      "processing": "处理中",
+      "failed": "失败",
+      "review": "待审核",
+      "importDocuments": "导入文档",
+      "startConversation": "开始对话",
+      "recentActivity": "最近活动",
+      "noActivity": "暂无活动。导入一份文档即可开始。"
+    },
+    "knowledge": {
+      "tabs": {
+        "pages": "知识页",
+        "review": "待审核",
+        "conflicts": "知识冲突",
+        "versions": "文档版本"
+      }
+    },
+    "tasks": {
+      "title": "任务",
+      "description": "集中查看导入任务与当前阶段进度。",
+      "empty": "当前知识库没有导入任务。",
+      "batch": "导入批次",
+      "batchSummary": "共 {{total}} 份 · 已完成 {{completed}} · 进行中 {{active}} · 失败 {{failed}}",
+      "stages": "导入阶段"
+    },
+    "documents": {
+      "search": "搜索文档",
+      "details": "查看文档状态、处理阶段与原文操作。",
+      "sourceUnavailable": "当前文档不可用，不能参与问答。请重新导入或修复原始文件后再使用。",
+      "importHistory": "导入历史",
+      "source": "来源",
+      "format": "格式",
+      "evidenceUnits": "可定位证据",
+      "assetHash": "原始资产",
+      "empty": "没有符合当前筛选的文档。",
+      "filters": {
+        "all": "全部状态",
+        "available": "可用",
+        "processing": "处理中",
+        "quarantined": "已隔离"
+      }
+    },
+    "globalSearch": {
+      "title": "搜索当前知识库",
+      "description": "查找当前知识库中的文档、知识页和对话。",
+      "placeholder": "搜索文档、知识和对话…",
+      "searching": "正在搜索…",
+      "empty": "没有匹配的工作台内容。",
+      "hint": "输入内容以搜索当前知识库。",
+      "unavailable": "不可用",
+      "openKnowledgeBaseFirst": "请先打开一个知识库再搜索。",
+      "groups": {
+        "document": "文档",
+        "knowledge_page": "知识页",
+        "conversation": "对话"
+      }
+    },
+    "conversations": {
+      "new": "新建对话",
+      "search": "搜索对话",
+      "loading": "正在加载对话…",
+      "empty": "提出问题即可开始此对话。",
+      "expand": "展开对话列表",
+      "collapse": "收起对话列表",
+      "rename": "重命名对话",
+      "renamePrompt": "对话标题",
+      "delete": "删除对话",
+      "deleteConfirm": "删除此对话及其全部消息？",
+      "placeholder": "询问当前知识库…",
+      "generating": "正在生成回答…",
+      "interrupted": "此回答已中断。",
+      "regenerate": "重新生成回答",
+      "evidence": "引用 {{citations}} · 图片 {{images}}",
+      "evidenceTitle": "回答证据",
+      "evidenceDescription": "这里只展示该版本实际发送给回答模型的来源。",
+      "sources": "来源 {{count}}",
+      "images": "图片 {{count}}",
+      "sourceUnavailable": "此历史来源当前不可用。",
+      "groups": {
+        "today": "今天",
+        "week": "最近 7 天",
+        "older": "更早"
+      }
     }
   }
 }

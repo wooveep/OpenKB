@@ -16,6 +16,7 @@ pub use crate::engine_wire::{
     KnowledgeReconciliationDecision, ModelSettings, RawDocument, RecoveryOverride,
     TextDocumentImportResult,
 };
+use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -33,6 +34,8 @@ use tauri::ipc::Channel;
 
 #[path = "engine_protocol_answers.rs"]
 mod answers;
+#[path = "engine_protocol_conversations.rs"]
+mod conversations;
 #[path = "engine_protocol_document_versions.rs"]
 mod document_versions;
 #[path = "engine_protocol_knowledge_pages.rs"]
@@ -41,6 +44,8 @@ mod knowledge_pages;
 mod knowledge_reconciliation;
 #[path = "engine_protocol_lifecycle.rs"]
 mod lifecycle;
+#[path = "engine_protocol_search.rs"]
+mod search;
 #[path = "engine_protocol_settings.rs"]
 mod settings;
 
@@ -48,6 +53,14 @@ const PROTOCOL_VERSION: u32 = 1;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const IMPORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn validated_response<T: DeserializeOwned>(value: Value, shape: &str) -> BridgeResult<Value> {
+    serde_json::from_value::<T>(value.clone()).map_err(|error| BridgeError {
+        code: "invalid_engine_response".to_owned(),
+        message: format!("Engine returned an invalid {shape} response: {error}"),
+    })?;
+    Ok(value)
+}
 
 struct SharedTransport {
     writer: Mutex<Option<ChildStdin>>,

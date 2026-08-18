@@ -4,21 +4,33 @@ import {
   FilePlus2,
   FolderOpen,
   Loader2,
+  Search,
   Upload,
   X,
 } from "lucide-react"
+import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
 import { cn } from "@/lib/utils"
 import type {
   DesktopImportSourceInspection,
   DesktopImportSourcePicker,
   DesktopImportTask,
 } from "./contracts"
+import { currentDocumentTasks, taskIsFailed } from "./desktop-document-tasks"
 
 export interface DesktopImportBatchSummary {
+  total: number
   completed: number
   failures: Array<{ name: string; reason: string }>
+  running: boolean
 }
 
 type ImportTaskAction = "pause" | "resume" | "cancel"
@@ -42,6 +54,9 @@ export function DesktopDocumentImportPanel({
   onSubmit,
   onControl,
   onOpenOriginal,
+  onOpenFailedDocuments,
+  requestedDocumentId,
+  requestKey = 0,
 }: {
   error: string | null
   importing: boolean
@@ -60,6 +75,9 @@ export function DesktopDocumentImportPanel({
   onSubmit: () => void
   onControl: (jobId: string, action: ImportTaskAction) => void
   onOpenOriginal: (documentId: string) => void
+  onOpenFailedDocuments: () => void
+  requestedDocumentId?: string | null
+  requestKey?: number
 }) {
   const { t } = useTranslation("common")
   const supportedCount = inspection?.supported.length ?? 0
@@ -178,17 +196,98 @@ export function DesktopDocumentImportPanel({
       )}
 
       {summary ? <ImportBatchSummary summary={summary} /> : null}
-      {tasks.map((task) => (
-        <ImportTaskCard
-          key={task.job.jobId}
-          className="mt-5"
-          task={task}
-          controlling={controllingJobId === task.job.jobId}
-          onControl={onControl}
-          onOpenOriginal={onOpenOriginal}
-        />
-      ))}
+      <DocumentList
+        key={requestKey}
+        tasks={tasks}
+        controllingJobId={controllingJobId}
+        onControl={onControl}
+        onOpenOriginal={onOpenOriginal}
+        onOpenFailedDocuments={onOpenFailedDocuments}
+        requestedDocumentId={requestedDocumentId}
+      />
     </section>
+  )
+}
+
+function DocumentList({
+  tasks,
+  controllingJobId,
+  onControl,
+  onOpenOriginal,
+  onOpenFailedDocuments,
+  requestedDocumentId,
+}: {
+  tasks: DesktopImportTask[]
+  controllingJobId: string | null
+  onControl: (jobId: string, action: ImportTaskAction) => void
+  onOpenOriginal: (documentId: string) => void
+  onOpenFailedDocuments: () => void
+  requestedDocumentId?: string | null
+}) {
+  const { t } = useTranslation("common")
+  const [query, setQuery] = useState("")
+  const [status, setStatus] = useState<"all" | "available" | "processing" | "quarantined">("all")
+  const documents = currentDocumentTasks(tasks)
+  const [selected, setSelected] = useState<DesktopImportTask | null>(() => (
+    documents.find((task) => task.document?.documentId === requestedDocumentId) ?? null
+  ))
+  const normalizedQuery = query.trim().toLowerCase()
+  const filtered = documents.filter((task) => {
+    const matchesQuery = !normalizedQuery
+      || task.job.sourceName.toLowerCase().includes(normalizedQuery)
+      || task.document?.name.toLowerCase().includes(normalizedQuery)
+    const matchesStatus = status === "all"
+      || (status === "available" && task.document?.availability === "available")
+      || (status === "processing" && ["running", "paused", "recoverable"].includes(task.job.status))
+      || (status === "quarantined" && taskIsFailed(task))
+    return matchesQuery && matchesStatus
+  })
+
+  return (
+    <>
+      <div className="mt-6 flex flex-col gap-3 border-t border-border/70 pt-5 sm:flex-row sm:items-center">
+        <label className="relative min-w-0 flex-1">
+          <span className="sr-only">{t("desktop.documents.search")}</span>
+          <Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("desktop.documents.search")} className="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+        </label>
+        <select value={status} onChange={(event) => setStatus(event.target.value as typeof status)} className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <option value="all">{t("desktop.documents.filters.all")}</option>
+          <option value="available">{t("desktop.documents.filters.available")}</option>
+          <option value="processing">{t("desktop.documents.filters.processing")}</option>
+          <option value="quarantined">{t("desktop.documents.filters.quarantined")}</option>
+        </select>
+        <Button type="button" variant="outline" size="sm" onClick={onOpenFailedDocuments}>
+          <CircleAlert className="size-4" />{t("desktop.knowledgeBases.failedDocuments")}
+        </Button>
+      </div>
+      <div className="mt-3 overflow-hidden rounded-xl border border-border/70">
+        {filtered.length ? (
+          <ul className="divide-y divide-border/70">
+            {filtered.map((task) => {
+              const statusKey = task.document?.availability === "failed" ? "quarantined" : task.job.status
+              return (
+              <li key={task.document?.documentId ?? task.job.jobId}>
+                <button type="button" onClick={() => setSelected(task)} className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-4 py-3 text-left outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+                  <span className="min-w-0"><strong className="block truncate text-sm font-medium">{task.document?.name ?? task.job.sourceName}</strong><span className="mt-0.5 block truncate text-xs text-muted-foreground">{task.job.sourceName}</span></span>
+                  <span className="text-right"><span className="block text-xs font-medium">{t(`desktop.knowledgeBases.importStatuses.${statusKey}`)}</span><span className="mt-0.5 block text-xs text-muted-foreground">{task.job.progress}%</span></span>
+                </button>
+              </li>
+              )
+            })}
+          </ul>
+        ) : <p className="px-4 py-8 text-center text-sm text-muted-foreground">{t("desktop.documents.empty")}</p>}
+      </div>
+      <Sheet open={selected !== null} onOpenChange={(open) => { if (!open) setSelected(null) }}>
+        <SheetContent className="w-[min(32rem,100vw)] overflow-y-auto sm:max-w-lg">
+          <SheetHeader>
+            <SheetTitle>{selected?.document?.name ?? selected?.job.sourceName}</SheetTitle>
+            <SheetDescription>{t("desktop.documents.details")}</SheetDescription>
+          </SheetHeader>
+          {selected ? <ImportTaskCard className="mt-5" task={selected} controlling={controllingJobId === selected.job.jobId} onControl={onControl} onOpenOriginal={onOpenOriginal} /> : null}
+        </SheetContent>
+      </Sheet>
+    </>
   )
 }
 
@@ -234,12 +333,15 @@ function ImportSourceList({
 
 function ImportBatchSummary({ summary }: { summary: DesktopImportBatchSummary }) {
   const { t } = useTranslation("common")
+  const active = Math.max(0, summary.total - summary.completed - summary.failures.length)
   return (
     <section className="mt-5 rounded-xl border border-border/70 bg-muted/20 p-4" aria-live="polite">
       <div className="flex items-center gap-2">
-        <CheckCircle2 className="size-4 text-emerald-600 dark:text-emerald-400" />
+        {summary.running ? <Loader2 className="size-4 animate-spin text-primary" /> : <CheckCircle2 className="size-4 text-emerald-600 dark:text-emerald-400" />}
         <h3 className="font-medium">
-          {t("desktop.knowledgeBases.importBatchComplete", { count: summary.completed })}
+          {summary.running
+            ? t("desktop.tasks.batchSummary", { total: summary.total, completed: summary.completed, active, failed: summary.failures.length })
+            : t("desktop.knowledgeBases.importBatchComplete", { count: summary.completed })}
         </h3>
       </div>
       {summary.failures.length ? (
@@ -280,6 +382,8 @@ function ImportTaskCard({
     ?? task.stages.at(-1)
   if (!stage) return null
   const jobStatus = task.job.status
+  const sourceFailed = task.document?.availability === "failed"
+  const currentStatus = sourceFailed ? "quarantined" : jobStatus
   const modelCall = task.modelCalls.at(-1)
   const quarantine = task.quarantine
   const modelCallIsWaiting = modelCall?.status === "running" || modelCall?.status === "retry_wait"
@@ -287,16 +391,27 @@ function ImportTaskCard({
     <div className={cn("rounded-xl border border-border/70 bg-muted/30 p-4", className)}>
       <div className="flex items-center justify-between gap-3 text-sm">
         <span className="font-medium">{t("desktop.knowledgeBases.taskCenter")}</span>
-        <span className="text-muted-foreground">{task.job.progress}%</span>
+        <span className="text-muted-foreground">{t(`desktop.knowledgeBases.importStatuses.${currentStatus}`)}</span>
       </div>
-      <p className="mt-2 text-sm text-muted-foreground">
+      <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+        <dt className="text-muted-foreground">{t("desktop.documents.source")}</dt>
+        <dd className="truncate text-right" title={task.job.sourceName}>{task.job.sourceName}</dd>
+        {task.document ? <>
+          <dt className="text-muted-foreground">{t("desktop.documents.format")}</dt>
+          <dd className="text-right uppercase">{task.document.sourceFormat}</dd>
+          <dt className="text-muted-foreground">{t("desktop.documents.evidenceUnits")}</dt>
+          <dd className="text-right">{task.document.evidenceCount}</dd>
+          <dt className="text-muted-foreground">{t("desktop.documents.assetHash")}</dt>
+          <dd className="truncate text-right font-mono" title={task.document.rawAssetSha256}>{task.document.rawAssetSha256.slice(0, 12)}…</dd>
+        </> : null}
+      </dl>
+      {sourceFailed ? <p className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{t("desktop.documents.sourceUnavailable")}</p> : null}
+      <p className="mt-3 text-xs font-medium text-muted-foreground">{t("desktop.documents.importHistory")}</p>
+      <p className="mt-1 text-sm text-muted-foreground">
         {t("desktop.knowledgeBases.stageStatus", {
           stage: t(`desktop.knowledgeBases.importStages.${stage.stage}`),
           status: t(`desktop.knowledgeBases.importStatuses.${stage.status}`),
         })} · {stage.progress}%
-      </p>
-      <p className="mt-1 text-xs text-muted-foreground">
-        {t(`desktop.knowledgeBases.importStatuses.${jobStatus}`)}
       </p>
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${task.job.progress}%` }} />

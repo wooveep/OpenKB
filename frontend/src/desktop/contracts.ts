@@ -256,6 +256,77 @@ export interface DesktopGroundedAnswers {
   answers: DesktopGroundedAnswer[]
 }
 
+export interface DesktopConversationSummary {
+  conversationId: string
+  title: string
+  draftText: string
+  createdAt: string
+  updatedAt: string
+  generating: boolean
+}
+
+export interface DesktopConversationList {
+  conversations: DesktopConversationSummary[]
+  lastConversationId: string | null
+}
+
+export interface DesktopConversationEvidenceRef extends DesktopEvidenceRef {
+  sourceAvailable: boolean
+}
+
+export interface DesktopConversationSourceImage extends DesktopAnswerSourceImage {
+  sourceAvailable: boolean
+}
+
+export interface DesktopAnswerVersion {
+  answerVersionId: string
+  versionNumber: number
+  answerText: string
+  retrievalPlan: DesktopRetrievalPlan
+  citations: DesktopConversationEvidenceRef[]
+  sourceImages: DesktopConversationSourceImage[]
+  degradations: string[]
+  status: "completed" | "interrupted"
+  interruptionCode: string | null
+  interruptionReason: string | null
+  createdAt: string
+}
+
+export interface DesktopConversationMessage {
+  messageId: string
+  ordinal: number
+  role: "user" | "assistant"
+  content: string
+  status: "completed" | "generating" | "interrupted"
+  selectedAnswerVersionId: string | null
+  createdAt: string
+  updatedAt: string
+  answerVersions: DesktopAnswerVersion[]
+}
+
+export interface DesktopConversation extends Omit<DesktopConversationSummary, "generating"> {
+  messages: DesktopConversationMessage[]
+}
+
+export type DesktopGlobalSearchResultKind = "document" | "knowledge_page" | "conversation"
+
+export interface DesktopGlobalSearchResult {
+  resultId: string
+  kind: DesktopGlobalSearchResultKind
+  title: string
+  snippet: string
+  status: "available" | "failed"
+  documentId: string | null
+  pageId: string | null
+  conversationId: string | null
+  messageId: string | null
+}
+
+export interface DesktopGlobalSearchResults {
+  query: string
+  results: DesktopGlobalSearchResult[]
+}
+
 export type DesktopKnowledgePageKind = "concept" | "entity"
 
 export interface DesktopKnowledgePageSummary {
@@ -370,6 +441,13 @@ export interface DesktopModelSettings {
   modelCallDeadlineSeconds: number
 }
 
+export interface DesktopModelConnectionTest {
+  ok: boolean
+  model: string
+  latencyMs: number
+  attemptCount: number
+}
+
 export interface DesktopDiagnosticBundle {
   path: string
   files: string[]
@@ -398,6 +476,15 @@ export interface DesktopBridge {
     initialTimeoutSeconds: number,
     requestId: string,
   ): Promise<DesktopModelSettings>
+  testModelConnection(
+    provider: string,
+    model: string,
+    apiBaseUrl: string,
+    apiKey: string,
+    maxConcurrentModelCalls: number,
+    initialTimeoutSeconds: number,
+    requestId: string,
+  ): Promise<DesktopModelConnectionTest>
   exportDiagnosticBundle(destination: string, requestId: string): Promise<DesktopDiagnosticBundle>
   inspectImportSources(
     sourcePaths: string[],
@@ -420,6 +507,16 @@ export interface DesktopBridge {
   askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer>
   retryInterruptedAnswer(answerId: string, requestId: string): Promise<DesktopGroundedAnswer>
   groundedAnswers(): Promise<DesktopGroundedAnswers>
+  conversations(search?: string): Promise<DesktopConversationList>
+  globalSearch(query: string): Promise<DesktopGlobalSearchResults>
+  getConversation(conversationId: string): Promise<DesktopConversation>
+  createConversation(title: string | undefined, requestId: string): Promise<DesktopConversation>
+  renameConversation(conversationId: string, title: string, requestId: string): Promise<DesktopConversation>
+  deleteConversation(conversationId: string, requestId: string): Promise<DesktopConversationList>
+  saveConversationDraft(conversationId: string, draftText: string, requestId: string): Promise<DesktopConversation>
+  askConversation(conversationId: string, question: string, requestId: string): Promise<DesktopConversation>
+  regenerateConversationAnswer(conversationId: string, assistantMessageId: string, requestId: string): Promise<DesktopConversation>
+  selectAnswerVersion(conversationId: string, assistantMessageId: string, answerVersionId: string, requestId: string): Promise<DesktopConversation>
   knowledgePages(): Promise<DesktopKnowledgePages>
   getKnowledgePage(pageId: string): Promise<DesktopKnowledgePage>
   saveKnowledgePage(

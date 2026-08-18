@@ -1,9 +1,11 @@
-import { AlertTriangle, Loader2, RefreshCw, Server } from "lucide-react"
+import { AlertTriangle, FolderOpen, Loader2, Power, RefreshCw, Server } from "lucide-react"
 import { useCallback, useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
 import { useDesktopBridge } from "./bridge-context"
 import type { DesktopBridgeHandshake, DesktopEngineHealth } from "./contracts"
+
+export type EngineViewPhase = "starting" | "ready" | "unavailable" | "error"
 
 type EngineViewState =
   | { phase: "starting"; lastSequence?: number }
@@ -24,8 +26,10 @@ type EngineViewState =
 /** The first Desktop Workbench view: a real, retryable Engine health indicator. */
 export default function DesktopStartup({
   onReadyChange,
+  onPhaseChange,
 }: {
   onReadyChange?: (ready: boolean) => void
+  onPhaseChange?: (phase: EngineViewPhase) => void
 }) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
@@ -77,6 +81,15 @@ export default function DesktopStartup({
     }
   }, [bridge, refresh])
 
+  useEffect(() => {
+    onPhaseChange?.(state.phase)
+  }, [onPhaseChange, state.phase])
+
+  const quitApplication = async () => {
+    const { invoke } = await import("@tauri-apps/api/core")
+    await invoke("desktop_quit_application")
+  }
+
   const icon =
     state.phase === "starting" ? (
       <Loader2 className="h-5 w-5 animate-spin text-accent-brand" />
@@ -116,10 +129,17 @@ export default function DesktopStartup({
             </div>
           ) : null}
           {state.phase === "unavailable" || state.phase === "error" ? (
-            <Button className="mt-5" onClick={() => void refresh()}>
-              <RefreshCw className="h-4 w-4" />
-              {t("desktop.engine.retry")}
-            </Button>
+            <div className="mt-5 flex flex-wrap gap-2">
+              <Button onClick={() => void refresh()}>
+                <RefreshCw className="h-4 w-4" />{t("desktop.engine.retry")}
+              </Button>
+              <Button variant="outline" onClick={() => void bridge.revealApplicationLogDirectory()}>
+                <FolderOpen className="h-4 w-4" />{t("desktop.engine.openLogs")}
+              </Button>
+              <Button variant="ghost" onClick={() => void quitApplication()}>
+                <Power className="h-4 w-4" />{t("desktop.engine.exit")}
+              </Button>
+            </div>
           ) : null}
         </div>
       </div>
