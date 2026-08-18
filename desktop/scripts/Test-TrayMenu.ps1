@@ -180,6 +180,7 @@ function Send-LeftClick {
     Assert-That -Condition (-not $bounds.IsEmpty) -Message "TRAY_MENU_ITEM_BOUNDS_EMPTY: Quit OpenKB has no clickable bounds."
     $x = [int] [Math]::Round($bounds.X + ($bounds.Width / 2))
     $y = [int] [Math]::Round($bounds.Y + ($bounds.Height / 2))
+    Write-Host ("TRAY_MENU_CLICK_TARGET name='{0}' x={1} y={2} width={3} height={4}" -f $Element.Current.Name, $x, $y, [int] $bounds.Width, [int] $bounds.Height)
     Assert-That -Condition ([OpenKBTrayNativeMethods]::SetCursorPos($x, $y)) -Message "TRAY_MENU_ITEM_CURSOR_FAILED: Could not move the cursor to Quit OpenKB."
     [OpenKBTrayNativeMethods]::mouse_event($MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 40
