@@ -459,6 +459,23 @@
         "merge": "Merging document",
         "completed": "Completed"
       },
+      "pageTreeTitle": "PageTree rebuilds",
+      "pageTreeProvider": "{{provider}} · version {{version}}",
+      "pageTreeAttempts": "{{count}} attempts",
+      "pageTreeStatuses": {
+        "pending": "Pending",
+        "running": "Running",
+        "failed": "Failed",
+        "completed": "Completed"
+      },
+      "pageTreeReasons": {
+        "schema_upgrade": "Building the initial deterministic PageTree",
+        "import_build_failed": "Retrying after an import-time PageTree build failure",
+        "publication_failed": "Retrying after PageTree publication failed",
+        "missing_generation": "The document has no current PageTree",
+        "provider_update": "Rebuilding for a new PageTree provider version",
+        "provider_cache_missing": "Rebuilding from SQLite and the stored document structure"
+      },
       "reanalysis": {
         "title": "Knowledge Reanalysis",
         "description": "{{count}} Available documents can be explicitly reanalysed with the current model.",

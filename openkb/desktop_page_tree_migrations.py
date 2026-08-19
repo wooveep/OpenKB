@@ -142,3 +142,23 @@ PAGE_TREE_MIGRATION_STATEMENTS: tuple[str, ...] = (
     FROM source_documents WHERE availability = 'available'
     """,
 )
+
+
+PAGE_TREE_LIFECYCLE_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    ALTER TABLE document_page_tree_generations
+    ADD COLUMN reused_from_generation_id TEXT
+    """,
+    """
+    ALTER TABLE document_page_tree_rebuild_tasks
+    ADD COLUMN requested_provider_kind TEXT NOT NULL DEFAULT 'openkb_deterministic'
+    """,
+    """
+    ALTER TABLE document_page_tree_rebuild_tasks
+    ADD COLUMN requested_provider_version TEXT NOT NULL DEFAULT '1'
+    """,
+    """
+    CREATE INDEX document_page_tree_generations_status_idx
+        ON document_page_tree_generations(document_id, status, created_at DESC)
+    """,
+)

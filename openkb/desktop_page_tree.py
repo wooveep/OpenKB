@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 PAGE_TREE_CHECKPOINT_SCHEMA = "openkb.document-page-tree.v1"
 DETERMINISTIC_PROVIDER_KIND = "openkb_deterministic"
-DETERMINISTIC_PROVIDER_VERSION = "1"
+DETERMINISTIC_PROVIDER_VERSION = "2"
 PAGE_TREE_STAGE = "deterministic_page_tree"
 PAGE_TREE_FAILURE_CODE = "deterministic_page_tree_failed"
 
@@ -63,6 +63,7 @@ class PageTreeGeneration:
     created_at: str
     status: str
     nodes: tuple[PageTreeNode, ...]
+    reused_from_generation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -79,9 +80,17 @@ def build_deterministic_page_tree(
     source_images: tuple[SourceImage, ...] = (),
     *,
     created_at: str | None = None,
+    provider_kind: str = DETERMINISTIC_PROVIDER_KIND,
+    provider_version: str = DETERMINISTIC_PROVIDER_VERSION,
 ) -> PageTreeGeneration:
     """Build one immutable hierarchy from validated IR without calling a model."""
-    if not document_version_id or not blocks or len(evidence) != len(blocks):
+    if (
+        not document_version_id
+        or not provider_kind
+        or not provider_version
+        or not blocks
+        or len(evidence) != len(blocks)
+    ):
         raise ValueError("Document PageTree input is incomplete.")
     block_by_id = {block.block_id: block for block in blocks}
     evidence_by_block = {block.block_id: evidence_id for evidence_id, block in evidence}
@@ -102,8 +111,8 @@ def build_deterministic_page_tree(
         {
             "schema": PAGE_TREE_CHECKPOINT_SCHEMA,
             "document_version_id": document_version_id,
-            "provider_kind": DETERMINISTIC_PROVIDER_KIND,
-            "provider_version": DETERMINISTIC_PROVIDER_VERSION,
+            "provider_kind": provider_kind,
+            "provider_version": provider_version,
             "structural_ir_fingerprint": structural_fingerprint,
             "locator_mapping_digest": locator_digest,
         }
@@ -141,8 +150,8 @@ def build_deterministic_page_tree(
     return PageTreeGeneration(
         generation_id=generation_id,
         document_version_id=document_version_id,
-        provider_kind=DETERMINISTIC_PROVIDER_KIND,
-        provider_version=DETERMINISTIC_PROVIDER_VERSION,
+        provider_kind=provider_kind,
+        provider_version=provider_version,
         structural_ir_fingerprint=structural_fingerprint,
         locator_mapping_digest=locator_digest,
         created_at=created_at or _timestamp(),
@@ -266,6 +275,7 @@ def _generation_payload(generation: PageTreeGeneration) -> dict[str, object]:
         "locator_mapping_digest": generation.locator_mapping_digest,
         "created_at": generation.created_at,
         "status": generation.status,
+        "reused_from_generation_id": generation.reused_from_generation_id,
         "nodes": [
             {
                 "node_id": node.node_id,
@@ -301,6 +311,9 @@ def _generation_from_payload(payload: object) -> PageTreeGeneration:
     )
     if any(not isinstance(payload.get(key), str) or not payload[key] for key in required):
         raise ValueError("Document PageTree generation checkpoint is invalid.")
+    reused_from = payload.get("reused_from_generation_id")
+    if reused_from is not None and (not isinstance(reused_from, str) or not reused_from):
+        raise ValueError("Document PageTree generation checkpoint is invalid.")
     nodes = tuple(_node_from_payload(value) for value in payload["nodes"])
     if not nodes or any(node.order != order for order, node in enumerate(nodes)):
         raise ValueError("Document PageTree generation node order is invalid.")
@@ -319,6 +332,7 @@ def _generation_from_payload(payload: object) -> PageTreeGeneration:
         created_at=str(payload["created_at"]),
         status=str(payload["status"]),
         nodes=nodes,
+        reused_from_generation_id=str(reused_from) if reused_from is not None else None,
     )
 
 
@@ -396,11 +410,16 @@ def _structural_fingerprint(blocks: tuple[DocumentIRBlock, ...]) -> str:
 def _locator_mapping_digest(
     blocks: tuple[DocumentIRBlock, ...], source_images: tuple[SourceImage, ...]
 ) -> str:
+    images_by_id = {image.image_id: image for image in source_images}
     return _digest(
         {
             "schema": "openkb.document-page-tree.locators.v1",
             "blocks": [
-                {"ordinal": block.ordinal, "locator": _block_locator(block)} for block in blocks
+                {
+                    "ordinal": block.ordinal,
+                    "locator": _stable_block_locator(block, images_by_id),
+                }
+                for block in blocks
             ],
             "source_images": [
                 {
@@ -412,6 +431,32 @@ def _locator_mapping_digest(
             ],
         }
     )
+
+
+def _stable_block_locator(
+    block: DocumentIRBlock, images_by_id: Mapping[str, SourceImage]
+) -> dict[str, object]:
+    locator = _block_locator(block)
+    image_id = locator.get("source_image_id")
+    if image_id is not None:
+        locator["source_image_id"] = _stable_image_reference(image_id, images_by_id)
+    image_ids = locator.get("source_image_ids")
+    if image_ids is not None:
+        if not isinstance(image_ids, list):
+            raise ValueError("Document PageTree Source Image locator is invalid.")
+        locator["source_image_ids"] = [
+            _stable_image_reference(value, images_by_id) for value in image_ids
+        ]
+    return locator
+
+
+def _stable_image_reference(
+    value: object, images_by_id: Mapping[str, SourceImage]
+) -> dict[str, object]:
+    if not isinstance(value, str) or value not in images_by_id:
+        raise ValueError("Document PageTree block references an unknown Source Image.")
+    image = images_by_id[value]
+    return {"ordinal": image.ordinal, "image_sha256": image.image_sha256}
 
 
 def _image_bindings(

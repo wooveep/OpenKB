@@ -237,6 +237,21 @@ export interface DesktopImportTask {
 
 export interface DesktopImportJobs {
   jobs: DesktopImportTask[]
+  pageTreeRebuilds: DesktopPageTreeRebuildTask[]
+}
+
+export interface DesktopPageTreeRebuildTask {
+  documentId: string
+  documentName: string
+  status: "pending" | "running" | "failed" | "completed"
+  reason: string
+  errorCode: string | null
+  attemptCount: number
+  providerKind: string
+  providerVersion: string
+  updatedAt: string
+  completedAt: string | null
+  currentGenerationId: string | null
 }
 
 export interface DesktopRetrievalPlan {

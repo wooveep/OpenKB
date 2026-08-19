@@ -459,6 +459,23 @@
         "merge": "合并文档结果",
         "completed": "已完成"
       },
+      "pageTreeTitle": "PageTree 重建",
+      "pageTreeProvider": "{{provider}} · 版本 {{version}}",
+      "pageTreeAttempts": "已尝试 {{count}} 次",
+      "pageTreeStatuses": {
+        "pending": "等待中",
+        "running": "进行中",
+        "failed": "失败",
+        "completed": "已完成"
+      },
+      "pageTreeReasons": {
+        "schema_upgrade": "正在创建首个确定性 PageTree",
+        "import_build_failed": "正在重试导入阶段失败的 PageTree 构建",
+        "publication_failed": "正在重试失败的 PageTree 发布",
+        "missing_generation": "该文档尚无当前 PageTree",
+        "provider_update": "正在使用新版 PageTree 提供程序重建",
+        "provider_cache_missing": "正在从 SQLite 与已保存的文档结构重建"
+      },
       "reanalysis": {
         "title": "知识重新分析",
         "description": "可使用当前模型显式重分析 {{count}} 份可用文档。",

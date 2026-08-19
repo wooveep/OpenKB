@@ -57,7 +57,7 @@ from openkb.desktop_okf_projection import (
     stage_okf_projection_in,
 )
 from openkb.desktop_page_tree import PageTreeGeneration, page_tree_analysis_sections
-from openkb.desktop_page_tree_store import load_current_page_tree_in
+from openkb.desktop_page_tree_store import lease_current_page_tree, load_current_page_tree_in
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -295,66 +295,66 @@ class DesktopKnowledgeReanalysisService:
             document_id, document_name, expected_digest, execution_token = self._begin_job(
                 job_id, gateway
             )
-            connection = _connect(self._database_path)
-            try:
-                evidence = analysis_evidence_for_document_in(connection, document_id)
-                page_tree = load_current_page_tree_in(connection, document_id)
-            finally:
-                connection.close()
-            if expected_prompt_digest(evidence, page_tree) != expected_digest:
-                raise DesktopImportError(
-                    "knowledge_reanalysis_behavior_changed",
-                    "The analysis behavior changed after this Reanalysis was created.",
-                )
-
-            def honor_control() -> None:
-                if should_stop():
+            with lease_current_page_tree(self._kb_dir, document_id) as page_tree:
+                connection = _connect(self._database_path)
+                try:
+                    evidence = analysis_evidence_for_document_in(connection, document_id)
+                finally:
+                    connection.close()
+                if expected_prompt_digest(evidence, page_tree) != expected_digest:
                     raise DesktopImportError(
-                        "knowledge_reanalysis_interrupted",
-                        "Knowledge Reanalysis stopped with the Desktop Runtime.",
+                        "knowledge_reanalysis_behavior_changed",
+                        "The analysis behavior changed after this Reanalysis was created.",
                     )
 
-            def analyze(operation: str, prompt: str):
-                honor_control()
-                self._set_phase(job_id, execution_token, operation)
-                return gateway.analyze(
-                    DesktopModelRequest(operation, document_name, prompt),
-                    on_event=lambda event: self._record_attempt(
-                        job_id, execution_token, operation, event
-                    ),
-                    is_cancelled=should_stop,
-                )
+                def honor_control() -> None:
+                    if should_stop():
+                        raise DesktopImportError(
+                            "knowledge_reanalysis_interrupted",
+                            "Knowledge Reanalysis stopped with the Desktop Runtime.",
+                        )
 
-            run = run_knowledge_analysis(
-                store=DesktopKnowledgeAnalysisBatchStore(
-                    self._kb_dir,
-                    reanalysis=True,
-                    execution_token=execution_token,
-                ),
-                job_id=job_id,
-                stage_run_id=job_id,
-                document_name=document_name,
-                evidence=evidence,
-                page_tree=page_tree,
-                provider=gateway.provider_name,
-                model=gateway.model_name,
-                engine_version=__version__,
-                analyze=analyze,
-                honor_control=honor_control,
-                on_batch_completed=lambda completed, total: self._batch_completed(
-                    job_id, execution_token, completed, total
-                ),
-            )
-            honor_control()
-            self._apply_result(
-                job_id,
-                document_id,
-                evidence,
-                run.analysis,
-                run.provenance_json,
-                run.checkpoint,
-                execution_token,
-            )
+                def analyze(operation: str, prompt: str):
+                    honor_control()
+                    self._set_phase(job_id, execution_token, operation)
+                    return gateway.analyze(
+                        DesktopModelRequest(operation, document_name, prompt),
+                        on_event=lambda event: self._record_attempt(
+                            job_id, execution_token, operation, event
+                        ),
+                        is_cancelled=should_stop,
+                    )
+
+                run = run_knowledge_analysis(
+                    store=DesktopKnowledgeAnalysisBatchStore(
+                        self._kb_dir,
+                        reanalysis=True,
+                        execution_token=execution_token,
+                    ),
+                    job_id=job_id,
+                    stage_run_id=job_id,
+                    document_name=document_name,
+                    evidence=evidence,
+                    page_tree=page_tree,
+                    provider=gateway.provider_name,
+                    model=gateway.model_name,
+                    engine_version=__version__,
+                    analyze=analyze,
+                    honor_control=honor_control,
+                    on_batch_completed=lambda completed, total: self._batch_completed(
+                        job_id, execution_token, completed, total
+                    ),
+                )
+                honor_control()
+                self._apply_result(
+                    job_id,
+                    document_id,
+                    evidence,
+                    run.analysis,
+                    run.provenance_json,
+                    run.checkpoint,
+                    execution_token,
+                )
         except DesktopModelCallError as error:
             if execution_token is not None:
                 self._fail_job(job_id, execution_token, error.failure.code, error.failure.reason)

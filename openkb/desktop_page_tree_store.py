@@ -6,6 +6,8 @@ import json
 import logging
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +19,8 @@ from openkb.desktop_import_artifacts import (
     source_images_from_checkpoint,
 )
 from openkb.desktop_page_tree import (
+    DETERMINISTIC_PROVIDER_KIND,
+    DETERMINISTIC_PROVIDER_VERSION,
     PAGE_TREE_FAILURE_CODE,
     PageTreeEvidenceBinding,
     PageTreeGeneration,
@@ -24,6 +28,18 @@ from openkb.desktop_page_tree import (
     PageTreeNode,
     PageTreeStageOutcome,
     build_deterministic_page_tree,
+)
+from openkb.desktop_page_tree_rebuild_state import (
+    claim_page_tree_rebuild,
+    mark_page_tree_rebuild_failed,
+    queue_page_tree_rebuild_in,
+    ready_page_tree_rebuild_document_ids_in,
+    rebuild_claim_is_current_in,
+)
+from openkb.desktop_page_tree_reuse import (
+    PageTreeCanonicalDependencyError,
+    require_d1_canonical_provider_in,
+    reuse_matching_d1_generation_in,
 )
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
@@ -33,6 +49,8 @@ _REBUILD_WORKER_LOCK = threading.Lock()
 _REBUILD_START_LOCK = threading.Lock()
 _ACTIVE_REBUILD_WORKERS: set[Path] = set()
 _REBUILD_RERUN_REQUESTS: set[Path] = set()
+_GENERATION_LEASE_LOCK = threading.Lock()
+_GENERATION_LEASES: dict[str, int] = {}
 
 
 def publish_or_queue_page_tree_in(
@@ -53,6 +71,26 @@ def publish_or_queue_page_tree_in(
     try:
         persist_page_tree_generation_in(connection, document_id, outcome.generation)
         connection.execute("RELEASE SAVEPOINT publish_document_page_tree")
+        return
+    except PageTreeCanonicalDependencyError as error:
+        connection.execute("ROLLBACK TO SAVEPOINT publish_document_page_tree")
+        connection.execute("RELEASE SAVEPOINT publish_document_page_tree")
+        queue_page_tree_rebuild_in(
+            connection,
+            error.canonical_document_id,
+            reason="provider_update",
+            error_code=PAGE_TREE_FAILURE_CODE,
+            provider_kind=outcome.generation.provider_kind,
+            provider_version=outcome.generation.provider_version,
+        )
+        queue_page_tree_rebuild_in(
+            connection,
+            document_id,
+            reason="canonical_dependency",
+            error_code=PAGE_TREE_FAILURE_CODE,
+            provider_kind=outcome.generation.provider_kind,
+            provider_version=outcome.generation.provider_version,
+        )
         return
     except Exception:
         connection.execute("ROLLBACK TO SAVEPOINT publish_document_page_tree")
@@ -75,6 +113,8 @@ def persist_page_tree_generation_in(
     """Persist immutable nodes and activate the generation for one Available document."""
     if generation.document_version_id != document_id or generation.status != "ready":
         raise ValueError("Document PageTree generation is bound to another version.")
+    require_d1_canonical_provider_in(connection, document_id, generation)
+    generation = reuse_matching_d1_generation_in(connection, document_id, generation)
     available = connection.execute(
         "SELECT 1 FROM source_documents WHERE document_id = ? AND availability = 'available'",
         (document_id,),
@@ -143,6 +183,7 @@ def persist_page_tree_generation_in(
         """,
         (document_id, generation.generation_id, now),
     )
+    _delete_unleased_superseded_in(connection, document_id)
     connection.execute(
         """
         UPDATE document_page_tree_rebuild_tasks
@@ -164,8 +205,9 @@ def _insert_generation_in(
         """
         INSERT INTO document_page_tree_generations (
             generation_id, document_id, provider_kind, provider_version,
-            structural_ir_fingerprint, locator_mapping_digest, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'current', ?)
+            structural_ir_fingerprint, locator_mapping_digest, status, created_at,
+            reused_from_generation_id
+        ) VALUES (?, ?, ?, ?, ?, ?, 'current', ?, ?)
         """,
         (
             generation.generation_id,
@@ -175,6 +217,7 @@ def _insert_generation_in(
             generation.structural_ir_fingerprint,
             generation.locator_mapping_digest,
             generation.created_at,
+            generation.reused_from_generation_id,
         ),
     )
     for node in generation.nodes:
@@ -229,28 +272,6 @@ def _insert_generation_in(
             )
 
 
-def queue_page_tree_rebuild_in(
-    connection: sqlite3.Connection,
-    document_id: str,
-    *,
-    reason: str,
-    error_code: str,
-) -> None:
-    now = _timestamp()
-    connection.execute(
-        """
-        INSERT INTO document_page_tree_rebuild_tasks (
-            document_id, status, reason, error_code, attempt_count,
-            created_at, updated_at, completed_at
-        ) VALUES (?, 'pending', ?, ?, 0, ?, ?, NULL)
-        ON CONFLICT(document_id) DO UPDATE SET
-            status = 'pending', reason = excluded.reason, error_code = excluded.error_code,
-            updated_at = excluded.updated_at, completed_at = NULL
-        """,
-        (document_id, reason, error_code, now, now),
-    )
-
-
 def load_current_page_tree_in(
     connection: sqlite3.Connection, document_id: str
 ) -> PageTreeGeneration | None:
@@ -258,7 +279,8 @@ def load_current_page_tree_in(
         """
         SELECT generations.generation_id, generations.provider_kind,
             generations.provider_version, generations.structural_ir_fingerprint,
-            generations.locator_mapping_digest, generations.created_at, generations.status
+            generations.locator_mapping_digest, generations.created_at, generations.status,
+            generations.reused_from_generation_id
         FROM document_page_tree_current AS current
         JOIN document_page_tree_generations AS generations
             ON generations.generation_id = current.generation_id
@@ -303,6 +325,67 @@ def load_current_page_tree_in(
         created_at=str(row[5]),
         status="ready" if str(row[6]) == "current" else str(row[6]),
         nodes=nodes,
+        reused_from_generation_id=str(row[7]) if row[7] is not None else None,
+    )
+
+
+@contextmanager
+def lease_current_page_tree(kb_dir: Path, document_id: str) -> Iterator[PageTreeGeneration | None]:
+    """Keep a request's current immutable generation until its work finishes."""
+    resolved = kb_dir.expanduser().resolve()
+    state_dir = desktop_state_dir(resolved)
+    with kb_ingest_lock(state_dir):
+        connection = _connect(desktop_state_database_path(resolved))
+        try:
+            generation = load_current_page_tree_in(connection, document_id)
+            if generation is not None:
+                with _GENERATION_LEASE_LOCK:
+                    generation_id = generation.generation_id
+                    _GENERATION_LEASES[generation_id] = _GENERATION_LEASES.get(generation_id, 0) + 1
+        finally:
+            connection.close()
+    try:
+        yield generation
+    finally:
+        if generation is not None:
+            with _GENERATION_LEASE_LOCK:
+                remaining = _GENERATION_LEASES[generation.generation_id] - 1
+                if remaining:
+                    _GENERATION_LEASES[generation.generation_id] = remaining
+                else:
+                    del _GENERATION_LEASES[generation.generation_id]
+            cleanup_page_tree_generations(resolved, document_id)
+
+
+def cleanup_page_tree_generations(kb_dir: Path, document_id: str) -> None:
+    """Remove superseded trees once no active request leases them."""
+    resolved = kb_dir.expanduser().resolve()
+    try:
+        with kb_ingest_lock(desktop_state_dir(resolved)):
+            connection = _connect(desktop_state_database_path(resolved))
+            try:
+                with connection:
+                    _delete_unleased_superseded_in(connection, document_id)
+            finally:
+                connection.close()
+    except (OSError, sqlite3.Error):
+        logger.warning("Could not clean superseded PageTree generations for %s", document_id)
+
+
+def _delete_unleased_superseded_in(connection: sqlite3.Connection, document_id: str) -> None:
+    generation_ids = tuple(
+        str(row[0])
+        for row in connection.execute(
+            "SELECT generation_id FROM document_page_tree_generations "
+            "WHERE document_id = ? AND status = 'superseded'",
+            (document_id,),
+        ).fetchall()
+    )
+    with _GENERATION_LEASE_LOCK:
+        deletable = tuple(value for value in generation_ids if value not in _GENERATION_LEASES)
+    connection.executemany(
+        "DELETE FROM document_page_tree_generations WHERE generation_id = ?",
+        ((value,) for value in deletable),
     )
 
 
@@ -350,40 +433,50 @@ def rebuild_pending_page_trees(kb_dir: Path) -> None:
     state_dir = desktop_state_dir(resolved)
     database_path = desktop_state_database_path(resolved)
     with _REBUILD_WORKER_LOCK:
-        connection = _connect(database_path)
-        try:
-            rows = connection.execute(
-                """
-                SELECT document_id FROM document_page_tree_rebuild_tasks
-                WHERE status IN ('pending', 'running', 'failed') ORDER BY updated_at, document_id
-                """
-            ).fetchall()
-        finally:
-            connection.close()
-        for row in rows:
-            _rebuild_one(state_dir, database_path, str(row[0]))
+        attempted: set[str] = set()
+        while True:
+            connection = _connect(database_path)
+            try:
+                document_ids = tuple(
+                    document_id
+                    for document_id in ready_page_tree_rebuild_document_ids_in(connection)
+                    if document_id not in attempted
+                )
+            finally:
+                connection.close()
+            if not document_ids:
+                return
+            for document_id in document_ids:
+                attempted.add(document_id)
+                _rebuild_one(state_dir, database_path, document_id)
 
 
 def _rebuild_one(state_dir: Path, database_path: Path, document_id: str) -> None:
+    claim = claim_page_tree_rebuild(state_dir, database_path, document_id)
+    if claim is None:
+        return
     try:
         with kb_ingest_lock(state_dir):
             connection = _connect(database_path)
             try:
+                blocks, evidence, images = _published_page_tree_input_in(connection, document_id)
+            finally:
+                connection.close()
+        generation = build_deterministic_page_tree(
+            document_id,
+            blocks,
+            evidence,
+            images,
+            provider_kind=claim.provider_kind,
+            provider_version=claim.provider_version,
+        )
+        with kb_ingest_lock(state_dir):
+            connection = _connect(database_path)
+            try:
                 connection.execute("BEGIN IMMEDIATE")
-                cursor = connection.execute(
-                    """
-                    UPDATE document_page_tree_rebuild_tasks
-                    SET status = 'running', attempt_count = attempt_count + 1,
-                        error_code = NULL, updated_at = ?, completed_at = NULL
-                    WHERE document_id = ? AND status IN ('pending', 'running', 'failed')
-                    """,
-                    (_timestamp(), document_id),
-                )
-                if cursor.rowcount != 1:
+                if not rebuild_claim_is_current_in(connection, claim):
                     connection.rollback()
                     return
-                blocks, evidence, images = _published_page_tree_input_in(connection, document_id)
-                generation = build_deterministic_page_tree(document_id, blocks, evidence, images)
                 persist_page_tree_generation_in(connection, document_id, generation)
                 connection.commit()
             except BaseException:
@@ -393,13 +486,17 @@ def _rebuild_one(state_dir: Path, database_path: Path, document_id: str) -> None
                 connection.close()
     except Exception:
         logger.exception("Document PageTree rebuild failed for %s", document_id)
-        _mark_rebuild_failed(state_dir, database_path, document_id)
+        try:
+            mark_page_tree_rebuild_failed(state_dir, database_path, claim, PAGE_TREE_FAILURE_CODE)
+        except (OSError, sqlite3.Error):
+            logger.warning("Could not record PageTree rebuild failure for %s", document_id)
 
 
 def start_page_tree_rebuilds(kb_dir: Path) -> None:
     """Start one daemon pass over queued deterministic rebuilds."""
     resolved = kb_dir.expanduser().resolve()
     try:
+        _ensure_page_tree_rebuilds(resolved)
         connection = _connect(desktop_state_database_path(resolved))
         try:
             pending = connection.execute(
@@ -408,7 +505,7 @@ def start_page_tree_rebuilds(kb_dir: Path) -> None:
             ).fetchone()
         finally:
             connection.close()
-    except sqlite3.Error:
+    except (OSError, sqlite3.Error):
         logger.warning("Could not inspect deterministic PageTree rebuild work.")
         return
     if pending is None:
@@ -430,6 +527,49 @@ def start_page_tree_rebuilds(kb_dir: Path) -> None:
             _ACTIVE_REBUILD_WORKERS.discard(resolved)
             _REBUILD_RERUN_REQUESTS.discard(resolved)
         logger.warning("Could not start deterministic PageTree rebuild worker.")
+
+
+def _ensure_page_tree_rebuilds(kb_dir: Path) -> None:
+    state_dir = desktop_state_dir(kb_dir)
+    with kb_ingest_lock(state_dir):
+        connection = _connect(desktop_state_database_path(kb_dir))
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT documents.document_id, current.generation_id
+                FROM source_documents AS documents
+                LEFT JOIN document_page_tree_current AS current
+                    ON current.document_id = documents.document_id
+                LEFT JOIN document_page_tree_generations AS generations
+                    ON generations.generation_id = current.generation_id
+                WHERE documents.availability = 'available' AND (
+                    current.generation_id IS NULL
+                    OR generations.provider_kind != ? OR generations.provider_version != ?
+                )
+                """,
+                (DETERMINISTIC_PROVIDER_KIND, DETERMINISTIC_PROVIDER_VERSION),
+            ).fetchall()
+            for document_id, generation_id in rows:
+                queue_page_tree_rebuild_in(
+                    connection,
+                    str(document_id),
+                    reason="missing_generation" if generation_id is None else "provider_update",
+                    error_code=PAGE_TREE_FAILURE_CODE,
+                    provider_kind=DETERMINISTIC_PROVIDER_KIND,
+                    provider_version=DETERMINISTIC_PROVIDER_VERSION,
+                )
+            for (document_id,) in connection.execute(
+                "SELECT DISTINCT document_id FROM document_page_tree_generations "
+                "WHERE status = 'superseded'"
+            ).fetchall():
+                _delete_unleased_superseded_in(connection, str(document_id))
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
 
 def _run_page_tree_rebuild_worker(kb_dir: Path) -> None:
@@ -582,26 +722,6 @@ def _image_from_row(value: tuple[object, ...]) -> SourceImage:
         alt_text=str(value[6]) if value[6] is not None else None,
         locator=_json_object(value[7]),
     )
-
-
-def _mark_rebuild_failed(state_dir: Path, database_path: Path, document_id: str) -> None:
-    try:
-        with kb_ingest_lock(state_dir):
-            connection = _connect(database_path)
-            try:
-                with connection:
-                    connection.execute(
-                        """
-                        UPDATE document_page_tree_rebuild_tasks
-                        SET status = 'failed', error_code = ?, updated_at = ?
-                        WHERE document_id = ?
-                        """,
-                        (PAGE_TREE_FAILURE_CODE, _timestamp(), document_id),
-                    )
-            finally:
-                connection.close()
-    except (OSError, sqlite3.Error):
-        logger.warning("Could not record PageTree rebuild failure for %s", document_id)
 
 
 def _json_strings(value: object) -> tuple[str, ...]:

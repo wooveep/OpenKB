@@ -23,6 +23,9 @@ mod missing_sources;
 pub use missing_sources::{
     MissingSourceBindingResult, MissingSourceCandidatesResult, MissingSourceDismissalResult,
 };
+#[path = "engine_wire_page_tree.rs"]
+mod page_tree;
+pub use page_tree::PageTreeRebuildTask;
 #[path = "engine_wire_settings.rs"]
 mod settings;
 pub use settings::{DiagnosticBundleResult, ModelSettings};
@@ -595,6 +598,8 @@ pub struct ImportTask {
 #[serde(rename_all = "camelCase")]
 pub struct ImportJobsResult {
     pub jobs: Vec<ImportTask>,
+    #[serde(default, alias = "page_tree_rebuilds")]
+    pub page_tree_rebuilds: Vec<PageTreeRebuildTask>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

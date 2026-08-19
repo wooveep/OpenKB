@@ -8,49 +8,15 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from openkb import desktop_knowledge_lifecycle_migrations as lifecycle_migrations
-from openkb import desktop_knowledge_page_migrations as knowledge_page_migrations
-from openkb import desktop_knowledge_reanalysis_migrations as reanalysis_migrations
-from openkb import desktop_knowledge_verification_migrations as verification_migrations
-from openkb import desktop_page_tree_migrations as page_tree_migrations
 from openkb.desktop_import_deduplication import (
     backfill_deduplication_metadata,
     deduplication_backfill_needed,
 )
-from openkb.desktop_knowledge_analysis_batch_migrations import (
-    KNOWLEDGE_ANALYSIS_BATCH_MIGRATION_STATEMENTS,
-)
 from openkb.desktop_knowledge_analysis_migrations import (
-    KNOWLEDGE_ANALYSIS_METADATA_MIGRATION_STATEMENTS,
-    KNOWLEDGE_ANALYSIS_MIGRATION_STATEMENTS,
-    KNOWLEDGE_ANALYSIS_PROVENANCE_MIGRATION_STATEMENTS,
     register_knowledge_analysis_migration_functions,
 )
-from openkb.desktop_knowledge_provenance_migrations import (
-    KNOWLEDGE_PROVENANCE_MIGRATION_STATEMENTS,
-)
-from openkb.desktop_knowledge_reconciliation_migrations import (
-    THREE_WAY_KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS,
-)
-from openkb.desktop_knowledge_source_migrations import KNOWLEDGE_SOURCE_MIGRATION_STATEMENTS
-from openkb.desktop_missing_source_migrations import MISSING_SOURCE_MIGRATION_STATEMENTS
-from openkb.desktop_okf_projection_migrations import OKF_PROJECTION_MIGRATION_STATEMENTS
-from openkb.desktop_workspace_migrations import (
-    CONVERSATION_MIGRATION_STATEMENTS,
-    DEDUPLICATION_MIGRATION_STATEMENTS,
-    DOCUMENT_VERSION_CANDIDATE_MIGRATION_STATEMENTS,
-    GRAPH_FEATURE_FLAG_MIGRATION_STATEMENTS,
-    GROUNDED_ANSWER_MIGRATION_STATEMENTS,
-    GROUNDED_ANSWER_SOURCE_IMAGE_MIGRATION_STATEMENTS,
-    INTERRUPTED_ANSWER_MIGRATION_STATEMENTS,
-    KNOWLEDGE_GRAPH_MIGRATION_STATEMENTS,
-    KNOWLEDGE_PAGE_MIGRATION_STATEMENTS,
-    KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS,
-    KNOWLEDGE_RECONCILIATION_RESOLUTION_MIGRATION_STATEMENTS,
-    MODEL_CALL_MIGRATION_STATEMENTS,
-    RAW_ASSET_INTEGRITY_MIGRATION_STATEMENTS,
-    RECOVERY_RUN_MIGRATION_STATEMENTS,
-    SOURCE_IMAGE_MIGRATION_STATEMENTS,
+from openkb.desktop_workspace_feature_migrations import (
+    DESKTOP_FEATURE_MIGRATIONS,
 )
 from openkb.locks import kb_ingest_lock
 
@@ -360,35 +326,7 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
-    (4, MODEL_CALL_MIGRATION_STATEMENTS),
-    (5, RECOVERY_RUN_MIGRATION_STATEMENTS),
-    (6, RAW_ASSET_INTEGRITY_MIGRATION_STATEMENTS),
-    (7, SOURCE_IMAGE_MIGRATION_STATEMENTS),
-    (8, GROUNDED_ANSWER_MIGRATION_STATEMENTS),
-    (9, GROUNDED_ANSWER_SOURCE_IMAGE_MIGRATION_STATEMENTS),
-    (10, INTERRUPTED_ANSWER_MIGRATION_STATEMENTS),
-    (11, KNOWLEDGE_PAGE_MIGRATION_STATEMENTS),
-    (12, DEDUPLICATION_MIGRATION_STATEMENTS),
-    (13, DOCUMENT_VERSION_CANDIDATE_MIGRATION_STATEMENTS),
-    (14, KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS),
-    (15, KNOWLEDGE_RECONCILIATION_RESOLUTION_MIGRATION_STATEMENTS),
-    (16, KNOWLEDGE_GRAPH_MIGRATION_STATEMENTS),
-    (17, GRAPH_FEATURE_FLAG_MIGRATION_STATEMENTS),
-    (18, CONVERSATION_MIGRATION_STATEMENTS),
-    (19, knowledge_page_migrations.KNOWLEDGE_PAGE_DRAFT_MIGRATION_STATEMENTS),
-    (20, KNOWLEDGE_SOURCE_MIGRATION_STATEMENTS),
-    (21, KNOWLEDGE_PROVENANCE_MIGRATION_STATEMENTS),
-    (22, verification_migrations.KNOWLEDGE_VERIFICATION_MIGRATION_STATEMENTS),
-    (23, lifecycle_migrations.KNOWLEDGE_LIFECYCLE_MIGRATION_STATEMENTS),
-    (24, THREE_WAY_KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS),
-    (25, OKF_PROJECTION_MIGRATION_STATEMENTS),
-    (26, KNOWLEDGE_ANALYSIS_MIGRATION_STATEMENTS),
-    (27, KNOWLEDGE_ANALYSIS_PROVENANCE_MIGRATION_STATEMENTS),
-    (28, KNOWLEDGE_ANALYSIS_METADATA_MIGRATION_STATEMENTS),
-    (29, MISSING_SOURCE_MIGRATION_STATEMENTS),
-    (30, KNOWLEDGE_ANALYSIS_BATCH_MIGRATION_STATEMENTS),
-    (31, reanalysis_migrations.KNOWLEDGE_REANALYSIS_MIGRATION_STATEMENTS),
-    (32, page_tree_migrations.PAGE_TREE_MIGRATION_STATEMENTS),
+    *DESKTOP_FEATURE_MIGRATIONS,
 )
 
 

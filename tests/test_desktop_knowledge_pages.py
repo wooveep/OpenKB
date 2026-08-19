@@ -32,7 +32,7 @@ def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
     ):
         connection.execute(f"DROP TABLE {table}")
     connection.execute("DROP INDEX import_jobs_document_completed_idx")
-    connection.execute("DELETE FROM schema_migrations WHERE version = 32")
+    connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33)")
 
 
 def test_working_draft_does_not_replace_published_revision_until_explicit_publish(tmp_path):

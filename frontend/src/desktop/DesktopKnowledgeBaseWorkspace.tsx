@@ -769,6 +769,9 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
         tasks={importTasks}
         controllingJobId={controllingJobId}
         knowledgeReanalysis={knowledgeReanalysis}
+        bridge={bridge}
+        kbDir={knowledgeBase?.kbDir ?? null}
+        engineReady={engineReady}
         onOpenChange={setTaskDrawerOpen}
         onControl={(jobId, action) => void controlImportJob(jobId, action)}
       />

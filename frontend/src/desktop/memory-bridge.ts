@@ -10,6 +10,7 @@ import type {
   DesktopRuntimeLaunchIntent,
   DesktopImportSourceInspection,
   DesktopImportSourcePicker,
+  DesktopImportJobs,
   DesktopRawDocument,
   DesktopActiveKnowledgeBase,
   DesktopEngineHealth,
@@ -304,8 +305,8 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
     return result
   }
 
-  async importJobs(): Promise<{ jobs: DesktopImportTask[] }> {
-    return { jobs: this.importJobResults }
+  async importJobs(): Promise<DesktopImportJobs> {
+    return { jobs: this.importJobResults, pageTreeRebuilds: [] }
   }
 
   async knowledgeReanalysis(): Promise<DesktopKnowledgeReanalysisOverview> {

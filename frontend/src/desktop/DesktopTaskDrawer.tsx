@@ -10,7 +10,9 @@ import { Button } from "@/components/ui/button"
 import type { DesktopImportBatchSummary } from "./DesktopDocumentImportPanel"
 import { DesktopKnowledgeAnalysisProgress } from "./DesktopKnowledgeAnalysisProgress"
 import { DesktopKnowledgeReanalysisTasks } from "./DesktopKnowledgeReanalysisTasks"
-import type { DesktopImportTask } from "./contracts"
+import { DesktopPageTreeRebuildTasks } from "./DesktopPageTreeRebuildTasks"
+import type { DesktopBridge, DesktopImportTask } from "./contracts"
+import { usePageTreeRebuilds } from "./usePageTreeRebuilds"
 import type { KnowledgeReanalysisController } from "./useKnowledgeReanalysis"
 
 type ImportTaskAction = "pause" | "resume" | "cancel"
@@ -22,6 +24,9 @@ export function DesktopTaskDrawer({
   tasks,
   controllingJobId,
   knowledgeReanalysis,
+  bridge,
+  kbDir,
+  engineReady,
   onOpenChange,
   onControl,
 }: {
@@ -30,12 +35,16 @@ export function DesktopTaskDrawer({
   tasks: DesktopImportTask[]
   controllingJobId: string | null
   knowledgeReanalysis: KnowledgeReanalysisController
+  bridge: DesktopBridge
+  kbDir: string | null
+  engineReady: boolean
   onOpenChange: (open: boolean) => void
   onControl: (jobId: string, action: ImportTaskAction) => void
 }) {
   const { t } = useTranslation("common")
   const batchTotal = batchSummary?.total ?? 0
   const batchActive = batchSummary ? Math.max(0, batchSummary.total - batchSummary.completed - batchSummary.failures.length) : 0
+  const pageTreeRebuilds = usePageTreeRebuilds({ bridge, kbDir, open, engineReady })
   return (
     <Drawer open={open} onOpenChange={onOpenChange}>
       <DrawerContent className="max-h-[72vh]">
@@ -44,6 +53,10 @@ export function DesktopTaskDrawer({
             <DrawerTitle>{t("desktop.tasks.title")}</DrawerTitle>
             <DrawerDescription>{t("desktop.tasks.description")}</DrawerDescription>
           </DrawerHeader>
+          <DesktopPageTreeRebuildTasks
+            tasks={pageTreeRebuilds.tasks}
+            error={pageTreeRebuilds.error}
+          />
           <DesktopKnowledgeReanalysisTasks controller={knowledgeReanalysis} />
           {tasks.length || batchSummary ? (
             <div className="space-y-2">
@@ -95,7 +108,7 @@ export function DesktopTaskDrawer({
                 )
               })}
             </div>
-          ) : knowledgeReanalysis.overview.runs.length || knowledgeReanalysis.overview.documents.length ? null : (
+          ) : pageTreeRebuilds.tasks.length || pageTreeRebuilds.error || knowledgeReanalysis.overview.runs.length || knowledgeReanalysis.overview.documents.length ? null : (
             <p className="py-8 text-center text-sm text-muted-foreground">{t("desktop.tasks.empty")}</p>
           )}
         </div>
