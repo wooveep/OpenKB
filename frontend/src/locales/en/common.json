@@ -403,6 +403,16 @@
         "review": "Review",
         "conflicts": "Knowledge conflicts",
         "versions": "Document versions"
+      },
+      "export": {
+        "action": "Export",
+        "exporting": "Exporting…",
+        "projection": "Knowledge projection",
+        "projectionDescription": "OKF Markdown and source manifest, without original files.",
+        "selfContained": "Self-contained bundle",
+        "selfContainedDescription": "Adds only the original files and images referenced by published knowledge.",
+        "success": "Knowledge exported to {{path}}",
+        "failed": "The Knowledge Bundle could not be exported."
       }
     },
     "tasks": {

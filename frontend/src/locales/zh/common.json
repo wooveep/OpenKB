@@ -403,6 +403,16 @@
         "review": "待审核",
         "conflicts": "知识冲突",
         "versions": "文档版本"
+      },
+      "export": {
+        "action": "导出",
+        "exporting": "正在导出…",
+        "projection": "知识投影包",
+        "projectionDescription": "包含 OKF Markdown 与来源清单，不包含原始文件。",
+        "selfContained": "自包含知识包",
+        "selfContainedDescription": "仅附带已发布知识实际引用的原始文件与图片。",
+        "success": "知识已导出到 {{path}}",
+        "failed": "无法导出知识包。"
       }
     },
     "tasks": {

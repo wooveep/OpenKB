@@ -7,6 +7,7 @@ import io
 import struct
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -825,6 +826,52 @@ def test_engine_autosaves_then_explicitly_publishes_user_knowledge_pages(tmp_pat
         cancel_event=None,
     )
     assert restored["selected_page_id"] == saved["page_id"]
+
+
+def test_engine_exports_a_typed_knowledge_bundle_to_a_selected_directory(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    destination = tmp_path / "exports"
+    destination.mkdir()
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    saved = server._dispatch(
+        DesktopRequest(
+            request_id="save-export-page",
+            method="workbench.save_knowledge_page",
+            params={
+                "page_id": None,
+                "kind": "concept",
+                "title": "Exported Knowledge",
+                "content_markdown": "Please see [Configuration](configuration.md).",
+            },
+        ),
+        cancel_event=None,
+    )
+    server._dispatch(
+        DesktopRequest(
+            request_id="publish-export-page",
+            method="workbench.publish_knowledge_page",
+            params={"page_id": saved["page_id"]},
+        ),
+        cancel_event=None,
+    )
+
+    exported = server._dispatch(
+        DesktopRequest(
+            request_id="export-knowledge",
+            method="workbench.export_knowledge_bundle",
+            params={"destination": str(destination), "mode": "knowledge_projection"},
+        ),
+        cancel_event=None,
+    )
+
+    assert exported["mode"] == "knowledge_projection"
+    assert exported["raw_asset_count"] == 0
+    assert exported["source_image_count"] == 0
+    assert "source-manifest.json" in exported["files"]
+    assert Path(exported["path"]).parent == destination
 
 
 def test_engine_exposes_knowledge_lifecycle_and_confirmed_permanent_delete(tmp_path):

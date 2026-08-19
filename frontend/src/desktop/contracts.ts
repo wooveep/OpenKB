@@ -543,6 +543,16 @@ export interface DesktopDiagnosticBundle {
   files: string[]
 }
 
+export type DesktopKnowledgeExportMode = "knowledge_projection" | "self_contained"
+
+export interface DesktopKnowledgeExport {
+  path: string
+  mode: DesktopKnowledgeExportMode
+  files: string[]
+  rawAssetCount: number
+  sourceImageCount: number
+}
+
 export interface DesktopBridge {
   handshake(): Promise<DesktopBridgeHandshake>
   health(): Promise<DesktopEngineHealth>
@@ -576,6 +586,11 @@ export interface DesktopBridge {
     requestId: string,
   ): Promise<DesktopModelConnectionTest>
   exportDiagnosticBundle(destination: string, requestId: string): Promise<DesktopDiagnosticBundle>
+  exportKnowledgeBundle(
+    destination: string,
+    mode: DesktopKnowledgeExportMode,
+    requestId: string,
+  ): Promise<DesktopKnowledgeExport>
   inspectImportSources(
     sourcePaths: string[],
     requestId: string,

@@ -1,8 +1,8 @@
 //! Tauri commands for SQLite-authoritative user Knowledge Pages.
 
 use crate::engine_protocol::{
-    BridgeError, KnowledgePage, KnowledgePageDeletionResult, KnowledgePageKind,
-    KnowledgePagesResult, KnowledgeSourcesResult,
+    BridgeError, KnowledgeExportMode, KnowledgeExportResult, KnowledgePage,
+    KnowledgePageDeletionResult, KnowledgePageKind, KnowledgePagesResult, KnowledgeSourcesResult,
 };
 use crate::DesktopState;
 use std::sync::Arc;
@@ -151,6 +151,21 @@ pub(crate) async fn desktop_bind_knowledge_page_source(
     })
     .await
     .map_err(join_error("source binding"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn desktop_export_knowledge_bundle(
+    state: State<'_, DesktopState>,
+    destination: String,
+    mode: KnowledgeExportMode,
+    request_id: String,
+) -> Result<KnowledgeExportResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.export_knowledge_bundle(destination, mode, request_id)
+    })
+    .await
+    .map_err(join_error("export"))?
 }
 
 fn join_error(operation: &'static str) -> impl FnOnce(tauri::Error) -> BridgeError {

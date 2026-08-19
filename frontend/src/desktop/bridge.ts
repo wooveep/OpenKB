@@ -24,6 +24,8 @@ import {
   type DesktopModelConnectionTest,
   type DesktopKnowledgePage,
   type DesktopKnowledgePageDeletion,
+  type DesktopKnowledgeExport,
+  type DesktopKnowledgeExportMode,
   type DesktopKnowledgePages,
   type DesktopKnowledgePageKind,
   type DesktopKnowledgeSourceCandidate,
@@ -48,18 +50,6 @@ import {
 } from "./bridge-normalizers"
 import { UnavailableKnowledgePageBridge } from "./unavailable-knowledge-page-bridge"
 
-type DesktopWindow = Window & {
-  __OPENKB_DESKTOP__?: unknown
-  __TAURI_INTERNALS__?: unknown
-}
-
-/** True only when the Desktop Workbench is running inside its Tauri shell. */
-export function isDesktopShell(): boolean {
-  if (typeof window === "undefined") return false
-  const desktopWindow = window as DesktopWindow
-  return Boolean(desktopWindow.__OPENKB_DESKTOP__ ?? desktopWindow.__TAURI_INTERNALS__)
-}
-
 /** Production Bridge: the sole React caller of Tauri commands and channels. */
 export class TauriDesktopBridge implements DesktopBridge {
   async handshake(): Promise<DesktopBridgeHandshake> {
@@ -82,10 +72,7 @@ export class TauriDesktopBridge implements DesktopBridge {
     })
   }
 
-  async openKnowledgeBase(
-    kbDir: string,
-    requestId: string,
-  ): Promise<DesktopKnowledgeBaseActivation> {
+  async openKnowledgeBase(kbDir: string, requestId: string): Promise<DesktopKnowledgeBaseActivation> {
     return this.call<DesktopKnowledgeBaseActivation>("desktop_open_knowledge_base", {
       kbDir,
       requestId,
@@ -160,12 +147,17 @@ export class TauriDesktopBridge implements DesktopBridge {
     }
   }
 
-  async exportDiagnosticBundle(
-    destination: string,
-    requestId: string,
-  ): Promise<DesktopDiagnosticBundle> {
+  async exportDiagnosticBundle(destination: string, requestId: string): Promise<DesktopDiagnosticBundle> {
     return this.call<DesktopDiagnosticBundle>("desktop_export_diagnostic_bundle", {
       destination,
+      requestId,
+    })
+  }
+
+  async exportKnowledgeBundle(destination: string, mode: DesktopKnowledgeExportMode, requestId: string): Promise<DesktopKnowledgeExport> {
+    return this.call<DesktopKnowledgeExport>("desktop_export_knowledge_bundle", {
+      destination,
+      mode,
       requestId,
     })
   }
@@ -795,5 +787,12 @@ class UnavailableDesktopBridge extends UnavailableKnowledgePageBridge implements
 }
 
 export function createDesktopBridge(): DesktopBridge {
-  return isDesktopShell() ? new TauriDesktopBridge() : new UnavailableDesktopBridge()
+  if (typeof window === "undefined") return new UnavailableDesktopBridge()
+  const desktopWindow = window as Window & {
+    __OPENKB_DESKTOP__?: unknown
+    __TAURI_INTERNALS__?: unknown
+  }
+  return desktopWindow.__OPENKB_DESKTOP__ ?? desktopWindow.__TAURI_INTERNALS__
+    ? new TauriDesktopBridge()
+    : new UnavailableDesktopBridge()
 }

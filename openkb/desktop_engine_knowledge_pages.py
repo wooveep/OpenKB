@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Event
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+from openkb.desktop_knowledge_export import (
+    DesktopKnowledgeExportMode,
+    DesktopKnowledgeExportService,
+)
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
 
 if TYPE_CHECKING:
@@ -45,6 +49,11 @@ def dispatch_knowledge_page_request(
                 ]
             }
         server._begin_workspace_mutation(request, cancel_event)
+        if request.method == "workbench.export_knowledge_bundle":
+            return DesktopKnowledgeExportService(Path(active.kb_dir)).export(
+                Path(_required_string_param(request, "destination")),
+                mode=_required_export_mode(request),
+            ).as_dict()
         if request.method == "workbench.publish_knowledge_page":
             return service.publish(_required_string_param(request, "page_id")).as_dict()
         if request.method == "workbench.verify_knowledge_page":
@@ -114,3 +123,14 @@ def _optional_stale_after_param(request: DesktopRequest) -> str | None:
             "invalid_params", f"{request.method} stale_after must be a string or null."
         )
     return value
+
+
+def _required_export_mode(request: DesktopRequest) -> DesktopKnowledgeExportMode:
+    from openkb.desktop_engine import DesktopRequestError
+
+    value = request.params.get("mode")
+    if value not in {"knowledge_projection", "self_contained"}:
+        raise DesktopRequestError(
+            "invalid_params", f"{request.method} requires a supported Knowledge Bundle mode."
+        )
+    return cast(DesktopKnowledgeExportMode, value)

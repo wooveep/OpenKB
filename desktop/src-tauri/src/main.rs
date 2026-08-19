@@ -12,10 +12,10 @@ mod process_tree;
 
 use desktop_knowledge_page_commands::{
     desktop_bind_knowledge_page_source, desktop_deprecate_knowledge_page,
-    desktop_get_knowledge_page, desktop_knowledge_pages, desktop_permanently_delete_knowledge_page,
-    desktop_publish_knowledge_page, desktop_restore_knowledge_page, desktop_save_knowledge_page,
-    desktop_search_knowledge_sources, desktop_set_knowledge_page_stale_after,
-    desktop_verify_knowledge_page,
+    desktop_export_knowledge_bundle, desktop_get_knowledge_page, desktop_knowledge_pages,
+    desktop_permanently_delete_knowledge_page, desktop_publish_knowledge_page,
+    desktop_restore_knowledge_page, desktop_save_knowledge_page, desktop_search_knowledge_sources,
+    desktop_set_knowledge_page_stale_after, desktop_verify_knowledge_page,
 };
 use desktop_runtime::DesktopRuntimeState;
 use engine_protocol::{
@@ -732,6 +732,7 @@ fn main() {
             desktop_permanently_delete_knowledge_page,
             desktop_search_knowledge_sources,
             desktop_bind_knowledge_page_source,
+            desktop_export_knowledge_bundle,
             desktop_document_version_candidates,
             desktop_knowledge_reconciliation_conflicts,
             desktop_stage_knowledge_reconciliation_decisions,

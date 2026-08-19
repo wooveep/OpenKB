@@ -3,6 +3,8 @@ import type {
   DesktopKnowledgePageDeletion,
   DesktopKnowledgePageKind,
   DesktopKnowledgePages,
+  DesktopKnowledgeExport,
+  DesktopKnowledgeExportMode,
   DesktopKnowledgeSourceCandidate,
 } from "./contracts"
 
@@ -86,6 +88,17 @@ export abstract class UnavailableKnowledgePageBridge {
     void pageId
     void claimText
     void evidenceId
+    void requestId
+    return this.unavailable()
+  }
+
+  exportKnowledgeBundle(
+    destination: string,
+    mode: DesktopKnowledgeExportMode,
+    requestId: string,
+  ): Promise<DesktopKnowledgeExport> {
+    void destination
+    void mode
     void requestId
     return this.unavailable()
   }

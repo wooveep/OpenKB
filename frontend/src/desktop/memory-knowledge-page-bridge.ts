@@ -3,6 +3,8 @@ import type {
   DesktopKnowledgePageDeletion,
   DesktopKnowledgePageKind,
   DesktopKnowledgePages,
+  DesktopKnowledgeExport,
+  DesktopKnowledgeExportMode,
   DesktopKnowledgeSourceCandidate,
 } from "./contracts"
 import { MemoryKnowledgePageStore } from "./memory-knowledge-pages"
@@ -89,5 +91,20 @@ export abstract class MemoryKnowledgePageBridge {
   ): Promise<DesktopKnowledgePage> {
     void requestId
     return this.knowledgePagesStore.bindSource(pageId, claimText, evidenceId)
+  }
+
+  async exportKnowledgeBundle(
+    destination: string,
+    mode: DesktopKnowledgeExportMode,
+    requestId: string,
+  ): Promise<DesktopKnowledgeExport> {
+    void requestId
+    return {
+      path: `${destination}/OpenKB-Knowledge-Export`,
+      mode,
+      files: ["index.md", "log.md", "source-manifest.json"],
+      rawAssetCount: mode === "self_contained" ? 1 : 0,
+      sourceImageCount: mode === "self_contained" ? 1 : 0,
+    }
   }
 }

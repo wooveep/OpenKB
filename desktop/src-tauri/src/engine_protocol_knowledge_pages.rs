@@ -1,8 +1,9 @@
 //! Desktop Concept/Entity page requests owned by the Python SQLite authority.
 
 use super::{
-    BridgeError, BridgeResult, EngineSupervisor, KnowledgePage, KnowledgePageDeletionResult,
-    KnowledgePageKind, KnowledgePagesResult, KnowledgeSourcesResult,
+    BridgeError, BridgeResult, EngineSupervisor, KnowledgeExportMode, KnowledgeExportResult,
+    KnowledgePage, KnowledgePageDeletionResult, KnowledgePageKind, KnowledgePagesResult,
+    KnowledgeSourcesResult, IMPORT_REQUEST_TIMEOUT,
 };
 use serde_json::json;
 
@@ -197,6 +198,27 @@ impl EngineSupervisor {
             BridgeError::new(
                 "invalid_engine_response",
                 format!("Engine knowledge-source binding has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn export_knowledge_bundle(
+        &self,
+        destination: String,
+        mode: KnowledgeExportMode,
+        request_id: String,
+    ) -> BridgeResult<KnowledgeExportResult> {
+        self.ensure_started()?;
+        let value = self.request_started_with_timeout(
+            "workbench.export_knowledge_bundle",
+            json!({ "destination": destination, "mode": mode }),
+            Some(request_id),
+            IMPORT_REQUEST_TIMEOUT,
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine Knowledge export response has an invalid shape: {error}"),
             )
         })
     }
