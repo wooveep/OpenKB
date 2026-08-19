@@ -32,6 +32,7 @@ from openkb.desktop_model_settings import (
     litellm_model_identifier,
     read_desktop_model_settings,
 )
+from openkb.desktop_page_tree_enrichment import PAGE_TREE_ENRICHMENT_SYSTEM_PROMPT
 
 _concurrency_gates: dict[Path, _DesktopModelConcurrencyGate] = {}
 _concurrency_gates_lock = threading.Lock()
@@ -316,6 +317,11 @@ class DesktopLiteLLMTransport:
 
 
 def _messages_for(request: DesktopModelRequest) -> list[dict[str, str]]:
+    if request.operation == "page_tree_enrichment":
+        return [
+            {"role": "system", "content": PAGE_TREE_ENRICHMENT_SYSTEM_PROMPT},
+            {"role": "user", "content": request.content},
+        ]
     if request.operation == "knowledge_analysis":
         return [
             {"role": "system", "content": KNOWLEDGE_ANALYSIS_SYSTEM_PROMPT},

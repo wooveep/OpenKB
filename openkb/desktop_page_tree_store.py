@@ -29,6 +29,7 @@ from openkb.desktop_page_tree import (
     PageTreeStageOutcome,
     build_deterministic_page_tree,
 )
+from openkb.desktop_page_tree_enrichment import active_page_tree_summaries_in
 from openkb.desktop_page_tree_rebuild_state import (
     claim_page_tree_rebuild,
     mark_page_tree_rebuild_failed,
@@ -300,6 +301,7 @@ def load_current_page_tree_in(
     ).fetchall()
     evidence_by_node = _evidence_bindings_in(connection, generation_id)
     images_by_node = _image_bindings_in(connection, generation_id)
+    enriched_summaries = active_page_tree_summaries_in(connection, document_id, generation_id)
     nodes = tuple(
         PageTreeNode(
             node_id=str(node[0]),
@@ -308,7 +310,9 @@ def load_current_page_tree_in(
             depth=int(node[3]),
             kind=str(node[4]),
             title=str(node[5]),
-            summary=str(node[6]) if node[6] is not None else None,
+            summary=enriched_summaries.get(
+                str(node[0]), str(node[6]) if node[6] is not None else None
+            ),
             locator=_json_object(node[7]),
             evidence=tuple(evidence_by_node.get(str(node[0]), ())),
             source_images=tuple(images_by_node.get(str(node[0]), ())),

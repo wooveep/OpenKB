@@ -476,6 +476,24 @@
         "provider_update": "Rebuilding for a new PageTree provider version",
         "provider_cache_missing": "Rebuilding from SQLite and the stored document structure"
       },
+      "pageTreeEnrichment": {
+        "title": "PageTree enrichment",
+        "description": "Optional routing summaries. The deterministic tree remains available if this work fails.",
+        "attempts": "{{count}} attempts",
+        "budget": "Model attempt {{attempt}} · timeout {{timeout}}s · {{remaining}}s remaining",
+        "statuses": {
+          "pending": "Pending",
+          "running": "Running",
+          "failed": "Failed",
+          "completed": "Completed"
+        },
+        "reasons": {
+          "initial": "Adding the first routing summaries",
+          "base_generation_update": "Refreshing summaries for a new deterministic tree",
+          "model_update": "Refreshing summaries for the selected model",
+          "prompt_update": "Refreshing summaries for the current enrichment prompt"
+        }
+      },
       "reanalysis": {
         "title": "Knowledge Reanalysis",
         "description": "{{count}} Available documents can be explicitly reanalysed with the current model.",

@@ -476,6 +476,24 @@
         "provider_update": "正在使用新版 PageTree 提供程序重建",
         "provider_cache_missing": "正在从 SQLite 与已保存的文档结构重建"
       },
+      "pageTreeEnrichment": {
+        "title": "PageTree 语义增强",
+        "description": "仅生成可选的路由摘要；即使失败，确定性 PageTree 仍保持可用。",
+        "attempts": "已尝试 {{count}} 次",
+        "budget": "模型第 {{attempt}} 次尝试 · 超时 {{timeout}} 秒 · 剩余 {{remaining}} 秒",
+        "statuses": {
+          "pending": "等待中",
+          "running": "进行中",
+          "failed": "失败",
+          "completed": "已完成"
+        },
+        "reasons": {
+          "initial": "正在生成首批路由摘要",
+          "base_generation_update": "正在为新的确定性 PageTree 刷新摘要",
+          "model_update": "正在使用当前模型刷新摘要",
+          "prompt_update": "正在使用当前增强提示版本刷新摘要"
+        }
+      },
       "reanalysis": {
         "title": "知识重新分析",
         "description": "可使用当前模型显式重分析 {{count}} 份可用文档。",

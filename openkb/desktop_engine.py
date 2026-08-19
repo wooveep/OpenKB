@@ -21,6 +21,7 @@ from typing import BinaryIO
 
 from openkb import __version__
 from openkb import desktop_engine_methods as engine_methods
+from openkb import desktop_engine_page_tree_enrichment as page_tree_enrichment_engine
 from openkb.desktop_answer_types import DesktopAnswerError
 from openkb.desktop_conversations import DesktopConversationError
 from openkb.desktop_grounded_answer import DesktopGroundedAnswerService
@@ -161,7 +162,7 @@ class DesktopEngineServer:
         self._reader = FrameReader(input_stream)
         self._writer = FrameWriter(output_stream)
         self._workspace = workspace or DesktopKnowledgeBaseRuntime()
-        self._workspace_requests_lock = threading.Lock()
+        self._workspace_requests_lock = threading.RLock()
         self._engine_version = engine_version or __version__
         self._model_gateway_factory = model_gateway_factory or desktop_model_gateway_for
         self._handshake_complete = False
@@ -173,6 +174,11 @@ class DesktopEngineServer:
         self._workers: set[threading.Thread] = set()
         self._workers_lock = threading.Lock()
         self._knowledge_reanalysis_lease = 0
+        self._page_tree_enrichment_lease = 0
+        self._page_tree_enrichment_workers: set[Path] = set()
+        self._page_tree_enrichment_reruns: set[Path] = set()
+        self._page_tree_enrichment_retries: set[Path] = set()
+        self._page_tree_enrichment_gateways: dict[Path, DesktopModelGateway] = {}
         self._sequence = 0
         self._sequence_lock = threading.Lock()
 
@@ -522,12 +528,18 @@ class DesktopEngineServer:
         )
         try:
             if source_path is not None:
-                return importer.import_text(source_path).as_dict()
-            if job_id is not None:
+                result = importer.import_text(source_path)
+            elif job_id is not None:
                 if recovery_override is not None:
-                    return importer.recover_text(job_id, recovery_override).as_dict()
-                return importer.resume_text(job_id).as_dict()
-            raise DesktopRequestError("invalid_params", "An import source or job is required.")
+                    result = importer.recover_text(job_id, recovery_override)
+                else:
+                    result = importer.resume_text(job_id)
+            else:
+                raise DesktopRequestError("invalid_params", "An import source or job is required.")
+            page_tree_enrichment_engine.start_page_tree_enrichments(
+                self, kb_dir, self._model_gateway_factory(kb_dir, None)
+            )
+            return result.as_dict()
         finally:
             self._release_import_control(control)
 

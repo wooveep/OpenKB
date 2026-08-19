@@ -1,9 +1,14 @@
 import { useEffect, useState } from "react"
-import type { DesktopBridge, DesktopPageTreeRebuildTask } from "./contracts"
+import type {
+  DesktopBridge,
+  DesktopPageTreeEnrichmentTask,
+  DesktopPageTreeRebuildTask,
+} from "./contracts"
 
 interface RebuildState {
   kbDir: string | null
   tasks: DesktopPageTreeRebuildTask[]
+  enrichments: DesktopPageTreeEnrichmentTask[]
   error: string | null
 }
 
@@ -19,7 +24,12 @@ export function usePageTreeRebuilds({
   open: boolean
   engineReady: boolean
 }) {
-  const [state, setState] = useState<RebuildState>({ kbDir: null, tasks: [], error: null })
+  const [state, setState] = useState<RebuildState>({
+    kbDir: null,
+    tasks: [],
+    enrichments: [],
+    error: null,
+  })
 
   useEffect(() => {
     if (!open || !kbDir || !engineReady) return
@@ -29,12 +39,18 @@ export function usePageTreeRebuilds({
       try {
         const result = await bridge.importJobs()
         if (disposed) return
-        setState({ kbDir, tasks: result.pageTreeRebuilds, error: null })
+        setState({
+          kbDir,
+          tasks: result.pageTreeRebuilds,
+          enrichments: result.pageTreeEnrichments,
+          error: null,
+        })
       } catch (reason) {
         if (!disposed) {
           setState({
             kbDir,
             tasks: [],
+            enrichments: [],
             error: reason instanceof Error ? reason.message : String(reason),
           })
         }
@@ -48,5 +64,7 @@ export function usePageTreeRebuilds({
     }
   }, [bridge, engineReady, kbDir, open])
 
-  return engineReady && state.kbDir === kbDir ? state : { kbDir, tasks: [], error: null }
+  return engineReady && state.kbDir === kbDir
+    ? state
+    : { kbDir, tasks: [], enrichments: [], error: null }
 }

@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Event
 from typing import TYPE_CHECKING
 
+from openkb import desktop_engine_page_tree_enrichment as enrichment_engine
 from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
@@ -19,6 +20,7 @@ from openkb.desktop_model_settings import (
     validate_desktop_model_settings,
 )
 from openkb.desktop_model_transport import desktop_model_gateway_for_settings
+from openkb.desktop_page_tree_enrichment import DesktopPageTreeEnrichmentService
 
 if TYPE_CHECKING:
     from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
@@ -44,7 +46,9 @@ def dispatch_model_settings_request(
             return read_desktop_model_settings(kb_dir).as_dict()
         if request.method == "workbench.save_model_settings":
             server._begin_workspace_mutation(request, cancel_event)
-            return save_desktop_model_settings(
+            enrichment_engine.invalidate_page_tree_enrichment_workers(server)
+            DesktopPageTreeEnrichmentService(kb_dir).recover_interrupted()
+            settings = save_desktop_model_settings(
                 kb_dir,
                 provider=request.params.get("provider"),
                 model=request.params.get("model"),
@@ -52,7 +56,14 @@ def dispatch_model_settings_request(
                 api_key=request.params.get("api_key"),
                 max_concurrent_model_calls=request.params.get("max_concurrent_model_calls"),
                 initial_timeout_seconds=request.params.get("initial_timeout_seconds"),
-            ).as_dict()
+            )
+            enrichment_engine.start_page_tree_enrichments(
+                server,
+                kb_dir,
+                server._model_gateway_factory(kb_dir, None),
+                retry_failed=True,
+            )
+            return settings.as_dict()
         if request.method == "workbench.test_model_connection":
             settings = validate_desktop_model_settings(
                 provider=request.params.get("provider"),

@@ -238,6 +238,7 @@ export interface DesktopImportTask {
 export interface DesktopImportJobs {
   jobs: DesktopImportTask[]
   pageTreeRebuilds: DesktopPageTreeRebuildTask[]
+  pageTreeEnrichments: DesktopPageTreeEnrichmentTask[]
 }
 
 export interface DesktopPageTreeRebuildTask {
@@ -252,6 +253,26 @@ export interface DesktopPageTreeRebuildTask {
   updatedAt: string
   completedAt: string | null
   currentGenerationId: string | null
+}
+
+export interface DesktopPageTreeEnrichmentTask {
+  documentId: string
+  documentName: string
+  status: "pending" | "running" | "failed" | "completed"
+  reason: "initial" | "base_generation_update" | "model_update" | "prompt_update" | string
+  provider: string
+  model: string
+  attemptCount: number
+  modelAttempt: number
+  callId: string | null
+  timeoutSeconds: number | null
+  remainingSeconds: number | null
+  errorCode: string | null
+  errorReason: string | null
+  updatedAt: string
+  completedAt: string | null
+  baseGenerationId: string
+  currentEnrichmentGenerationId: string | null
 }
 
 export interface DesktopRetrievalPlan {

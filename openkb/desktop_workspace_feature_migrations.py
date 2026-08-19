@@ -22,6 +22,9 @@ from openkb.desktop_knowledge_reconciliation_migrations import (
 from openkb.desktop_knowledge_source_migrations import KNOWLEDGE_SOURCE_MIGRATION_STATEMENTS
 from openkb.desktop_missing_source_migrations import MISSING_SOURCE_MIGRATION_STATEMENTS
 from openkb.desktop_okf_projection_migrations import OKF_PROJECTION_MIGRATION_STATEMENTS
+from openkb.desktop_page_tree_enrichment_migrations import (
+    PAGE_TREE_ENRICHMENT_MIGRATION_STATEMENTS,
+)
 from openkb.desktop_workspace_migrations import (
     CONVERSATION_MIGRATION_STATEMENTS,
     DEDUPLICATION_MIGRATION_STATEMENTS,
@@ -71,4 +74,5 @@ DESKTOP_FEATURE_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (31, reanalysis_migrations.KNOWLEDGE_REANALYSIS_MIGRATION_STATEMENTS),
     (32, page_tree_migrations.PAGE_TREE_MIGRATION_STATEMENTS),
     (33, page_tree_migrations.PAGE_TREE_LIFECYCLE_MIGRATION_STATEMENTS),
+    (34, PAGE_TREE_ENRICHMENT_MIGRATION_STATEMENTS),
 )

@@ -142,6 +142,7 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
         "import-jobs.json",
         "model-calls.json",
         "graph-diagnostics.json",
+        "page-tree-enrichment.json",
         "integrity.json",
     }
     with zipfile.ZipFile(destination) as archive:

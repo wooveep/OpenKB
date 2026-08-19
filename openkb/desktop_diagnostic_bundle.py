@@ -165,6 +165,28 @@ class DesktopDiagnosticBundleService:
                             """,
                         ),
                     },
+                    "page-tree-enrichment.json": {
+                        "tasks": _rows(
+                            connection,
+                            """
+                            SELECT document_id, base_generation_id, status, reason,
+                                provider, model, attempt_count, model_attempt, call_id,
+                                timeout_seconds, remaining_seconds, error_code, error_reason,
+                                created_at, updated_at, completed_at
+                            FROM document_page_tree_enrichment_tasks
+                            ORDER BY updated_at DESC
+                            """,
+                        ),
+                        "generations": _rows(
+                            connection,
+                            """
+                            SELECT enrichment_generation_id, document_id, base_generation_id,
+                                provider, model, prompt_digest, status, created_at
+                            FROM document_page_tree_enrichment_generations
+                            ORDER BY created_at DESC
+                            """,
+                        ),
+                    },
                     "integrity.json": {
                         "source_document_counts": _rows(
                             connection,

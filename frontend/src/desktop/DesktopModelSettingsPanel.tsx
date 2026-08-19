@@ -34,6 +34,7 @@ const diagnosticFiles = [
   "import-jobs.json",
   "model-calls.json",
   "graph-diagnostics.json",
+  "page-tree-enrichment.json",
   "integrity.json",
 ]
 
