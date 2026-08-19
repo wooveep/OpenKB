@@ -226,6 +226,29 @@ class DesktopModelGateway:
             is_cancelled=is_cancelled,
         )
 
+    def analyze_once(
+        self,
+        request: DesktopModelRequest,
+        *,
+        on_event: ModelEventCallback,
+        timeout_seconds: float = INITIAL_RESPONSE_TIMEOUT_SECONDS,
+        is_cancelled: CancellationCallback | None = None,
+    ) -> DesktopModelResult:
+        """Execute exactly one provider attempt within one bounded response deadline."""
+        if timeout_seconds <= 0 or timeout_seconds > MODEL_CALL_DEADLINE_SECONDS:
+            raise ValueError("One-shot model timeout must be between 0 and 60 seconds.")
+        return self._run(
+            request,
+            on_event=on_event,
+            attempt_call=lambda current_request, timeout, _attempt: self._call_transport(
+                current_request, timeout, is_cancelled=is_cancelled
+            ),
+            is_cancelled=is_cancelled,
+            max_automatic_retries=0,
+            deadline_seconds=timeout_seconds,
+            initial_timeout_seconds=timeout_seconds,
+        )
+
     def stream(
         self,
         request: DesktopModelRequest,
@@ -264,22 +287,34 @@ class DesktopModelGateway:
         attempt_call: Callable[[DesktopModelRequest, float, int], object],
         on_retry: RetryCallback | None = None,
         is_cancelled: CancellationCallback | None = None,
+        max_automatic_retries: int | None = None,
+        deadline_seconds: float | None = None,
+        initial_timeout_seconds: float | None = None,
     ) -> DesktopModelResult:
+        retry_limit = (
+            MAX_AUTOMATIC_RETRIES if max_automatic_retries is None else max_automatic_retries
+        )
+        deadline = MODEL_CALL_DEADLINE_SECONDS if deadline_seconds is None else deadline_seconds
+        initial_timeout = (
+            self._initial_timeout_seconds
+            if initial_timeout_seconds is None
+            else initial_timeout_seconds
+        )
         call_id = uuid.uuid4().hex
         started_at = self._clock()
-        for attempt_index in range(MAX_AUTOMATIC_RETRIES + 1):
+        for attempt_index in range(retry_limit + 1):
             if _is_cancelled(is_cancelled):
                 raise DesktopModelCancelledError()
-            remaining = _remaining_seconds(started_at, self._clock())
+            remaining = _remaining_seconds(started_at, self._clock(), deadline)
             if remaining <= 0:
                 raise self._deadline_error(call_id, attempt_index + 1, on_event)
             if not _prepare_transport_attempt(self._transport, is_cancelled, remaining):
                 raise self._deadline_error(call_id, attempt_index + 1, on_event)
             try:
-                remaining = _remaining_seconds(started_at, self._clock())
+                remaining = _remaining_seconds(started_at, self._clock(), deadline)
                 if remaining <= 0:
                     raise self._deadline_error(call_id, attempt_index + 1, on_event)
-                scheduled_timeout = self._initial_timeout_seconds + (
+                scheduled_timeout = initial_timeout + (
                     attempt_index * RETRY_TIMEOUT_INCREMENT_SECONDS
                 )
                 timeout_seconds = min(scheduled_timeout, remaining)
@@ -301,7 +336,7 @@ class DesktopModelGateway:
                 raise
             except Exception as error:
                 failure = classify_model_error(error)
-                remaining = _remaining_seconds(started_at, self._clock())
+                remaining = _remaining_seconds(started_at, self._clock(), deadline)
                 exception_type, diagnostic_detail = _diagnostic_error_detail(error)
                 logger.warning(
                     "model_attempt_failed call_id=%s operation=%s document=%r attempt=%s "
@@ -317,10 +352,9 @@ class DesktopModelGateway:
                 )
                 if remaining <= 0:
                     raise self._deadline_error(call_id, attempt_index + 1, on_event) from error
-                if failure.retryable and attempt_index < MAX_AUTOMATIC_RETRIES:
+                if failure.retryable and attempt_index < retry_limit:
                     next_timeout = min(
-                        self._initial_timeout_seconds
-                        + ((attempt_index + 1) * RETRY_TIMEOUT_INCREMENT_SECONDS),
+                        initial_timeout + ((attempt_index + 1) * RETRY_TIMEOUT_INCREMENT_SECONDS),
                         remaining,
                     )
                     on_event(
@@ -339,7 +373,12 @@ class DesktopModelGateway:
                         on_retry(attempt_index + 2)
                     if _is_cancelled(is_cancelled):
                         raise DesktopModelCancelledError() from error
-                    self._wait_for_retry(error, started_at, is_cancelled=is_cancelled)
+                    self._wait_for_retry(
+                        error,
+                        started_at,
+                        deadline,
+                        is_cancelled=is_cancelled,
+                    )
                     continue
                 on_event(
                     DesktopModelAttemptEvent(
@@ -357,8 +396,8 @@ class DesktopModelGateway:
             if _is_cancelled(is_cancelled):
                 raise DesktopModelCancelledError()
             now = self._clock()
-            remaining = _remaining_seconds(started_at, now)
-            if now - started_at >= MODEL_CALL_DEADLINE_SECONDS:
+            remaining = _remaining_seconds(started_at, now, deadline)
+            if now - started_at >= deadline:
                 raise self._deadline_error(call_id, attempt_index + 1, on_event)
             if not isinstance(response, str) or not response.strip():
                 failure = _FAILURES["model_response_invalid"]
@@ -386,7 +425,7 @@ class DesktopModelGateway:
             return DesktopModelResult(
                 call_id=call_id, content=response, attempt_count=attempt_index + 1
             )
-        raise self._deadline_error(call_id, MAX_AUTOMATIC_RETRIES + 1, on_event)
+        raise self._deadline_error(call_id, retry_limit + 1, on_event)
 
     def _deadline_error(
         self, call_id: str, attempts: int, on_event: ModelEventCallback
@@ -472,6 +511,7 @@ class DesktopModelGateway:
         self,
         error: Exception,
         started_at: float,
+        deadline_seconds: float,
         *,
         is_cancelled: CancellationCallback | None,
     ) -> None:
@@ -483,7 +523,7 @@ class DesktopModelGateway:
         )
         if retry_after <= 0:
             return
-        remaining = _remaining_seconds(started_at, self._clock())
+        remaining = _remaining_seconds(started_at, self._clock(), deadline_seconds)
         wait_remaining = min(float(retry_after), remaining)
         while wait_remaining > 0:
             if _is_cancelled(is_cancelled):
@@ -567,5 +607,5 @@ def _diagnostic_error_detail(error: Exception) -> tuple[str, str]:
     return type(error).__name__, detail[:500]
 
 
-def _remaining_seconds(started_at: float, now: float) -> float:
-    return max(0.0, MODEL_CALL_DEADLINE_SECONDS - (now - started_at))
+def _remaining_seconds(started_at: float, now: float, deadline_seconds: float) -> float:
+    return max(0.0, deadline_seconds - (now - started_at))

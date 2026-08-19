@@ -124,6 +124,9 @@ class DesktopGroundedAnswerService:
             source_images=tuple(
                 image for image in pack.source_images if image.evidence_id in sent_evidence_ids
             ),
+            retrieval_trace=pack.retrieval_trace.with_canonical_evidence_ids(
+                tuple(reference.evidence_id for reference in sent_evidence)
+            ),
         )
         emitted = False
         visible_attempt = 0
@@ -174,6 +177,7 @@ class DesktopGroundedAnswerService:
                 citations=pack.evidence,
                 degradations=pack.degradations,
                 source_images=pack.source_images,
+                retrieval_trace=pack.retrieval_trace,
                 status="interrupted",
                 interruption_code=interruption_code,
                 interruption_reason=interruption_reason,
@@ -220,6 +224,7 @@ class DesktopGroundedAnswerService:
             citations=pack.evidence,
             degradations=tuple((*pack.degradations, *generation.degradations)),
             source_images=pack.source_images,
+            retrieval_trace=pack.retrieval_trace,
             created_at=created_at,
         )
         return answer

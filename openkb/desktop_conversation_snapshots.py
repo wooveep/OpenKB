@@ -8,6 +8,7 @@ from pathlib import Path
 
 from openkb.desktop_answer_types import DesktopGroundedAnswer
 from openkb.desktop_retrieval_channels import normalize_retrieval_channels
+from openkb.desktop_retrieval_trace import DesktopRetrievalTrace, retrieval_trace_from_json
 
 
 def insert_answer_version(
@@ -60,6 +61,13 @@ def insert_answer_version(
             )
             for ordinal, citation in enumerate(answer.citations)
         ],
+    )
+    connection.execute(
+        """
+        INSERT INTO conversation_answer_retrieval_traces (answer_version_id, trace_json)
+        VALUES (?, ?)
+        """,
+        (version_id, json.dumps(answer.retrieval_trace.as_dict(), ensure_ascii=False)),
     )
     connection.executemany(
         """
@@ -153,6 +161,16 @@ def version_images(
             }
         )
     return images
+
+
+def version_retrieval_trace(
+    connection: sqlite3.Connection, version_id: str
+) -> DesktopRetrievalTrace:
+    row = connection.execute(
+        "SELECT trace_json FROM conversation_answer_retrieval_traces WHERE answer_version_id = ?",
+        (version_id,),
+    ).fetchone()
+    return retrieval_trace_from_json(str(row[0])) if row is not None else DesktopRetrievalTrace()
 
 
 def json_object(value: str) -> dict[str, object]:

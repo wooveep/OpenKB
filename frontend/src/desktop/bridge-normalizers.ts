@@ -136,6 +136,7 @@ function answerVersion(item: unknown): DesktopConversation["messages"][number]["
       terms: Array.isArray(plan.terms) ? plan.terms.filter((term): term is string => typeof term === "string") : [],
       source: stringValue(plan, "source"),
     },
+    retrievalTrace: retrievalTrace(value.retrieval_trace),
     degradations: Array.isArray(value.degradations) ? value.degradations.filter((entry): entry is string => typeof entry === "string") : [],
     status: value.status === "interrupted" ? "interrupted" : "completed",
     interruptionCode: nullableString(value.interruption_code),
@@ -169,6 +170,31 @@ function answerVersion(item: unknown): DesktopConversation["messages"][number]["
         sourceAvailable: Boolean(image.source_available),
       }
     }),
+  }
+}
+
+function retrievalTrace(payload: unknown): DesktopConversation["messages"][number]["answerVersions"][number]["retrievalTrace"] {
+  const value = record(payload)
+  const strings = (item: unknown) => Array.isArray(item)
+    ? item.filter((entry): entry is string => typeof entry === "string")
+    : []
+  return {
+    catalogGenerationIds: strings(value.catalog_generation_ids),
+    pageTreeGenerationIds: strings(value.page_tree_generation_ids),
+    channels: (Array.isArray(value.channels) ? value.channels : []).map((item) => {
+      const channel = record(item)
+      return {
+        channel: stringValue(channel, "channel"),
+        candidateCount: numberValue(channel.candidate_count),
+        triggerReasons: strings(channel.trigger_reasons),
+        degradationReasons: strings(channel.degradation_reasons),
+      }
+    }),
+    triggerReasons: strings(value.trigger_reasons),
+    degradationReasons: strings(value.degradation_reasons),
+    selectedNodeIds: strings(value.selected_node_ids),
+    canonicalEvidenceIds: strings(value.canonical_evidence_ids),
+    fusionPolicyVersion: stringValue(value, "fusion_policy_version"),
   }
 }
 

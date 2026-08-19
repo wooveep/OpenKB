@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import sqlite3
 from collections import defaultdict
 from collections.abc import Callable, Iterator
@@ -14,7 +13,6 @@ from pathlib import Path
 
 from openkb.desktop_answer_types import (
     DesktopAnswerError,
-    DesktopAnswerSourceImage,
     DesktopEvidencePack,
     DesktopEvidenceRef,
     DesktopRetrievalPlan,
@@ -31,34 +29,59 @@ from openkb.desktop_knowledge_graph import (
 )
 from openkb.desktop_knowledge_source_retrieval import knowledge_source_rows_in
 from openkb.desktop_knowledge_sources import AVAILABLE_EVIDENCE_OCCURRENCES_CTE
-from openkb.desktop_lexical import cjk_bigrams, is_cjk_text
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
     DesktopModelGateway,
     DesktopModelRequest,
 )
+from openkb.desktop_page_tree_selection import (
+    PageTreeSelectionResult,
+    select_page_tree_evidence,
+)
 from openkb.desktop_retrieval_channels import (
     DESKTOP_RETRIEVAL_VARIANTS,
     DesktopRetrievalVariant,
+)
+from openkb.desktop_retrieval_images import source_images_for_evidence
+from openkb.desktop_retrieval_plan import (
+    deterministic_plan,
+    model_plan,
+    validate_question,
+    with_baseline_terms,
+)
+from openkb.desktop_retrieval_trace import (
+    FUSION_POLICY_VERSION,
+    DesktopRetrievalChannelTrace,
+    DesktopRetrievalTrace,
 )
 from openkb.desktop_source_image_locator import source_image_matches_evidence
 from openkb.desktop_workspace import desktop_state_database_path
 
 _source_image_matches_evidence = source_image_matches_evidence
 
-_MAX_QUERY_LENGTH = 2_000
-_MAX_PLAN_TERMS = 8
-_MAX_COMBINED_PLAN_TERMS = 12
 _CHANNEL_LIMIT = 12
 _EVIDENCE_PACK_LIMIT = 6
 DESKTOP_EVIDENCE_RECALL_K = _EVIDENCE_PACK_LIMIT
 _BASELINE_MINIMUM_QUOTA = 4
 _GRAPH_CANDIDATE_LIMIT = 2
 _RRF_OFFSET = 60
-_TERM_PATTERN = re.compile(r"[A-Za-z0-9_]{2,}|[\u3400-\u9fff]+")
 _SCORE_COLUMNS = frozenset(("display_name", "heading_path", "text"))
 _CATALOG_VARIANTS = frozenset(("wiki", "baseline", "local_graph"))
+_VARIANT_CHANNELS: dict[DesktopRetrievalVariant, tuple[str, ...]] = {
+    "fts": ("fts",),
+    "structure_lexical": ("structure_lexical",),
+    "wiki": ("wiki", "knowledge_source", "catalog"),
+    "baseline": ("fts", "structure_lexical", "wiki", "knowledge_source", "catalog"),
+    "local_graph": (
+        "fts",
+        "structure_lexical",
+        "wiki",
+        "knowledge_source",
+        "catalog",
+        "knowledge_graph",
+    ),
+}
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +92,15 @@ class _Candidate:
     channel: str
     rank: int
     weight: float = 1.0
+
+
+@dataclass(frozen=True)
+class _VariantEvidence:
+    evidence: tuple[DesktopEvidenceRef, ...]
+    candidates: tuple[_Candidate, ...]
+    protected_candidates: tuple[_Candidate, ...]
+    channel_counts: tuple[tuple[str, int], ...]
+    graph_error_code: str | None = None
 
 
 class DesktopEvidenceRetriever:
@@ -86,13 +118,18 @@ class DesktopEvidenceRetriever:
         variant: DesktopRetrievalVariant = (
             "local_graph" if local_graph_default_enabled(self._kb_dir) else "baseline"
         )
-        return self.retrieve_variant(question, variant=variant, is_cancelled=is_cancelled)
+        return self.retrieve_variant(
+            question,
+            variant=variant,
+            is_cancelled=is_cancelled,
+            _enable_page_tree_selection=True,
+        )
 
     def build_plan(
         self, question: str, *, is_cancelled: Callable[[], bool] | None = None
     ) -> tuple[DesktopRetrievalPlan, tuple[str, ...]]:
         """Build one bounded plan that an evaluation can reuse across variants."""
-        normalized_question = _validate_question(question)
+        normalized_question = validate_question(question)
         plan, degradations = self._plan(normalized_question, is_cancelled=is_cancelled)
         return plan, tuple(degradations)
 
@@ -104,6 +141,7 @@ class DesktopEvidenceRetriever:
         retrieval_plan: DesktopRetrievalPlan | None = None,
         degradations: tuple[str, ...] = (),
         is_cancelled: Callable[[], bool] | None = None,
+        _enable_page_tree_selection: bool = False,
     ) -> DesktopEvidencePack:
         """Retrieve one named vectorless channel for a fixed evaluation plan.
 
@@ -114,7 +152,7 @@ class DesktopEvidenceRetriever:
         """
         if variant not in DESKTOP_RETRIEVAL_VARIANTS:
             raise ValueError(f"Unsupported Desktop retrieval variant: {variant}")
-        normalized_question = _validate_question(question)
+        normalized_question = validate_question(question)
         if retrieval_plan is None:
             plan, plan_degradations = self._plan(normalized_question, is_cancelled=is_cancelled)
             all_degradations = tuple((*degradations, *plan_degradations))
@@ -127,6 +165,7 @@ class DesktopEvidenceRetriever:
             plan = retrieval_plan
             all_degradations = degradations
         graph_error_code: str | None = None
+        selection = PageTreeSelectionResult()
         with _best_effort_catalog_lease(self._kb_dir, enabled=variant in _CATALOG_VARIANTS) as (
             catalog,
             lease_degradations,
@@ -140,28 +179,98 @@ class DesktopEvidenceRetriever:
                     variant,
                     lease_degradations,
                 )
-                evidence, graph_error_code = _variant_evidence(
+                variant_evidence = _variant_evidence(
                     connection,
                     plan.terms,
                     variant,
                     catalog_candidates=catalog_candidates,
                 )
-                source_images = _source_images_for_evidence(connection, evidence, self._kb_dir)
+                graph_error_code = variant_evidence.graph_error_code
+            finally:
+                connection.close()
+            if _enable_page_tree_selection and variant in {"baseline", "local_graph"}:
+                selection = select_page_tree_evidence(
+                    self._kb_dir,
+                    normalized_question,
+                    plan,
+                    variant_evidence.evidence,
+                    self._model_gateway,
+                    is_cancelled=is_cancelled,
+                )
+            connection = _connect(self._database_path)
+            try:
+                page_tree_candidates = _page_tree_candidates(connection, selection.evidence_ids)
+                candidates = (*variant_evidence.candidates, *page_tree_candidates)
+                evidence = _fuse_candidates(
+                    candidates,
+                    protected=variant_evidence.protected_candidates,
+                )
+                source_images = source_images_for_evidence(connection, evidence, self._kb_dir)
             finally:
                 connection.close()
         if graph_error_code is not None:
             record_query_diagnostic(self._kb_dir, graph_error_code)
+        retrieval_degradations = tuple(
+            dict.fromkeys(
+                (
+                    *all_degradations,
+                    *catalog_degradation,
+                    *selection.degradation_reasons,
+                )
+            )
+        )
+        trace_degradations = tuple(
+            dict.fromkeys(
+                (
+                    *retrieval_degradations,
+                    *((graph_error_code,) if graph_error_code else ()),
+                )
+            )
+        )
+        channel_counts = dict(variant_evidence.channel_counts)
+        for channel in _VARIANT_CHANNELS[variant]:
+            channel_counts.setdefault(channel, 0)
+        if _enable_page_tree_selection:
+            channel_counts["document_page_tree"] = len(page_tree_candidates)
+        channel_degradations = {
+            "catalog": catalog_degradation,
+            "knowledge_graph": ((graph_error_code,) if graph_error_code else ()),
+            "document_page_tree": selection.degradation_reasons,
+        }
+        trace = DesktopRetrievalTrace(
+            catalog_generation_ids=((catalog.generation_id,) if catalog is not None else ()),
+            page_tree_generation_ids=selection.generation_ids,
+            channels=tuple(
+                DesktopRetrievalChannelTrace(
+                    channel,
+                    count,
+                    trigger_reasons=(
+                        selection.trigger_reasons if channel == "document_page_tree" else ()
+                    ),
+                    degradation_reasons=tuple(
+                        dict.fromkeys((*all_degradations, *channel_degradations.get(channel, ())))
+                    ),
+                )
+                for channel, count in channel_counts.items()
+            ),
+            trigger_reasons=selection.trigger_reasons,
+            degradation_reasons=trace_degradations,
+            selected_node_ids=selection.selected_node_ids,
+            canonical_evidence_ids=tuple(reference.evidence_id for reference in evidence),
+            fusion_policy_version=FUSION_POLICY_VERSION,
+        )
         return DesktopEvidencePack(
             retrieval_plan=plan,
             evidence=evidence,
-            degradations=tuple((*all_degradations, *catalog_degradation)),
+            degradations=retrieval_degradations,
             source_images=source_images,
+            retrieval_trace=trace,
         )
 
     def _plan(
         self, question: str, *, is_cancelled: Callable[[], bool] | None = None
     ) -> tuple[DesktopRetrievalPlan, list[str]]:
-        fallback = _deterministic_plan(question)
+        fallback = deterministic_plan(question)
         if self._model_gateway is None:
             return fallback, ["retrieval_plan_unavailable"]
         try:
@@ -170,8 +279,8 @@ class DesktopEvidenceRetriever:
                 on_event=lambda _event: None,
                 is_cancelled=is_cancelled,
             )
-            model_plan = _model_plan(question, result.content)
-            return _with_baseline_terms(fallback, model_plan), []
+            planned = model_plan(question, result.content)
+            return with_baseline_terms(fallback, planned), []
         except DesktopModelCancelledError:
             return fallback, ["retrieval_plan_cancelled"]
         except (DesktopModelCallError, ValueError, json.JSONDecodeError):
@@ -211,72 +320,6 @@ def _connect(database_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path)
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
-
-
-def _validate_question(question: str) -> str:
-    if not isinstance(question, str) or not question.strip():
-        raise DesktopAnswerError("invalid_question", "Enter a question before asking OpenKB.")
-    normalized = " ".join(question.split())
-    if len(normalized) > _MAX_QUERY_LENGTH:
-        raise DesktopAnswerError(
-            "invalid_question", "The question is too long for grounded retrieval."
-        )
-    return normalized
-
-
-def _deterministic_plan(question: str) -> DesktopRetrievalPlan:
-    return DesktopRetrievalPlan(query=question, terms=_terms(question), source="deterministic")
-
-
-def _model_plan(question: str, content: str) -> DesktopRetrievalPlan:
-    payload = json.loads(_json_object_text(content))
-    if not isinstance(payload, dict):
-        raise ValueError("Retrieval Plan must be an object.")
-    values = payload.get("terms")
-    if not isinstance(values, list):
-        raise ValueError("Retrieval Plan terms are missing.")
-    terms = _terms(" ".join(value for value in values if isinstance(value, str)))
-    if not terms:
-        raise ValueError("Retrieval Plan terms are empty.")
-    return DesktopRetrievalPlan(query=question, terms=terms, source="model")
-
-
-def _with_baseline_terms(
-    baseline: DesktopRetrievalPlan, model_plan: DesktopRetrievalPlan
-) -> DesktopRetrievalPlan:
-    """Keep deterministic question terms even when a valid model plan is incomplete."""
-    terms: list[str] = []
-    for value in (*baseline.terms, *model_plan.terms):
-        if value not in terms:
-            terms.append(value)
-        if len(terms) == _MAX_COMBINED_PLAN_TERMS:
-            break
-    return DesktopRetrievalPlan(
-        query=baseline.query,
-        terms=tuple(terms),
-        source=model_plan.source,
-    )
-
-
-def _json_object_text(content: str) -> str:
-    stripped = content.strip()
-    if stripped.startswith("```"):
-        stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
-        stripped = stripped.rsplit("```", 1)[0].strip()
-    return stripped
-
-
-def _terms(value: str) -> tuple[str, ...]:
-    terms: list[str] = []
-    for match in _TERM_PATTERN.finditer(value.casefold()):
-        token = match.group(0)
-        values = cjk_bigrams(token) if is_cjk_text(token) else (token,)
-        for item in values:
-            if item and item not in terms:
-                terms.append(item)
-            if len(terms) == _MAX_PLAN_TERMS:
-                return tuple(terms)
-    return tuple(terms)
 
 
 def _fts_candidates(
@@ -467,35 +510,95 @@ def _variant_evidence(
     terms: tuple[str, ...],
     variant: DesktopRetrievalVariant,
     catalog_candidates: tuple[_Candidate, ...] = (),
-) -> tuple[tuple[DesktopEvidenceRef, ...], str | None]:
+) -> _VariantEvidence:
     """Build one evaluation candidate set without adding unrequested channels."""
     if variant == "fts":
-        return _fuse_candidates(_fts_candidates(connection, terms)), None
+        candidates = _fts_candidates(connection, terms)
+        return _variant_result(candidates)
     if variant == "structure_lexical":
-        return _fuse_candidates(_structure_lexical_candidates(connection, terms)), None
+        candidates = _structure_lexical_candidates(connection, terms)
+        return _variant_result(candidates)
     if variant == "wiki":
-        return _fuse_candidates(
+        candidates = (
             _wiki_candidates(connection, terms)
             + _knowledge_source_candidates(connection, terms)
             + catalog_candidates
-        ), None
+        )
+        return _variant_result(candidates)
 
-    baseline = _fuse_candidates(
-        _fts_candidates(connection, terms)
-        + _structure_lexical_candidates(connection, terms)
+    protected = _fts_candidates(connection, terms) + _structure_lexical_candidates(
+        connection, terms
+    )
+    candidates = (
+        protected
         + _wiki_candidates(connection, terms)
         + _knowledge_source_candidates(connection, terms)
         + catalog_candidates
     )
+    baseline = _fuse_candidates(candidates, protected=protected)
     if variant == "baseline":
-        return baseline, None
+        return _variant_result(candidates, protected=protected)
     try:
         graph_candidates = _graph_candidates(connection, terms, baseline)
     except DesktopKnowledgeGraphQueryError as error:
         # A failed graph capability is never user-visible and never removes
         # the independently retrieved baseline.
-        return _with_graph_budget(baseline, ()), error.code
-    return _with_graph_budget(baseline, graph_candidates), None
+        return _variant_result(
+            candidates,
+            protected=protected,
+            graph_error_code=error.code,
+            extra_channel_counts=(("knowledge_graph", 0),),
+        )
+    bounded_graph = graph_candidates[:_GRAPH_CANDIDATE_LIMIT]
+    return _variant_result(
+        (*candidates, *bounded_graph),
+        protected=protected,
+        extra_channel_counts=(("knowledge_graph", len(bounded_graph)),),
+    )
+
+
+def _variant_result(
+    candidates: tuple[_Candidate, ...],
+    *,
+    protected: tuple[_Candidate, ...] = (),
+    graph_error_code: str | None = None,
+    extra_channel_counts: tuple[tuple[str, int], ...] = (),
+) -> _VariantEvidence:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        counts[candidate.channel] = counts.get(candidate.channel, 0) + 1
+    counts.update(extra_channel_counts)
+    return _VariantEvidence(
+        evidence=_fuse_candidates(candidates, protected=protected),
+        candidates=candidates,
+        protected_candidates=protected,
+        channel_counts=tuple(counts.items()),
+        graph_error_code=graph_error_code,
+    )
+
+
+def _page_tree_candidates(
+    connection: sqlite3.Connection, evidence_ids: tuple[str, ...]
+) -> tuple[_Candidate, ...]:
+    """Resolve selected tree bindings back to canonical Available EvidenceRefs."""
+    if not evidence_ids:
+        return ()
+    rows = connection.execute(
+        f"""
+        {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+        SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
+        FROM available_evidence_occurrences
+        WHERE occurrence_rank = 1 AND evidence_id IN ({_placeholders(evidence_ids)})
+        """,
+        evidence_ids,
+    ).fetchall()
+    rows_by_evidence_id = {str(row[0]): row for row in rows}
+    ordered_rows = [
+        rows_by_evidence_id[evidence_id]
+        for evidence_id in evidence_ids
+        if evidence_id in rows_by_evidence_id
+    ]
+    return _ranked_candidates(ordered_rows, "document_page_tree")
 
 
 def _catalog_degradation(
@@ -585,7 +688,9 @@ def _json_object(value: str) -> dict[str, object]:
     return dict(decoded) if isinstance(decoded, dict) else {}
 
 
-def _fuse_candidates(candidates: tuple[_Candidate, ...]) -> tuple[DesktopEvidenceRef, ...]:
+def _fuse_candidates(
+    candidates: tuple[_Candidate, ...], *, protected: tuple[_Candidate, ...] = ()
+) -> tuple[DesktopEvidenceRef, ...]:
     scores: defaultdict[str, float] = defaultdict(float)
     channels: defaultdict[str, set[str]] = defaultdict(set)
     references: dict[str, DesktopEvidenceRef] = {}
@@ -597,8 +702,10 @@ def _fuse_candidates(candidates: tuple[_Candidate, ...]) -> tuple[DesktopEvidenc
         references.setdefault(evidence_id, candidate.reference)
         channel_first.setdefault(candidate.channel, evidence_id)
 
-    selected: list[str] = []
+    selected: list[str] = list(_rank_candidate_ids(protected)[:_BASELINE_MINIMUM_QUOTA])
     for channel in ("fts", "structure_lexical", "wiki"):
+        if len(selected) == _EVIDENCE_PACK_LIMIT:
+            break
         first_evidence_id = channel_first.get(channel)
         if first_evidence_id is not None and first_evidence_id not in selected:
             selected.append(first_evidence_id)
@@ -617,6 +724,24 @@ def _fuse_candidates(candidates: tuple[_Candidate, ...]) -> tuple[DesktopEvidenc
         )
         for key in selected
     )
+
+
+def _rank_candidate_ids(candidates: tuple[_Candidate, ...]) -> tuple[str, ...]:
+    scores: defaultdict[str, float] = defaultdict(float)
+    channel_first: dict[str, str] = {}
+    for candidate in candidates:
+        evidence_id = candidate.reference.evidence_id
+        scores[evidence_id] += candidate.weight / (_RRF_OFFSET + candidate.rank)
+        channel_first.setdefault(candidate.channel, evidence_id)
+    selected: list[str] = []
+    for channel in ("fts", "structure_lexical", "wiki"):
+        first_evidence_id = channel_first.get(channel)
+        if first_evidence_id is not None and first_evidence_id not in selected:
+            selected.append(first_evidence_id)
+    for evidence_id in sorted(scores, key=lambda key: (-scores[key], key)):
+        if evidence_id not in selected:
+            selected.append(evidence_id)
+    return tuple(selected)
 
 
 def _with_graph_budget(
@@ -670,61 +795,3 @@ def _placeholders(values: tuple[str, ...]) -> str:
     if not values:
         raise ValueError("Evidence lookup requires at least one identifier.")
     return ", ".join("?" for _ in values)
-
-
-def _source_images_for_evidence(
-    connection: sqlite3.Connection,
-    evidence: tuple[DesktopEvidenceRef, ...],
-    kb_dir: Path,
-) -> tuple[DesktopAnswerSourceImage, ...]:
-    """Select only original images that share an exact source location with a citation."""
-    document_ids = tuple(dict.fromkeys(reference.document_id for reference in evidence))
-    if not document_ids:
-        return ()
-    placeholders = ", ".join("?" for _ in document_ids)
-    rows = connection.execute(
-        f"""
-        SELECT source_images.source_image_id, source_images.document_id,
-            source_documents.display_name, source_images.display_name,
-            source_images.media_type, source_images.storage_path, source_images.alt_text,
-            source_images.locator_json
-        FROM source_images
-        JOIN source_documents ON source_documents.document_id = source_images.document_id
-        WHERE source_documents.availability = 'available'
-            AND source_images.document_id IN ({placeholders})
-        ORDER BY source_images.document_id, source_images.ordinal
-        """,
-        document_ids,
-    ).fetchall()
-    images_by_document: defaultdict[str, list[tuple[object, ...]]] = defaultdict(list)
-    for row in rows:
-        images_by_document[str(row[1])].append(row)
-
-    selected: list[DesktopAnswerSourceImage] = []
-    selected_ids: set[str] = set()
-    for reference in evidence:
-        for row in images_by_document[reference.document_id]:
-            source_image_id = str(row[0])
-            if source_image_id in selected_ids:
-                continue
-            locator = _json_object(str(row[7]))
-            if not source_image_matches_evidence(source_image_id, locator, reference.locator):
-                continue
-            file_path = kb_dir / str(row[5])
-            if not file_path.is_file():
-                continue
-            selected_ids.add(source_image_id)
-            selected.append(
-                DesktopAnswerSourceImage(
-                    source_image_id=source_image_id,
-                    evidence_id=reference.evidence_id,
-                    document_id=str(row[1]),
-                    document_name=str(row[2]),
-                    name=str(row[3]),
-                    media_type=str(row[4]),
-                    file_path=str(file_path),
-                    alt_text=str(row[6]) if row[6] is not None else None,
-                    locator={**locator, "source_image_id": source_image_id},
-                )
-            )
-    return tuple(selected)

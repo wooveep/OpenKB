@@ -42,6 +42,19 @@ import {
 } from "./memory-bridge-helpers"
 import { MemoryKnowledgeReviewBridge } from "./memory-knowledge-review-bridge"
 
+function emptyRetrievalTrace(canonicalEvidenceIds: string[] = []) {
+  return {
+    catalogGenerationIds: [],
+    pageTreeGenerationIds: [],
+    channels: [],
+    triggerReasons: [],
+    degradationReasons: [],
+    selectedNodeIds: [],
+    canonicalEvidenceIds,
+    fusionPolicyVersion: "openkb.rrf-protected-baseline.v1",
+  }
+}
+
 /** In-memory Bridge for React component tests; it never touches Tauri or Python. */
 export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements DesktopBridge {
   private readonly listeners = new Set<(event: DesktopBridgeEvent) => void>()
@@ -372,6 +385,7 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
       },
       citations,
       sourceImages: [],
+      retrievalTrace: emptyRetrievalTrace(citations.map((citation) => citation.evidenceId)),
       degradations: ["answer_model_unavailable"],
       status: "completed",
       interruptionCode: null,
@@ -536,6 +550,7 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
           retrievalPlan: { query: question, terms: question.split(/\s+/), source: "deterministic" },
           citations,
           sourceImages: [],
+          retrievalTrace: emptyRetrievalTrace(citations.map((citation) => citation.evidenceId)),
           degradations: [],
           status: "completed",
           interruptionCode: null,

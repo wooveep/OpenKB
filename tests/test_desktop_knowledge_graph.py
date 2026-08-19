@@ -169,6 +169,13 @@ def test_graph_failures_keep_baseline_answers_and_only_record_safe_diagnostics(
 
     assert pack.evidence
     assert "knowledge_graph_query_timeout" not in pack.degradations
+    graph_trace = next(
+        channel
+        for channel in pack.retrieval_trace.channels
+        if channel.channel == "knowledge_graph"
+    )
+    assert graph_trace.candidate_count == 0
+    assert "knowledge_graph_query_timeout" in graph_trace.degradation_reasons
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         assert connection.execute(
             "SELECT availability FROM source_documents WHERE document_id = ?",

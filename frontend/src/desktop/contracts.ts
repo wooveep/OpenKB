@@ -4,7 +4,16 @@ import type {
   DesktopKnowledgeReanalysisOverview,
   DesktopKnowledgeReanalysisRun,
 } from "./knowledge-reanalysis-contracts"
+import type {
+  DesktopAnswerSourceImage,
+  DesktopEvidenceRef,
+  DesktopGroundedAnswer,
+  DesktopGroundedAnswers,
+  DesktopRetrievalPlan,
+  DesktopRetrievalTrace,
+} from "./contracts-retrieval"
 export type * from "./knowledge-reanalysis-contracts"
+export type * from "./contracts-retrieval"
 
 export const DESKTOP_BRIDGE_PROTOCOL_VERSION = 1
 
@@ -291,52 +300,6 @@ export interface DesktopPageTreeEnrichmentTask {
   currentEnrichmentGenerationId: string | null
 }
 
-export interface DesktopRetrievalPlan {
-  query: string
-  terms: string[]
-  source: "deterministic" | "model" | string
-}
-
-export interface DesktopEvidenceRef {
-  evidenceId: string
-  documentId: string
-  documentName: string
-  section: string
-  locator: Record<string, unknown>
-  excerpt: string
-  channels: string[]
-}
-
-export interface DesktopAnswerSourceImage {
-  sourceImageId: string
-  evidenceId: string
-  documentId: string
-  documentName: string
-  name: string
-  mediaType: string
-  filePath: string
-  altText: string | null
-  locator: Record<string, unknown>
-}
-
-export interface DesktopGroundedAnswer {
-  answerId: string
-  question: string
-  answerText: string
-  retrievalPlan: DesktopRetrievalPlan
-  citations: DesktopEvidenceRef[]
-  sourceImages: DesktopAnswerSourceImage[]
-  degradations: string[]
-  status: "completed" | "interrupted"
-  interruptionCode: string | null
-  interruptionReason: string | null
-  createdAt: string
-}
-
-export interface DesktopGroundedAnswers {
-  answers: DesktopGroundedAnswer[]
-}
-
 export interface DesktopConversationSummary {
   conversationId: string
   title: string
@@ -366,6 +329,7 @@ export interface DesktopAnswerVersion {
   retrievalPlan: DesktopRetrievalPlan
   citations: DesktopConversationEvidenceRef[]
   sourceImages: DesktopConversationSourceImage[]
+  retrievalTrace: DesktopRetrievalTrace
   degradations: string[]
   status: "completed" | "interrupted"
   interruptionCode: string | null

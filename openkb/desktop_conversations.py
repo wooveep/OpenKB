@@ -14,6 +14,7 @@ from openkb.desktop_conversation_snapshots import (
     json_object,
     version_citations,
     version_images,
+    version_retrieval_trace,
 )
 from openkb.desktop_grounded_answer import (
     AnswerCancellationCallback,
@@ -25,6 +26,8 @@ from openkb.desktop_workspace import desktop_state_database_path, desktop_state_
 from openkb.locks import kb_ingest_lock
 
 _DEFAULT_TITLE = "New conversation"
+
+
 class DesktopConversationError(RuntimeError):
     """Stable domain error for conversation commands."""
 
@@ -553,6 +556,7 @@ def _answer_versions(
                 "created_at": str(row[8]),
                 "citations": citations,
                 "source_images": version_images(connection, version_id, kb_dir),
+                "retrieval_trace": version_retrieval_trace(connection, version_id).as_dict(),
             }
         )
     return versions
@@ -665,8 +669,6 @@ def _connect(database_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path)
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
-
-
 
 
 def _timestamp() -> str:

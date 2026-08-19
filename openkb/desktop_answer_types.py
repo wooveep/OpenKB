@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from openkb.desktop_retrieval_trace import DesktopRetrievalTrace
+
 
 class DesktopAnswerError(RuntimeError):
     """A stable domain error for the Desktop grounded-answer path."""
@@ -91,6 +93,7 @@ class DesktopEvidencePack:
     evidence: tuple[DesktopEvidenceRef, ...]
     degradations: tuple[str, ...] = ()
     source_images: tuple[DesktopAnswerSourceImage, ...] = ()
+    retrieval_trace: DesktopRetrievalTrace = DesktopRetrievalTrace()
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,7 @@ class DesktopGroundedAnswer:
     degradations: tuple[str, ...]
     created_at: str
     source_images: tuple[DesktopAnswerSourceImage, ...] = ()
+    retrieval_trace: DesktopRetrievalTrace = DesktopRetrievalTrace()
     status: str = "completed"
     interruption_code: str | None = None
     interruption_reason: str | None = None
@@ -119,6 +123,7 @@ class DesktopGroundedAnswer:
             "degradations": list(self.degradations),
             "created_at": self.created_at,
             "source_images": [image.as_dict() for image in self.source_images],
+            "retrieval_trace": self.retrieval_trace.as_dict(),
             "status": self.status,
             "interruption_code": self.interruption_code,
             "interruption_reason": self.interruption_reason,

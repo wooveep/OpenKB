@@ -1,6 +1,7 @@
 //! Conversation request methods for the private Engine transport.
 
 use super::{validated_response, BridgeResult, EngineSupervisor, IMPORT_REQUEST_TIMEOUT};
+use crate::engine_wire::RetrievalTrace;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -71,6 +72,8 @@ struct AnswerVersion {
     retrieval_plan: RetrievalPlan,
     citations: Vec<EvidenceRef>,
     source_images: Vec<SourceImage>,
+    #[serde(default)]
+    retrieval_trace: RetrievalTrace,
     degradations: Vec<String>,
     status: AnswerStatus,
     interruption_code: Option<String>,

@@ -57,6 +57,27 @@ def test_gateway_retries_transient_failures_after_the_initial_attempt():
     ]
 
 
+def test_gateway_one_shot_analysis_never_retries() -> None:
+    calls: list[float] = []
+    events = []
+
+    def unavailable(_request, timeout_seconds):
+        calls.append(timeout_seconds)
+        raise ConnectionError("transient")
+
+    with pytest.raises(DesktopModelCallError) as error:
+        DesktopModelGateway(unavailable).analyze_once(
+            DesktopModelRequest("page_tree_selection", "Knowledge Base", "{}"),
+            on_event=events.append,
+            timeout_seconds=20.0,
+        )
+
+    assert len(calls) == 1
+    assert 19.9 < calls[0] <= 20.0
+    assert error.value.attempt_count == 1
+    assert [event.status for event in events] == ["running", "failed"]
+
+
 def test_gateway_logs_each_network_attempt_with_diagnostic_detail(caplog):
     """A quarantined model-analysis failure remains diagnosable in the application log."""
 

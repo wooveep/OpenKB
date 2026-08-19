@@ -94,6 +94,10 @@ def test_catalog_uses_published_snapshot_and_routes_one_low_weight_link(
     direct = DesktopEvidenceRetriever(kb_dir).retrieve("Alpha Router")
     assert alpha_evidence in {item.evidence_id for item in direct.evidence}
     assert "catalog_stale" in direct.degradations
+    catalog_trace = next(
+        channel for channel in direct.retrieval_trace.channels if channel.channel == "catalog"
+    )
+    assert "catalog_stale" in catalog_trace.degradation_reasons
 
     assert rebuild_pending_catalog(kb_dir)
     routed = DesktopEvidenceRetriever(kb_dir).retrieve("Alpha Router")
@@ -237,6 +241,10 @@ def test_catalog_faults_drop_only_the_optional_channel(tmp_path, monkeypatch) ->
     for pack in (query_failure, lease_failure):
         assert any("Alpha baseline evidence" in item.excerpt for item in pack.evidence)
         assert "catalog_query_failed" in pack.degradations
+        catalog_trace = next(
+            channel for channel in pack.retrieval_trace.channels if channel.channel == "catalog"
+        )
+        assert "catalog_query_failed" in catalog_trace.degradation_reasons
 
 
 def test_catalog_retains_recent_generation_until_an_older_reader_releases(

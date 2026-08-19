@@ -29,15 +29,20 @@ def _line_count(path: Path) -> int:
     return len(path.read_bytes().splitlines())
 
 
-def _py_files(pkg: Path) -> list[Path]:
-    return [p for p in sorted(pkg.rglob("*.py")) if "__pycache__" not in p.parts]
+def _module_files(root: Path) -> list[Path]:
+    suffixes = {".py", ".rs", ".ts", ".tsx"}
+    return [
+        path
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.suffix in suffixes and "__pycache__" not in path.parts
+    ]
 
 
 def _files_over_limit(
     root: Path, pkg: Path, limit: int, grandfathered: set[str]
 ) -> list[tuple[str, int]]:
     over: list[tuple[str, int]] = []
-    for path in _py_files(pkg):
+    for path in _module_files(pkg):
         rel = path.relative_to(root).as_posix()
         if rel in grandfathered:
             continue
@@ -52,6 +57,18 @@ def test_detector_flags_oversize(tmp_path):
     (tmp_path / "small.py").write_text("x = 1\n" * 2)
     over = _files_over_limit(tmp_path, tmp_path, limit=3, grandfathered=set())
     assert [name for name, _ in over] == ["big.py"]
+
+
+def test_detector_scans_python_typescript_tsx_and_rust(tmp_path):
+    for name in ("module.py", "module.rs", "module.ts", "module.tsx"):
+        (tmp_path / name).write_text("line\n" * 3)
+    over = _files_over_limit(tmp_path, tmp_path, limit=3, grandfathered=set())
+    assert [name for name, _ in over] == [
+        "module.py",
+        "module.rs",
+        "module.ts",
+        "module.tsx",
+    ]
 
 
 def test_exactly_at_limit_is_flagged(tmp_path):
@@ -73,9 +90,14 @@ def test_grandfathered_files_are_exempt(tmp_path):
 
 
 def test_no_module_exceeds_limit():
-    files = _py_files(_PKG)
-    assert files, f"no Python files found under {_PKG} — the scan would be vacuous"
-    over = _files_over_limit(_REPO_ROOT, _PKG, LIMIT, _GRANDFATHERED)
+    roots = (_PKG, _REPO_ROOT / "frontend" / "src", _REPO_ROOT / "desktop" / "src-tauri" / "src")
+    files = [path for root in roots for path in _module_files(root)]
+    assert files, f"no production modules found under {roots} — the scan would be vacuous"
+    over = [
+        item
+        for root in roots
+        for item in _files_over_limit(_REPO_ROOT, root, LIMIT, _GRANDFATHERED)
+    ]
     if over:
         lines = "\n".join(f"  - {rel}: {n} lines" for rel, n in over)
         raise AssertionError(

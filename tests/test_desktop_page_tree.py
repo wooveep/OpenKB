@@ -673,11 +673,13 @@ def test_migration_backfills_stage_and_queues_available_legacy_document(tmp_path
         ):
             connection.execute(f"DROP TABLE {table}")
         connection.execute("DROP INDEX import_jobs_document_completed_idx")
-        connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35)")
+        connection.execute("DROP TABLE grounded_answer_retrieval_traces")
+        connection.execute("DROP TABLE conversation_answer_retrieval_traces")
+        connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35, 36)")
 
     activation = DesktopKnowledgeBaseRuntime().open(kb_dir)
 
-    assert activation.knowledge_base.schema_version == 35
+    assert activation.knowledge_base.schema_version == 36
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT status FROM stage_runs WHERE job_id = ? AND stage = 'deterministic_page_tree'",
@@ -743,7 +745,9 @@ def test_migration_leaves_page_tree_pending_for_a_legacy_quarantined_import(tmp_
         ):
             connection.execute(f"DROP TABLE {table}")
         connection.execute("DROP INDEX import_jobs_document_completed_idx")
-        connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35)")
+        connection.execute("DROP TABLE grounded_answer_retrieval_traces")
+        connection.execute("DROP TABLE conversation_answer_retrieval_traces")
+        connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35, 36)")
 
     DesktopKnowledgeBaseRuntime().open(kb_dir)
 

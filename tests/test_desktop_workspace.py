@@ -55,6 +55,8 @@ def _drop_knowledge_page_draft_schema(connection: sqlite3.Connection) -> None:
 
 def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
     """Return a fixture to the state before deterministic PageTrees."""
+    connection.execute("DROP TABLE grounded_answer_retrieval_traces")
+    connection.execute("DROP TABLE conversation_answer_retrieval_traces")
     _drop_catalog_schema(connection)
     for table in (
         "document_page_tree_enrichment_current",
@@ -70,7 +72,7 @@ def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
     ):
         connection.execute(f"DROP TABLE IF EXISTS {table}")
     connection.execute("DROP INDEX import_jobs_document_completed_idx")
-    connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35)")
+    connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35, 36)")
 
 
 def _drop_catalog_schema(connection: sqlite3.Connection) -> None:
@@ -96,7 +98,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 35
+    assert first.knowledge_base.schema_version == 36
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
@@ -138,6 +140,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
             (33,),
             (34,),
             (35,),
+            (36,),
         ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
@@ -309,6 +312,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
             (33,),
             (34,),
             (35,),
+            (36,),
         ]
         assert connection.execute(
             "SELECT status FROM import_job_runtime WHERE job_id = 'legacy-job'"

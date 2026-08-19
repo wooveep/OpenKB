@@ -30,6 +30,9 @@ pub use missing_sources::{
 #[path = "engine_wire_page_tree.rs"]
 mod page_tree;
 pub use page_tree::{PageTreeEnrichmentTask, PageTreeRebuildTask};
+#[path = "engine_wire_retrieval.rs"]
+mod retrieval;
+pub use retrieval::{GroundedAnswer, GroundedAnswersResult, RetrievalTrace};
 #[path = "engine_wire_settings.rs"]
 mod settings;
 pub use settings::{DiagnosticBundleResult, ModelSettings};
@@ -119,13 +122,6 @@ pub enum ModelCallStatus {
     RetryWait,
     Completed,
     Failed,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AnswerStatus {
-    Completed,
-    Interrupted,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -329,85 +325,6 @@ pub struct RawDocument {
     pub has_more: bool,
     #[serde(default, alias = "source_images")]
     pub source_images: Vec<SourceImage>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RetrievalPlan {
-    pub query: String,
-    pub terms: Vec<String>,
-    pub source: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EvidenceRef {
-    #[serde(alias = "evidence_id")]
-    pub evidence_id: String,
-    #[serde(alias = "document_id")]
-    pub document_id: String,
-    #[serde(alias = "document_name")]
-    pub document_name: String,
-    pub section: String,
-    pub locator: Value,
-    pub excerpt: String,
-    pub channels: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GroundedAnswer {
-    #[serde(alias = "answer_id")]
-    pub answer_id: String,
-    pub question: String,
-    #[serde(alias = "answer_text")]
-    pub answer_text: String,
-    #[serde(alias = "retrieval_plan")]
-    pub retrieval_plan: RetrievalPlan,
-    pub citations: Vec<EvidenceRef>,
-    #[serde(default, alias = "source_images")]
-    pub source_images: Vec<AnswerSourceImage>,
-    #[serde(default)]
-    pub degradations: Vec<String>,
-    #[serde(default = "default_completed_answer_status")]
-    pub status: AnswerStatus,
-    #[serde(default, alias = "interruption_code")]
-    pub interruption_code: Option<String>,
-    #[serde(default, alias = "interruption_reason")]
-    pub interruption_reason: Option<String>,
-    #[serde(alias = "created_at")]
-    pub created_at: String,
-}
-
-fn default_completed_answer_status() -> AnswerStatus {
-    AnswerStatus::Completed
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AnswerSourceImage {
-    #[serde(alias = "source_image_id")]
-    pub source_image_id: String,
-    #[serde(alias = "evidence_id")]
-    pub evidence_id: String,
-    #[serde(alias = "document_id")]
-    pub document_id: String,
-    #[serde(alias = "document_name")]
-    pub document_name: String,
-    pub name: String,
-    #[serde(alias = "media_type")]
-    pub media_type: String,
-    #[serde(alias = "file_path")]
-    pub file_path: String,
-    #[serde(alias = "alt_text")]
-    pub alt_text: Option<String>,
-    pub locator: Value,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GroundedAnswersResult {
-    pub answers: Vec<GroundedAnswer>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -750,7 +667,9 @@ pub(crate) fn write_frame<W: Write>(writer: &mut W, value: &Value) -> BridgeResu
 
 #[cfg(test)]
 mod tests {
-    use super::{BridgeEvent, EngineEvent, KnowledgeAnalysisPhase, KnowledgeAnalysisProgress};
+    use super::{
+        BridgeEvent, EngineEvent, GroundedAnswer, KnowledgeAnalysisPhase, KnowledgeAnalysisProgress,
+    };
     use serde_json::json;
 
     #[test]
@@ -786,5 +705,42 @@ mod tests {
             EngineEvent::KnowledgeReanalysisUpdated(data)
                 if data.run_id == "run-1" && data.job_id == "job-1"
         ));
+    }
+
+    #[test]
+    fn grounded_answer_accepts_python_retrieval_trace_fields() {
+        let answer: GroundedAnswer = serde_json::from_value(json!({
+            "answer_id": "answer-1",
+            "question": "Compare Alpha and Beta",
+            "answer_text": "They are related. [1]",
+            "retrieval_plan": {
+                "query": "Compare Alpha and Beta",
+                "terms": ["alpha", "beta"],
+                "source": "model"
+            },
+            "citations": [],
+            "degradations": [],
+            "status": "completed",
+            "created_at": "2026-08-20T00:00:00+00:00",
+            "retrieval_trace": {
+                "catalog_generation_ids": ["catalog-1"],
+                "page_tree_generation_ids": ["tree-1"],
+                "channels": [{
+                    "channel": "document_page_tree",
+                    "candidate_count": 2,
+                    "trigger_reasons": ["multi_hop"],
+                    "degradation_reasons": []
+                }],
+                "trigger_reasons": ["multi_hop"],
+                "degradation_reasons": [],
+                "selected_node_ids": ["node-1"],
+                "canonical_evidence_ids": ["evidence-1"],
+                "fusion_policy_version": "openkb.rrf-protected-baseline.v1"
+            }
+        }))
+        .expect("Retrieval Trace should deserialize");
+
+        assert_eq!(answer.retrieval_trace.page_tree_generation_ids, ["tree-1"]);
+        assert_eq!(answer.retrieval_trace.channels[0].candidate_count, 2);
     }
 }

@@ -26,6 +26,7 @@ from openkb.desktop_okf_projection_migrations import OKF_PROJECTION_MIGRATION_ST
 from openkb.desktop_page_tree_enrichment_migrations import (
     PAGE_TREE_ENRICHMENT_MIGRATION_STATEMENTS,
 )
+from openkb.desktop_retrieval_trace_migrations import RETRIEVAL_TRACE_MIGRATION_STATEMENTS
 from openkb.desktop_workspace_migrations import (
     CONVERSATION_MIGRATION_STATEMENTS,
     DEDUPLICATION_MIGRATION_STATEMENTS,
@@ -77,4 +78,5 @@ DESKTOP_FEATURE_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (33, page_tree_migrations.PAGE_TREE_LIFECYCLE_MIGRATION_STATEMENTS),
     (34, PAGE_TREE_ENRICHMENT_MIGRATION_STATEMENTS),
     (35, CATALOG_MIGRATION_STATEMENTS),
+    (36, RETRIEVAL_TRACE_MIGRATION_STATEMENTS),
 )

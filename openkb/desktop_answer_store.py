@@ -15,6 +15,7 @@ from openkb.desktop_answer_types import (
     DesktopRetrievalPlan,
 )
 from openkb.desktop_retrieval_channels import normalize_retrieval_channels
+from openkb.desktop_retrieval_trace import DesktopRetrievalTrace, retrieval_trace_from_json
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -33,6 +34,7 @@ class DesktopGroundedAnswerStore:
                 with connection:
                     _insert_answer(connection, answer)
                     _replace_answer_sources(connection, answer)
+                    _replace_answer_trace(connection, answer)
             finally:
                 connection.close()
         return answer
@@ -71,6 +73,7 @@ class DesktopGroundedAnswerStore:
                             "This interrupted answer is no longer available for retry.",
                         )
                     _replace_answer_sources(connection, answer)
+                    _replace_answer_trace(connection, answer)
             finally:
                 connection.close()
         return answer
@@ -119,6 +122,7 @@ def new_answer(
     citations: tuple[DesktopEvidenceRef, ...],
     degradations: tuple[str, ...],
     source_images: tuple[DesktopAnswerSourceImage, ...] = (),
+    retrieval_trace: DesktopRetrievalTrace = DesktopRetrievalTrace(),
     status: str = "completed",
     interruption_code: str | None = None,
     interruption_reason: str | None = None,
@@ -133,6 +137,7 @@ def new_answer(
         degradations=degradations,
         created_at=created_at or _timestamp(),
         source_images=source_images,
+        retrieval_trace=retrieval_trace,
         status=status,
         interruption_code=interruption_code,
         interruption_reason=interruption_reason,
@@ -179,6 +184,7 @@ def _answer_from_row(
         degradations=tuple(value for value in _json_list(str(row[4])) if isinstance(value, str)),
         created_at=str(row[5]),
         source_images=_source_images_for_answer(connection, answer_id, kb_dir),
+        retrieval_trace=_answer_trace(connection, answer_id),
         status=str(row[6]),
         interruption_code=str(row[7]) if row[7] is not None else None,
         interruption_reason=str(row[8]) if row[8] is not None else None,
@@ -254,6 +260,25 @@ def _replace_answer_sources(connection: sqlite3.Connection, answer: DesktopGroun
             for ordinal, image in enumerate(answer.source_images)
         ],
     )
+
+
+def _replace_answer_trace(connection: sqlite3.Connection, answer: DesktopGroundedAnswer) -> None:
+    connection.execute(
+        """
+        INSERT INTO grounded_answer_retrieval_traces (answer_id, trace_json)
+        VALUES (?, ?)
+        ON CONFLICT(answer_id) DO UPDATE SET trace_json = excluded.trace_json
+        """,
+        (answer.answer_id, json.dumps(answer.retrieval_trace.as_dict(), ensure_ascii=False)),
+    )
+
+
+def _answer_trace(connection: sqlite3.Connection, answer_id: str) -> DesktopRetrievalTrace:
+    row = connection.execute(
+        "SELECT trace_json FROM grounded_answer_retrieval_traces WHERE answer_id = ?",
+        (answer_id,),
+    ).fetchone()
+    return retrieval_trace_from_json(str(row[0])) if row is not None else DesktopRetrievalTrace()
 
 
 def _answer_row(connection: sqlite3.Connection, answer_id: str) -> tuple[object, ...] | None:
