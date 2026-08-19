@@ -114,19 +114,8 @@ class DesktopGroundedAnswerService:
         is_cancelled: AnswerCancellationCallback | None,
         conversation_context: tuple[tuple[str, str], ...],
     ) -> DesktopGroundedAnswer:
-        pack = self._retriever.retrieve(question, is_cancelled=is_cancelled)
-        sent_evidence = _evidence_for_prompt(pack.evidence)
-        sent_evidence_ids = {reference.evidence_id for reference in sent_evidence}
-        pack = DesktopEvidencePack(
-            retrieval_plan=pack.retrieval_plan,
-            evidence=sent_evidence,
-            degradations=pack.degradations,
-            source_images=tuple(
-                image for image in pack.source_images if image.evidence_id in sent_evidence_ids
-            ),
-            retrieval_trace=pack.retrieval_trace.with_canonical_evidence_ids(
-                tuple(reference.evidence_id for reference in sent_evidence)
-            ),
+        pack = prepare_grounded_evidence_pack(
+            self._retriever.retrieve(question, is_cancelled=is_cancelled)
         )
         emitted = False
         visible_attempt = 0
@@ -233,6 +222,24 @@ class DesktopGroundedAnswerService:
         return self._store.list()
 
 
+def prepare_grounded_evidence_pack(pack: DesktopEvidencePack) -> DesktopEvidencePack:
+    """Apply the exact production context bound before generation and scoring."""
+    sent_evidence = _evidence_for_prompt(pack.evidence)
+    sent_evidence_ids = {reference.evidence_id for reference in sent_evidence}
+    return DesktopEvidencePack(
+        retrieval_plan=pack.retrieval_plan,
+        evidence=sent_evidence,
+        degradations=pack.degradations,
+        source_images=tuple(
+            image for image in pack.source_images if image.evidence_id in sent_evidence_ids
+        ),
+        retrieval_trace=pack.retrieval_trace.with_canonical_evidence_ids(
+            tuple(reference.evidence_id for reference in sent_evidence)
+        ),
+        retrieval_model_cost=pack.retrieval_model_cost,
+    )
+
+
 def generate_grounded_answer(
     question: str,
     pack: DesktopEvidencePack,
@@ -294,7 +301,6 @@ def generate_grounded_answer(
     except DesktopModelCancelledError:
         return _cancelled_generation(model_calls=attempts, prompt=prompt)
     except DesktopModelCallError as error:
-        attempts = max(attempts, 1)
         return DesktopGroundedAnswerGeneration(
             None,
             (),

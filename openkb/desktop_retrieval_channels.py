@@ -12,6 +12,15 @@ DesktopRetrievalVariant = Literal[
     "baseline",
     "local_graph",
 ]
+DesktopEvaluationVariant = Literal[
+    "fts",
+    "structure_lexical",
+    "wiki",
+    "baseline",
+    "local_graph",
+    "document_page_tree",
+    "catalog + document_page_tree",
+]
 
 DESKTOP_RETRIEVAL_VARIANT_ORDER: tuple[DesktopRetrievalVariant, ...] = (
     "fts",
@@ -23,6 +32,40 @@ DESKTOP_RETRIEVAL_VARIANT_ORDER: tuple[DesktopRetrievalVariant, ...] = (
 DESKTOP_RETRIEVAL_VARIANTS: frozenset[DesktopRetrievalVariant] = frozenset(
     DESKTOP_RETRIEVAL_VARIANT_ORDER
 )
+DESKTOP_EVALUATION_VARIANT_ORDER: tuple[DesktopEvaluationVariant, ...] = (
+    *DESKTOP_RETRIEVAL_VARIANT_ORDER,
+    "document_page_tree",
+    "catalog + document_page_tree",
+)
+DESKTOP_EVALUATION_VARIANTS: frozenset[DesktopEvaluationVariant] = frozenset(
+    DESKTOP_EVALUATION_VARIANT_ORDER
+)
+CATALOG_RETRIEVAL_VARIANTS: frozenset[DesktopEvaluationVariant] = frozenset(
+    ("wiki", "baseline", "local_graph", "catalog + document_page_tree")
+)
+PAGE_TREE_EVALUATION_VARIANTS: frozenset[DesktopEvaluationVariant] = frozenset(
+    ("document_page_tree", "catalog + document_page_tree")
+)
+RETRIEVAL_CHANNELS_BY_VARIANT: dict[DesktopEvaluationVariant, tuple[str, ...]] = {
+    "fts": ("fts",),
+    "structure_lexical": ("structure_lexical",),
+    "wiki": ("wiki", "knowledge_source", "catalog"),
+    "baseline": ("fts", "structure_lexical", "wiki", "knowledge_source", "catalog"),
+    "local_graph": (
+        "fts",
+        "structure_lexical",
+        "wiki",
+        "knowledge_source",
+        "catalog",
+        "knowledge_graph",
+    ),
+    "document_page_tree": ("structure_lexical", "document_page_tree"),
+    "catalog + document_page_tree": (
+        "structure_lexical",
+        "catalog",
+        "document_page_tree",
+    ),
+}
 
 _LEGACY_CHANNEL_ALIASES = {"page_tree": "structure_lexical"}
 

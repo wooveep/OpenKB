@@ -38,7 +38,7 @@ def local_graph_default_enabled(kb_dir: Path) -> bool:
                 or not isinstance(row[1], int)
             ):
                 return False
-            return _knowledge_snapshot_revision_in(connection) == row[1]
+            return knowledge_snapshot_revision_in(connection) == row[1]
         finally:
             connection.close()
     except sqlite3.Error:
@@ -53,7 +53,7 @@ def desktop_knowledge_snapshot_digest(kb_dir: Path) -> str:
         raise ValueError("Desktop retrieval evaluation requires an open knowledge base.")
     connection = sqlite3.connect(database_path)
     try:
-        return _knowledge_snapshot_digest_in(connection, resolved)
+        return knowledge_snapshot_digest_in(connection, resolved)
     except sqlite3.Error as error:
         raise ValueError("Desktop retrieval evaluation evidence is unavailable.") from error
     finally:
@@ -68,7 +68,7 @@ def desktop_knowledge_snapshot_revision(kb_dir: Path) -> int:
         raise ValueError("Desktop retrieval evaluation requires an open knowledge base.")
     connection = sqlite3.connect(database_path)
     try:
-        return _knowledge_snapshot_revision_in(connection)
+        return knowledge_snapshot_revision_in(connection)
     except sqlite3.Error as error:
         raise ValueError("Desktop retrieval evaluation evidence is unavailable.") from error
     finally:
@@ -98,12 +98,12 @@ def enable_local_graph_after_evaluation(
         try:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("BEGIN IMMEDIATE")
-            if _knowledge_snapshot_revision_in(connection) != knowledge_snapshot_revision:
+            if knowledge_snapshot_revision_in(connection) != knowledge_snapshot_revision:
                 raise ValueError(
                     "The Desktop Knowledge Base changed after this retrieval evaluation; "
                     "run it again."
                 )
-            if _knowledge_snapshot_digest_in(connection, resolved) != knowledge_snapshot_digest:
+            if knowledge_snapshot_digest_in(connection, resolved) != knowledge_snapshot_digest:
                 raise ValueError(
                     "The Desktop Knowledge Base changed after this retrieval evaluation; "
                     "run it again."
@@ -140,7 +140,7 @@ def _timestamp() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def _knowledge_snapshot_revision_in(connection: sqlite3.Connection) -> int:
+def knowledge_snapshot_revision_in(connection: sqlite3.Connection) -> int:
     row = connection.execute(
         "SELECT revision FROM desktop_retrieval_corpus_state WHERE singleton = 1"
     ).fetchone()
@@ -149,7 +149,7 @@ def _knowledge_snapshot_revision_in(connection: sqlite3.Connection) -> int:
     return row[0]
 
 
-def _knowledge_snapshot_digest_in(connection: sqlite3.Connection, kb_dir: Path) -> str:
+def knowledge_snapshot_digest_in(connection: sqlite3.Connection, kb_dir: Path) -> str:
     """Return a stable, KB-local summary of every retrieval-affecting record."""
     payload = {
         "knowledge_base_path_digest": hashlib.sha256(str(kb_dir).encode("utf-8")).hexdigest(),

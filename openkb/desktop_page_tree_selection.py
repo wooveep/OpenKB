@@ -11,7 +11,11 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
-from openkb.desktop_answer_types import DesktopEvidenceRef, DesktopRetrievalPlan
+from openkb.desktop_answer_types import (
+    DesktopEvidenceRef,
+    DesktopRetrievalModelCost,
+    DesktopRetrievalPlan,
+)
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -51,6 +55,7 @@ class PageTreeSelectionResult:
     selected_node_ids: tuple[str, ...] = ()
     trigger_reasons: tuple[str, ...] = ()
     degradation_reasons: tuple[str, ...] = ()
+    model_cost: DesktopRetrievalModelCost = DesktopRetrievalModelCost()
 
 
 def select_page_tree_evidence(
@@ -86,35 +91,49 @@ def select_page_tree_evidence(
                     trigger_reasons=triggers,
                     degradation_reasons=("page_tree_selection_unavailable",),
                 )
+            prompt = _selection_prompt(question, trees)
+            attempts = 0
+            response_characters = 0
+
+            def observe(event) -> None:
+                nonlocal attempts
+                if event.status == "running":
+                    attempts = max(attempts, event.attempt)
+
             try:
                 result = model_gateway.analyze_once(
                     DesktopModelRequest(
                         "page_tree_selection",
                         "Current Knowledge Base",
-                        _selection_prompt(question, trees),
+                        prompt,
                     ),
-                    on_event=lambda _event: None,
+                    on_event=observe,
                     timeout_seconds=PAGE_TREE_SELECTION_TIMEOUT_SECONDS,
                     is_cancelled=is_cancelled,
                 )
+                attempts = max(attempts, result.attempt_count)
+                response_characters = len(result.content)
                 selected = _selected_nodes(result.content, trees)
             except DesktopModelCancelledError:
                 return PageTreeSelectionResult(
                     generation_ids=generation_ids,
                     trigger_reasons=triggers,
                     degradation_reasons=("page_tree_selection_cancelled",),
+                    model_cost=_selection_cost(prompt, attempts),
                 )
             except DesktopModelCallError:
                 return PageTreeSelectionResult(
                     generation_ids=generation_ids,
                     trigger_reasons=triggers,
                     degradation_reasons=("page_tree_selection_failed",),
+                    model_cost=_selection_cost(prompt, attempts),
                 )
             except (ValueError, json.JSONDecodeError):
                 return PageTreeSelectionResult(
                     generation_ids=generation_ids,
                     trigger_reasons=triggers,
                     degradation_reasons=("page_tree_selection_invalid",),
+                    model_cost=_selection_cost(prompt, attempts, response_characters),
                 )
             return PageTreeSelectionResult(
                 evidence_ids=_selected_evidence_ids(trees, selected),
@@ -123,12 +142,23 @@ def select_page_tree_evidence(
                     node_id for _document_id, node_ids in selected for node_id in node_ids
                 ),
                 trigger_reasons=triggers,
+                model_cost=_selection_cost(prompt, attempts, response_characters),
             )
     except (OSError, sqlite3.Error, ValueError):
         logger.warning(
             "Document PageTree selection failed; using baseline retrieval.", exc_info=True
         )
         return PageTreeSelectionResult(degradation_reasons=("page_tree_query_failed",))
+
+
+def _selection_cost(
+    prompt: str, attempts: int, response_characters: int = 0
+) -> DesktopRetrievalModelCost:
+    return DesktopRetrievalModelCost(
+        model_calls=attempts,
+        input_characters=len(prompt) * attempts,
+        output_characters=response_characters,
+    )
 
 
 def _candidate_document_ids(

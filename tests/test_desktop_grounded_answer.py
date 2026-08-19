@@ -5,7 +5,11 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from openkb.desktop_grounded_answer import DesktopGroundedAnswerService
+from openkb.desktop_answer_types import DesktopEvidencePack, DesktopRetrievalPlan
+from openkb.desktop_grounded_answer import (
+    DesktopGroundedAnswerService,
+    generate_grounded_answer,
+)
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_retrieval import _source_image_matches_evidence
@@ -380,3 +384,30 @@ def test_grounded_answer_stops_deterministic_stream_at_the_visible_partial_text(
     assert answer.interruption_code == "answer_cancelled"
     assert answer.answer_text == deltas[0]
     assert len(deltas) == 1
+
+
+def test_grounded_answer_does_not_charge_when_provider_never_starts() -> None:
+    class ExhaustedTransport:
+        calls = 0
+
+        def prepare_model_attempt(self, _is_cancelled, _remaining_seconds):
+            return False
+
+        def __call__(self, _request, _timeout_seconds):
+            self.calls += 1
+            return "unreachable"
+
+    transport = ExhaustedTransport()
+    pack = DesktopEvidencePack(
+        retrieval_plan=DesktopRetrievalPlan("question", ("question",), "deterministic"),
+        evidence=(),
+    )
+
+    generation = generate_grounded_answer(
+        "question", pack, model_gateway=DesktopModelGateway(transport)
+    )
+
+    assert transport.calls == 0
+    assert generation.answer_text is None
+    assert generation.model_calls == 0
+    assert generation.model_input_characters == 0

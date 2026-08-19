@@ -18,6 +18,15 @@ class DesktopAnswerError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class DesktopRetrievalModelCost:
+    """Provider-neutral query-time model usage retained only for evaluation."""
+
+    model_calls: int = 0
+    input_characters: int = 0
+    output_characters: int = 0
+
+
+@dataclass(frozen=True)
 class DesktopRetrievalPlan:
     """The bounded query terms used to build one auditable Evidence Pack."""
 
@@ -94,6 +103,7 @@ class DesktopEvidencePack:
     degradations: tuple[str, ...] = ()
     source_images: tuple[DesktopAnswerSourceImage, ...] = ()
     retrieval_trace: DesktopRetrievalTrace = DesktopRetrievalTrace()
+    retrieval_model_cost: DesktopRetrievalModelCost = DesktopRetrievalModelCost()
 
 
 @dataclass(frozen=True)

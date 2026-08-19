@@ -42,6 +42,7 @@ from openkb.desktop_page_tree_reuse import (
     require_d1_canonical_provider_in,
     reuse_matching_d1_generation_in,
 )
+from openkb.desktop_page_tree_validation import validate_current_page_tree
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -291,6 +292,8 @@ def load_current_page_tree_in(
     ).fetchone()
     if row is None:
         return None
+    if str(row[6]) != "current":
+        raise ValueError("The current Document PageTree generation is not current.")
     generation_id = str(row[0])
     node_rows = connection.execute(
         """
@@ -319,7 +322,7 @@ def load_current_page_tree_in(
         )
         for node in node_rows
     )
-    return PageTreeGeneration(
+    generation = PageTreeGeneration(
         generation_id=generation_id,
         document_version_id=document_id,
         provider_kind=str(row[1]),
@@ -327,10 +330,12 @@ def load_current_page_tree_in(
         structural_ir_fingerprint=str(row[3]),
         locator_mapping_digest=str(row[4]),
         created_at=str(row[5]),
-        status="ready" if str(row[6]) == "current" else str(row[6]),
+        status="ready",
         nodes=nodes,
         reused_from_generation_id=str(row[7]) if row[7] is not None else None,
     )
+    validate_current_page_tree(generation)
+    return generation
 
 
 @contextmanager

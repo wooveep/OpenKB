@@ -15,6 +15,7 @@ from openkb.desktop_answer_types import (
     DesktopAnswerError,
     DesktopEvidencePack,
     DesktopEvidenceRef,
+    DesktopRetrievalModelCost,
     DesktopRetrievalPlan,
 )
 from openkb.desktop_catalog_retrieval import catalog_route_rows_in
@@ -29,26 +30,23 @@ from openkb.desktop_knowledge_graph import (
 )
 from openkb.desktop_knowledge_source_retrieval import knowledge_source_rows_in
 from openkb.desktop_knowledge_sources import AVAILABLE_EVIDENCE_OCCURRENCES_CTE
-from openkb.desktop_model_gateway import (
-    DesktopModelCallError,
-    DesktopModelCancelledError,
-    DesktopModelGateway,
-    DesktopModelRequest,
-)
+from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_page_tree_selection import (
     PageTreeSelectionResult,
     select_page_tree_evidence,
 )
 from openkb.desktop_retrieval_channels import (
-    DESKTOP_RETRIEVAL_VARIANTS,
-    DesktopRetrievalVariant,
+    CATALOG_RETRIEVAL_VARIANTS,
+    DESKTOP_EVALUATION_VARIANTS,
+    PAGE_TREE_EVALUATION_VARIANTS,
+    RETRIEVAL_CHANNELS_BY_VARIANT,
+    DesktopEvaluationVariant,
 )
 from openkb.desktop_retrieval_images import source_images_for_evidence
-from openkb.desktop_retrieval_plan import (
-    deterministic_plan,
-    model_plan,
-    validate_question,
-    with_baseline_terms,
+from openkb.desktop_retrieval_plan import validate_question
+from openkb.desktop_retrieval_planning import (
+    DesktopRetrievalPlanningResult,
+    build_retrieval_plan,
 )
 from openkb.desktop_retrieval_trace import (
     FUSION_POLICY_VERSION,
@@ -67,22 +65,6 @@ _BASELINE_MINIMUM_QUOTA = 4
 _GRAPH_CANDIDATE_LIMIT = 2
 _RRF_OFFSET = 60
 _SCORE_COLUMNS = frozenset(("display_name", "heading_path", "text"))
-_CATALOG_VARIANTS = frozenset(("wiki", "baseline", "local_graph"))
-_VARIANT_CHANNELS: dict[DesktopRetrievalVariant, tuple[str, ...]] = {
-    "fts": ("fts",),
-    "structure_lexical": ("structure_lexical",),
-    "wiki": ("wiki", "knowledge_source", "catalog"),
-    "baseline": ("fts", "structure_lexical", "wiki", "knowledge_source", "catalog"),
-    "local_graph": (
-        "fts",
-        "structure_lexical",
-        "wiki",
-        "knowledge_source",
-        "catalog",
-        "knowledge_graph",
-    ),
-}
-
 logger = logging.getLogger(__name__)
 
 
@@ -115,7 +97,7 @@ class DesktopEvidenceRetriever:
         self, question: str, *, is_cancelled: Callable[[], bool] | None = None
     ) -> DesktopEvidencePack:
         """Plan and retrieve without ever allowing optional model work to block a reply."""
-        variant: DesktopRetrievalVariant = (
+        variant: DesktopEvaluationVariant = (
             "local_graph" if local_graph_default_enabled(self._kb_dir) else "baseline"
         )
         return self.retrieve_variant(
@@ -129,15 +111,22 @@ class DesktopEvidenceRetriever:
         self, question: str, *, is_cancelled: Callable[[], bool] | None = None
     ) -> tuple[DesktopRetrievalPlan, tuple[str, ...]]:
         """Build one bounded plan that an evaluation can reuse across variants."""
-        normalized_question = validate_question(question)
-        plan, degradations = self._plan(normalized_question, is_cancelled=is_cancelled)
-        return plan, tuple(degradations)
+        result = self.build_plan_with_cost(question, is_cancelled=is_cancelled)
+        return result.plan, result.degradations
+
+    def build_plan_with_cost(
+        self, question: str, *, is_cancelled: Callable[[], bool] | None = None
+    ) -> DesktopRetrievalPlanningResult:
+        """Build one plan and retain the physical Model Attempt cost."""
+        return build_retrieval_plan(
+            validate_question(question), self._model_gateway, is_cancelled=is_cancelled
+        )
 
     def retrieve_variant(
         self,
         question: str,
         *,
-        variant: DesktopRetrievalVariant,
+        variant: DesktopEvaluationVariant,
         retrieval_plan: DesktopRetrievalPlan | None = None,
         degradations: tuple[str, ...] = (),
         is_cancelled: Callable[[], bool] | None = None,
@@ -150,12 +139,16 @@ class DesktopEvidenceRetriever:
         harness can compare like-for-like candidate sets without giving each
         variant a different query plan.
         """
-        if variant not in DESKTOP_RETRIEVAL_VARIANTS:
+        if variant not in DESKTOP_EVALUATION_VARIANTS:
             raise ValueError(f"Unsupported Desktop retrieval variant: {variant}")
         normalized_question = validate_question(question)
         if retrieval_plan is None:
-            plan, plan_degradations = self._plan(normalized_question, is_cancelled=is_cancelled)
-            all_degradations = tuple((*degradations, *plan_degradations))
+            planning = build_retrieval_plan(
+                normalized_question, self._model_gateway, is_cancelled=is_cancelled
+            )
+            plan = planning.plan
+            planning_cost = planning.model_cost
+            all_degradations = tuple((*degradations, *planning.degradations))
         else:
             if retrieval_plan.query != normalized_question:
                 raise DesktopAnswerError(
@@ -163,10 +156,13 @@ class DesktopEvidenceRetriever:
                     "The evaluation retrieval plan does not match the question.",
                 )
             plan = retrieval_plan
+            planning_cost = DesktopRetrievalModelCost()
             all_degradations = degradations
         graph_error_code: str | None = None
         selection = PageTreeSelectionResult()
-        with _best_effort_catalog_lease(self._kb_dir, enabled=variant in _CATALOG_VARIANTS) as (
+        with _best_effort_catalog_lease(
+            self._kb_dir, enabled=variant in CATALOG_RETRIEVAL_VARIANTS
+        ) as (
             catalog,
             lease_degradations,
         ):
@@ -188,7 +184,10 @@ class DesktopEvidenceRetriever:
                 graph_error_code = variant_evidence.graph_error_code
             finally:
                 connection.close()
-            if _enable_page_tree_selection and variant in {"baseline", "local_graph"}:
+            page_tree_enabled = variant in PAGE_TREE_EVALUATION_VARIANTS or (
+                _enable_page_tree_selection and variant in {"baseline", "local_graph"}
+            )
+            if page_tree_enabled:
                 selection = select_page_tree_evidence(
                     self._kb_dir,
                     normalized_question,
@@ -228,9 +227,9 @@ class DesktopEvidenceRetriever:
             )
         )
         channel_counts = dict(variant_evidence.channel_counts)
-        for channel in _VARIANT_CHANNELS[variant]:
+        for channel in RETRIEVAL_CHANNELS_BY_VARIANT[variant]:
             channel_counts.setdefault(channel, 0)
-        if _enable_page_tree_selection:
+        if page_tree_enabled:
             channel_counts["document_page_tree"] = len(page_tree_candidates)
         channel_degradations = {
             "catalog": catalog_degradation,
@@ -265,26 +264,16 @@ class DesktopEvidenceRetriever:
             degradations=retrieval_degradations,
             source_images=source_images,
             retrieval_trace=trace,
+            retrieval_model_cost=DesktopRetrievalModelCost(
+                model_calls=planning_cost.model_calls + selection.model_cost.model_calls,
+                input_characters=(
+                    planning_cost.input_characters + selection.model_cost.input_characters
+                ),
+                output_characters=(
+                    planning_cost.output_characters + selection.model_cost.output_characters
+                ),
+            ),
         )
-
-    def _plan(
-        self, question: str, *, is_cancelled: Callable[[], bool] | None = None
-    ) -> tuple[DesktopRetrievalPlan, list[str]]:
-        fallback = deterministic_plan(question)
-        if self._model_gateway is None:
-            return fallback, ["retrieval_plan_unavailable"]
-        try:
-            result = self._model_gateway.analyze(
-                DesktopModelRequest("retrieval_plan", "Grounded answer question", question),
-                on_event=lambda _event: None,
-                is_cancelled=is_cancelled,
-            )
-            planned = model_plan(question, result.content)
-            return with_baseline_terms(fallback, planned), []
-        except DesktopModelCancelledError:
-            return fallback, ["retrieval_plan_cancelled"]
-        except (DesktopModelCallError, ValueError, json.JSONDecodeError):
-            return fallback, ["retrieval_plan_fallback"]
 
 
 @contextmanager
@@ -450,11 +439,11 @@ def _catalog_channel_candidates(
     connection: sqlite3.Connection,
     terms: tuple[str, ...],
     catalog: CatalogGenerationLease | None,
-    variant: DesktopRetrievalVariant,
+    variant: DesktopEvaluationVariant,
     lease_degradations: tuple[str, ...],
 ) -> tuple[tuple[_Candidate, ...], tuple[str, ...]]:
     """Drop only the optional Catalog channel when its derived state is invalid."""
-    if variant not in _CATALOG_VARIANTS:
+    if variant not in CATALOG_RETRIEVAL_VARIANTS:
         return (), ()
     if lease_degradations:
         return (), lease_degradations
@@ -508,7 +497,7 @@ def _graph_candidates(
 def _variant_evidence(
     connection: sqlite3.Connection,
     terms: tuple[str, ...],
-    variant: DesktopRetrievalVariant,
+    variant: DesktopEvaluationVariant,
     catalog_candidates: tuple[_Candidate, ...] = (),
 ) -> _VariantEvidence:
     """Build one evaluation candidate set without adding unrequested channels."""
@@ -518,6 +507,10 @@ def _variant_evidence(
     if variant == "structure_lexical":
         candidates = _structure_lexical_candidates(connection, terms)
         return _variant_result(candidates)
+    if variant in PAGE_TREE_EVALUATION_VARIANTS:
+        protected = _structure_lexical_candidates(connection, terms)
+        candidates = protected + catalog_candidates
+        return _variant_result(candidates, protected=protected)
     if variant == "wiki":
         candidates = (
             _wiki_candidates(connection, terms)
@@ -604,9 +597,9 @@ def _page_tree_candidates(
 def _catalog_degradation(
     connection: sqlite3.Connection,
     catalog: CatalogGenerationLease | None,
-    variant: DesktopRetrievalVariant,
+    variant: DesktopEvaluationVariant,
 ) -> tuple[str, ...]:
-    if variant not in _CATALOG_VARIANTS:
+    if variant not in CATALOG_RETRIEVAL_VARIANTS:
         return ()
     if catalog is not None:
         return ("catalog_stale",) if catalog.is_stale else ()

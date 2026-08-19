@@ -16,7 +16,11 @@ from openkb.desktop_page_tree import (
 )
 from openkb.desktop_page_tree_selection import _selected_evidence_ids
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_dir
+from openkb.desktop_workspace import (
+    DesktopKnowledgeBaseRuntime,
+    desktop_state_database_path,
+    desktop_state_dir,
+)
 from openkb.locks import kb_ingest_lock
 
 
@@ -166,6 +170,57 @@ def test_page_tree_selection_failure_keeps_deterministic_baseline(tmp_path) -> N
     )
     assert "multi_hop" in page_tree_trace.trigger_reasons
     assert "page_tree_selection_failed" in page_tree_trace.degradation_reasons
+
+
+def test_page_tree_selection_does_not_charge_when_provider_never_starts(tmp_path) -> None:
+    kb_dir = _knowledge_base(tmp_path)
+
+    class ExhaustedTransport:
+        calls = 0
+
+        def prepare_model_attempt(self, _is_cancelled, _remaining_seconds):
+            return False
+
+        def __call__(self, _request, _timeout_seconds):
+            self.calls += 1
+            return "unreachable"
+
+    transport = ExhaustedTransport()
+    pack = DesktopEvidenceRetriever(
+        kb_dir, model_gateway=DesktopModelGateway(transport)
+    ).retrieve("Compare Alpha and Beta")
+
+    assert transport.calls == 0
+    assert "page_tree_selection_failed" in pack.retrieval_trace.degradation_reasons
+    assert pack.retrieval_model_cost.model_calls == 0
+    assert pack.retrieval_model_cost.input_characters == 0
+
+
+def test_query_rejects_a_noncurrent_page_tree_generation(tmp_path) -> None:
+    kb_dir = _knowledge_base(tmp_path)
+    operations: list[str] = []
+
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        connection.execute(
+            "UPDATE document_page_tree_generations SET status = 'superseded' "
+            "WHERE generation_id IN (SELECT generation_id FROM document_page_tree_current)"
+        )
+        connection.commit()
+
+    def transport(request, _timeout_seconds):
+        operations.append(request.operation)
+        if request.operation == "retrieval_plan":
+            return '{"terms":["alpha","beta"]}'
+        raise AssertionError("A corrupt PageTree must not reach the selection model.")
+
+    pack = DesktopEvidenceRetriever(kb_dir, model_gateway=DesktopModelGateway(transport)).retrieve(
+        "Compare Alpha and Beta"
+    )
+
+    assert pack.evidence
+    assert operations == ["retrieval_plan"]
+    assert "page_tree_query_failed" in pack.retrieval_trace.degradation_reasons
+    assert pack.retrieval_trace.page_tree_generation_ids == ()
 
 
 def test_conversation_trace_survives_page_tree_generation_cleanup(tmp_path) -> None:
