@@ -54,6 +54,7 @@ class DesktopKnowledgeAnalysisBatchStore:
         job_id: str,
         stage_run_id: str,
         evidence: tuple[tuple[str, DocumentIRBlock], ...],
+        planned_batches: tuple[tuple[tuple[str, DocumentIRBlock], ...], ...] | None = None,
     ) -> tuple[KnowledgeAnalysisBatch, ...]:
         from openkb.desktop_knowledge_analysis_batches import (
             plan_knowledge_analysis_batches,
@@ -66,7 +67,7 @@ class DesktopKnowledgeAnalysisBatchStore:
                 rows = _batch_rows(connection, job_id, self._batch_table)
                 if rows:
                     return _hydrate_batches(rows, evidence)
-                planned = plan_knowledge_analysis_batches(evidence)
+                planned = planned_batches or plan_knowledge_analysis_batches(evidence)
                 if len(planned) <= 1:
                     return ()
                 now = _timestamp()

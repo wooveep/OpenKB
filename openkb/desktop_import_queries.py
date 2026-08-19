@@ -22,7 +22,9 @@ _DEDUPLICATION_REASONS = {
     "D1": "normalized_body_sha256_match",
     "D2": "evidence_sha256_match",
 }
-_REUSABLE_STAGES = frozenset(("document_ir", "evidence", "model_analysis", "search"))
+_REUSABLE_STAGES = frozenset(
+    ("document_ir", "evidence", "deterministic_page_tree", "model_analysis", "search")
+)
 
 
 def task_from_row(

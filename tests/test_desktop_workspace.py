@@ -52,6 +52,21 @@ def _drop_knowledge_page_draft_schema(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
 
 
+def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
+    """Return a fixture to the state before deterministic PageTrees."""
+    for table in (
+        "document_page_tree_current",
+        "document_page_tree_node_images",
+        "document_page_tree_node_evidence",
+        "document_page_tree_nodes",
+        "document_page_tree_rebuild_tasks",
+        "document_page_tree_generations",
+    ):
+        connection.execute(f"DROP TABLE {table}")
+    connection.execute("DROP INDEX import_jobs_document_completed_idx")
+    connection.execute("DELETE FROM schema_migrations WHERE version = 32")
+
+
 def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_one(tmp_path):
     """One Engine owns one active SQLite knowledge base and checkpoints before a switch."""
     runtime = DesktopKnowledgeBaseRuntime()
@@ -59,7 +74,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 31
+    assert first.knowledge_base.schema_version == 32
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
@@ -94,10 +109,11 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
             (26,),
             (27,),
             (28,),
-                (29,),
-                (30,),
-                (31,),
-            ]
+            (29,),
+            (30,),
+            (31,),
+            (32,),
+        ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
         )
@@ -182,6 +198,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 21")
         connection.execute("DELETE FROM schema_migrations WHERE version = 22")
         connection.execute("DELETE FROM schema_migrations WHERE version = 23")
+        _drop_page_tree_schema(connection)
         connection.execute("DROP TABLE knowledge_reanalysis_merges")
         connection.execute("DROP TABLE knowledge_reanalysis_batches")
         connection.execute("DROP TABLE knowledge_reanalysis_jobs")
@@ -263,6 +280,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
             (29,),
             (30,),
             (31,),
+            (32,),
         ]
         assert connection.execute(
             "SELECT status FROM import_job_runtime WHERE job_id = 'legacy-job'"
@@ -274,7 +292,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
             connection.execute(
                 "SELECT status, progress FROM stage_runs WHERE job_id = 'legacy-job' ORDER BY stage"
             ).fetchall()
-            == [("pending", 0)] * 6
+            == [("pending", 0)] * 7
         )
 
 
@@ -338,6 +356,7 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 21")
         connection.execute("DELETE FROM schema_migrations WHERE version = 22")
         connection.execute("DELETE FROM schema_migrations WHERE version = 23")
+        _drop_page_tree_schema(connection)
         connection.execute("DROP TABLE knowledge_reanalysis_merges")
         connection.execute("DROP TABLE knowledge_reanalysis_batches")
         connection.execute("DROP TABLE knowledge_reanalysis_jobs")
@@ -379,10 +398,11 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
         "raw_asset",
         "document_ir",
         "evidence",
+        "deterministic_page_tree",
         "model_analysis",
         "search",
     ]
-    assert resumed.stages[4].status == "skipped"
+    assert resumed.stages[5].status == "skipped"
 
 
 def test_migration_backfills_independent_version_sources_for_existing_documents(tmp_path):
@@ -425,6 +445,7 @@ def test_migration_backfills_independent_version_sources_for_existing_documents(
         connection.execute("DELETE FROM schema_migrations WHERE version = 21")
         connection.execute("DELETE FROM schema_migrations WHERE version = 22")
         connection.execute("DELETE FROM schema_migrations WHERE version = 23")
+        _drop_page_tree_schema(connection)
         connection.execute("DROP TABLE knowledge_reanalysis_merges")
         connection.execute("DROP TABLE knowledge_reanalysis_batches")
         connection.execute("DROP TABLE knowledge_reanalysis_jobs")

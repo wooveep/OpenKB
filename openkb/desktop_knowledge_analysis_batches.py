@@ -31,6 +31,7 @@ from openkb.desktop_knowledge_analysis_batch_store import (
 )
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
 from openkb.desktop_model_gateway import DesktopModelCallError, DesktopModelResult
+from openkb.desktop_page_tree import PageTreeGeneration, page_tree_analysis_sections
 
 __all__ = ["DesktopKnowledgeAnalysisBatchStore"]
 
@@ -91,6 +92,7 @@ def run_knowledge_analysis(
     stage_run_id: str,
     document_name: str,
     evidence: tuple[tuple[str, DocumentIRBlock], ...],
+    page_tree: PageTreeGeneration | None = None,
     provider: str,
     model: str,
     engine_version: str,
@@ -99,10 +101,17 @@ def run_knowledge_analysis(
     on_batch_completed: Callable[[int, int], None],
 ) -> KnowledgeAnalysisRun:
     """Execute a direct analysis or resume a persisted long-document batch plan."""
+    natural_sections = (
+        page_tree_analysis_sections(page_tree, evidence) if page_tree is not None else ()
+    )
+    planned_batches = plan_knowledge_analysis_batches(
+        evidence, natural_sections=natural_sections or None
+    )
     batches = store.load_or_create(
         job_id=job_id,
         stage_run_id=stage_run_id,
         evidence=evidence,
+        planned_batches=planned_batches,
     )
     if not batches:
         result = analyze("knowledge_analysis", knowledge_analysis_prompt(document_name, evidence))
@@ -219,13 +228,18 @@ def run_knowledge_analysis(
 def plan_knowledge_analysis_batches(
     evidence: tuple[tuple[str, DocumentIRBlock], ...],
     *,
+    natural_sections: tuple[tuple[tuple[str, DocumentIRBlock], ...], ...] | None = None,
     max_evidence: int = MAX_BATCH_EVIDENCE,
     max_prompt_characters: int = MAX_BATCH_PROMPT_CHARACTERS,
 ) -> tuple[tuple[tuple[str, DocumentIRBlock], ...], ...]:
     """Pack ordered natural sections, splitting an oversized section only at IR blocks."""
     if not evidence or max_evidence < 1 or max_prompt_characters < 1:
         raise _state_error("Knowledge Analysis batch input is invalid.")
-    sections = _natural_sections(evidence)
+    sections = (
+        natural_sections
+        if natural_sections is not None and _sections_cover_evidence(natural_sections, evidence)
+        else _natural_sections(evidence)
+    )
     batches: list[tuple[tuple[str, DocumentIRBlock], ...]] = []
     current: list[tuple[str, DocumentIRBlock]] = []
     for section in sections:
@@ -250,6 +264,17 @@ def plan_knowledge_analysis_batches(
     if current:
         batches.append(tuple(current))
     return tuple(batches)
+
+
+def _sections_cover_evidence(
+    sections: tuple[tuple[tuple[str, DocumentIRBlock], ...], ...],
+    evidence: tuple[tuple[str, DocumentIRBlock], ...],
+) -> bool:
+    return (
+        bool(sections)
+        and all(sections)
+        and tuple(item for section in sections for item in section) == evidence
+    )
 
 
 def knowledge_analysis_batch_prompt(

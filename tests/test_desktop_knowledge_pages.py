@@ -21,6 +21,20 @@ from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
+def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
+    for table in (
+        "document_page_tree_current",
+        "document_page_tree_node_images",
+        "document_page_tree_node_evidence",
+        "document_page_tree_nodes",
+        "document_page_tree_rebuild_tasks",
+        "document_page_tree_generations",
+    ):
+        connection.execute(f"DROP TABLE {table}")
+    connection.execute("DROP INDEX import_jobs_document_completed_idx")
+    connection.execute("DELETE FROM schema_migrations WHERE version = 32")
+
+
 def test_working_draft_does_not_replace_published_revision_until_explicit_publish(tmp_path):
     """Autosave is durable, while readers keep seeing the last explicit publication."""
     kb_dir = tmp_path / "desktop-kb"
@@ -136,6 +150,7 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
         connection.execute("DROP TABLE IF EXISTS knowledge_page_working_sources")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_ui_state")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_working_drafts")
+        _drop_page_tree_schema(connection)
         connection.execute("DROP TABLE knowledge_reanalysis_merges")
         connection.execute("DROP TABLE knowledge_reanalysis_batches")
         connection.execute("DROP TABLE knowledge_reanalysis_jobs")
@@ -158,9 +173,7 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
         connection.execute(
             "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN aliases_json"
         )
-        connection.execute(
-            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN tags_json"
-        )
+        connection.execute("ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN tags_json")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN entity_subtype")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN stale_after")
@@ -252,13 +265,12 @@ def test_v20_source_map_migrates_as_source_backed_without_rewriting_the_revision
         connection.execute(
             "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN aliases_json"
         )
-        connection.execute(
-            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN tags_json"
-        )
+        connection.execute("ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN tags_json")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN entity_subtype")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN stale_after")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
+        _drop_page_tree_schema(connection)
         connection.execute("DROP TABLE knowledge_reanalysis_merges")
         connection.execute("DROP TABLE knowledge_reanalysis_batches")
         connection.execute("DROP TABLE knowledge_reanalysis_jobs")
@@ -521,9 +533,7 @@ def test_knowledge_source_limit_counts_unique_evidence_not_claim_mappings(tmp_pa
         source for source in pages.search_sources("Primary") if "Primary" in source.excerpt
     )
     second_source = next(
-        source
-        for source in pages.search_sources("Independent")
-        if "Independent" in source.excerpt
+        source for source in pages.search_sources("Independent") if "Independent" in source.excerpt
     )
     claims = tuple(f"Primary claim {index}." for index in range(13))
     crowded = pages.save_draft(

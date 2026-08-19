@@ -126,6 +126,7 @@
         "raw_asset": "Saving raw asset",
         "document_ir": "Building document structure",
         "evidence": "Preparing evidence",
+        "deterministic_page_tree": "Building document PageTree",
         "model_analysis": "Knowledge Analysis",
         "search": "Publishing full-text search"
       },

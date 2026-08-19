@@ -56,6 +56,8 @@ from openkb.desktop_okf_projection import (
     discard_okf_projection_staging,
     stage_okf_projection_in,
 )
+from openkb.desktop_page_tree import PageTreeGeneration, page_tree_analysis_sections
+from openkb.desktop_page_tree_store import load_current_page_tree_in
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -143,6 +145,7 @@ class DesktopKnowledgeReanalysisService:
                 )
                 for document_id in selected:
                     evidence = analysis_evidence_for_document_in(connection, document_id)
+                    page_tree = load_current_page_tree_in(connection, document_id)
                     connection.execute(
                         """
                         INSERT INTO knowledge_reanalysis_jobs (
@@ -163,7 +166,7 @@ class DesktopKnowledgeReanalysisService:
                             provider,
                             model,
                             __version__,
-                            expected_prompt_digest(evidence),
+                            expected_prompt_digest(evidence, page_tree),
                             now,
                         ),
                     )
@@ -202,7 +205,13 @@ class DesktopKnowledgeReanalysisService:
                         "Wait for the active bulk Reanalysis run to finish before retrying.",
                     )
                 evidence = analysis_evidence_for_document_in(connection, str(row[1]))
-                identity = (provider, model, __version__, expected_prompt_digest(evidence))
+                page_tree = load_current_page_tree_in(connection, str(row[1]))
+                identity = (
+                    provider,
+                    model,
+                    __version__,
+                    expected_prompt_digest(evidence, page_tree),
+                )
                 if identity != tuple(str(value) for value in row[3:7]):
                     raise DesktopImportError(
                         "knowledge_reanalysis_configuration_changed",
@@ -289,9 +298,10 @@ class DesktopKnowledgeReanalysisService:
             connection = _connect(self._database_path)
             try:
                 evidence = analysis_evidence_for_document_in(connection, document_id)
+                page_tree = load_current_page_tree_in(connection, document_id)
             finally:
                 connection.close()
-            if expected_prompt_digest(evidence) != expected_digest:
+            if expected_prompt_digest(evidence, page_tree) != expected_digest:
                 raise DesktopImportError(
                     "knowledge_reanalysis_behavior_changed",
                     "The analysis behavior changed after this Reanalysis was created.",
@@ -325,6 +335,7 @@ class DesktopKnowledgeReanalysisService:
                 stage_run_id=job_id,
                 document_name=document_name,
                 evidence=evidence,
+                page_tree=page_tree,
                 provider=gateway.provider_name,
                 model=gateway.model_name,
                 engine_version=__version__,
@@ -606,7 +617,8 @@ class DesktopKnowledgeReanalysisService:
         )
         prompt_digest = persisted_analysis_prompt_digest_in(connection, stored)
         evidence = analysis_evidence_for_document_in(connection, document_id)
-        expected = expected_prompt_digest(evidence)
+        page_tree = load_current_page_tree_in(connection, document_id)
+        expected = expected_prompt_digest(evidence, page_tree)
         current = (
             schema_version == KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
             and prompt_digest == expected
@@ -632,8 +644,12 @@ class DesktopKnowledgeReanalysisService:
             )
 
 
-def expected_prompt_digest(evidence: tuple[tuple[str, DocumentIRBlock], ...]) -> str:
-    batches = plan_knowledge_analysis_batches(evidence)
+def expected_prompt_digest(
+    evidence: tuple[tuple[str, DocumentIRBlock], ...],
+    page_tree: PageTreeGeneration | None = None,
+) -> str:
+    sections = page_tree_analysis_sections(page_tree, evidence) if page_tree is not None else ()
+    batches = plan_knowledge_analysis_batches(evidence, natural_sections=sections or None)
     return (
         KNOWLEDGE_ANALYSIS_PROMPT_DIGEST
         if len(batches) <= 1

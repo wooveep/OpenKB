@@ -10,6 +10,7 @@ from openkb import desktop_engine_knowledge_reanalysis as reanalysis_engine
 from openkb import desktop_knowledge_reanalysis as reanalysis_runtime
 from openkb.desktop_conversations import recover_stale_conversation_generations
 from openkb.desktop_okf_projection import materialize_okf_projection
+from openkb.desktop_page_tree_store import start_page_tree_rebuilds
 from openkb.desktop_raw_assets import DesktopRawAssetService
 
 if TYPE_CHECKING:
@@ -47,6 +48,7 @@ def dispatch_knowledge_base_activation(
     DesktopRawAssetService(active_kb_dir).verify_available_documents()
     materialize_okf_projection(active_kb_dir)
     server._start_recoverable_imports(active_kb_dir)
+    start_page_tree_rebuilds(active_kb_dir)
     return activation.as_dict()
 
 

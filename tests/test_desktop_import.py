@@ -57,6 +57,7 @@ def test_txt_import_publishes_raw_ir_evidence_and_fts_in_one_available_document(
         "completed",
         "completed",
         "completed",
+        "completed",
         "skipped",
         "completed",
     ]
@@ -69,6 +70,8 @@ def test_txt_import_publishes_raw_ir_evidence_and_fts_in_one_available_document(
         ("document_ir", "completed"),
         ("evidence", "running"),
         ("evidence", "completed"),
+        ("deterministic_page_tree", "running"),
+        ("deterministic_page_tree", "completed"),
         ("model_analysis", "running"),
         ("model_analysis", "skipped"),
         ("search", "running"),
@@ -112,6 +115,7 @@ def test_duplicate_txt_reuses_the_single_available_raw_asset(tmp_path):
         "skipped",
         "skipped",
         "skipped",
+        "skipped",
     ]
     assert len(list((kb_dir / "raw").iterdir())) == 1
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
@@ -145,8 +149,9 @@ def test_d1_normalized_body_reuses_processing_but_keeps_a_distinct_raw_document(
         "completed",
         "completed",
         "skipped",
+        "completed",
         "skipped",
-        "skipped",
+        "completed",
     ]
     assert len(list((kb_dir / "raw").iterdir())) == 2
 
@@ -328,7 +333,7 @@ def test_model_failure_is_quarantined_with_safe_attempt_history(tmp_path):
     assert task["job"]["status"] == "quarantined"
     assert task["document"] is None
     assert task["quarantine"] == {
-        "stage_run_id": task["stages"][4]["stage_run_id"],
+        "stage_run_id": task["stages"][5]["stage_run_id"],
         "stage": "model_analysis",
         "error_code": "model_timeout",
         "reason": "The model did not respond before the response timeout.",
@@ -514,6 +519,7 @@ def test_open_recovers_an_interrupted_job_without_exposing_a_partial_document(tm
         "pending",
         "pending",
         "pending",
+        "pending",
     ]
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)
@@ -648,6 +654,7 @@ def test_paused_import_resumes_from_verified_document_ir_checkpoint(tmp_path, mo
         "paused",
         "pending",
         "pending",
+        "pending",
     ]
 
     resumed = DesktopTextImportService(kb_dir).resume_text(paused_task["job"]["job_id"])
@@ -655,6 +662,7 @@ def test_paused_import_resumes_from_verified_document_ir_checkpoint(tmp_path, mo
     assert resumed.job.status == "completed"
     assert calls == 1
     assert [stage.status for stage in resumed.stages] == [
+        "completed",
         "completed",
         "completed",
         "completed",

@@ -45,6 +45,7 @@ IMPORT_STAGES = (
     "raw_asset",
     "document_ir",
     "evidence",
+    "deterministic_page_tree",
     "model_analysis",
     "search",
 )
@@ -475,6 +476,7 @@ class DesktopImportStore:
         source_images: tuple[SourceImage, ...],
         normalized_body_sha256: str,
         canonical_document: DesktopImportedDocument,
+        before_commit: PublishDocumentCallback | None = None,
     ) -> tuple[DesktopImportedDocument, bool]:
         """Publish a distinct raw document that reuses an exact D1 processing result."""
         now = _timestamp()
@@ -498,6 +500,8 @@ class DesktopImportStore:
                     now=now,
                     complete_job=self._complete_job_in,
                 )
+                if before_commit is not None:
+                    before_commit(connection, *result)
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -505,10 +509,10 @@ class DesktopImportStore:
             finally:
                 connection.close()
         document, deduplicated = result
-        for stage in ("evidence", "model_analysis", "search"):
+        for stage, status in (("model_analysis", "skipped"), ("search", "completed")):
             self._emit_stage(
                 state.job_id,
-                DesktopStageRun(state.stage_ids[stage], stage, "skipped", 100),
+                DesktopStageRun(state.stage_ids[stage], stage, status, 100),
                 document_id=document.document_id,
             )
         return document, deduplicated

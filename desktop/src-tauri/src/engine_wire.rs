@@ -76,6 +76,7 @@ pub enum ImportStage {
     RawAsset,
     DocumentIr,
     Evidence,
+    DeterministicPageTree,
     ModelAnalysis,
     Search,
 }

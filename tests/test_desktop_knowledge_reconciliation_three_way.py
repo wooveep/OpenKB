@@ -24,6 +24,20 @@ from openkb.desktop_workspace_migrations import (
 )
 
 
+def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
+    for table in (
+        "document_page_tree_current",
+        "document_page_tree_node_images",
+        "document_page_tree_node_evidence",
+        "document_page_tree_nodes",
+        "document_page_tree_rebuild_tasks",
+        "document_page_tree_generations",
+    ):
+        connection.execute(f"DROP TABLE {table}")
+    connection.execute("DROP INDEX import_jobs_document_completed_idx")
+    connection.execute("DELETE FROM schema_migrations WHERE version = 32")
+
+
 def _knowledge_base(tmp_path: Path) -> Path:
     return Path(DesktopKnowledgeBaseRuntime().create(tmp_path / "knowledge").knowledge_base.kb_dir)
 
@@ -186,6 +200,7 @@ def test_v24_migration_reclassifies_a_generation_candidate_with_a_draft(
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN aliases_json")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN tags_json")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN entity_subtype")
+        _drop_page_tree_schema(connection)
         connection.execute("DROP TABLE knowledge_reanalysis_merges")
         connection.execute("DROP TABLE knowledge_reanalysis_batches")
         connection.execute("DROP TABLE knowledge_reanalysis_jobs")
@@ -538,9 +553,7 @@ def test_manual_merge_keeps_only_the_exact_claim_source_mapping(tmp_path: Path) 
             }
         )
 
-    DesktopTextImportService(
-        kb_dir, model_gateway=DesktopModelGateway(analyze)
-    ).import_text(source)
+    DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(analyze)).import_text(source)
     conflict = DesktopKnowledgeReconciliationService(kb_dir).list_conflicts()[0]
     first_claim = conflict.content_markdown.split("\n\n")[0]
     resolution = DesktopKnowledgeReconciliationResolutionService(kb_dir)

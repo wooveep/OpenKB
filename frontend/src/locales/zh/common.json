@@ -126,6 +126,7 @@
         "raw_asset": "保存 raw 原文",
         "document_ir": "构建文档结构",
         "evidence": "准备证据",
+        "deterministic_page_tree": "构建文档 PageTree",
         "model_analysis": "知识分析",
         "search": "发布全文搜索"
       },

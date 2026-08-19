@@ -6,7 +6,6 @@ import hashlib
 import logging
 import sqlite3
 import threading
-import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable
@@ -14,6 +13,8 @@ from typing import Callable
 from portalocker import LockException
 
 from openkb import __version__
+from openkb import desktop_page_tree as page_tree_runtime
+from openkb import desktop_page_tree_store as page_tree_store
 from openkb.desktop_document_parsers import parse_structured_document
 from openkb.desktop_document_versions import DesktopDocumentVersionService
 from openkb.desktop_import_artifacts import (
@@ -207,6 +208,10 @@ class DesktopTextImportService:
     def _start_graph_extraction(self, result: DesktopTextImportResult) -> None:
         """Make optional graph work independent from the completed Import Job result."""
         try:
+            page_tree_store.start_page_tree_rebuilds(self._store.kb_dir)
+        except RuntimeError:
+            logger.warning("Could not start deterministic PageTree rebuilds.")
+        try:
             start_graph_extraction(
                 self._store.kb_dir,
                 result.document.document_id,
@@ -255,33 +260,11 @@ class DesktopTextImportService:
 
             stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
             normalized_body_hash = normalized_body_sha256(blocks)
+            content_duplicate: DesktopImportedDocument | None = None
             if not self._completed(stages, "evidence"):
                 content_duplicate = self._store.find_available_document_by_normalized_body(
                     normalized_body_hash
                 )
-                if content_duplicate is not None:
-                    document, deduplicated = self._store.complete_content_duplicate_job(
-                        state=state,
-                        source=state.source,
-                        document_id=uuid.uuid4().hex,
-                        asset_sha256=asset_sha256,
-                        raw_path=raw_path,
-                        raw_size=len(raw_bytes),
-                        source_format=source_format,
-                        raw_media_type=source_media_type(source_format),
-                        source_images=source_images,
-                        normalized_body_sha256=normalized_body_hash,
-                        canonical_document=content_duplicate,
-                    )
-                    terminal_state_committed = True
-                    self._record_document_version_candidates(document.document_id, blocks)
-                    self._record_existing_knowledge_reconciliation(document.document_id)
-                    return self._result(
-                        state.job_id,
-                        document.document_id,
-                        deduplicated=deduplicated,
-                    )
-
                 active_stage = "evidence"
                 self._honor_control(state, active_stage)
                 self._store.set_stage(state, active_stage, "running", 60)
@@ -289,12 +272,61 @@ class DesktopTextImportService:
                 self._store.set_stage(
                     state,
                     active_stage,
-                    "completed",
+                    "skipped" if content_duplicate is not None else "completed",
                     75,
                     checkpoint=evidence_checkpoint(evidence),
                 )
             else:
                 evidence = evidence_from_checkpoint(self._checkpoint(state, "evidence"), blocks)
+                if stages["evidence"].status == "skipped":
+                    content_duplicate = self._store.find_available_document_by_normalized_body(
+                        normalized_body_hash
+                    )
+                    if content_duplicate is None:
+                        raise DesktopImportError(
+                            "desktop_import_state_invalid",
+                            "The reusable normalized document is no longer Available.",
+                        )
+
+            stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
+            active_stage = page_tree_runtime.PAGE_TREE_STAGE
+            page_tree = page_tree_runtime.prepare_import_page_tree(
+                store=self._store,
+                state=state,
+                stage_run_id=state.stage_ids[active_stage],
+                stage_status=stages[active_stage].status,
+                blocks=blocks,
+                evidence=evidence,
+                source_images=source_images,
+                honor_control=lambda: self._honor_control(state, active_stage),
+            )
+            if content_duplicate is not None:
+                document, deduplicated = self._store.complete_content_duplicate_job(
+                    state=state,
+                    source=state.source,
+                    document_id=page_tree.document_version_id,
+                    asset_sha256=asset_sha256,
+                    raw_path=raw_path,
+                    raw_size=len(raw_bytes),
+                    source_format=source_format,
+                    raw_media_type=source_media_type(source_format),
+                    source_images=source_images,
+                    normalized_body_sha256=normalized_body_hash,
+                    canonical_document=content_duplicate,
+                    before_commit=lambda connection, published, _deduplicated: (
+                        page_tree_store.publish_or_queue_page_tree_in(
+                            connection, published.document_id, page_tree
+                        )
+                    ),
+                )
+                terminal_state_committed = True
+                self._record_document_version_candidates(document.document_id, blocks)
+                self._record_existing_knowledge_reconciliation(document.document_id)
+                return self._result(
+                    state.job_id,
+                    document.document_id,
+                    deduplicated=deduplicated,
+                )
 
             stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
             knowledge_analysis: DesktopKnowledgeAnalysis | None = None
@@ -332,6 +364,7 @@ class DesktopTextImportService:
                         stage_run_id=state.stage_ids[active_stage],
                         document_name=state.source.name,
                         evidence=evidence,
+                        page_tree=page_tree.generation,
                         provider=self._model_gateway.provider_name,
                         model=self._model_gateway.model_name,
                         engine_version=__version__,
@@ -368,27 +401,30 @@ class DesktopTextImportService:
             self._store.set_stage(state, active_stage, "running", 90)
             staged_projection: Path | None = None
 
-            def apply_analysis_and_stage(
+            def apply_import_derivatives(
                 connection: sqlite3.Connection,
                 published: DesktopImportedDocument,
                 _deduplicated: bool,
             ) -> None:
                 nonlocal staged_projection
-                assert knowledge_analysis is not None and analysis_provenance_json is not None
-                self._apply_knowledge_analysis_in(
-                    connection,
-                    published.document_id,
-                    knowledge_analysis,
-                    analysis_provenance_json,
-                    evidence,
+                page_tree_store.publish_or_queue_page_tree_in(
+                    connection, published.document_id, page_tree
                 )
-                staged_projection = stage_okf_projection_in(connection, self._store.kb_dir)
+                if knowledge_analysis is not None and analysis_provenance_json is not None:
+                    self._apply_knowledge_analysis_in(
+                        connection,
+                        published.document_id,
+                        knowledge_analysis,
+                        analysis_provenance_json,
+                        evidence,
+                    )
+                    staged_projection = stage_okf_projection_in(connection, self._store.kb_dir)
 
             try:
                 document, deduplicated = self._store.publish_document(
                     state=state,
                     source=state.source,
-                    document_id=uuid.uuid4().hex,
+                    document_id=page_tree.document_version_id,
                     asset_sha256=asset_sha256,
                     raw_path=raw_path,
                     raw_size=len(raw_bytes),
@@ -398,12 +434,7 @@ class DesktopTextImportService:
                     evidence=evidence,
                     source_images=source_images,
                     normalized_body_sha256=normalized_body_hash,
-                    before_commit=(
-                        apply_analysis_and_stage
-                        if knowledge_analysis is not None
-                        and analysis_provenance_json is not None
-                        else None
-                    ),
+                    before_commit=apply_import_derivatives,
                 )
             except BaseException:
                 if staged_projection is not None:

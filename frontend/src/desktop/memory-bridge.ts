@@ -254,8 +254,8 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
     const name = sourceName(sourcePath) || "document.txt"
     const jobId = `job-${requestId}`
     const documentId = `document-${requestId}`
-    const stages = ["preflight", "raw_asset", "document_ir", "evidence", "model_analysis", "search"] as const
-    const progress = [20, 35, 55, 75, 85, 100]
+    const stages = ["preflight", "raw_asset", "document_ir", "evidence", "deterministic_page_tree", "model_analysis", "search"] as const
+    const progress = [20, 35, 55, 75, 79, 85, 100]
     for (const [index, stage] of stages.entries()) {
       emitBridgeEvent(this.listeners, {
         sequence: index + 1,

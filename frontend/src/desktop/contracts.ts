@@ -107,7 +107,7 @@ export interface DesktopImportDeduplication {
 
 export interface DesktopImportStageRun {
   stageRunId: string
-  stage: "preflight" | "raw_asset" | "document_ir" | "evidence" | "model_analysis" | "search"
+  stage: "preflight" | "raw_asset" | "document_ir" | "evidence" | "deterministic_page_tree" | "model_analysis" | "search"
   status: "pending" | "running" | "paused" | "cancelled" | "completed" | "failed" | "skipped"
   progress: number
   errorCode: string | null

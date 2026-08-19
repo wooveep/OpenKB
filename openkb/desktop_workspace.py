@@ -11,6 +11,8 @@ from pathlib import Path
 from openkb import desktop_knowledge_lifecycle_migrations as lifecycle_migrations
 from openkb import desktop_knowledge_page_migrations as knowledge_page_migrations
 from openkb import desktop_knowledge_reanalysis_migrations as reanalysis_migrations
+from openkb import desktop_knowledge_verification_migrations as verification_migrations
+from openkb import desktop_page_tree_migrations as page_tree_migrations
 from openkb.desktop_import_deduplication import (
     backfill_deduplication_metadata,
     deduplication_backfill_needed,
@@ -31,9 +33,6 @@ from openkb.desktop_knowledge_reconciliation_migrations import (
     THREE_WAY_KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS,
 )
 from openkb.desktop_knowledge_source_migrations import KNOWLEDGE_SOURCE_MIGRATION_STATEMENTS
-from openkb.desktop_knowledge_verification_migrations import (
-    KNOWLEDGE_VERIFICATION_MIGRATION_STATEMENTS,
-)
 from openkb.desktop_missing_source_migrations import MISSING_SOURCE_MIGRATION_STATEMENTS
 from openkb.desktop_okf_projection_migrations import OKF_PROJECTION_MIGRATION_STATEMENTS
 from openkb.desktop_workspace_migrations import (
@@ -379,7 +378,7 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (19, knowledge_page_migrations.KNOWLEDGE_PAGE_DRAFT_MIGRATION_STATEMENTS),
     (20, KNOWLEDGE_SOURCE_MIGRATION_STATEMENTS),
     (21, KNOWLEDGE_PROVENANCE_MIGRATION_STATEMENTS),
-    (22, KNOWLEDGE_VERIFICATION_MIGRATION_STATEMENTS),
+    (22, verification_migrations.KNOWLEDGE_VERIFICATION_MIGRATION_STATEMENTS),
     (23, lifecycle_migrations.KNOWLEDGE_LIFECYCLE_MIGRATION_STATEMENTS),
     (24, THREE_WAY_KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS),
     (25, OKF_PROJECTION_MIGRATION_STATEMENTS),
@@ -389,6 +388,7 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (29, MISSING_SOURCE_MIGRATION_STATEMENTS),
     (30, KNOWLEDGE_ANALYSIS_BATCH_MIGRATION_STATEMENTS),
     (31, reanalysis_migrations.KNOWLEDGE_REANALYSIS_MIGRATION_STATEMENTS),
+    (32, page_tree_migrations.PAGE_TREE_MIGRATION_STATEMENTS),
 )
 
 
