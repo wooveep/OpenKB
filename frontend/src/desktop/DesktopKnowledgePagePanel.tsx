@@ -644,7 +644,7 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
               {editor.sourceMap.length ? (
                 <div className="mt-3 space-y-2">
                   {editor.sourceMap.map((source) => (
-                    <div key={source.sourceId} className="rounded-lg border border-border/60 bg-background px-3 py-2 text-xs">
+                    <div key={`${source.sourceId}-${source.claimText}`} className="rounded-lg border border-border/60 bg-background px-3 py-2 text-xs">
                       <p className="font-medium">{source.documentName} · {source.section}</p>
                       <p className="mt-1 text-muted-foreground">
                         {source.sourceId} · {t(`desktop.knowledgeBases.knowledgePages.sourceAvailability.${source.availability}`)}

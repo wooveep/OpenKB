@@ -16,7 +16,7 @@ from openkb.desktop_knowledge_pages import (
     DesktopKnowledgePageError,
     DesktopKnowledgePageService,
 )
-from openkb.desktop_knowledge_sources import knowledge_source_rows_in
+from openkb.desktop_knowledge_source_retrieval import knowledge_source_rows_in
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
@@ -125,6 +125,11 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
     now = "2026-08-19T00:00:00+00:00"
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE knowledge_generation_item_sources")
+        connection.execute("DROP TABLE knowledge_reconciliation_candidate_sources")
+        connection.execute(
+            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN entity_subtype"
+        )
         connection.execute("DROP TABLE knowledge_page_lifecycle_events")
         connection.execute("DROP TABLE knowledge_page_verifications")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_revision_sources")
@@ -132,12 +137,27 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
         connection.execute("DROP TABLE IF EXISTS knowledge_page_ui_state")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_working_drafts")
         connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
+        connection.execute(
+            "ALTER TABLE knowledge_generation_items DROP COLUMN analysis_provenance_json"
+        )
+        connection.execute(
+            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN analysis_provenance_json"
+        )
+        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN aliases_json")
+        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN tags_json")
+        connection.execute(
+            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN aliases_json"
+        )
+        connection.execute(
+            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN tags_json"
+        )
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN entity_subtype")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN stale_after")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
         connection.execute(
-            "DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25)"
+            "DELETE FROM schema_migrations "
+            "WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28)"
         )
         connection.execute(
             """
@@ -203,13 +223,35 @@ def test_v20_source_map_migrates_as_source_backed_without_rewriting_the_revision
 
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE knowledge_generation_item_sources")
+        connection.execute("DROP TABLE knowledge_reconciliation_candidate_sources")
+        connection.execute(
+            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN entity_subtype"
+        )
         connection.execute("DROP TABLE knowledge_page_lifecycle_events")
         connection.execute("DROP TABLE knowledge_page_verifications")
         connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
+        connection.execute(
+            "ALTER TABLE knowledge_generation_items DROP COLUMN analysis_provenance_json"
+        )
+        connection.execute(
+            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN analysis_provenance_json"
+        )
+        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN aliases_json")
+        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN tags_json")
+        connection.execute(
+            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN aliases_json"
+        )
+        connection.execute(
+            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN tags_json"
+        )
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN entity_subtype")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN stale_after")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 28")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 27")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 26")
         connection.execute("DELETE FROM schema_migrations WHERE version = 21")
         connection.execute("DELETE FROM schema_migrations WHERE version = 22")
         connection.execute("DELETE FROM schema_migrations WHERE version = 23")
@@ -444,6 +486,53 @@ def test_verification_rechecks_the_publication_gate_and_trust_only_breaks_score_
     assert gate_error.value.code == "knowledge_verification_blocked"
 
 
+def test_knowledge_source_limit_counts_unique_evidence_not_claim_mappings(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_text("# First\n\nPrimary supporting record.", encoding="utf-8")
+    second.write_text("# Second\n\nIndependent supporting record.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(first)
+    DesktopTextImportService(kb_dir).import_text(second)
+    pages = DesktopKnowledgePageService(kb_dir)
+    first_source = next(
+        source for source in pages.search_sources("Primary") if "Primary" in source.excerpt
+    )
+    second_source = next(
+        source
+        for source in pages.search_sources("Independent")
+        if "Independent" in source.excerpt
+    )
+    claims = tuple(f"Primary claim {index}." for index in range(13))
+    crowded = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Zebra topic",
+        content_markdown="\n\n".join(claims),
+    )
+    for claim in claims:
+        pages.bind_source(crowded.page_id, claim, first_source.evidence_id)
+    pages.publish(crowded.page_id)
+    independent_claim = "Independent claim."
+    independent = pages.save_draft(
+        page_id=None,
+        kind="entity",
+        title="Zebra independent",
+        content_markdown=independent_claim,
+    )
+    pages.bind_source(independent.page_id, independent_claim, second_source.evidence_id)
+    pages.publish(independent.page_id)
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        rows = knowledge_source_rows_in(connection, ("zebra",), limit=12)
+
+    assert {str(row[0]) for row in rows} == {
+        first_source.evidence_id,
+        second_source.evidence_id,
+    }
+
+
 def test_lifecycle_stales_deprecates_and_restores_without_changing_original_evidence(tmp_path):
     """Lifecycle changes invalidate review while Evidence remains independently available."""
     kb_dir = tmp_path / "desktop-kb"
@@ -660,25 +749,35 @@ def test_claim_supports_multiple_canonical_sources_without_counting_d2_twice(tmp
         item for item in pages.search_sources("Audit records") if item.excerpt == independent
     )
     claim = "The resilience policy is independently corroborated."
+    second_claim = "The same recovery evidence also supports continuity."
     draft = pages.save_draft(
         page_id=None,
         kind="concept",
         title="Corroborated recovery",
-        content_markdown=claim,
+        content_markdown=f"{claim}\n\n{second_claim}",
     )
 
     pages.bind_source(draft.page_id, claim, shared_source.evidence_id)
     pages.bind_source(draft.page_id, claim, shared_source.evidence_id)
-    bound = pages.bind_source(draft.page_id, claim, independent_source.evidence_id)
+    pages.bind_source(draft.page_id, claim, independent_source.evidence_id)
+    bound = pages.bind_source(draft.page_id, second_claim, shared_source.evidence_id)
 
     assert bound.working_draft is not None
     first_source_ids = tuple(item.source_id for item in bound.working_draft.source_map)
-    assert len(first_source_ids) == 2
+    assert len(first_source_ids) == 3
     assert len(set(first_source_ids)) == 2
-    assert all(
-        bound.working_draft.content_markdown.count(f"[^{source_id}]") == 1
-        for source_id in first_source_ids
+    shared_source_id = next(
+        item.source_id
+        for item in bound.working_draft.source_map
+        if item.evidence_id == shared_source.evidence_id
     )
+    independent_source_id = next(
+        item.source_id
+        for item in bound.working_draft.source_map
+        if item.evidence_id == independent_source.evidence_id
+    )
+    assert bound.working_draft.content_markdown.count(f"[^{shared_source_id}]") == 2
+    assert bound.working_draft.content_markdown.count(f"[^{independent_source_id}]") == 1
     published = pages.publish(draft.page_id)
     assert published.published_revision is not None
     assert published.published_revision.provenance_state == "source_backed"
@@ -695,6 +794,9 @@ def test_claim_supports_multiple_canonical_sources_without_counting_d2_twice(tmp
         tuple(item.source_id for item in republished.published_revision.source_map)
         == first_source_ids
     )
+    projection = (kb_dir / republished.materialized_path).read_text(encoding="utf-8")
+    assert projection.count(f"id: {shared_source_id}") == 1
+    assert projection.count(f"[^{shared_source_id}]:") == 1
 
     routed = [
         item

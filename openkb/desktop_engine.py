@@ -533,6 +533,7 @@ class DesktopEngineServer:
             control=control,
             on_stage_progress=lambda data: self._record_import_stage(request_id, control, data),
             model_gateway=model_gateway,
+            require_model_analysis=True,
         )
         try:
             if source_path is not None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from hashlib import sha256
@@ -17,9 +18,22 @@ from openkb.desktop_import import (
     DesktopTextImportService,
 )
 from openkb.desktop_import_store import DesktopImportStore
+from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+
+
+def _empty_analysis() -> str:
+    return json.dumps(
+        {
+            "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+            "analysis_scope": "document",
+            "document_description": "No durable knowledge candidates.",
+            "concepts": [],
+            "entities": [],
+        }
+    )
 
 
 def test_txt_import_publishes_raw_ir_evidence_and_fts_in_one_available_document(tmp_path):
@@ -370,7 +384,7 @@ def test_manual_recovery_reuses_verified_stages_and_records_its_override(tmp_pat
     recovered = DesktopTextImportService(
         kb_dir,
         model_gateway=DesktopModelGateway(
-            lambda *_args: "Recovered summary.", initial_timeout_seconds=30
+            lambda *_args: _empty_analysis(), initial_timeout_seconds=30
         ),
     ).recover_text(
         job_id,
@@ -421,7 +435,7 @@ def test_cancelled_manual_recovery_can_be_retried(tmp_path):
     assert cancelled.quarantine is not None
 
     recovered = DesktopTextImportService(
-        kb_dir, model_gateway=DesktopModelGateway(lambda *_args: "Recovered after cancel.")
+        kb_dir, model_gateway=DesktopModelGateway(lambda *_args: _empty_analysis())
     ).recover_text(job_id, DesktopRecoveryOverride())
 
     assert recovered.job.status == "completed"

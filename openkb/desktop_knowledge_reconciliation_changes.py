@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from openkb.desktop_import_artifacts import DocumentIRBlock
-from openkb.desktop_knowledge_generations import knowledge_content_sha256
+from openkb.desktop_knowledge_generations import (
+    KnowledgeGenerationSource,
+    knowledge_content_sha256,
+    normalized_knowledge_content,
+)
+from openkb.desktop_knowledge_sources import strip_knowledge_source_markers
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
 
 _MAX_CANDIDATES_PER_DOCUMENT = 32
@@ -17,6 +22,7 @@ _KIND_PREFIX = re.compile(
     r"^\s*(?:(?P<english>concept|entity)|(?P<chinese>概念|实体))\s*[:：]\s*(?P<title>.+?)\s*$",
     re.IGNORECASE,
 )
+_FIELD_PATTERN = re.compile(r"^\s*(?:[-*+]\s*)?(?P<key>[^:：\n]{1,80})\s*[:：]\s*\S")
 
 
 @dataclass(frozen=True)
@@ -30,6 +36,11 @@ class IncomingKnowledgeChange:
     normalized_title: str
     content_markdown: str
     content_sha256: str
+    entity_subtype: str | None = None
+    aliases: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
+    sources: tuple[KnowledgeGenerationSource, ...] = ()
+    analysis_provenance_json: str | None = None
 
 
 def extract_incoming_knowledge_changes(
@@ -54,6 +65,47 @@ def extract_incoming_knowledge_changes(
         if body:
             candidates.append((None, "concept", False, Path(document_name).stem, body))
     return _merge_changes(candidates)
+
+
+def knowledge_relationship(incoming: str, baseline: str) -> str:
+    """Classify one normalized incoming value against a published baseline."""
+    incoming_content = normalized_knowledge_content(strip_knowledge_source_markers(incoming))
+    baseline_content = normalized_knowledge_content(strip_knowledge_source_markers(baseline))
+    if incoming_content == baseline_content:
+        return "duplicate"
+    incoming_units = frozenset(part for part in incoming_content.split("\n") if part)
+    baseline_units = frozenset(part for part in baseline_content.split("\n") if part)
+    if incoming_units and incoming_units <= baseline_units:
+        return "duplicate"
+    if _is_compatible_structured_addition(incoming_units, baseline_units):
+        return "compatible_addition"
+    return "conflict"
+
+
+def _is_compatible_structured_addition(
+    incoming_units: frozenset[str], baseline_units: frozenset[str]
+) -> bool:
+    if not baseline_units or not baseline_units < incoming_units:
+        return False
+    baseline_fields = tuple(_field_key(unit) for unit in baseline_units)
+    additional_fields = tuple(_field_key(unit) for unit in incoming_units - baseline_units)
+    if any(field is None for field in (*baseline_fields, *additional_fields)):
+        return False
+    known_fields = tuple(str(field) for field in baseline_fields)
+    added_fields = tuple(str(field) for field in additional_fields)
+    return (
+        len(set(known_fields)) == len(known_fields)
+        and len(set(added_fields)) == len(added_fields)
+        and all(field not in known_fields for field in added_fields)
+    )
+
+
+def _field_key(value: str) -> str | None:
+    match = _FIELD_PATTERN.match(value)
+    if match is None:
+        return None
+    key, _ = normalize_knowledge_title(str(match.group("key")))
+    return key or None
 
 
 def _merge_changes(

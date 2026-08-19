@@ -57,6 +57,7 @@ _STAGE_ORDER_SQL = (
 )
 _BASE_STAGE_STATUSES = {"pending", "running", "completed", "failed", "skipped"}
 StageProgressCallback = Callable[[dict[str, object]], None]
+PublishDocumentCallback = Callable[[sqlite3.Connection, DesktopImportedDocument, bool], None]
 logger = logging.getLogger(__name__)
 
 
@@ -527,6 +528,7 @@ class DesktopImportStore:
         evidence: tuple[tuple[str, DocumentIRBlock], ...],
         source_images: tuple[SourceImage, ...],
         normalized_body_sha256: str,
+        before_commit: PublishDocumentCallback | None = None,
     ) -> tuple[DesktopImportedDocument, bool]:
         now = _timestamp()
         with kb_ingest_lock(self.state_dir):
@@ -550,6 +552,8 @@ class DesktopImportStore:
                     now=now,
                     complete_job=self._complete_job_in,
                 )
+                if before_commit is not None:
+                    before_commit(connection, *result)
                 connection.commit()
             except BaseException:
                 connection.rollback()

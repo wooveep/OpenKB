@@ -127,9 +127,7 @@ class DesktopKnowledgeExportService:
                     projection_snapshot = stage_okf_projection_in(connection, self._kb_dir)
                     projection_staging = projection_snapshot
                     sources = _source_assets_in(connection)
-                    mappings = tuple(
-                        mapping for source in sources for mapping in source.mappings
-                    )
+                    mappings = tuple(mapping for source in sources for mapping in source.mappings)
                     images = _source_images_in(connection, mappings)
                     shutil.copytree(projection_snapshot, staging, dirs_exist_ok=True)
                     raw_resources: dict[str, str] = {}
@@ -177,9 +175,7 @@ class DesktopKnowledgeExportService:
             if staging is not None and staging.exists():
                 shutil.rmtree(staging, ignore_errors=True)
 
-    def _copy_raw_assets(
-        self, staging: Path, sources: tuple[_SourceAsset, ...]
-    ) -> dict[str, str]:
+    def _copy_raw_assets(self, staging: Path, sources: tuple[_SourceAsset, ...]) -> dict[str, str]:
         resources: dict[str, str] = {}
         for source in sources:
             if source.availability != "available":
@@ -221,6 +217,30 @@ class DesktopKnowledgeExportService:
 def _source_assets_in(connection: sqlite3.Connection) -> tuple[_SourceAsset, ...]:
     rows = connection.execute(
         """
+        WITH generated_ranked AS (
+            SELECT raw.asset_sha256, raw.raw_path, raw.original_name, raw.media_type,
+                documents.display_name, documents.source_format, documents.availability,
+                sources.source_id, sources.evidence_id, documents.document_id,
+                blocks.locator_json,
+                ROW_NUMBER() OVER (
+                    PARTITION BY items.generation_id, items.item_key, sources.source_id
+                    ORDER BY (documents.availability = 'available') DESC,
+                        documents.created_at, documents.document_id, occurrences.ordinal
+                ) AS occurrence_rank
+            FROM knowledge_generation_state AS state
+            JOIN knowledge_generation_items AS items
+                ON items.generation_id = state.current_generation_id
+            JOIN knowledge_generation_item_sources AS sources
+                ON sources.generation_id = items.generation_id
+                AND sources.item_key = items.item_key
+            JOIN evidence_occurrences AS occurrences
+                ON occurrences.evidence_id = sources.evidence_id
+            JOIN source_documents AS documents
+                ON documents.document_id = occurrences.document_id
+            JOIN raw_assets AS raw ON raw.asset_sha256 = documents.asset_sha256
+            JOIN document_ir_blocks AS blocks ON blocks.block_id = occurrences.block_id
+            WHERE state.singleton = 1 AND items.provenance_state = 'source_backed'
+        )
         SELECT raw.asset_sha256, raw.raw_path, raw.original_name, raw.media_type,
             documents.display_name, documents.source_format, documents.availability,
             sources.source_id, sources.evidence_id, sources.document_id,
@@ -233,15 +253,17 @@ def _source_assets_in(connection: sqlite3.Connection) -> tuple[_SourceAsset, ...
         JOIN source_documents AS documents ON documents.document_id = sources.document_id
         JOIN raw_assets AS raw ON raw.asset_sha256 = documents.asset_sha256
         WHERE pages.lifecycle_state IN ('stable', 'deprecated')
-        ORDER BY raw.asset_sha256, sources.source_id, sources.evidence_id
+        UNION ALL
+        SELECT asset_sha256, raw_path, original_name, media_type, display_name,
+            source_format, availability, source_id, evidence_id, document_id, locator_json
+        FROM generated_ranked WHERE occurrence_rank = 1
+        ORDER BY asset_sha256, source_id, evidence_id
         """
     ).fetchall()
     grouped: dict[str, tuple[tuple[object, ...], list[_SourceMapping]]] = {}
     for row in rows:
         asset_sha256 = str(row[0])
-        mapping = _SourceMapping(
-            str(row[7]), str(row[8]), str(row[9]), _json_object(str(row[10]))
-        )
+        mapping = _SourceMapping(str(row[7]), str(row[8]), str(row[9]), _json_object(str(row[10])))
         if asset_sha256 not in grouped:
             grouped[asset_sha256] = (row, [mapping])
         elif mapping not in grouped[asset_sha256][1]:

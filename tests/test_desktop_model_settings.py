@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sqlite3
 import zipfile
 
@@ -10,6 +11,7 @@ from openkb import desktop_model_transport
 from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
 from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
 from openkb.desktop_import import DesktopTextImportService
+from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelRequest
 from openkb.desktop_model_settings import (
     read_desktop_model_settings,
@@ -117,7 +119,17 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
     source.write_text("private-source-content", encoding="utf-8")
     DesktopTextImportService(
         kb_dir,
-        model_gateway=DesktopModelGateway(lambda _request, _timeout: "private-model-response"),
+        model_gateway=DesktopModelGateway(
+            lambda _request, _timeout: json.dumps(
+                {
+                    "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+                    "analysis_scope": "document",
+                    "document_description": "private-model-response",
+                    "concepts": [],
+                    "entities": [],
+                }
+            )
+        ),
     ).import_text(source)
 
     destination = tmp_path / "desktop-diagnostics.zip"

@@ -187,6 +187,8 @@ class DesktopModelGateway:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         initial_timeout_seconds: float = INITIAL_RESPONSE_TIMEOUT_SECONDS,
+        provider_name: str = "scripted",
+        model_name: str = "scripted",
     ) -> None:
         if not 0 < initial_timeout_seconds <= MODEL_CALL_DEADLINE_SECONDS:
             raise ValueError("Initial model response timeout must be between 0 and 60 seconds.")
@@ -194,6 +196,18 @@ class DesktopModelGateway:
         self._clock = clock
         self._sleep = sleep
         self._initial_timeout_seconds = initial_timeout_seconds
+        self._provider_name = provider_name
+        self._model_name = model_name
+
+    @property
+    def provider_name(self) -> str:
+        """Return non-secret provider metadata suitable for Stage checkpoints."""
+        return self._provider_name
+
+    @property
+    def model_name(self) -> str:
+        """Return non-secret model metadata suitable for Stage checkpoints."""
+        return self._model_name
 
     def analyze(
         self,

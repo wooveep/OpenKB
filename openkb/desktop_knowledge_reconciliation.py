@@ -11,7 +11,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -23,15 +22,15 @@ from openkb.desktop_knowledge_generations import (
     KnowledgeGenerationChange,
     current_generation_id_in,
     knowledge_content_sha256,
-    normalized_knowledge_content,
+    publish_additional_generation_sources_in,
     publish_generation_changes_in,
 )
+from openkb.desktop_knowledge_metadata import encode_knowledge_labels
 from openkb.desktop_knowledge_reconciliation_changes import (
     IncomingKnowledgeChange,
     extract_incoming_knowledge_changes,
+    knowledge_relationship,
 )
-from openkb.desktop_knowledge_sources import strip_knowledge_source_markers
-from openkb.desktop_knowledge_titles import normalize_knowledge_title
 from openkb.desktop_okf_projection import (
     activate_okf_projection,
     discard_okf_projection_staging,
@@ -39,7 +38,6 @@ from openkb.desktop_okf_projection import (
 )
 from openkb.desktop_workspace import desktop_state_database_path
 
-_FIELD_PATTERN = re.compile(r"^\s*(?:[-*+]\s*)?(?P<key>[^:：\n]{1,80})\s*[:：]\s*\S")
 logger = logging.getLogger(__name__)
 
 
@@ -78,35 +76,38 @@ class DesktopKnowledgeReconciliationService:
         calls this method.  As with D3 candidate recording, this method only owns
         a short SQLite transaction and must not acquire that file lock again.
         """
+        return self._record_changes(document_id, blocks=blocks)
+
+    def record_analysis_changes(
+        self, document_id: str, changes: tuple[IncomingKnowledgeChange, ...]
+    ) -> tuple[DesktopKnowledgeReconciliationConflict, ...]:
+        """Reconcile a validated Knowledge Analysis result after document publication."""
+        return self._record_changes(document_id, changes=changes)
+
+    def record_analysis_changes_in(
+        self,
+        connection: sqlite3.Connection,
+        document_id: str,
+        changes: tuple[IncomingKnowledgeChange, ...],
+    ) -> tuple[DesktopKnowledgeReconciliationConflict, ...]:
+        """Apply structured analysis inside the document publication transaction."""
+        return self._record_changes_in(connection, document_id, changes=changes)
+
+    def _record_changes(
+        self,
+        document_id: str,
+        *,
+        blocks: tuple[DocumentIRBlock, ...] | None = None,
+        changes: tuple[IncomingKnowledgeChange, ...] | None = None,
+    ) -> tuple[DesktopKnowledgeReconciliationConflict, ...]:
         connection = self._connect()
         staged_projection: Path | None = None
-        conflicts: list[DesktopKnowledgeReconciliationConflict] = []
         try:
             with connection:
-                document = connection.execute(
-                    """
-                    SELECT display_name FROM source_documents
-                    WHERE document_id = ? AND availability = 'available'
-                    """,
-                    (document_id,),
-                ).fetchone()
-                if document is None:
-                    return ()
-                document_name = str(document[0])
                 initial_generation_id = current_generation_id_in(connection)
-                for parsed_change in extract_incoming_knowledge_changes(blocks, document_name):
-                    current_generation_id = current_generation_id_in(connection)
-                    for change in _resolved_kinds_in(
-                        connection, current_generation_id, parsed_change
-                    ):
-                        conflict = self._reconcile_change_in(
-                            connection,
-                            document_id=document_id,
-                            document_name=document_name,
-                            change=change,
-                        )
-                        if conflict is not None:
-                            conflicts.append(conflict)
+                conflicts = self._record_changes_in(
+                    connection, document_id, blocks=blocks, changes=changes
+                )
                 if current_generation_id_in(connection) != initial_generation_id:
                     staged_projection = stage_okf_projection_in(connection, self._kb_dir)
         except BaseException:
@@ -122,6 +123,41 @@ class DesktopKnowledgeReconciliationService:
                 logger.exception("Could not activate auto-reconciled OKF projection.")
             finally:
                 discard_okf_projection_staging(staged_projection)
+        return tuple(conflicts)
+
+    def _record_changes_in(
+        self,
+        connection: sqlite3.Connection,
+        document_id: str,
+        *,
+        blocks: tuple[DocumentIRBlock, ...] | None = None,
+        changes: tuple[IncomingKnowledgeChange, ...] | None = None,
+    ) -> tuple[DesktopKnowledgeReconciliationConflict, ...]:
+        document = connection.execute(
+            """SELECT display_name FROM source_documents
+            WHERE document_id = ? AND availability = 'available'""",
+            (document_id,),
+        ).fetchone()
+        if document is None:
+            return ()
+        document_name = str(document[0])
+        incoming = (
+            changes
+            if changes is not None
+            else extract_incoming_knowledge_changes(blocks or (), document_name)
+        )
+        conflicts: list[DesktopKnowledgeReconciliationConflict] = []
+        for parsed_change in incoming:
+            generation_id = current_generation_id_in(connection)
+            for change in _resolved_kinds_in(connection, generation_id, parsed_change):
+                conflict = self._reconcile_change_in(
+                    connection,
+                    document_id=document_id,
+                    document_name=document_name,
+                    change=change,
+                )
+                if conflict is not None:
+                    conflicts.append(conflict)
         return tuple(conflicts)
 
     def list_conflicts(self) -> tuple[DesktopKnowledgeReconciliationConflict, ...]:
@@ -240,10 +276,10 @@ class DesktopKnowledgeReconciliationService:
         working_draft = _working_draft_in(connection, change)
         now = _timestamp()
         if working_draft is not None:
-            published_relationship = _relationship(
+            published_relationship = knowledge_relationship(
                 change.content_markdown, working_draft.published.content_markdown
             )
-            draft_relationship = _relationship(
+            draft_relationship = knowledge_relationship(
                 change.content_markdown, working_draft.content_markdown
             )
             classification = published_relationship
@@ -287,7 +323,7 @@ class DesktopKnowledgeReconciliationService:
 
         baselines = _baselines_in(connection, current_generation_id, change)
         relationships = tuple(
-            _relationship(change.content_markdown, baseline.content_markdown)
+            knowledge_relationship(change.content_markdown, baseline.content_markdown)
             for baseline in baselines
         )
         conflict_index = next(
@@ -349,6 +385,20 @@ class DesktopKnowledgeReconciliationService:
                 now=now,
             )
         else:
+            duplicate_generation_id = current_generation_id
+            if (
+                current_generation_id is not None
+                and change.sources
+                and any(baseline.kind == "published_generation" for baseline in baselines)
+            ):
+                duplicate_generation_id = publish_additional_generation_sources_in(
+                    connection,
+                    current_generation_id=current_generation_id,
+                    kind=change.kind,
+                    normalized_title=change.normalized_title,
+                    sources=change.sources,
+                    now=now,
+                )
             _insert_candidate_in(
                 connection,
                 document_id=document_id,
@@ -357,7 +407,7 @@ class DesktopKnowledgeReconciliationService:
                 status="auto_reconciled",
                 baseline=baseline_for_record,
                 working_draft=None,
-                observed_generation_id=current_generation_id,
+                observed_generation_id=duplicate_generation_id,
                 now=now,
             )
         return None
@@ -371,60 +421,6 @@ class DesktopKnowledgeReconciliationService:
         connection = sqlite3.connect(self._database_path)
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
-
-
-def _normalized_content(value: str) -> str:
-    return normalized_knowledge_content(strip_knowledge_source_markers(value))
-
-
-def _content_units(value: str) -> frozenset[str]:
-    return frozenset(part for part in _normalized_content(value).split("\n") if part)
-
-
-def _relationship(incoming: str, baseline: str) -> str:
-    if _normalized_content(incoming) == _normalized_content(baseline):
-        return "duplicate"
-    incoming_units = _content_units(incoming)
-    baseline_units = _content_units(baseline)
-    if incoming_units and incoming_units <= baseline_units:
-        return "duplicate"
-    if _is_compatible_structured_addition(incoming_units, baseline_units):
-        return "compatible_addition"
-    return "conflict"
-
-
-def _is_compatible_structured_addition(
-    incoming_units: frozenset[str], baseline_units: frozenset[str]
-) -> bool:
-    """Accept only additions that introduce new explicit fields.
-
-    A line-set superset alone cannot distinguish an added fact from a
-    contradictory replacement.  Requiring every retained and added statement
-    to use a ``Field: value`` form makes the automatic path intentionally
-    narrow: an existing field with a different value, or arbitrary prose,
-    remains a reviewable conflict.
-    """
-    if not baseline_units or not baseline_units < incoming_units:
-        return False
-    baseline_fields = tuple(_field_key(unit) for unit in baseline_units)
-    additional_fields = tuple(_field_key(unit) for unit in incoming_units - baseline_units)
-    if any(field is None for field in (*baseline_fields, *additional_fields)):
-        return False
-    known_fields = tuple(str(field) for field in baseline_fields)
-    added_fields = tuple(str(field) for field in additional_fields)
-    return (
-        len(set(known_fields)) == len(known_fields)
-        and len(set(added_fields)) == len(added_fields)
-        and all(field not in known_fields for field in added_fields)
-    )
-
-
-def _field_key(value: str) -> str | None:
-    match = _FIELD_PATTERN.match(value)
-    if match is None:
-        return None
-    key, _ = normalize_knowledge_title(str(match.group("key")))
-    return key or None
 
 
 def _resolved_kinds_in(
@@ -466,6 +462,11 @@ def _resolved_kinds_in(
             normalized_title=change.normalized_title,
             content_markdown=change.content_markdown,
             content_sha256=change.content_sha256,
+            entity_subtype=change.entity_subtype,
+            aliases=change.aliases,
+            tags=change.tags,
+            sources=change.sources,
+            analysis_provenance_json=change.analysis_provenance_json,
         )
         for kind in kinds
     )
@@ -490,9 +491,7 @@ def _baselines_in(
     ).fetchone()
     if user is not None:
         baselines.append(
-            _Baseline(
-                "user_revision", str(user[0]), str(user[1]), str(user[2]), str(user[3])
-            )
+            _Baseline("user_revision", str(user[0]), str(user[1]), str(user[2]), str(user[3]))
         )
     if generation_id is not None:
         published = connection.execute(
@@ -577,6 +576,11 @@ def _generation_change(
         normalized_title=change.normalized_title,
         content_markdown=change.content_markdown,
         content_sha256=change.content_sha256,
+        entity_subtype=change.entity_subtype,
+        aliases=change.aliases,
+        tags=change.tags,
+        sources=change.sources,
+        analysis_provenance_json=change.analysis_provenance_json,
     )
 
 
@@ -610,7 +614,25 @@ def _insert_candidate_in(
         ),
     ).fetchone()
     if existing is not None:
-        return str(existing[0])
+        candidate_id = str(existing[0])
+        connection.execute(
+            """
+            UPDATE knowledge_reconciliation_candidates
+            SET entity_subtype = ?, aliases_json = ?, tags_json = ?,
+                analysis_provenance_json = ?
+            WHERE candidate_id = ?
+            """,
+            (
+                change.entity_subtype,
+                encode_knowledge_labels(change.aliases),
+                encode_knowledge_labels(change.tags),
+                change.analysis_provenance_json,
+                candidate_id,
+            ),
+        )
+        if status == "pending_conflict":
+            _replace_candidate_sources_in(connection, candidate_id, change)
+        return candidate_id
     candidate_id = uuid.uuid4().hex
     source_block_id = change.source_block_id
     if source_block_id is not None:
@@ -630,12 +652,13 @@ def _insert_candidate_in(
         """
         INSERT INTO knowledge_reconciliation_candidates (
             candidate_id, document_id, source_block_id, kind, title, normalized_title,
-            content_markdown, content_sha256, classification, status,
+            content_markdown, content_sha256, entity_subtype, classification, status,
+            aliases_json, tags_json, analysis_provenance_json,
             baseline_kind, baseline_id, baseline_title, baseline_content_markdown,
             observed_generation_id, reconciliation_mode, target_page_id,
             working_draft_title, working_draft_content_markdown,
             working_draft_content_sha256, working_draft_updated_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             candidate_id,
@@ -646,17 +669,19 @@ def _insert_candidate_in(
             change.normalized_title,
             change.content_markdown,
             change.content_sha256,
+            change.entity_subtype,
             classification,
             status,
+            encode_knowledge_labels(change.aliases),
+            encode_knowledge_labels(change.tags),
+            change.analysis_provenance_json,
             baseline.kind if baseline is not None else None,
             baseline.baseline_id if baseline is not None else None,
             baseline.title if baseline is not None else None,
             baseline.content_markdown if baseline is not None else None,
             observed_generation_id,
             "three_way" if working_draft is not None else "two_way",
-            baseline.page_id
-            if baseline is not None and status == "pending_conflict"
-            else None,
+            baseline.page_id if baseline is not None and status == "pending_conflict" else None,
             working_draft.title if working_draft is not None else None,
             working_draft.content_markdown if working_draft is not None else None,
             working_draft.content_sha256 if working_draft is not None else None,
@@ -664,7 +689,31 @@ def _insert_candidate_in(
             now,
         ),
     )
+    if status == "pending_conflict":
+        _replace_candidate_sources_in(connection, candidate_id, change)
     return candidate_id
+
+
+def _replace_candidate_sources_in(
+    connection: sqlite3.Connection,
+    candidate_id: str,
+    change: IncomingKnowledgeChange,
+) -> None:
+    connection.execute(
+        "DELETE FROM knowledge_reconciliation_candidate_sources WHERE candidate_id = ?",
+        (candidate_id,),
+    )
+    connection.executemany(
+        """
+        INSERT INTO knowledge_reconciliation_candidate_sources (
+            candidate_id, source_id, evidence_id, claim_text
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (
+            (candidate_id, source.source_id, source.evidence_id, source.claim_text)
+            for source in change.sources
+        ),
+    )
 
 
 def _conflict_from_row(row: tuple[object, ...]) -> DesktopKnowledgeReconciliationConflict:
@@ -702,9 +751,7 @@ def _stored_block(row: tuple[object, ...]) -> DocumentIRBlock:
         or not all(isinstance(value, str) for value in heading_path)
         or not isinstance(locator, dict)
     ):
-        raise DesktopImportError(
-            "desktop_import_state_invalid", "Stored Document IR is invalid."
-        )
+        raise DesktopImportError("desktop_import_state_invalid", "Stored Document IR is invalid.")
     return DocumentIRBlock(
         block_id=str(row[0]),
         ordinal=int(str(row[1])),

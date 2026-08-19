@@ -209,7 +209,12 @@ export class MemoryKnowledgePageStore {
       claimText: claim,
       availability: "available",
     }
-    const sourceMap = [entry, ...current.workingDraft.sourceMap.filter((item) => item.sourceId !== sourceId)]
+    const sourceMap = [
+      entry,
+      ...current.workingDraft.sourceMap.filter(
+        (item) => item.sourceId !== sourceId || item.claimText !== claim,
+      ),
+    ]
     const publicationDiagnostics = diagnostics(contentMarkdown, sourceMap)
     const next: DesktopKnowledgePage = {
       ...current,

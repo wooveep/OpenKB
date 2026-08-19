@@ -13,6 +13,7 @@ import yaml
 
 from openkb.config import LlmCredentialBundle, resolve_credential_bundle
 from openkb.desktop_import_types import DesktopRecoveryOverride
+from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SYSTEM_PROMPT
 from openkb.desktop_model_gateway import (
     INITIAL_RESPONSE_TIMEOUT_SECONDS,
     DesktopModelCancelledError,
@@ -90,6 +91,8 @@ def desktop_model_gateway_for_settings(
             _DesktopModelConcurrencyGate(settings.max_concurrent_model_calls),
         ),
         initial_timeout_seconds=settings.initial_timeout_seconds,
+        provider_name=settings.provider,
+        model_name=settings.model,
     )
 
 
@@ -121,6 +124,14 @@ def _gateway_for(
             _concurrency_gate_for(kb_dir, concurrency),
         ),
         initial_timeout_seconds=timeout,
+        provider_name=settings.provider if settings is not None else "custom",
+        model_name=(
+            override.model
+            if override is not None and override.model is not None
+            else settings.model
+            if settings is not None
+            else str(model or "")
+        ),
     )
 
 
@@ -301,6 +312,11 @@ class DesktopLiteLLMTransport:
 
 
 def _messages_for(request: DesktopModelRequest) -> list[dict[str, str]]:
+    if request.operation == "knowledge_analysis":
+        return [
+            {"role": "system", "content": KNOWLEDGE_ANALYSIS_SYSTEM_PROMPT},
+            {"role": "user", "content": request.content},
+        ]
     if request.operation == "retrieval_plan":
         return [
             {

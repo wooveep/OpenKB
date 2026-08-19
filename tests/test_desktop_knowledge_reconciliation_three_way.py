@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -9,11 +10,13 @@ import pytest
 
 from openkb.desktop_import_artifacts import DesktopImportError
 from openkb.desktop_import_runner import DesktopTextImportService
+from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
 from openkb.desktop_knowledge_reconciliation_resolution import (
     DesktopKnowledgeReconciliationResolutionService,
 )
+from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 from openkb.desktop_workspace_migrations import (
     KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS,
@@ -175,7 +178,17 @@ def test_v24_migration_reclassifies_a_generation_candidate_with_a_draft(
             """,
             auto_candidate,
         )
+        connection.execute("DROP TABLE knowledge_generation_item_sources")
+        connection.execute("DROP TABLE knowledge_reconciliation_candidate_sources")
+        connection.execute(
+            "ALTER TABLE knowledge_generation_items DROP COLUMN analysis_provenance_json"
+        )
+        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN aliases_json")
+        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN tags_json")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN entity_subtype")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 28")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 27")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 26")
         connection.execute("DELETE FROM schema_migrations WHERE version = 25")
         connection.execute("DELETE FROM schema_migrations WHERE version = 24")
 
@@ -465,3 +478,70 @@ def test_apply_incoming_rejects_conflicting_same_anchor_insertions(
     preserved = pages.get_page(page.page_id).working_draft
     assert preserved is not None
     assert preserved.content_markdown == draft_content
+
+
+def test_manual_merge_keeps_only_the_exact_claim_source_mapping(tmp_path: Path) -> None:
+    kb_dir = _knowledge_base(tmp_path)
+    pages = DesktopKnowledgePageService(kb_dir)
+    page = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Shared source",
+        content_markdown="[Overview](overview.md)",
+    )
+    pages.publish(page.page_id)
+    pages.save_draft(
+        page_id=page.page_id,
+        kind="concept",
+        title="Shared source",
+        content_markdown="[Overview](overview.md)",
+    )
+    source = tmp_path / "shared-source.txt"
+    source.write_text("One source supports two facts.", encoding="utf-8")
+
+    def analyze(request, _timeout_seconds):
+        evidence_id = str(json.loads(request.content)["evidence"][0]["evidence_id"])
+        return json.dumps(
+            {
+                "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+                "analysis_scope": "document",
+                "document_description": "Two claims share one source.",
+                "concepts": [
+                    {
+                        "title": "Shared source",
+                        "aliases": [],
+                        "tags": [],
+                        "claims": [
+                            {
+                                "text": "Claim one.",
+                                "source_evidence_ids": [evidence_id],
+                            },
+                            {
+                                "text": "Claim two.",
+                                "source_evidence_ids": [evidence_id],
+                            },
+                        ],
+                    }
+                ],
+                "entities": [],
+            }
+        )
+
+    DesktopTextImportService(
+        kb_dir, model_gateway=DesktopModelGateway(analyze)
+    ).import_text(source)
+    conflict = DesktopKnowledgeReconciliationService(kb_dir).list_conflicts()[0]
+    first_claim = conflict.content_markdown.split("\n\n")[0]
+    resolution = DesktopKnowledgeReconciliationResolutionService(kb_dir)
+    resolution.stage_decisions(
+        (conflict.candidate_id,), "manual_merge", manual_merge_content=first_claim
+    )
+
+    resolution.commit_staged_decisions()
+
+    resolved = pages.get_page(page.page_id)
+    assert resolved.working_draft is not None
+    assert resolved.working_draft.content_markdown == first_claim
+    assert [source.claim_text for source in resolved.working_draft.source_map] == ["Claim one."]
+    assert resolved.publication_diagnostics == ()
+    pages.publish(page.page_id)

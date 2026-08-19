@@ -127,60 +127,6 @@ def search_available_sources_in(
     return tuple(_candidate_from_row(row) for row in rows)
 
 
-def knowledge_source_rows_in(
-    connection: sqlite3.Connection, terms: tuple[str, ...], *, limit: int
-) -> list[tuple[object, ...]]:
-    """Rank mapped original Evidence by published Knowledge Claim wording."""
-    if not terms:
-        return []
-    score_parts: list[str] = []
-    parameters: list[object] = []
-    for term in terms:
-        score_parts.extend(
-            (
-                "CASE WHEN instr(lower(pages.title), ?) > 0 THEN 2 ELSE 0 END",
-                "CASE WHEN instr(lower(sources.claim_text), ?) > 0 THEN 1 ELSE 0 END",
-            )
-        )
-        parameters.extend((term, term))
-    return connection.execute(
-        f"""
-        {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
-        SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
-        FROM (
-            SELECT available_evidence_occurrences.evidence_id,
-                available_evidence_occurrences.document_id,
-                available_evidence_occurrences.display_name,
-                available_evidence_occurrences.heading_path,
-                available_evidence_occurrences.locator_json,
-                available_evidence_occurrences.text,
-                ({" + ".join(score_parts)}) AS channel_score,
-                pages.page_id, available_evidence_occurrences.ordinal,
-                CASE
-                    WHEN pages.stale_after IS NOT NULL
-                        AND julianday(pages.stale_after) <= julianday('now') THEN 0
-                    ELSE 1
-                END AS lifecycle_tier,
-                CASE WHEN verifications.verification_id IS NULL THEN 0 ELSE 1 END AS trust_tier
-            FROM knowledge_pages AS pages
-            JOIN knowledge_page_revision_sources AS sources
-                ON sources.revision_id = pages.current_revision_id
-            LEFT JOIN knowledge_page_verifications AS verifications
-                ON verifications.revision_id = sources.revision_id
-                AND verifications.invalidated_at IS NULL
-            JOIN available_evidence_occurrences
-                ON available_evidence_occurrences.evidence_id = sources.evidence_id
-            WHERE available_evidence_occurrences.occurrence_rank = 1
-                AND pages.lifecycle_state = 'stable'
-        )
-        WHERE channel_score > 0
-        ORDER BY channel_score DESC, lifecycle_tier DESC, trust_tier DESC, page_id, ordinal
-        LIMIT ?
-        """,
-        (*parameters, limit),
-    ).fetchall()
-
-
 def bind_source_in(
     connection: sqlite3.Connection,
     *,
@@ -202,7 +148,7 @@ def bind_source_in(
     source = _available_source_in(connection, evidence_id)
     source_id = stable_source_id(evidence_id)
     marker = f"[^{source_id}]"
-    if marker not in content:
+    if not knowledge_source_matches_claim(content, source_id, claim):
         content = content.replace(claim, f"{claim}{marker}", 1)
     connection.execute(
         """
@@ -217,8 +163,7 @@ def bind_source_in(
             page_id, source_id, evidence_id, claim_text, document_id, document_name,
             section, locator_json, excerpt, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(page_id, source_id) DO UPDATE SET
-            claim_text = excluded.claim_text,
+        ON CONFLICT(page_id, source_id, claim_text) DO UPDATE SET
             document_id = excluded.document_id,
             document_name = excluded.document_name,
             section = excluded.section,
@@ -323,7 +268,10 @@ def publication_diagnostics_in(
     marker_occurrences = _SOURCE_MARKER.findall(content_markdown)
     markers = set(marker_occurrences)
     mapped = {source.source_id for source in source_map}
-    sources_by_id = {source.source_id: source for source in source_map}
+    sources_by_id = {
+        source_id: tuple(source for source in source_map if source.source_id == source_id)
+        for source_id in mapped
+    }
     claim_units = _claim_units(content_markdown)
     diagnostics: list[DesktopKnowledgePublicationDiagnostic] = []
     for source_id in sorted(mapped - markers):
@@ -371,13 +319,13 @@ def publication_diagnostics_in(
         matching_claims = [
             claim for claim in claim_units if source_id in _SOURCE_MARKER.findall(claim)
         ]
-        expected = _normalized_claim_text(sources_by_id[source_id].claim_text)
-        actual = (
-            _normalized_claim_text(_SOURCE_MARKER.sub("", matching_claims[0]))
-            if len(matching_claims) == 1
-            else ""
+        expected = sorted(
+            _normalized_claim_text(source.claim_text) for source in sources_by_id[source_id]
         )
-        if marker_occurrences.count(source_id) != 1 or actual != expected:
+        actual = sorted(
+            _normalized_claim_text(_SOURCE_MARKER.sub("", claim)) for claim in matching_claims
+        )
+        if marker_occurrences.count(source_id) != len(actual) or actual != expected:
             diagnostics.append(
                 DesktopKnowledgePublicationDiagnostic(
                     "knowledge_source_claim_mismatch",
@@ -406,19 +354,21 @@ def prune_obsolete_draft_sources_in(
     ).fetchall()
     if not rows:
         return
-    obsolete: list[tuple[str, str]] = []
+    obsolete: list[tuple[str, str, str]] = []
     for source_id_value, claim_text_value in rows:
         source_id = str(source_id_value)
         claim_text = str(claim_text_value)
-        was_valid = previous_content_markdown is None or _source_matches_claim(
+        was_valid = previous_content_markdown is None or knowledge_source_matches_claim(
             previous_content_markdown, source_id, claim_text
         )
-        if was_valid and not _source_matches_claim(content_markdown, source_id, claim_text):
-            obsolete.append((page_id, source_id))
+        if was_valid and not knowledge_source_matches_claim(
+            content_markdown, source_id, claim_text
+        ):
+            obsolete.append((page_id, source_id, claim_text))
     connection.executemany(
         """
         DELETE FROM knowledge_page_working_sources
-        WHERE page_id = ? AND source_id = ?
+        WHERE page_id = ? AND source_id = ? AND claim_text = ?
         """,
         obsolete,
     )
@@ -429,17 +379,39 @@ def strip_knowledge_source_markers(value: str) -> str:
     return _SOURCE_MARKER.sub("", value)
 
 
-def _source_matches_claim(content_markdown: str, source_id: str, claim_text: str) -> bool:
-    marker_occurrences = _SOURCE_MARKER.findall(content_markdown)
+def merge_claim_source_markers(
+    content_markdown: str, sources: tuple[object, ...]
+) -> str:
+    """Attach new stable markers to their exact factual claim units."""
+    parts = content_markdown.split("\n\n")
+    for source in sources:
+        source_id = str(getattr(source, "source_id"))
+        marker = f"[^{source_id}]"
+        expected = _normalized_claim_text(str(getattr(source, "claim_text")))
+        matches = [
+            index
+            for index, part in enumerate(parts)
+            if _normalized_claim_text(strip_knowledge_source_markers(part)) == expected
+        ]
+        if len(matches) == 1 and marker not in parts[matches[0]]:
+            parts[matches[0]] = f"{parts[matches[0]]}{marker}"
+    return "\n\n".join(parts)
+
+
+def knowledge_source_matches_claim(
+    content_markdown: str, source_id: str, claim_text: str
+) -> bool:
+    """Return whether one exact factual claim retains its stable source marker."""
     matching_claims = [
         claim
         for claim in _claim_units(content_markdown)
         if source_id in _SOURCE_MARKER.findall(claim)
     ]
-    if marker_occurrences.count(source_id) != 1 or len(matching_claims) != 1:
-        return False
-    actual = _normalized_claim_text(strip_knowledge_source_markers(matching_claims[0]))
-    return actual == _normalized_claim_text(claim_text)
+    expected = _normalized_claim_text(claim_text)
+    return any(
+        _normalized_claim_text(strip_knowledge_source_markers(claim)) == expected
+        for claim in matching_claims
+    )
 
 
 def stable_source_id(evidence_id: str) -> str:

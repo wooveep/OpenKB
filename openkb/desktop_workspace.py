@@ -18,6 +18,12 @@ from openkb.desktop_import_deduplication import (
     backfill_deduplication_metadata,
     deduplication_backfill_needed,
 )
+from openkb.desktop_knowledge_analysis_migrations import (
+    KNOWLEDGE_ANALYSIS_METADATA_MIGRATION_STATEMENTS,
+    KNOWLEDGE_ANALYSIS_MIGRATION_STATEMENTS,
+    KNOWLEDGE_ANALYSIS_PROVENANCE_MIGRATION_STATEMENTS,
+    register_knowledge_analysis_migration_functions,
+)
 from openkb.desktop_knowledge_lifecycle_migrations import (
     KNOWLEDGE_LIFECYCLE_MIGRATION_STATEMENTS,
 )
@@ -170,9 +176,7 @@ class DesktopKnowledgeBaseActivation:
         }
 
 
-# Each migration is intentionally additive and recorded before a newer command
-# can use its tables.  Later tickets append entries here rather than modifying
-# an already shipped migration.
+# Migrations are additive and recorded before a newer command can use their tables.
 _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (
         1,
@@ -384,9 +388,10 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (23, KNOWLEDGE_LIFECYCLE_MIGRATION_STATEMENTS),
     (24, THREE_WAY_KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS),
     (25, OKF_PROJECTION_MIGRATION_STATEMENTS),
+    (26, KNOWLEDGE_ANALYSIS_MIGRATION_STATEMENTS),
+    (27, KNOWLEDGE_ANALYSIS_PROVENANCE_MIGRATION_STATEMENTS),
+    (28, KNOWLEDGE_ANALYSIS_METADATA_MIGRATION_STATEMENTS),
 )
-
-
 class DesktopKnowledgeBaseRuntime:
     """Own the one active Desktop Knowledge Base for one Python Engine."""
 
@@ -514,6 +519,7 @@ def _display_name(name: str | None, kb_dir: Path) -> str:
 def _connect(database_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path)
     connection.execute("PRAGMA foreign_keys = ON")
+    register_knowledge_analysis_migration_functions(connection)
     return connection
 
 

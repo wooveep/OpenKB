@@ -55,11 +55,13 @@ class DesktopImportError(RuntimeError):
 
     code: str
     suggested_action: str | None
+    attempt_count: int
 
     def __init__(self, code: str, message: str, *, suggested_action: str | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.suggested_action = suggested_action
+        self.attempt_count = 1
 
 
 @dataclass(frozen=True)

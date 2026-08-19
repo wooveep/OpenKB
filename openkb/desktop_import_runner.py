@@ -13,7 +13,8 @@ from typing import Callable
 
 from portalocker import LockException
 
-from openkb.desktop_document_parsers import analysis_text, parse_structured_document
+from openkb import __version__
+from openkb.desktop_document_parsers import parse_structured_document
 from openkb.desktop_document_versions import DesktopDocumentVersionService
 from openkb.desktop_import_artifacts import (
     DesktopImportError,
@@ -39,10 +40,26 @@ from openkb.desktop_import_quarantine import DesktopImportQuarantineStore
 from openkb.desktop_import_recovery import DesktopImportRecoveryStore
 from openkb.desktop_import_store import IMPORT_STAGES, DesktopImportStore, ImportJobState
 from openkb.desktop_import_types import (
+    DesktopImportedDocument,
     DesktopImportTask,
     DesktopRecoveryOverride,
     DesktopStageRun,
     DesktopTextImportResult,
+)
+from openkb.desktop_knowledge_analysis import (
+    KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
+    KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+    DesktopKnowledgeAnalysis,
+    knowledge_analysis_from_checkpoint,
+    knowledge_analysis_prompt,
+    knowledge_analysis_provenance_from_checkpoint,
+    knowledge_analysis_provenance_json,
+    parse_knowledge_analysis,
+)
+from openkb.desktop_knowledge_analysis_reuse import (
+    ReusableKnowledgeAnalysis,
+    canonical_analysis_changes_in,
+    load_reusable_knowledge_analysis,
 )
 from openkb.desktop_knowledge_graph import (
     record_graph_extraction_diagnostic,
@@ -56,6 +73,11 @@ from openkb.desktop_model_gateway import (
     DesktopModelRequest,
     DesktopModelResult,
 )
+from openkb.desktop_okf_projection import (
+    activate_okf_projection,
+    discard_okf_projection_staging,
+    stage_okf_projection_in,
+)
 from openkb.locks import kb_ingest_lock
 
 StageProgressCallback = Callable[[dict[str, object]], None]
@@ -63,6 +85,8 @@ _CONTROL_CODES = {"import_paused", "import_cancelled"}
 _DIRECT_QUARANTINE_CODES = {
     "legacy_office_parse_failed",
     "legacy_office_runtime_unavailable",
+    "model_configuration_invalid",
+    "model_response_invalid",
 }
 logger = logging.getLogger(__name__)
 
@@ -99,6 +123,7 @@ class DesktopTextImportService:
         on_stage_progress: StageProgressCallback | None = None,
         control: DesktopImportControl | None = None,
         model_gateway: DesktopModelGateway | None = None,
+        require_model_analysis: bool = False,
     ) -> None:
         self._store = DesktopImportStore(kb_dir, on_stage_progress=on_stage_progress)
         self._model_ledger = DesktopImportModelLedger(kb_dir)
@@ -108,6 +133,7 @@ class DesktopTextImportService:
         self._recovery = DesktopImportRecoveryStore(kb_dir, on_stage_progress=on_stage_progress)
         self._control = control or DesktopImportControl()
         self._model_gateway = model_gateway
+        self._require_model_analysis = require_model_analysis
 
     def import_text(self, source_path: Path) -> DesktopTextImportResult:
         """Create and execute a brand-new supported document Import Job."""
@@ -246,7 +272,7 @@ class DesktopTextImportService:
                     )
                     terminal_state_committed = True
                     self._record_document_version_candidates(document.document_id, blocks)
-                    self._record_knowledge_reconciliation(document.document_id, blocks)
+                    self._record_existing_knowledge_reconciliation(document.document_id)
                     return self._result(
                         state.job_id,
                         document.document_id,
@@ -268,6 +294,8 @@ class DesktopTextImportService:
                 evidence = evidence_from_checkpoint(self._checkpoint(state, "evidence"), blocks)
 
             stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
+            knowledge_analysis: DesktopKnowledgeAnalysis | None = None
+            analysis_provenance_json: str | None = None
             if not self._completed(stages, "model_analysis"):
                 active_stage = "model_analysis"
                 self._honor_control(state, active_stage)
@@ -277,6 +305,15 @@ class DesktopTextImportService:
                         raise DesktopImportError(
                             "recovery_model_not_configured",
                             "A configured model is required to resume model analysis.",
+                        )
+                    if self._require_model_analysis:
+                        raise DesktopImportError(
+                            "model_configuration_invalid",
+                            "Configure a model before importing new documents.",
+                            suggested_action=(
+                                "Configure the provider, API URL, API key, and model, "
+                                "then recover this document."
+                            ),
                         )
                     self._store.set_stage(
                         state,
@@ -289,7 +326,18 @@ class DesktopTextImportService:
                     result = self._analyze_document(
                         state,
                         active_stage,
-                        text if source_format == "txt" else analysis_text(blocks),
+                        knowledge_analysis_prompt(state.source.name, evidence),
+                    )
+                    try:
+                        knowledge_analysis = parse_knowledge_analysis(result.content)
+                    except DesktopImportError as error:
+                        error.attempt_count = result.attempt_count
+                        raise
+                    analysis_provenance_json = knowledge_analysis_provenance_json(
+                        provider=self._model_gateway.provider_name,
+                        model=self._model_gateway.model_name,
+                        prompt_digest=KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
+                        engine_version=__version__,
                     )
                     self._store.set_stage(
                         state,
@@ -297,31 +345,83 @@ class DesktopTextImportService:
                         "completed",
                         85,
                         checkpoint={
-                            "call_id": result.call_id,
-                            "attempt_count": result.attempt_count,
+                            "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+                            "analysis_scope": "document",
+                            "provider": self._model_gateway.provider_name,
+                            "model": self._model_gateway.model_name,
+                            "prompt_digest": KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
+                            "engine_version": __version__,
+                            "attempt_metadata": {
+                                "call_id": result.call_id,
+                                "attempt_count": result.attempt_count,
+                            },
                             "response_sha256": hashlib.sha256(
                                 result.content.encode("utf-8")
                             ).hexdigest(),
+                            "normalized_result": knowledge_analysis.as_dict(),
                         },
+                    )
+            else:
+                analysis_checkpoint = self._checkpoint(state, "model_analysis")
+                knowledge_analysis = knowledge_analysis_from_checkpoint(analysis_checkpoint)
+                if knowledge_analysis is not None:
+                    analysis_provenance_json = knowledge_analysis_provenance_from_checkpoint(
+                        analysis_checkpoint
                     )
 
             active_stage = "search"
             self._honor_control(state, active_stage)
             self._store.set_stage(state, active_stage, "running", 90)
-            document, deduplicated = self._store.publish_document(
-                state=state,
-                source=state.source,
-                document_id=uuid.uuid4().hex,
-                asset_sha256=asset_sha256,
-                raw_path=raw_path,
-                raw_size=len(raw_bytes),
-                source_format=source_format,
-                raw_media_type=source_media_type(source_format),
-                blocks=blocks,
-                evidence=evidence,
-                source_images=source_images,
-                normalized_body_sha256=normalized_body_hash,
-            )
+            staged_projection: Path | None = None
+
+            def apply_analysis_and_stage(
+                connection: sqlite3.Connection,
+                published: DesktopImportedDocument,
+                _deduplicated: bool,
+            ) -> None:
+                nonlocal staged_projection
+                assert knowledge_analysis is not None and analysis_provenance_json is not None
+                self._apply_knowledge_analysis_in(
+                    connection,
+                    published.document_id,
+                    knowledge_analysis,
+                    analysis_provenance_json,
+                    evidence,
+                )
+                staged_projection = stage_okf_projection_in(connection, self._store.kb_dir)
+
+            try:
+                document, deduplicated = self._store.publish_document(
+                    state=state,
+                    source=state.source,
+                    document_id=uuid.uuid4().hex,
+                    asset_sha256=asset_sha256,
+                    raw_path=raw_path,
+                    raw_size=len(raw_bytes),
+                    source_format=source_format,
+                    raw_media_type=source_media_type(source_format),
+                    blocks=blocks,
+                    evidence=evidence,
+                    source_images=source_images,
+                    normalized_body_sha256=normalized_body_hash,
+                    before_commit=(
+                        apply_analysis_and_stage
+                        if knowledge_analysis is not None
+                        and analysis_provenance_json is not None
+                        else None
+                    ),
+                )
+            except BaseException:
+                if staged_projection is not None:
+                    discard_okf_projection_staging(staged_projection)
+                raise
+            if staged_projection is not None:
+                try:
+                    activate_okf_projection(self._store.kb_dir, staged_projection)
+                except Exception:
+                    logger.exception("Could not activate Knowledge Analysis OKF projection.")
+                finally:
+                    discard_okf_projection_staging(staged_projection)
             terminal_state_committed = True
             self._store.emit_stage(
                 state,
@@ -331,7 +431,8 @@ class DesktopTextImportService:
                 document_id=document.document_id,
             )
             self._record_document_version_candidates(document.document_id, blocks)
-            self._record_knowledge_reconciliation(document.document_id, blocks)
+            if knowledge_analysis is None:
+                self._record_knowledge_reconciliation(document.document_id, blocks)
             return self._result(state.job_id, document.document_id, deduplicated=deduplicated)
         except _DuplicateImport as duplicate:
             self._record_existing_knowledge_reconciliation(duplicate.document_id)
@@ -374,6 +475,7 @@ class DesktopTextImportService:
                     reason=str(error),
                     suggested_action=error.suggested_action
                     or "Convert the document to DOCX or PPTX and import it again.",
+                    attempt_count=error.attempt_count,
                 )
                 self._recovery.mark_finished(state, "failed")
                 self._store.emit_stage(
@@ -424,7 +526,7 @@ class DesktopTextImportService:
             self._model_ledger.record_attempt(
                 job_id=state.job_id,
                 stage_run_id=state.stage_ids[stage],
-                operation="document_analysis",
+                operation="knowledge_analysis",
                 event=event,
             )
             self._store.emit_stage(
@@ -436,7 +538,7 @@ class DesktopTextImportService:
             )
 
         return self._model_gateway.analyze(
-            DesktopModelRequest("document_analysis", state.source.name, text),
+            DesktopModelRequest("knowledge_analysis", state.source.name, text),
             on_event=record_attempt,
         )
 
@@ -560,10 +662,36 @@ class DesktopTextImportService:
         except (DesktopImportError, OSError, sqlite3.Error, ValueError) as error:
             logger.warning("Could not reconcile imported knowledge for %s: %s", document_id, error)
 
+    def _apply_knowledge_analysis_in(
+        self,
+        connection: sqlite3.Connection,
+        document_id: str,
+        analysis: DesktopKnowledgeAnalysis,
+        analysis_provenance_json: str,
+        evidence: tuple[tuple[str, DocumentIRBlock], ...],
+    ) -> None:
+        """Atomically bind canonical Evidence and apply validated structured knowledge."""
+        changes = canonical_analysis_changes_in(
+            connection,
+            document_id,
+            ReusableKnowledgeAnalysis(analysis, analysis_provenance_json, evidence),
+        )
+        self._knowledge_reconciliation.record_analysis_changes_in(connection, document_id, changes)
+
     def _record_existing_knowledge_reconciliation(self, document_id: str) -> None:
-        """D0 reuse skips parsing but still applies the current Draft boundary."""
+        """Replay canonical structured analysis, falling back only for legacy imports."""
         try:
-            self._knowledge_reconciliation.record_existing_document_changes(document_id)
+            existing = load_reusable_knowledge_analysis(self._store.database_path, document_id)
+            if existing is None:
+                self._knowledge_reconciliation.record_existing_document_changes(document_id)
+                return
+            connection = sqlite3.connect(self._store.database_path)
+            connection.execute("PRAGMA foreign_keys = ON")
+            try:
+                changes = canonical_analysis_changes_in(connection, document_id, existing)
+            finally:
+                connection.close()
+            self._knowledge_reconciliation.record_analysis_changes(document_id, changes)
         except (DesktopImportError, OSError, sqlite3.Error, ValueError) as error:
             logger.warning(
                 "Could not reconcile reused imported knowledge for %s: %s", document_id, error

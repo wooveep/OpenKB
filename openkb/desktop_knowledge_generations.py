@@ -8,12 +8,23 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from openkb.desktop_knowledge_metadata import decode_knowledge_labels, encode_knowledge_labels
+from openkb.desktop_knowledge_sources import merge_claim_source_markers
 from openkb.desktop_okf_projection import (
     activate_okf_projection,
     discard_okf_projection_staging,
     materialize_okf_projection,
     stage_okf_projection_in,
 )
+
+
+@dataclass(frozen=True)
+class KnowledgeGenerationSource:
+    """One claim-to-Evidence mapping retained with an immutable generation item."""
+
+    source_id: str
+    evidence_id: str
+    claim_text: str
 
 
 @dataclass(frozen=True)
@@ -27,6 +38,10 @@ class KnowledgeGenerationChange:
     content_markdown: str
     content_sha256: str
     entity_subtype: str | None = None
+    aliases: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
+    sources: tuple[KnowledgeGenerationSource, ...] = ()
+    analysis_provenance_json: str | None = None
 
 
 def normalized_knowledge_content(value: str) -> str:
@@ -75,12 +90,24 @@ def publish_generation_changes_in(
             INSERT INTO knowledge_generation_items (
                 generation_id, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
-                provenance_state, entity_subtype
+                provenance_state, entity_subtype, aliases_json, tags_json,
+                analysis_provenance_json
             )
             SELECT ?, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
-                provenance_state, entity_subtype
+                provenance_state, entity_subtype, aliases_json, tags_json,
+                analysis_provenance_json
             FROM knowledge_generation_items WHERE generation_id = ?
+            """,
+            (generation_id, current_generation_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_generation_item_sources (
+                generation_id, item_key, source_id, evidence_id, claim_text
+            )
+            SELECT ?, item_key, source_id, evidence_id, claim_text
+            FROM knowledge_generation_item_sources WHERE generation_id = ?
             """,
             (generation_id, current_generation_id),
         )
@@ -95,6 +122,72 @@ def publish_generation_changes_in(
         (generation_id,),
     )
     return generation_id
+
+
+def publish_additional_generation_sources_in(
+    connection: sqlite3.Connection,
+    *,
+    current_generation_id: int,
+    kind: str,
+    normalized_title: str,
+    sources: tuple[KnowledgeGenerationSource, ...],
+    now: str,
+) -> int:
+    """Add independent claim support without counting D2 occurrences twice."""
+    row = connection.execute(
+        """
+        SELECT item_key, title, content_markdown, content_sha256, source_document_id,
+            entity_subtype, aliases_json, tags_json, analysis_provenance_json
+        FROM knowledge_generation_items
+        WHERE generation_id = ? AND kind = ? AND normalized_title = ?
+        """,
+        (current_generation_id, kind, normalized_title),
+    ).fetchone()
+    if row is None:
+        return current_generation_id
+    existing_rows = connection.execute(
+        """
+        SELECT source_id, evidence_id, claim_text
+        FROM knowledge_generation_item_sources
+        WHERE generation_id = ? AND item_key = ?
+        ORDER BY source_id
+        """,
+        (current_generation_id, str(row[0])),
+    ).fetchall()
+    merged = {
+        (str(value[1]), normalized_knowledge_content(str(value[2]))): KnowledgeGenerationSource(
+            str(value[0]), str(value[1]), str(value[2])
+        )
+        for value in existing_rows
+    }
+    previous_count = len(merged)
+    for source in sources:
+        key = source.evidence_id, normalized_knowledge_content(source.claim_text)
+        if key not in merged:
+            merged[key] = source
+    if len(merged) == previous_count:
+        return current_generation_id
+    content_markdown = merge_claim_source_markers(str(row[2]), sources)
+    return publish_generation_changes_in(
+        connection,
+        current_generation_id=current_generation_id,
+        changes=(
+            KnowledgeGenerationChange(
+                document_id=str(row[4]),
+                kind=kind,
+                title=str(row[1]),
+                normalized_title=normalized_title,
+                content_markdown=content_markdown,
+                content_sha256=knowledge_content_sha256(content_markdown),
+                entity_subtype=str(row[5]) if row[5] is not None else None,
+                aliases=decode_knowledge_labels(row[6]),
+                tags=decode_knowledge_labels(row[7]),
+                sources=tuple(merged.values()),
+                analysis_provenance_json=str(row[8]) if row[8] is not None else None,
+            ),
+        ),
+        now=now,
+    )
 
 
 def materialize_current_generation(kb_dir: Path) -> None:
@@ -144,17 +237,19 @@ def _upsert_generation_change_in(
         (generation_id, change.kind, change.normalized_title),
     ).fetchone()
     if existing is None:
+        item_key = uuid.uuid4().hex
         connection.execute(
             """
             INSERT INTO knowledge_generation_items (
                 generation_id, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
-                provenance_state, entity_subtype
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'legacy_unmapped', ?)
+                provenance_state, entity_subtype, aliases_json, tags_json,
+                analysis_provenance_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 generation_id,
-                uuid.uuid4().hex,
+                item_key,
                 change.kind,
                 change.title,
                 change.normalized_title,
@@ -162,26 +257,54 @@ def _upsert_generation_change_in(
                 change.content_sha256,
                 change.document_id,
                 now,
+                "source_backed" if change.sources else "legacy_unmapped",
                 change.entity_subtype,
+                encode_knowledge_labels(change.aliases),
+                encode_knowledge_labels(change.tags),
+                change.analysis_provenance_json,
             ),
         )
-        return
-    connection.execute(
+    else:
+        item_key = str(existing[0])
+        connection.execute(
+            """
+            UPDATE knowledge_generation_items
+            SET title = ?, content_markdown = ?, content_sha256 = ?,
+                source_document_id = ?, created_at = ?, provenance_state = ?,
+                entity_subtype = ?, aliases_json = ?, tags_json = ?,
+                analysis_provenance_json = ?
+            WHERE generation_id = ? AND item_key = ?
+            """,
+            (
+                change.title,
+                change.content_markdown,
+                change.content_sha256,
+                change.document_id,
+                now,
+                "source_backed" if change.sources else "legacy_unmapped",
+                change.entity_subtype,
+                encode_knowledge_labels(change.aliases),
+                encode_knowledge_labels(change.tags),
+                change.analysis_provenance_json,
+                generation_id,
+                item_key,
+            ),
+        )
+        connection.execute(
+            """
+            DELETE FROM knowledge_generation_item_sources
+            WHERE generation_id = ? AND item_key = ?
+            """,
+            (generation_id, item_key),
+        )
+    connection.executemany(
         """
-        UPDATE knowledge_generation_items
-        SET title = ?, content_markdown = ?, content_sha256 = ?,
-            source_document_id = ?, created_at = ?, provenance_state = 'legacy_unmapped',
-            entity_subtype = COALESCE(?, entity_subtype)
-        WHERE generation_id = ? AND item_key = ?
+        INSERT INTO knowledge_generation_item_sources (
+            generation_id, item_key, source_id, evidence_id, claim_text
+        ) VALUES (?, ?, ?, ?, ?)
         """,
         (
-            change.title,
-            change.content_markdown,
-            change.content_sha256,
-            change.document_id,
-            now,
-            change.entity_subtype,
-            generation_id,
-            str(existing[0]),
+            (generation_id, item_key, source.source_id, source.evidence_id, source.claim_text)
+            for source in change.sources
         ),
     )

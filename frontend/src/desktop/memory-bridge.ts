@@ -739,7 +739,7 @@ export class MemoryDesktopBridge extends MemoryKnowledgePageBridge implements De
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 25,
+      schemaVersion: 26,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []

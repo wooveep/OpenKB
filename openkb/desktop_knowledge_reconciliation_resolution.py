@@ -14,8 +14,10 @@ from openkb.desktop_import_types import (
     DesktopKnowledgeReconciliationCommit,
     DesktopKnowledgeReconciliationConflict,
 )
+from openkb.desktop_knowledge_analysis_sources import bind_generation_sources_to_draft_in
 from openkb.desktop_knowledge_generations import (
     KnowledgeGenerationChange,
+    KnowledgeGenerationSource,
     activate_generation_projection,
     current_generation_id_in,
     discard_generation_projection_staging,
@@ -23,6 +25,7 @@ from openkb.desktop_knowledge_generations import (
     publish_generation_changes_in,
     stage_generation_projection_in,
 )
+from openkb.desktop_knowledge_metadata import decode_knowledge_labels
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
 from openkb.desktop_knowledge_sources import prune_obsolete_draft_sources_in
 from openkb.desktop_knowledge_three_way_merge import apply_incoming_to_draft
@@ -46,6 +49,11 @@ class _StagedCandidate:
     normalized_title: str
     content_markdown: str
     content_sha256: str
+    entity_subtype: str | None
+    aliases: tuple[str, ...]
+    tags: tuple[str, ...]
+    analysis_provenance_json: str | None
+    sources: tuple[KnowledgeGenerationSource, ...]
     baseline_kind: str
     baseline_id: str
     baseline_content_markdown: str
@@ -176,6 +184,13 @@ class DesktopKnowledgeReconciliationResolutionService:
                                 else None
                             ),
                         )
+                        bind_generation_sources_to_draft_in(
+                            connection,
+                            candidate.target_page_id,
+                            result,
+                            candidate.sources,
+                            created_at=now,
+                        )
                 for candidate in candidates:
                     resolution_id = uuid.uuid4().hex
                     connection.execute(
@@ -205,11 +220,22 @@ class DesktopKnowledgeReconciliationResolutionService:
                     )
                     connection.execute(
                         """
+                        DELETE FROM knowledge_reconciliation_candidate_sources
+                        WHERE candidate_id = ?
+                        """,
+                        (candidate.candidate_id,),
+                    )
+                    connection.execute(
+                        """
                         UPDATE knowledge_reconciliation_candidates
                         SET staged_decision = NULL,
                             resolution_status = ?,
                             resolved_at = ?,
                             content_markdown = '',
+                            entity_subtype = NULL,
+                            aliases_json = '[]',
+                            tags_json = '[]',
+                            analysis_provenance_json = NULL,
                             baseline_content_markdown = NULL,
                             working_draft_content_markdown = NULL,
                             working_draft_content_sha256 = NULL,
@@ -408,6 +434,8 @@ def _staged_candidates_in(connection: sqlite3.Connection) -> tuple[_StagedCandid
         SELECT candidates.candidate_id, candidates.document_id, documents.availability,
             candidates.kind, candidates.title, candidates.normalized_title,
             candidates.content_markdown, candidates.content_sha256,
+            candidates.entity_subtype, candidates.aliases_json, candidates.tags_json,
+            candidates.analysis_provenance_json,
             candidates.baseline_kind, candidates.baseline_id,
             candidates.baseline_content_markdown, candidates.reconciliation_mode,
             candidates.target_page_id, candidates.working_draft_title,
@@ -434,17 +462,22 @@ def _staged_candidates_in(connection: sqlite3.Connection) -> tuple[_StagedCandid
             normalized_title=str(row[5]),
             content_markdown=str(row[6]),
             content_sha256=str(row[7]),
-            baseline_kind=str(row[8]),
-            baseline_id=str(row[9]),
-            baseline_content_markdown=str(row[10]),
-            reconciliation_mode=str(row[11]),
-            target_page_id=str(row[12]) if row[12] is not None else None,
-            working_draft_title=str(row[13]) if row[13] is not None else None,
-            working_draft_content_markdown=str(row[14]) if row[14] is not None else None,
-            working_draft_content_sha256=str(row[15]) if row[15] is not None else None,
-            working_draft_updated_at=str(row[16]) if row[16] is not None else None,
-            decision=str(row[17]),
-            staged_content_markdown=str(row[18]) if row[18] is not None else None,
+            entity_subtype=str(row[8]) if row[8] is not None else None,
+            aliases=decode_knowledge_labels(row[9]),
+            tags=decode_knowledge_labels(row[10]),
+            analysis_provenance_json=str(row[11]) if row[11] is not None else None,
+            sources=_candidate_sources_in(connection, str(row[0])),
+            baseline_kind=str(row[12]),
+            baseline_id=str(row[13]),
+            baseline_content_markdown=str(row[14]),
+            reconciliation_mode=str(row[15]),
+            target_page_id=str(row[16]) if row[16] is not None else None,
+            working_draft_title=str(row[17]) if row[17] is not None else None,
+            working_draft_content_markdown=str(row[18]) if row[18] is not None else None,
+            working_draft_content_sha256=str(row[19]) if row[19] is not None else None,
+            working_draft_updated_at=str(row[20]) if row[20] is not None else None,
+            decision=str(row[21]),
+            staged_content_markdown=str(row[22]) if row[22] is not None else None,
         )
         if candidate.decision not in _DECISIONS:
             raise DesktopImportError(
@@ -468,6 +501,20 @@ def _staged_candidates_in(connection: sqlite3.Connection) -> tuple[_StagedCandid
             )
         values.append(candidate)
     return tuple(values)
+
+
+def _candidate_sources_in(
+    connection: sqlite3.Connection, candidate_id: str
+) -> tuple[KnowledgeGenerationSource, ...]:
+    rows = connection.execute(
+        """
+        SELECT source_id, evidence_id, claim_text
+        FROM knowledge_reconciliation_candidate_sources
+        WHERE candidate_id = ? ORDER BY source_id
+        """,
+        (candidate_id,),
+    ).fetchall()
+    return tuple(KnowledgeGenerationSource(str(row[0]), str(row[1]), str(row[2])) for row in rows)
 
 
 def _require_distinct_publications(candidates: tuple[_StagedCandidate, ...]) -> None:
@@ -658,6 +705,11 @@ def _generation_change(candidate: _StagedCandidate) -> KnowledgeGenerationChange
         normalized_title=candidate.normalized_title,
         content_markdown=candidate.content_markdown,
         content_sha256=candidate.content_sha256,
+        entity_subtype=candidate.entity_subtype,
+        aliases=candidate.aliases,
+        tags=candidate.tags,
+        sources=candidate.sources,
+        analysis_provenance_json=candidate.analysis_provenance_json,
     )
 
 

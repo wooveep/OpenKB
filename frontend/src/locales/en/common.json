@@ -126,7 +126,7 @@
         "raw_asset": "Saving raw asset",
         "document_ir": "Building document structure",
         "evidence": "Preparing evidence",
-        "model_analysis": "Analyzing with model",
+        "model_analysis": "Knowledge Analysis",
         "search": "Publishing full-text search"
       },
       "importStatuses": {
@@ -145,7 +145,7 @@
       "deduplicationD0": "Reused the identical raw file.",
       "deduplicationD1": "Reused processing for the identical normalized body.",
       "deduplicationD2": "Reused {{count}} duplicate evidence fragments.",
-      "modelCallStatus": "Model analysis · {{status}} · attempt {{attempt}} of {{maximum}}",
+      "modelCallStatus": "Knowledge Analysis · {{status}} · attempt {{attempt}} of {{maximum}}",
       "modelCallBudget": "This request may wait up to {{timeout}}s ({{remaining}}s call budget remaining).",
       "modelCallStates": {
         "running": "Waiting for response",

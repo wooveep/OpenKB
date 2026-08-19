@@ -25,10 +25,8 @@ from openkb.desktop_knowledge_graph import (
     local_graph_evidence_ids,
     record_query_diagnostic,
 )
-from openkb.desktop_knowledge_sources import (
-    AVAILABLE_EVIDENCE_OCCURRENCES_CTE,
-    knowledge_source_rows_in,
-)
+from openkb.desktop_knowledge_source_retrieval import knowledge_source_rows_in
+from openkb.desktop_knowledge_sources import AVAILABLE_EVIDENCE_OCCURRENCES_CTE
 from openkb.desktop_lexical import cjk_bigrams, is_cjk_text
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,

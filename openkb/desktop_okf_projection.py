@@ -14,6 +14,7 @@ from typing import Literal
 
 import yaml
 
+from openkb.desktop_knowledge_metadata import decode_knowledge_labels
 from openkb.desktop_okf_compatibility import lint_okf_projection
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import atomic_write_text, kb_ingest_lock
@@ -67,6 +68,9 @@ class _ProjectionDocument:
     verified_by: str | None = None
     verified_at: str | None = None
     entity_subtype: str | None = None
+    aliases: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
+    analysis: dict[str, str] | None = None
     sources: tuple[_ProjectionSource, ...] = ()
 
     @property
@@ -204,13 +208,22 @@ def _revision_sources_in(
 ) -> tuple[_ProjectionSource, ...]:
     rows = connection.execute(
         """
-        SELECT sources.source_id, sources.evidence_id, sources.document_id,
-            sources.document_name, sources.section, sources.locator_json,
-            documents.asset_sha256, documents.availability
-        FROM knowledge_page_revision_sources AS sources
-        JOIN source_documents AS documents ON documents.document_id = sources.document_id
-        WHERE sources.revision_id = ?
-        ORDER BY sources.source_id
+        WITH ranked AS (
+            SELECT sources.source_id, sources.evidence_id, sources.document_id,
+                sources.document_name, sources.section, sources.locator_json,
+                documents.asset_sha256, documents.availability,
+                ROW_NUMBER() OVER (
+                    PARTITION BY sources.source_id
+                    ORDER BY (documents.availability = 'available') DESC,
+                        documents.created_at, documents.document_id
+                ) AS source_rank
+            FROM knowledge_page_revision_sources AS sources
+            JOIN source_documents AS documents ON documents.document_id = sources.document_id
+            WHERE sources.revision_id = ?
+        )
+        SELECT source_id, evidence_id, document_id, document_name, section,
+            locator_json, asset_sha256, availability
+        FROM ranked WHERE source_rank = 1 ORDER BY source_id
         """,
         (revision_id,),
     ).fetchall()
@@ -234,7 +247,8 @@ def _current_generation_in(connection: sqlite3.Connection) -> list[_ProjectionDo
         """
         SELECT state.current_generation_id, items.item_key, items.kind, items.title,
             items.content_markdown, items.source_document_id, items.created_at,
-            items.provenance_state, items.entity_subtype
+            items.provenance_state, items.entity_subtype, items.aliases_json,
+            items.tags_json, items.analysis_provenance_json
         FROM knowledge_generation_state AS state
         JOIN knowledge_generation_items AS items
             ON items.generation_id = state.current_generation_id
@@ -255,9 +269,56 @@ def _current_generation_in(connection: sqlite3.Connection) -> list[_ProjectionDo
             status="stable",
             authority="published_generation",
             entity_subtype=str(row[8]) if row[8] is not None else None,
+            aliases=decode_knowledge_labels(row[9]),
+            tags=decode_knowledge_labels(row[10]),
+            analysis=_analysis_metadata(row[11]),
+            sources=_generation_sources_in(connection, int(row[0]), str(row[1])),
         )
         for row in rows
     ]
+
+
+def _generation_sources_in(
+    connection: sqlite3.Connection, generation_id: int, item_key: str
+) -> tuple[_ProjectionSource, ...]:
+    rows = connection.execute(
+        """
+        WITH ranked AS (
+            SELECT sources.source_id, sources.evidence_id, documents.document_id,
+                documents.display_name, blocks.heading_path, blocks.locator_json,
+                documents.asset_sha256, documents.availability,
+                ROW_NUMBER() OVER (
+                    PARTITION BY sources.source_id
+                    ORDER BY (documents.availability = 'available') DESC,
+                        documents.created_at, documents.document_id, occurrences.ordinal
+                ) AS occurrence_rank
+            FROM knowledge_generation_item_sources AS sources
+            JOIN evidence_occurrences AS occurrences
+                ON occurrences.evidence_id = sources.evidence_id
+            JOIN source_documents AS documents
+                ON documents.document_id = occurrences.document_id
+            JOIN document_ir_blocks AS blocks ON blocks.block_id = occurrences.block_id
+            WHERE sources.generation_id = ? AND sources.item_key = ?
+        )
+        SELECT source_id, evidence_id, document_id, display_name, heading_path,
+            locator_json, asset_sha256, availability
+        FROM ranked WHERE occurrence_rank = 1 ORDER BY source_id
+        """,
+        (generation_id, item_key),
+    ).fetchall()
+    return tuple(
+        _ProjectionSource(
+            source_id=str(row[0]),
+            evidence_id=str(row[1]),
+            document_id=str(row[2]),
+            document_name=str(row[3]),
+            section=_heading_section(str(row[4])),
+            locator=_locator(str(row[5])),
+            asset_sha256=str(row[6]),
+            availability=str(row[7]),
+        )
+        for row in rows
+    )
 
 
 def _render_bundle_in(
@@ -288,6 +349,8 @@ def _render_document(document: _ProjectionDocument) -> str:
             "by": (
                 "openkb-user-revision/1"
                 if document.authority == "user_revision"
+                else f"openkb-knowledge-analysis/{document.analysis['schema_version']}"
+                if document.analysis is not None
                 else "openkb-knowledge-reconciliation/1"
             ),
             "at": document.published_at,
@@ -295,6 +358,8 @@ def _render_document(document: _ProjectionDocument) -> str:
     }
     if document.stale_after is not None:
         metadata["stale_after"] = document.stale_after
+    if document.tags:
+        metadata["tags"] = list(document.tags)
     if document.verified_by is not None and document.verified_at is not None:
         metadata["verified"] = [
             {"by": _okf_human_actor(document.verified_by), "at": document.verified_at}
@@ -316,6 +381,10 @@ def _render_document(document: _ProjectionDocument) -> str:
                 "origin_document_id": document.source_document_id,
             }
         )
+        if document.analysis is not None:
+            extension["analysis"] = document.analysis
+        if document.aliases:
+            extension["aliases"] = list(document.aliases)
     metadata["openkb"] = extension
     body = document.content_markdown.rstrip("\n")
     footnotes = "\n".join(
@@ -323,6 +392,21 @@ def _render_document(document: _ProjectionDocument) -> str:
     )
     suffix = f"\n\n{footnotes}" if footnotes else ""
     return f"{_yaml_frontmatter(metadata)}\n# {document.title}\n\n{body}{suffix}\n"
+
+
+def _analysis_metadata(value: object) -> dict[str, str] | None:
+    if value is None:
+        return None
+    try:
+        payload = json.loads(str(value))
+    except json.JSONDecodeError:
+        return None
+    fields = ("schema_version", "provider", "model", "prompt_digest", "engine_version")
+    if not isinstance(payload, dict) or not all(
+        isinstance(payload.get(field), str) and payload[field] for field in fields
+    ):
+        return None
+    return {field: str(payload[field]) for field in fields}
 
 
 def _source_metadata(source: _ProjectionSource) -> dict[str, object]:
@@ -477,6 +561,16 @@ def _locator(value: str) -> dict[str, object]:
     except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _heading_section(value: str) -> str:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(parsed, list):
+        return ""
+    return " / ".join(str(item) for item in parsed if isinstance(item, str))
 
 
 def _link_label(value: str) -> str:

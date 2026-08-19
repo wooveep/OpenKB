@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import struct
 import threading
 import time
@@ -20,9 +21,22 @@ from openkb.desktop_engine import (
 )
 from openkb.desktop_import import DesktopImportControl, DesktopImportError, DesktopTextImportService
 from openkb.desktop_import_store import DesktopImportStore
+from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+
+
+def _empty_knowledge_analysis() -> str:
+    return json.dumps(
+        {
+            "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+            "analysis_scope": "document",
+            "document_description": "No durable knowledge candidates.",
+            "concepts": [],
+            "entities": [],
+        }
+    )
 
 
 class FragmentedBytesIO(io.BytesIO):
@@ -262,7 +276,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 25,
+            "schema_version": 28,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -382,7 +396,7 @@ def test_completed_batch_document_remains_visible_while_the_next_job_runs(tmp_pa
         if request.document_name == "second.txt":
             second_started.set()
             assert release_second.wait(timeout=1)
-        return "Analysis complete."
+        return _empty_knowledge_analysis()
 
     server = DesktopEngineServer(
         io.BytesIO(),
@@ -475,7 +489,12 @@ def test_engine_imports_txt_and_emits_durable_stage_progress(tmp_path):
     output = RequestResponseOutput(completed, "import")
 
     DesktopEngineServer(
-        WaitForResponseBytesIO(incoming, completed), output, workspace=workspace
+        WaitForResponseBytesIO(incoming, completed),
+        output,
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(
+            lambda *_args: _empty_knowledge_analysis()
+        ),
     ).serve()
 
     frames = _decode_frames(output.getvalue())
@@ -549,6 +568,41 @@ def test_engine_uses_the_configured_model_gateway_for_imports(tmp_path):
     assert history["jobs"][0]["quarantine"]["error_code"] == "model_timeout"
 
 
+def test_engine_quarantines_new_import_when_model_is_not_configured(tmp_path):
+    """The Workbench cannot bypass its mandatory pre-publication analysis stage."""
+    desktop_kb = tmp_path / "desktop-kb"
+    source = tmp_path / "unconfigured.txt"
+    source.write_text("This document needs Knowledge Analysis.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(desktop_kb)
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir, _override: None,
+    )
+    server._handshake_complete = True
+
+    with pytest.raises(DesktopImportError) as error:
+        server._dispatch(
+            DesktopRequest(
+                request_id="import",
+                method="workbench.import_text_document",
+                params={"source_path": str(source)},
+            ),
+            cancel_event=None,
+        )
+
+    assert error.value.code == "model_configuration_invalid"
+    history = server._dispatch(
+        DesktopRequest(request_id="history", method="workbench.import_jobs", params={}),
+        cancel_event=None,
+    )
+    assert history["jobs"][0]["job"]["status"] == "quarantined"
+    assert history["jobs"][0]["quarantine"]["error_code"] == "model_configuration_invalid"
+    assert history["jobs"][0]["document"] is None
+
+
 def test_engine_recovers_a_quarantined_import_with_a_run_scoped_override(tmp_path):
     """The Bridge forwards a recovery override only to the selected recovery run."""
     desktop_kb = tmp_path / "desktop-kb"
@@ -562,7 +616,7 @@ def test_engine_recovers_a_quarantined_import_with_a_run_scoped_override(tmp_pat
         overrides.append(override)
         if override is None:
             return DesktopModelGateway(lambda *_args: (_ for _ in ()).throw(TimeoutError()))
-        return DesktopModelGateway(lambda *_args: "Recovered")
+        return DesktopModelGateway(lambda *_args: _empty_knowledge_analysis())
 
     server = DesktopEngineServer(
         io.BytesIO(),
@@ -636,7 +690,19 @@ def test_open_starts_recovery_from_the_latest_verified_checkpoint(tmp_path):
             "raw_size": len(source_bytes),
         },
     )
-    server = DesktopEngineServer(io.BytesIO(), io.BytesIO())
+    analysis_calls = 0
+
+    def analyze(_request, _timeout_seconds):
+        nonlocal analysis_calls
+        if _request.operation == "knowledge_analysis":
+            analysis_calls += 1
+        return _empty_knowledge_analysis()
+
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(analyze),
+    )
     server._handshake_complete = True
 
     server._dispatch(
@@ -654,6 +720,7 @@ def test_open_starts_recovery_from_the_latest_verified_checkpoint(tmp_path):
             break
         time.sleep(0.01)
     assert DesktopTextImportService(desktop_kb).task(state.job_id).job.status == "completed"
+    assert analysis_calls == 1
 
 
 def test_engine_signals_an_active_import_without_waiting_for_workspace_lock():
