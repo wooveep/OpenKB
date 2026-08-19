@@ -47,6 +47,8 @@ def dispatch_knowledge_page_request(
         server._begin_workspace_mutation(request, cancel_event)
         if request.method == "workbench.publish_knowledge_page":
             return service.publish(_required_string_param(request, "page_id")).as_dict()
+        if request.method == "workbench.verify_knowledge_page":
+            return service.verify(_required_string_param(request, "page_id")).as_dict()
         if request.method == "workbench.bind_knowledge_page_source":
             return service.bind_source(
                 _required_string_param(request, "page_id"),

@@ -1,4 +1,4 @@
-import { BookMarked, FilePlus2, Link2, Loader2, Save, Search, Upload } from "lucide-react"
+import { BookMarked, FilePlus2, Link2, Loader2, Save, Search, ShieldCheck, Upload } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import MarkdownView from "@/components/MarkdownView"
@@ -14,6 +14,7 @@ import type {
   DesktopKnowledgeProvenanceState,
   DesktopKnowledgePageSummary,
   DesktopKnowledgePublicationDiagnostic,
+  DesktopKnowledgeVerificationStatus,
   DesktopKnowledgeSourceCandidate,
   DesktopKnowledgeSourceMapEntry,
 } from "./contracts"
@@ -25,6 +26,7 @@ type KnowledgePageEditor = {
   contentMarkdown: string
   publicationState: DesktopKnowledgePagePublicationState
   provenanceState: DesktopKnowledgeProvenanceState
+  verification: DesktopKnowledgeVerificationStatus
   publishedRevisionNumber: number | null
   sourceMap: DesktopKnowledgeSourceMapEntry[]
   publicationDiagnostics: DesktopKnowledgePublicationDiagnostic[]
@@ -40,6 +42,14 @@ function newEditor(kind: DesktopKnowledgePageKind): KnowledgePageEditor {
     contentMarkdown: "",
     publicationState: "draft",
     provenanceState: "structural",
+    verification: {
+      state: "unverified",
+      canVerify: false,
+      reason: "publish_required",
+      actor: null,
+      verifiedAt: null,
+      revisionId: null,
+    },
     publishedRevisionNumber: null,
     sourceMap: [],
     publicationDiagnostics: [],
@@ -55,6 +65,7 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
   const [loading, setLoading] = useState(true)
   const [loadingPage, setLoadingPage] = useState(false)
   const [publishing, setPublishing] = useState(false)
+  const [verifying, setVerifying] = useState(false)
   const [saveState, setSaveState] = useState<DraftSaveState>("unsaved")
   const [error, setError] = useState<string | null>(null)
   const [editTick, setEditTick] = useState(0)
@@ -219,7 +230,15 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
   }, [queueDraftSave])
 
   const updateEditor = (change: Partial<KnowledgePageEditor>) => {
-    const next = { ...editorRef.current, ...change }
+    const next = {
+      ...editorRef.current,
+      ...change,
+      verification: {
+        ...editorRef.current.verification,
+        canVerify: false,
+        reason: "working_draft_not_verifiable" as const,
+      },
+    }
     editorRef.current = next
     dirtyRef.current = true
     editVersionRef.current += 1
@@ -307,6 +326,25 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
     }
   }
 
+  const verifyPage = async () => {
+    const pageId = pageIdRef.current
+    if (!pageId || !editorRef.current.verification.canVerify) return
+    setVerifying(true)
+    setError(null)
+    try {
+      const page = await bridge.verifyKnowledgePage(
+        pageId,
+        nextDesktopRequestId("knowledge-page-verification"),
+      )
+      applyServerPage(page)
+      updatePageSummary(page)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setVerifying(false)
+    }
+  }
+
   const renderPageList = (kind: DesktopKnowledgePageKind) => {
     const group = pages.filter((page) => page.kind === kind)
     return (
@@ -341,7 +379,7 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
     )
   }
 
-  const busy = loadingPage || publishing || bindingSource || saveState === "saving"
+  const busy = loadingPage || publishing || verifying || bindingSource || saveState === "saving"
   const canPublish = Boolean(editor.pageId || editor.title.trim())
 
   return (
@@ -387,6 +425,19 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
               <p className="mt-1 text-sm text-muted-foreground">
                 {statusText(t, editor, saveState)}
               </p>
+              <p className="mt-1 text-xs font-medium text-muted-foreground">
+                {t(`desktop.knowledgeBases.knowledgePages.verification.state.${editor.verification.state}`)}
+                {editor.verification.actor === "local_user" && editor.verification.verifiedAt
+                  ? ` · ${t("desktop.knowledgeBases.knowledgePages.verification.reviewedByLocal", {
+                    time: new Date(editor.verification.verifiedAt).toLocaleString(),
+                  })}`
+                  : ""}
+              </p>
+              {editor.verification.reason ? (
+                <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
+                  {t(`desktop.knowledgeBases.knowledgePages.verification.reason.${editor.verification.reason}`)}
+                </p>
+              ) : null}
             </div>
             <div className="flex flex-wrap gap-2">
               <Button variant="outline" disabled={busy || !editor.title.trim()} onClick={() => void flushDraft()}>
@@ -396,6 +447,14 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
               <Button disabled={busy || !canPublish} onClick={() => void publishPage()}>
                 {publishing ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
                 {t("desktop.knowledgeBases.knowledgePages.publish")}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={busy || !editor.verification.canVerify}
+                onClick={() => void verifyPage()}
+              >
+                {verifying ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
+                {t("desktop.knowledgeBases.knowledgePages.verification.verify")}
               </Button>
             </div>
           </div>
@@ -554,6 +613,7 @@ function editorFromPage(page: DesktopKnowledgePage): KnowledgePageEditor {
     contentMarkdown: editable?.contentMarkdown ?? "",
     publicationState: page.publicationState,
     provenanceState: editable?.provenanceState ?? "structural",
+    verification: page.verification,
     publishedRevisionNumber: page.publishedRevisionNumber,
     sourceMap: editable?.sourceMap ?? [],
     publicationDiagnostics: page.publicationDiagnostics,

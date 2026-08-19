@@ -14,6 +14,7 @@ from openkb.desktop_knowledge_pages import (
     DesktopKnowledgePageError,
     DesktopKnowledgePageService,
 )
+from openkb.desktop_knowledge_sources import knowledge_source_rows_in
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
@@ -122,13 +123,14 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
     now = "2026-08-19T00:00:00+00:00"
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE knowledge_page_verifications")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_revision_sources")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_working_sources")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_ui_state")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_working_drafts")
         connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
-        connection.execute("DELETE FROM schema_migrations WHERE version IN (19, 20, 21)")
+        connection.execute("DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22)")
         connection.execute(
             """
             INSERT INTO knowledge_pages (
@@ -157,6 +159,12 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
     assert migrated.published_revision.content_markdown == "Legacy published content."
     assert migrated.published_revision.source_map == ()
     assert migrated.published_revision.provenance_state == "legacy_unmapped"
+    assert migrated.verification.state == "unverified"
+    assert migrated.verification.reason == "legacy_unmapped_not_verifiable"
+    assert migrated.verification.can_verify is False
+    with pytest.raises(DesktopKnowledgePageError) as verification_error:
+        pages.verify(page_id)
+    assert verification_error.value.code == "knowledge_verification_legacy_unmapped"
     assert migrated.working_draft is None
     pages.materialize_current_pages()
     projection = (kb_dir / migrated.materialized_path).read_text(encoding="utf-8")
@@ -187,9 +195,11 @@ def test_v20_source_map_migrates_as_source_backed_without_rewriting_the_revision
 
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE knowledge_page_verifications")
         connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
         connection.execute("DELETE FROM schema_migrations WHERE version = 21")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 22")
         connection.commit()
 
     DesktopKnowledgeBaseRuntime().open(kb_dir)
@@ -289,6 +299,134 @@ def test_one_source_backed_claim_routes_only_to_its_available_original_evidence(
         )
     unavailable_pack = DesktopEvidenceRetriever(kb_dir).retrieve("Which analysis retries happen?")
     assert source_entry.evidence_id not in {item.evidence_id for item in unavailable_pack.evidence}
+
+
+def test_human_verification_binds_the_current_revision_and_is_not_inherited(tmp_path):
+    """Verify is explicit, revision-bound, and never applies to a Working Draft."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "verification.md"
+    source.write_text("# Policy\n\nThe recovery window is sixty seconds.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+    pages = DesktopKnowledgePageService(kb_dir)
+    candidate = pages.search_sources("recovery window")[0]
+    claim = "Recovery has a bounded logical-call window."
+    draft = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Recovery verification",
+        content_markdown=claim,
+    )
+    pages.bind_source(draft.page_id, claim, candidate.evidence_id)
+    published = pages.publish(draft.page_id)
+
+    assert published.verification.state == "unverified"
+    assert published.verification.reason == "not_verified"
+    assert published.verification.can_verify is True
+    verified = pages.verify(draft.page_id)
+    assert verified.verification.state == "human_reviewed"
+    assert verified.verification.actor == "local_user"
+    assert verified.verification.verified_at is not None
+    assert verified.verification.revision_id is not None
+    first_revision_id = verified.verification.revision_id
+
+    pending = pages.save_draft(
+        page_id=draft.page_id,
+        kind="concept",
+        title="Recovery verification",
+        content_markdown=verified.published_revision.content_markdown,
+    )
+    assert pending.verification.state == "human_reviewed"
+    assert pending.verification.reason == "working_draft_not_verifiable"
+    assert pending.verification.can_verify is False
+    with pytest.raises(DesktopKnowledgePageError) as draft_error:
+        pages.verify(draft.page_id)
+    assert draft_error.value.code == "knowledge_verification_requires_current_publication"
+
+    republished = pages.publish(draft.page_id)
+    assert republished.verification.state == "unverified"
+    assert republished.verification.reason == "revision_changed"
+    assert republished.verification.can_verify is True
+    assert republished.verification.revision_id is None
+    reverified = pages.verify(draft.page_id)
+    assert reverified.verification.revision_id != first_revision_id
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        rows = connection.execute(
+            """
+            SELECT actor, verification_kind, revision_id, invalidated_at
+            FROM knowledge_page_verifications ORDER BY verified_at
+            """
+        ).fetchall()
+    assert rows == [
+        ("local_user", "human_reviewed", first_revision_id, None),
+        ("local_user", "human_reviewed", reverified.verification.revision_id, None),
+    ]
+
+
+def test_verification_rechecks_the_publication_gate_and_trust_only_breaks_score_ties(tmp_path):
+    """Unavailable evidence blocks Verify; review cannot outrank stronger relevance."""
+    kb_dir = tmp_path / "desktop-kb"
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_text("# First\n\nAlpha support for the routing policy.", encoding="utf-8")
+    second.write_text("# Second\n\nBeta support for the routing policy.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    first_import = DesktopTextImportService(kb_dir).import_text(first)
+    DesktopTextImportService(kb_dir).import_text(second)
+    pages = DesktopKnowledgePageService(kb_dir)
+    first_source = next(
+        item for item in pages.search_sources("Alpha support") if "Alpha" in item.excerpt
+    )
+    second_source = next(
+        item for item in pages.search_sources("Beta support") if "Beta" in item.excerpt
+    )
+
+    first_claim = "Priority routing policy uses the first source."
+    first_page = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Priority routing policy",
+        content_markdown=first_claim,
+    )
+    pages.bind_source(first_page.page_id, first_claim, first_source.evidence_id)
+    pages.publish(first_page.page_id)
+
+    second_claim = "Routing policy uses an independently reviewed source."
+    second_page = pages.save_draft(
+        page_id=None,
+        kind="entity",
+        title="Reviewed route",
+        content_markdown=second_claim,
+    )
+    pages.bind_source(second_page.page_id, second_claim, second_source.evidence_id)
+    pages.publish(second_page.page_id)
+    pages.verify(second_page.page_id)
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        ranked = knowledge_source_rows_in(connection, ("priority", "routing", "policy"), limit=8)
+        tied = knowledge_source_rows_in(connection, ("uses",), limit=8)
+    assert [str(row[0]) for row in ranked[:2]] == [
+        first_source.evidence_id,
+        second_source.evidence_id,
+    ]
+    assert [str(row[0]) for row in tied[:2]] == [
+        second_source.evidence_id,
+        first_source.evidence_id,
+    ]
+
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE source_documents SET availability = 'failed' WHERE document_id = ?",
+            (first_import.document.document_id,),
+        )
+        connection.commit()
+    blocked = pages.get_page(first_page.page_id)
+    assert blocked.verification.reason == "publication_gate_blocked"
+    assert blocked.verification.can_verify is False
+    with pytest.raises(DesktopKnowledgePageError) as gate_error:
+        pages.verify(first_page.page_id)
+    assert gate_error.value.code == "knowledge_verification_blocked"
 
 
 def test_source_search_matches_a_noncanonical_available_d2_occurrence(tmp_path):

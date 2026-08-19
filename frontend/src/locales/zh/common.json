@@ -220,6 +220,22 @@
         "available": "可用",
         "unavailable": "不可用"
       },
+      "verification": {
+        "state": {
+          "unverified": "未验证",
+          "human_reviewed": "已人工审核"
+        },
+        "reason": {
+          "publish_required": "发布知识页后才能进行验证。",
+          "working_draft_not_verifiable": "工作草稿不能被验证。请先发布；当前已发布修订仍保留自己的审核记录。",
+          "not_verified": "当前已发布修订尚未经过人工审核。",
+          "revision_changed": "这是新的已发布修订，需要重新人工验证。",
+          "publication_gate_blocked": "所有事实声明都解析到可用知识后才能验证。",
+          "legacy_unmapped_not_verifiable": "此旧修订没有 claim 级 Source Map；请先把事实声明绑定到原文证据，再进行验证。"
+        },
+        "reviewedByLocal": "本地用户 · {{time}}",
+        "verify": "验证修订"
+      },
       "saveDraft": "保存草稿",
       "publish": "发布",
       "saveBeforePublish": "请先保存工作草稿，再进行发布。",

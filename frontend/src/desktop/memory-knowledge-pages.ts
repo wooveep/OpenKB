@@ -67,6 +67,9 @@ export class MemoryKnowledgePageStore {
       materializedPath: existing?.materializedPath ?? `knowledge-pages/${kind}/${resolvedPageId}.md`,
       updatedAt: now,
       publishedRevision: existing?.publishedRevision ?? null,
+      verification: existing?.verification
+        ? { ...existing.verification, canVerify: false, reason: "working_draft_not_verifiable" }
+        : unverified("publish_required", false),
       workingDraft: {
         title: title.trim(),
         contentMarkdown,
@@ -102,11 +105,32 @@ export class MemoryKnowledgePageStore {
         provenanceState: current.workingDraft.provenanceState,
         sourceMap: current.workingDraft.sourceMap,
       },
+      verification: unverified(current.verification.state === "human_reviewed" ? "revision_changed" : "not_verified", true),
       workingDraft: null,
       publicationDiagnostics: [],
     }
     this.pages = this.pages.map((candidate) => candidate.pageId === pageId ? published : candidate)
     return published
+  }
+
+  verify(pageId: string): DesktopKnowledgePage {
+    const current = this.require(pageId)
+    if (!current.publishedRevision || current.workingDraft) {
+      throw new Error("Publish the Working Draft before verifying.")
+    }
+    const verified: DesktopKnowledgePage = {
+      ...current,
+      verification: {
+        state: "human_reviewed",
+        canVerify: false,
+        reason: null,
+        actor: "local_user",
+        verifiedAt: new Date().toISOString(),
+        revisionId: `memory-revision-${current.publishedRevision.revisionNumber}`,
+      },
+    }
+    this.pages = this.pages.map((page) => page.pageId === pageId ? verified : page)
+    return verified
   }
 
   searchSources(query: string): DesktopKnowledgeSourceCandidate[] {
@@ -147,6 +171,11 @@ export class MemoryKnowledgePageStore {
         provenanceState: draftProvenance(sourceMap, publicationDiagnostics),
         sourceMap,
       },
+      verification: {
+        ...current.verification,
+        canVerify: false,
+        reason: "working_draft_not_verifiable",
+      },
       publicationDiagnostics,
     }
     this.pages = this.pages.map((page) => page.pageId === pageId ? next : page)
@@ -176,4 +205,15 @@ function draftProvenance(
 ) {
   if (publicationDiagnostics.length) return sources.length ? "invalid" as const : "unsourced" as const
   return sources.length ? "source_backed" as const : "structural" as const
+}
+
+function unverified(reason: "publish_required" | "not_verified" | "revision_changed", canVerify: boolean) {
+  return {
+    state: "unverified" as const,
+    canVerify,
+    reason,
+    actor: null,
+    verifiedAt: null,
+    revisionId: null,
+  }
 }

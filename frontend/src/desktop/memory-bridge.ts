@@ -582,6 +582,11 @@ export class MemoryDesktopBridge implements DesktopBridge {
     return this.knowledgePagesStore.publish(pageId)
   }
 
+  async verifyKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
+    void requestId
+    return this.knowledgePagesStore.verify(pageId)
+  }
+
   async searchKnowledgeSources(query: string): Promise<DesktopKnowledgeSourceCandidate[]> {
     return this.knowledgePagesStore.searchSources(query)
   }

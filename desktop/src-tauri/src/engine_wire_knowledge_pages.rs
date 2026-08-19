@@ -71,6 +71,38 @@ pub enum KnowledgeProvenanceState {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeVerificationState {
+    Unverified,
+    HumanReviewed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeVerificationReason {
+    PublishRequired,
+    WorkingDraftNotVerifiable,
+    NotVerified,
+    RevisionChanged,
+    PublicationGateBlocked,
+    LegacyUnmappedNotVerifiable,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeVerificationStatus {
+    pub state: KnowledgeVerificationState,
+    #[serde(alias = "can_verify")]
+    pub can_verify: bool,
+    pub reason: Option<KnowledgeVerificationReason>,
+    pub actor: Option<String>,
+    #[serde(alias = "verified_at")]
+    pub verified_at: Option<String>,
+    #[serde(alias = "revision_id")]
+    pub revision_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgePublicationDiagnostic {
     pub code: String,
@@ -128,6 +160,7 @@ pub struct KnowledgePage {
     pub published_revision: Option<KnowledgePublishedRevision>,
     #[serde(alias = "working_draft")]
     pub working_draft: Option<KnowledgeWorkingDraft>,
+    pub verification: KnowledgeVerificationStatus,
     #[serde(default, alias = "publication_diagnostics")]
     pub publication_diagnostics: Vec<KnowledgePublicationDiagnostic>,
 }
@@ -144,4 +177,32 @@ pub struct KnowledgePagesResult {
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeSourcesResult {
     pub sources: Vec<KnowledgeSourceCandidate>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KnowledgeVerificationState, KnowledgeVerificationStatus};
+    use serde_json::json;
+
+    #[test]
+    fn verification_status_accepts_python_snake_case_fields() {
+        let status: KnowledgeVerificationStatus = serde_json::from_value(json!({
+            "state": "human_reviewed",
+            "can_verify": false,
+            "reason": null,
+            "actor": "local_user",
+            "verified_at": "2026-08-19T10:00:00Z",
+            "revision_id": "revision-1"
+        }))
+        .expect("Python verification payload should deserialize");
+
+        assert!(matches!(
+            status.state,
+            KnowledgeVerificationState::HumanReviewed
+        ));
+        assert!(!status.can_verify);
+        assert_eq!(status.actor.as_deref(), Some("local_user"));
+        assert_eq!(status.verified_at.as_deref(), Some("2026-08-19T10:00:00Z"));
+        assert_eq!(status.revision_id.as_deref(), Some("revision-1"));
+    }
 }

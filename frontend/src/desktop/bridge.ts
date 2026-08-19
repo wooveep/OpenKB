@@ -337,6 +337,10 @@ export class TauriDesktopBridge implements DesktopBridge {
     return this.call<DesktopKnowledgePage>("desktop_publish_knowledge_page", { pageId, requestId })
   }
 
+  async verifyKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
+    return this.call<DesktopKnowledgePage>("desktop_verify_knowledge_page", { pageId, requestId })
+  }
+
   async searchKnowledgeSources(query: string): Promise<DesktopKnowledgeSourceCandidate[]> {
     const result = await this.call<{ sources: DesktopKnowledgeSourceCandidate[] }>(
       "desktop_search_knowledge_sources",

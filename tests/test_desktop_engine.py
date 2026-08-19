@@ -260,7 +260,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 21,
+            "schema_version": 22,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -877,6 +877,14 @@ def test_engine_binds_one_knowledge_claim_to_available_original_evidence(tmp_pat
         ),
         cancel_event=None,
     )
+    verified = server._dispatch(
+        DesktopRequest(
+            request_id="verify-source-page",
+            method="workbench.verify_knowledge_page",
+            params={"page_id": draft["page_id"]},
+        ),
+        cancel_event=None,
+    )
 
     assert len(bound["working_draft"]["source_map"]) == 1
     assert bound["publication_diagnostics"] == []
@@ -884,6 +892,14 @@ def test_engine_binds_one_knowledge_claim_to_available_original_evidence(tmp_pat
         published["published_revision"]["source_map"][0]["evidence_id"]
         == (candidate["evidence_id"])
     )
+    assert verified["verification"] == {
+        "state": "human_reviewed",
+        "can_verify": False,
+        "reason": None,
+        "actor": "local_user",
+        "verified_at": verified["verification"]["verified_at"],
+        "revision_id": verified["verification"]["revision_id"],
+    }
 
 
 def test_engine_lists_isolated_knowledge_reconciliation_conflicts(tmp_path):

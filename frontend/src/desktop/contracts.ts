@@ -330,6 +330,23 @@ export interface DesktopGlobalSearchResults {
 export type DesktopKnowledgePageKind = "concept" | "entity"
 export type DesktopKnowledgePagePublicationState = "draft" | "unpublished_changes" | "published"
 export type DesktopKnowledgeProvenanceState = "source_backed" | "structural" | "legacy_unmapped" | "unsourced" | "invalid"
+export type DesktopKnowledgeVerificationState = "unverified" | "human_reviewed"
+export type DesktopKnowledgeVerificationReason =
+  | "publish_required"
+  | "working_draft_not_verifiable"
+  | "not_verified"
+  | "revision_changed"
+  | "publication_gate_blocked"
+  | "legacy_unmapped_not_verifiable"
+
+export interface DesktopKnowledgeVerificationStatus {
+  state: DesktopKnowledgeVerificationState
+  canVerify: boolean
+  reason: DesktopKnowledgeVerificationReason | null
+  actor: string | null
+  verifiedAt: string | null
+  revisionId: string | null
+}
 
 export interface DesktopKnowledgePageSummary {
   pageId: string
@@ -382,6 +399,7 @@ export interface DesktopKnowledgePage extends DesktopKnowledgePageSummary {
   materializedPath: string
   publishedRevision: DesktopKnowledgePublishedRevision | null
   workingDraft: DesktopKnowledgeWorkingDraft | null
+  verification: DesktopKnowledgeVerificationStatus
   publicationDiagnostics: DesktopKnowledgePublicationDiagnostic[]
 }
 
@@ -571,6 +589,7 @@ export interface DesktopBridge {
     requestId: string,
   ): Promise<DesktopKnowledgePage>
   publishKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage>
+  verifyKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage>
   searchKnowledgeSources(query: string): Promise<DesktopKnowledgeSourceCandidate[]>
   bindKnowledgePageSource(
     pageId: string,

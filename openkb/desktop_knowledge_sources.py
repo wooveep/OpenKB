@@ -155,16 +155,20 @@ def knowledge_source_rows_in(
                 available_evidence_occurrences.locator_json,
                 available_evidence_occurrences.text,
                 ({" + ".join(score_parts)}) AS channel_score,
-                pages.page_id, available_evidence_occurrences.ordinal
+                pages.page_id, available_evidence_occurrences.ordinal,
+                CASE WHEN verifications.verification_id IS NULL THEN 0 ELSE 1 END AS trust_tier
             FROM knowledge_pages AS pages
             JOIN knowledge_page_revision_sources AS sources
                 ON sources.revision_id = pages.current_revision_id
+            LEFT JOIN knowledge_page_verifications AS verifications
+                ON verifications.revision_id = sources.revision_id
+                AND verifications.invalidated_at IS NULL
             JOIN available_evidence_occurrences
                 ON available_evidence_occurrences.evidence_id = sources.evidence_id
             WHERE available_evidence_occurrences.occurrence_rank = 1
         )
         WHERE channel_score > 0
-        ORDER BY channel_score DESC, page_id, ordinal
+        ORDER BY channel_score DESC, trust_tier DESC, page_id, ordinal
         LIMIT ?
         """,
         (*parameters, limit),

@@ -13,6 +13,7 @@ mod process_tree;
 use desktop_knowledge_page_commands::{
     desktop_bind_knowledge_page_source, desktop_get_knowledge_page, desktop_knowledge_pages,
     desktop_publish_knowledge_page, desktop_save_knowledge_page, desktop_search_knowledge_sources,
+    desktop_verify_knowledge_page,
 };
 use desktop_runtime::DesktopRuntimeState;
 use engine_protocol::{
@@ -716,6 +717,7 @@ fn main() {
             desktop_get_knowledge_page,
             desktop_save_knowledge_page,
             desktop_publish_knowledge_page,
+            desktop_verify_knowledge_page,
             desktop_search_knowledge_sources,
             desktop_bind_knowledge_page_source,
             desktop_document_version_candidates,

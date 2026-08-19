@@ -220,6 +220,22 @@
         "available": "Available",
         "unavailable": "Unavailable"
       },
+      "verification": {
+        "state": {
+          "unverified": "Unverified",
+          "human_reviewed": "Human reviewed"
+        },
+        "reason": {
+          "publish_required": "Publish this page before verification.",
+          "working_draft_not_verifiable": "The Working Draft cannot be verified. Publish it first; the current publication keeps its own review history.",
+          "not_verified": "This published revision has not been reviewed by a person.",
+          "revision_changed": "This is a new published revision and needs a new human review.",
+          "publication_gate_blocked": "Verification is unavailable until every factual claim resolves to Available Knowledge.",
+          "legacy_unmapped_not_verifiable": "This legacy revision has no claim-level Source Map. Bind its factual claims to original evidence before verification."
+        },
+        "reviewedByLocal": "Local user · {{time}}",
+        "verify": "Verify revision"
+      },
       "saveDraft": "Save draft",
       "publish": "Publish",
       "saveBeforePublish": "Save a Working Draft before publishing.",

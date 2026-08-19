@@ -39,6 +39,12 @@ export abstract class UnavailableKnowledgePageBridge {
     return this.unavailable()
   }
 
+  verifyKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
+    void pageId
+    void requestId
+    return this.unavailable()
+  }
+
   searchKnowledgeSources(query: string): Promise<DesktopKnowledgeSourceCandidate[]> {
     void query
     return this.unavailable()

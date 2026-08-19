@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import logging
-import os
-import shutil
 import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
+from openkb.desktop_knowledge_page_projection import (
+    activate_knowledge_page_projection,
+    discard_abandoned_knowledge_page_projection_staging,
+    discard_knowledge_page_projection_staging,
+    render_knowledge_page_markdown,
+    stage_knowledge_page_projection,
+)
 from openkb.desktop_knowledge_sources import (
     DesktopKnowledgePublicationDiagnostic,
     DesktopKnowledgeSourceCandidate,
@@ -26,6 +30,11 @@ from openkb.desktop_knowledge_sources import (
     search_available_sources_in,
 )
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
+from openkb.desktop_knowledge_verification import (
+    DesktopKnowledgeVerificationStatus,
+    verification_status_in,
+    verify_current_revision_in,
+)
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import atomic_write_text, kb_ingest_lock, kb_read_lock
 
@@ -150,6 +159,7 @@ class DesktopKnowledgePage(DesktopKnowledgePageSummary):
     materialized_path: str
     published_revision: DesktopKnowledgePublishedRevision | None
     working_draft: DesktopKnowledgeWorkingDraft | None
+    verification: DesktopKnowledgeVerificationStatus
     publication_diagnostics: tuple[DesktopKnowledgePublicationDiagnostic, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
@@ -160,6 +170,7 @@ class DesktopKnowledgePage(DesktopKnowledgePageSummary):
                 self.published_revision.as_dict() if self.published_revision else None
             ),
             "working_draft": self.working_draft.as_dict() if self.working_draft else None,
+            "verification": self.verification.as_dict(),
             "publication_diagnostics": [
                 diagnostic.as_dict() for diagnostic in self.publication_diagnostics
             ],
@@ -444,11 +455,33 @@ class DesktopKnowledgePageService:
                 discard_knowledge_page_projection_staging(staged)
             return page
 
+    def verify(self, page_id: str) -> DesktopKnowledgePage:
+        """Record one explicit human review of the exact Current Published Revision."""
+        self._require_database()
+        with kb_ingest_lock(self.state_dir):
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    verify_current_revision_in(
+                        connection, page_id=page_id, verified_at=_timestamp()
+                    )
+                except ValueError as error:
+                    raise _verification_error(str(error)) from error
+                page = self._page_in(connection, page_id)
+                connection.commit()
+                return page
+            except BaseException:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+
     def materialize_current_pages(self) -> None:
         """Rebuild published Markdown only; Working Drafts never enter the projection."""
         self._require_database()
         with kb_ingest_lock(self.state_dir):
-            _discard_abandoned_projection_staging(self.kb_dir)
+            discard_abandoned_knowledge_page_projection_staging(self.kb_dir)
             connection = self._connect()
             try:
                 rows = connection.execute(
@@ -462,7 +495,10 @@ class DesktopKnowledgePageService:
                 connection.close()
             for row in rows:
                 page = self._page_from_row_in(connection=None, row=row)
-                atomic_write_text(self.kb_dir / page.materialized_path, _render_markdown(page))
+                (self.kb_dir / page.materialized_path).parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_text(
+                    self.kb_dir / page.materialized_path, render_knowledge_page_markdown(page)
+                )
 
     def _require_existing_kind(
         self, connection: sqlite3.Connection, page_id: str, kind: str
@@ -547,11 +583,21 @@ class DesktopKnowledgePageService:
                 if row[11] is not None
                 else ()
             )
+            verification = verification_status_in(
+                active_connection,
+                page_id=page_id,
+                revision_id=str(current[0]) if current is not None else None,
+                content_markdown=str(row[8]) if row[4] is not None else "",
+                provenance_state=str(row[10]) if row[4] is not None else "structural",
+                source_map=published_sources,
+                has_working_draft=row[11] is not None,
+            )
             return _page_from_row(
                 row,
                 published_sources=published_sources,
                 draft_sources=draft_sources,
                 diagnostics=diagnostics,
+                verification=verification,
             )
         finally:
             if owns_connection:
@@ -592,39 +638,15 @@ class DesktopKnowledgePageService:
         return connection
 
 
-def stage_knowledge_page_projection(kb_dir: Path, page: DesktopKnowledgePage) -> Path:
-    """Render a publication before its SQLite transaction commits."""
-    staging_root = kb_dir / "knowledge-pages" / ".page-staging"
-    staging_root.mkdir(parents=True, exist_ok=True)
-    staged = staging_root / f"{uuid.uuid4().hex}.md"
-    atomic_write_text(staged, _render_markdown(page))
-    return staged
-
-
-def activate_knowledge_page_projection(
-    kb_dir: Path, page: DesktopKnowledgePage, staged: Path
-) -> None:
-    target = kb_dir / page.materialized_path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staged, target)
-
-
-def discard_knowledge_page_projection_staging(staged: Path) -> None:
-    staged.unlink(missing_ok=True)
-
-
-def _discard_abandoned_projection_staging(kb_dir: Path) -> None:
-    staging_root = kb_dir / "knowledge-pages" / ".page-staging"
-    if staging_root.exists():
-        shutil.rmtree(staging_root, ignore_errors=True)
-
-
 def _page_from_row(
     row: tuple[object, ...],
     *,
     published_sources: tuple[DesktopKnowledgeSourceMapEntry, ...] = (),
     draft_sources: tuple[DesktopKnowledgeSourceMapEntry, ...] = (),
     diagnostics: tuple[DesktopKnowledgePublicationDiagnostic, ...] = (),
+    verification: DesktopKnowledgeVerificationStatus = DesktopKnowledgeVerificationStatus(
+        "unverified", False, "publish_required"
+    ),
 ) -> DesktopKnowledgePage:
     published = (
         DesktopKnowledgePublishedRevision(
@@ -659,6 +681,7 @@ def _page_from_row(
         materialized_path=str(row[6]),
         published_revision=published,
         working_draft=draft,
+        verification=verification,
         publication_diagnostics=diagnostics,
     )
 
@@ -722,6 +745,24 @@ def _source_binding_error(code: str) -> DesktopKnowledgePageError:
     )
 
 
+def _verification_error(code: str) -> DesktopKnowledgePageError:
+    messages = {
+        "knowledge_verification_requires_current_publication": (
+            "Publish the Working Draft before verifying the Current Published Revision."
+        ),
+        "knowledge_verification_blocked": (
+            "All factual claims must pass the Publication Gate before verification."
+        ),
+        "knowledge_verification_legacy_unmapped": (
+            "Bind this legacy revision to original evidence before verification."
+        ),
+    }
+    return DesktopKnowledgePageError(
+        code if code in messages else "knowledge_verification_failed",
+        messages.get(code, "This knowledge revision could not be verified."),
+    )
+
+
 def _draft_provenance_state(
     source_map: tuple[DesktopKnowledgeSourceMapEntry, ...],
     diagnostics: tuple[DesktopKnowledgePublicationDiagnostic, ...],
@@ -733,34 +774,6 @@ def _draft_provenance_state(
     ):
         return "unsourced"
     return "invalid"
-
-
-def _render_markdown(page: DesktopKnowledgePage) -> str:
-    published = page.published_revision
-    if published is None:
-        raise DesktopKnowledgePageError(
-            "knowledge_page_not_published", "A Working Draft cannot be materialized."
-        )
-    frontmatter = "\n".join(
-        (
-            "---",
-            f"page_id: {json.dumps(page.page_id, ensure_ascii=False)}",
-            f"kind: {json.dumps(page.kind, ensure_ascii=False)}",
-            f"title: {json.dumps(published.title, ensure_ascii=False)}",
-            f"revision: {published.revision_number}",
-            'authority: "user_revision"',
-            f"openkb.provenance: {json.dumps(published.provenance_state)}",
-            f"updated_at: {json.dumps(published.published_at, ensure_ascii=False)}",
-            "---",
-        )
-    )
-    body = published.content_markdown.rstrip("\n")
-    footnotes = "\n".join(
-        f"[^{source.source_id}]: {source.document_name} / {source.section}".rstrip(" /")
-        for source in published.source_map
-    )
-    suffix = f"\n\n{footnotes}" if footnotes else ""
-    return f"{frontmatter}\n\n# {published.title}\n\n{body}{suffix}\n"
 
 
 def _timestamp() -> str:

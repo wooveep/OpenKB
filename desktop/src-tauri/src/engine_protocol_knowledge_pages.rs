@@ -79,6 +79,25 @@ impl EngineSupervisor {
         })
     }
 
+    pub fn verify_knowledge_page(
+        &self,
+        page_id: String,
+        request_id: String,
+    ) -> BridgeResult<KnowledgePage> {
+        self.ensure_started()?;
+        let value = self.request_started(
+            "workbench.verify_knowledge_page",
+            json!({ "page_id": page_id }),
+            Some(request_id),
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine knowledge verification response has an invalid shape: {error}"),
+            )
+        })
+    }
+
     pub fn search_knowledge_sources(&self, query: String) -> BridgeResult<KnowledgeSourcesResult> {
         self.ensure_started()?;
         let value = self.request_started(

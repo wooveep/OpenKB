@@ -57,6 +57,18 @@ pub(crate) async fn desktop_publish_knowledge_page(
         .map_err(join_error("publication"))?
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn desktop_verify_knowledge_page(
+    state: State<'_, DesktopState>,
+    page_id: String,
+    request_id: String,
+) -> Result<KnowledgePage, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.verify_knowledge_page(page_id, request_id))
+        .await
+        .map_err(join_error("verification"))?
+}
+
 #[tauri::command]
 pub(crate) async fn desktop_search_knowledge_sources(
     state: State<'_, DesktopState>,
