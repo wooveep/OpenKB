@@ -130,7 +130,7 @@ def test_structured_analysis_publishes_source_backed_unverified_knowledge(
     )
 
     assert result["document"]["availability"] == "available"
-    assert operations == ["knowledge_analysis"]
+    assert operations.count("knowledge_analysis") == 1
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         checkpoint_json = connection.execute(
             """

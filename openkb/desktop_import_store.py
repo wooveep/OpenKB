@@ -13,6 +13,7 @@ from typing import Callable
 
 from portalocker import LockException
 
+from openkb.desktop_catalog_store import catalog_rebuild_task_in
 from openkb.desktop_import_artifacts import (
     DesktopImportError,
     DocumentIRBlock,
@@ -42,14 +43,8 @@ from openkb.desktop_source_image_assets import write_source_images as write_sour
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import atomic_write_bytes, kb_ingest_lock
 
-IMPORT_STAGES = (
-    "preflight",
-    "raw_asset",
-    "document_ir",
-    "evidence",
-    "deterministic_page_tree",
-    "model_analysis",
-    "search",
+IMPORT_STAGES = tuple(
+    "preflight raw_asset document_ir evidence deterministic_page_tree model_analysis search".split()
 )
 _STAGE_ORDER_SQL = (
     "CASE stage "
@@ -233,12 +228,14 @@ class DesktopImportStore:
             tasks = tuple(task_from_row(connection, row, _STAGE_ORDER_SQL) for row in rows)
             page_tree_rebuilds = page_tree_rebuild_tasks_in(connection)
             page_tree_enrichments = page_tree_enrichment_tasks_in(connection)
+            catalog_rebuild = catalog_rebuild_task_in(connection)
         finally:
             connection.close()
         return {
             "jobs": [task.as_dict() for task in tasks],
             "page_tree_rebuilds": page_tree_rebuilds,
             "page_tree_enrichments": page_tree_enrichments,
+            "catalog_rebuild": catalog_rebuild,
         }
 
     def task(self, job_id: str) -> DesktopImportTask:

@@ -494,6 +494,26 @@
           "prompt_update": "Refreshing summaries for the current enrichment prompt"
         }
       },
+      "catalog": {
+        "title": "Knowledge Catalog",
+        "staleServing": "serving the previous generation",
+        "counts": "{{nodes}} nodes · {{links}} links · {{attempts}} attempts",
+        "statuses": {
+          "pending": "Pending",
+          "running": "Building",
+          "failed": "Build failed",
+          "completed": "Current"
+        },
+        "reasons": {
+          "schema_upgrade": "Building the initial Catalog",
+          "knowledge_publication": "Published knowledge changed",
+          "knowledge_deletion": "Published knowledge was deleted",
+          "source_map_change": "Published source mappings changed",
+          "document_availability_change": "Source document availability changed",
+          "knowledge_metadata_change": "Published knowledge metadata changed",
+          "successful_reanalysis": "Knowledge Reanalysis completed"
+        }
+      },
       "reanalysis": {
         "title": "Knowledge Reanalysis",
         "description": "{{count}} Available documents can be explicitly reanalysed with the current model.",

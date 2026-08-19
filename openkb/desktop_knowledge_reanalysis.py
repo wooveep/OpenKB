@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from openkb import __version__
+from openkb.desktop_catalog_store import queue_catalog_rebuild_in, start_catalog_rebuilds
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
 from openkb.desktop_knowledge_analysis import (
     KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
@@ -547,6 +548,7 @@ class DesktopKnowledgeReanalysisService:
                     evidence=evidence,
                     analysis_provenance_json=provenance_json,
                 )
+                queue_catalog_rebuild_in(connection, "successful_reanalysis")
                 if current_generation_id_in(connection) != initial_generation:
                     staged_projection = stage_okf_projection_in(connection, self._kb_dir)
                 now = _timestamp()
@@ -577,6 +579,7 @@ class DesktopKnowledgeReanalysisService:
                     logger.exception("Could not activate Knowledge Reanalysis OKF projection.")
                 finally:
                     discard_okf_projection_staging(staged_projection)
+            start_catalog_rebuilds(self._kb_dir)
 
     def _fail_job(self, job_id: str, execution_token: str, error_code: str, reason: str) -> None:
         with kb_ingest_lock(self._state_dir):

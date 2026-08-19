@@ -19,6 +19,22 @@ from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
+def _drop_catalog_schema(connection: sqlite3.Connection) -> None:
+    for (name,) in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'knowledge_catalog_%'"
+    ).fetchall():
+        connection.execute(f'DROP TRIGGER "{name}"')
+    for table in (
+        "knowledge_catalog_rebuild_tasks",
+        "knowledge_catalog_state",
+        "knowledge_catalog_links",
+        "knowledge_catalog_node_sources",
+        "knowledge_catalog_nodes",
+        "knowledge_catalog_generations",
+    ):
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
+
+
 def test_import_publishes_ordered_tree_and_d1_gets_its_own_generation(tmp_path) -> None:
     kb_dir = tmp_path / "knowledge"
     first_source = tmp_path / "first.md"
@@ -635,6 +651,7 @@ def test_migration_backfills_stage_and_queues_available_legacy_document(tmp_path
     imported = DesktopTextImportService(kb_dir).import_text(source)
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
+        _drop_catalog_schema(connection)
         stage_id = connection.execute(
             "SELECT stage_run_id FROM stage_runs WHERE job_id = ? "
             "AND stage = 'deterministic_page_tree'",
@@ -656,11 +673,11 @@ def test_migration_backfills_stage_and_queues_available_legacy_document(tmp_path
         ):
             connection.execute(f"DROP TABLE {table}")
         connection.execute("DROP INDEX import_jobs_document_completed_idx")
-        connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34)")
+        connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35)")
 
     activation = DesktopKnowledgeBaseRuntime().open(kb_dir)
 
-    assert activation.knowledge_base.schema_version == 34
+    assert activation.knowledge_base.schema_version == 35
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT status FROM stage_runs WHERE job_id = ? AND stage = 'deterministic_page_tree'",
@@ -704,6 +721,7 @@ def test_migration_leaves_page_tree_pending_for_a_legacy_quarantined_import(tmp_
     job_id = importer.list_import_jobs()["jobs"][0]["job"]["job_id"]
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
+        _drop_catalog_schema(connection)
         stage_id = connection.execute(
             "SELECT stage_run_id FROM stage_runs WHERE job_id = ? "
             "AND stage = 'deterministic_page_tree'",
@@ -725,7 +743,7 @@ def test_migration_leaves_page_tree_pending_for_a_legacy_quarantined_import(tmp_
         ):
             connection.execute(f"DROP TABLE {table}")
         connection.execute("DROP INDEX import_jobs_document_completed_idx")
-        connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34)")
+        connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35)")
 
     DesktopKnowledgeBaseRuntime().open(kb_dir)
 

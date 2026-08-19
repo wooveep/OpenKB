@@ -131,15 +131,27 @@ def activate_okf_projection(kb_dir: Path, staged: Path) -> None:
             os.replace(backup, target)
         raise
     finally:
-        if backup.exists() and target.exists():
-            shutil.rmtree(backup, ignore_errors=True)
-        _remove_empty_backup_root(backup_root)
+        try:
+            if backup.exists() and target.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+            _remove_empty_backup_root(backup_root)
+        finally:
+            _start_catalog_rebuilds(kb_dir)
 
 
 def discard_okf_projection_staging(staged: Path) -> None:
     """Remove a hidden bundle that was not, or is no longer, needed."""
     if staged.exists():
         shutil.rmtree(staged, ignore_errors=True)
+
+
+def _start_catalog_rebuilds(kb_dir: Path) -> None:
+    try:
+        from openkb.desktop_catalog_store import start_catalog_rebuilds
+
+        start_catalog_rebuilds(kb_dir)
+    except Exception:
+        logger.warning("Could not start Knowledge Catalog rebuilds.", exc_info=True)
 
 
 def canonical_okf_type(kind: str, entity_subtype: str | None = None) -> str:

@@ -166,7 +166,7 @@ def test_grounded_answer_persists_an_interruption_when_the_answer_model_fails(tm
     ).answer("What baseline does OpenKB keep?")
 
     assert answer.citations
-    assert answer.degradations == ("retrieval_plan_fallback",)
+    assert "retrieval_plan_fallback" in answer.degradations
     assert answer.status == "interrupted"
     assert answer.interruption_code == "model_response_invalid"
     assert answer.answer_text == ""

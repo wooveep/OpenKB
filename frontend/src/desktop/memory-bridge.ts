@@ -306,7 +306,12 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
   }
 
   async importJobs(): Promise<DesktopImportJobs> {
-    return { jobs: this.importJobResults, pageTreeRebuilds: [], pageTreeEnrichments: [] }
+    return {
+      jobs: this.importJobResults,
+      pageTreeRebuilds: [],
+      pageTreeEnrichments: [],
+      catalogRebuild: null,
+    }
   }
 
   async knowledgeReanalysis(): Promise<DesktopKnowledgeReanalysisOverview> {

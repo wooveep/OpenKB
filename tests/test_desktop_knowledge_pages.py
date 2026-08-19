@@ -22,6 +22,7 @@ from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
 def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
+    _drop_catalog_schema(connection)
     for table in (
         "document_page_tree_enrichment_current",
         "document_page_tree_enrichment_summaries",
@@ -34,9 +35,25 @@ def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
         "document_page_tree_rebuild_tasks",
         "document_page_tree_generations",
     ):
-        connection.execute(f"DROP TABLE {table}")
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
     connection.execute("DROP INDEX import_jobs_document_completed_idx")
-    connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34)")
+    connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35)")
+
+
+def _drop_catalog_schema(connection: sqlite3.Connection) -> None:
+    for (name,) in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'knowledge_catalog_%'"
+    ).fetchall():
+        connection.execute(f'DROP TRIGGER "{name}"')
+    for table in (
+        "knowledge_catalog_rebuild_tasks",
+        "knowledge_catalog_state",
+        "knowledge_catalog_links",
+        "knowledge_catalog_node_sources",
+        "knowledge_catalog_nodes",
+        "knowledge_catalog_generations",
+    ):
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def test_working_draft_does_not_replace_published_revision_until_explicit_publish(tmp_path):
@@ -143,6 +160,7 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
     now = "2026-08-19T00:00:00+00:00"
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
+        _drop_catalog_schema(connection)
         connection.execute("DROP TABLE knowledge_generation_item_sources")
         connection.execute("DROP TABLE knowledge_reconciliation_candidate_sources")
         connection.execute(
@@ -250,6 +268,7 @@ def test_v20_source_map_migrates_as_source_backed_without_rewriting_the_revision
 
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
+        _drop_catalog_schema(connection)
         connection.execute("DROP TABLE knowledge_generation_item_sources")
         connection.execute("DROP TABLE knowledge_reconciliation_candidate_sources")
         connection.execute(

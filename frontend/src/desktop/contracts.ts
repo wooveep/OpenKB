@@ -239,6 +239,22 @@ export interface DesktopImportJobs {
   jobs: DesktopImportTask[]
   pageTreeRebuilds: DesktopPageTreeRebuildTask[]
   pageTreeEnrichments: DesktopPageTreeEnrichmentTask[]
+  catalogRebuild: DesktopCatalogRebuildTask | null
+}
+
+export interface DesktopCatalogRebuildTask {
+  status: "pending" | "running" | "failed" | "completed"
+  reason: string
+  requestedSourceRevision: number
+  attemptCount: number
+  errorCode: string | null
+  errorReason: string | null
+  updatedAt: string
+  completedAt: string | null
+  currentGenerationId: string | null
+  staleServing: boolean
+  nodeCount: number
+  linkCount: number
 }
 
 export interface DesktopPageTreeRebuildTask {

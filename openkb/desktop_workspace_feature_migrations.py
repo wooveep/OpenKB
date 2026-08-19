@@ -5,6 +5,7 @@ from openkb import desktop_knowledge_page_migrations as knowledge_page_migration
 from openkb import desktop_knowledge_reanalysis_migrations as reanalysis_migrations
 from openkb import desktop_knowledge_verification_migrations as verification_migrations
 from openkb import desktop_page_tree_migrations as page_tree_migrations
+from openkb.desktop_catalog_migrations import CATALOG_MIGRATION_STATEMENTS
 from openkb.desktop_knowledge_analysis_batch_migrations import (
     KNOWLEDGE_ANALYSIS_BATCH_MIGRATION_STATEMENTS,
 )
@@ -75,4 +76,5 @@ DESKTOP_FEATURE_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (32, page_tree_migrations.PAGE_TREE_MIGRATION_STATEMENTS),
     (33, page_tree_migrations.PAGE_TREE_LIFECYCLE_MIGRATION_STATEMENTS),
     (34, PAGE_TREE_ENRICHMENT_MIGRATION_STATEMENTS),
+    (35, CATALOG_MIGRATION_STATEMENTS),
 )

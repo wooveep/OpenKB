@@ -42,6 +42,7 @@ def _drop_conversation_schema(connection: sqlite3.Connection) -> None:
 
 def _drop_knowledge_page_draft_schema(connection: sqlite3.Connection) -> None:
     """Return a test fixture to the state before Knowledge editor migrations."""
+    _drop_catalog_schema(connection)
     connection.execute("DROP TABLE knowledge_page_lifecycle_events")
     connection.execute("DROP TABLE knowledge_page_verifications")
     connection.execute("DROP TABLE knowledge_page_revision_sources")
@@ -54,6 +55,7 @@ def _drop_knowledge_page_draft_schema(connection: sqlite3.Connection) -> None:
 
 def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
     """Return a fixture to the state before deterministic PageTrees."""
+    _drop_catalog_schema(connection)
     for table in (
         "document_page_tree_enrichment_current",
         "document_page_tree_enrichment_summaries",
@@ -66,9 +68,25 @@ def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
         "document_page_tree_rebuild_tasks",
         "document_page_tree_generations",
     ):
-        connection.execute(f"DROP TABLE {table}")
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
     connection.execute("DROP INDEX import_jobs_document_completed_idx")
-    connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34)")
+    connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35)")
+
+
+def _drop_catalog_schema(connection: sqlite3.Connection) -> None:
+    for (name,) in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'knowledge_catalog_%'"
+    ).fetchall():
+        connection.execute(f'DROP TRIGGER "{name}"')
+    for table in (
+        "knowledge_catalog_rebuild_tasks",
+        "knowledge_catalog_state",
+        "knowledge_catalog_links",
+        "knowledge_catalog_node_sources",
+        "knowledge_catalog_nodes",
+        "knowledge_catalog_generations",
+    ):
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_one(tmp_path):
@@ -78,7 +96,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 34
+    assert first.knowledge_base.schema_version == 35
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
@@ -119,6 +137,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
             (32,),
             (33,),
             (34,),
+            (35,),
         ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
@@ -289,6 +308,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
             (32,),
             (33,),
             (34,),
+            (35,),
         ]
         assert connection.execute(
             "SELECT status FROM import_job_runtime WHERE job_id = 'legacy-job'"

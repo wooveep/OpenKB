@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from openkb import desktop_engine_knowledge_reanalysis as reanalysis_engine
 from openkb import desktop_engine_page_tree_enrichment as enrichment_engine
 from openkb import desktop_knowledge_reanalysis as reanalysis_runtime
+from openkb.desktop_catalog_store import start_catalog_rebuilds
 from openkb.desktop_conversations import recover_stale_conversation_generations
 from openkb.desktop_okf_projection import materialize_okf_projection
 from openkb.desktop_page_tree_enrichment import DesktopPageTreeEnrichmentService
@@ -51,6 +52,7 @@ def dispatch_knowledge_base_activation(
     materialize_okf_projection(active_kb_dir)
     server._start_recoverable_imports(active_kb_dir)
     start_page_tree_rebuilds(active_kb_dir)
+    start_catalog_rebuilds(active_kb_dir, recover=True)
     enrichment_engine.start_page_tree_enrichments(
         server,
         active_kb_dir,

@@ -9,6 +9,7 @@ import {
 import { Button } from "@/components/ui/button"
 import type { DesktopImportBatchSummary } from "./DesktopDocumentImportPanel"
 import { DesktopKnowledgeAnalysisProgress } from "./DesktopKnowledgeAnalysisProgress"
+import { DesktopCatalogRebuildTask } from "./DesktopCatalogRebuildTask"
 import { DesktopKnowledgeReanalysisTasks } from "./DesktopKnowledgeReanalysisTasks"
 import { DesktopPageTreeEnrichmentTasks } from "./DesktopPageTreeEnrichmentTasks"
 import { DesktopPageTreeRebuildTasks } from "./DesktopPageTreeRebuildTasks"
@@ -58,6 +59,7 @@ export function DesktopTaskDrawer({
             tasks={pageTreeRebuilds.tasks}
             error={pageTreeRebuilds.error}
           />
+          <DesktopCatalogRebuildTask task={pageTreeRebuilds.catalog} />
           <DesktopPageTreeEnrichmentTasks tasks={pageTreeRebuilds.enrichments} />
           <DesktopKnowledgeReanalysisTasks controller={knowledgeReanalysis} />
           {tasks.length || batchSummary ? (
@@ -110,7 +112,7 @@ export function DesktopTaskDrawer({
                 )
               })}
             </div>
-          ) : pageTreeRebuilds.tasks.length || pageTreeRebuilds.enrichments.length || pageTreeRebuilds.error || knowledgeReanalysis.overview.runs.length || knowledgeReanalysis.overview.documents.length ? null : (
+          ) : pageTreeRebuilds.tasks.length || pageTreeRebuilds.enrichments.length || pageTreeRebuilds.catalog || pageTreeRebuilds.error || knowledgeReanalysis.overview.runs.length || knowledgeReanalysis.overview.documents.length ? null : (
             <p className="py-8 text-center text-sm text-muted-foreground">{t("desktop.tasks.empty")}</p>
           )}
         </div>

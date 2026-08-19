@@ -25,6 +25,7 @@ from openkb.desktop_workspace_migrations import (
 
 
 def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
+    _drop_catalog_schema(connection)
     for table in (
         "document_page_tree_enrichment_current",
         "document_page_tree_enrichment_summaries",
@@ -37,9 +38,25 @@ def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
         "document_page_tree_rebuild_tasks",
         "document_page_tree_generations",
     ):
-        connection.execute(f"DROP TABLE {table}")
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
     connection.execute("DROP INDEX import_jobs_document_completed_idx")
-    connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34)")
+    connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35)")
+
+
+def _drop_catalog_schema(connection: sqlite3.Connection) -> None:
+    for (name,) in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'knowledge_catalog_%'"
+    ).fetchall():
+        connection.execute(f'DROP TRIGGER "{name}"')
+    for table in (
+        "knowledge_catalog_rebuild_tasks",
+        "knowledge_catalog_state",
+        "knowledge_catalog_links",
+        "knowledge_catalog_node_sources",
+        "knowledge_catalog_nodes",
+        "knowledge_catalog_generations",
+    ):
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def _knowledge_base(tmp_path: Path) -> Path:

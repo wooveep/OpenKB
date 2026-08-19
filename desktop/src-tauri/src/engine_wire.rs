@@ -4,6 +4,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::io::{Read, Write};
 
+#[path = "engine_wire_catalog.rs"]
+mod catalog;
+pub use catalog::CatalogRebuildTask;
+
 #[path = "engine_wire_document_versions.rs"]
 mod document_versions;
 pub use document_versions::{
@@ -602,6 +606,8 @@ pub struct ImportJobsResult {
     pub page_tree_rebuilds: Vec<PageTreeRebuildTask>,
     #[serde(default, alias = "page_tree_enrichments")]
     pub page_tree_enrichments: Vec<PageTreeEnrichmentTask>,
+    #[serde(default, alias = "catalog_rebuild")]
+    pub catalog_rebuild: Option<CatalogRebuildTask>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

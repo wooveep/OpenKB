@@ -494,6 +494,26 @@
           "prompt_update": "正在使用当前增强提示版本刷新摘要"
         }
       },
+      "catalog": {
+        "title": "知识目录",
+        "staleServing": "正在继续使用上一代目录",
+        "counts": "{{nodes}} 个节点 · {{links}} 条链接 · 已尝试 {{attempts}} 次",
+        "statuses": {
+          "pending": "等待中",
+          "running": "构建中",
+          "failed": "构建失败",
+          "completed": "当前版本"
+        },
+        "reasons": {
+          "schema_upgrade": "正在创建首个知识目录",
+          "knowledge_publication": "已发布知识发生变化",
+          "knowledge_deletion": "已发布知识被删除",
+          "source_map_change": "已发布来源映射发生变化",
+          "document_availability_change": "来源文档可用性发生变化",
+          "knowledge_metadata_change": "已发布知识元数据发生变化",
+          "successful_reanalysis": "知识重新分析已完成"
+        }
+      },
       "reanalysis": {
         "title": "知识重新分析",
         "description": "可使用当前模型显式重分析 {{count}} 份可用文档。",

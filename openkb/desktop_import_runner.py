@@ -208,6 +208,12 @@ class DesktopTextImportService:
     def _start_graph_extraction(self, result: DesktopTextImportResult) -> None:
         """Make optional graph work independent from the completed Import Job result."""
         try:
+            from openkb.desktop_catalog_store import start_catalog_rebuilds
+
+            start_catalog_rebuilds(self._store.kb_dir)
+        except (OSError, RuntimeError, sqlite3.Error):
+            logger.warning("Could not start Knowledge Catalog rebuilds.")
+        try:
             page_tree_store.start_page_tree_rebuilds(self._store.kb_dir)
         except RuntimeError:
             logger.warning("Could not start deterministic PageTree rebuilds.")

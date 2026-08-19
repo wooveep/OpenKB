@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +19,8 @@ from openkb.desktop_answer_types import (
     DesktopEvidenceRef,
     DesktopRetrievalPlan,
 )
+from openkb.desktop_catalog_retrieval import catalog_route_rows_in
+from openkb.desktop_catalog_store import CatalogGenerationLease, lease_current_catalog
 from openkb.desktop_graph_feature_flags import local_graph_default_enabled
 from openkb.desktop_knowledge_graph import (
     DesktopKnowledgeGraphQueryError,
@@ -54,6 +58,9 @@ _GRAPH_CANDIDATE_LIMIT = 2
 _RRF_OFFSET = 60
 _TERM_PATTERN = re.compile(r"[A-Za-z0-9_]{2,}|[\u3400-\u9fff]+")
 _SCORE_COLUMNS = frozenset(("display_name", "heading_path", "text"))
+_CATALOG_VARIANTS = frozenset(("wiki", "baseline", "local_graph"))
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,7 @@ class _Candidate:
     reference: DesktopEvidenceRef
     channel: str
     rank: int
+    weight: float = 1.0
 
 
 class DesktopEvidenceRetriever:
@@ -119,18 +127,34 @@ class DesktopEvidenceRetriever:
             plan = retrieval_plan
             all_degradations = degradations
         graph_error_code: str | None = None
-        connection = _connect(self._database_path)
-        try:
-            evidence, graph_error_code = _variant_evidence(connection, plan.terms, variant)
-            source_images = _source_images_for_evidence(connection, evidence, self._kb_dir)
-        finally:
-            connection.close()
+        with _best_effort_catalog_lease(self._kb_dir, enabled=variant in _CATALOG_VARIANTS) as (
+            catalog,
+            lease_degradations,
+        ):
+            connection = _connect(self._database_path)
+            try:
+                catalog_candidates, catalog_degradation = _catalog_channel_candidates(
+                    connection,
+                    plan.terms,
+                    catalog,
+                    variant,
+                    lease_degradations,
+                )
+                evidence, graph_error_code = _variant_evidence(
+                    connection,
+                    plan.terms,
+                    variant,
+                    catalog_candidates=catalog_candidates,
+                )
+                source_images = _source_images_for_evidence(connection, evidence, self._kb_dir)
+            finally:
+                connection.close()
         if graph_error_code is not None:
             record_query_diagnostic(self._kb_dir, graph_error_code)
         return DesktopEvidencePack(
             retrieval_plan=plan,
             evidence=evidence,
-            degradations=all_degradations,
+            degradations=tuple((*all_degradations, *catalog_degradation)),
             source_images=source_images,
         )
 
@@ -152,6 +176,30 @@ class DesktopEvidenceRetriever:
             return fallback, ["retrieval_plan_cancelled"]
         except (DesktopModelCallError, ValueError, json.JSONDecodeError):
             return fallback, ["retrieval_plan_fallback"]
+
+
+@contextmanager
+def _best_effort_catalog_lease(
+    kb_dir: Path, *, enabled: bool
+) -> Iterator[tuple[CatalogGenerationLease | None, tuple[str, ...]]]:
+    """Acquire an optional Catalog lease without making baseline retrieval depend on it."""
+    if not enabled:
+        yield None, ()
+        return
+    lease_manager = lease_current_catalog(kb_dir)
+    try:
+        catalog = lease_manager.__enter__()
+    except Exception:
+        logger.warning("Knowledge Catalog lease failed; using baseline retrieval.", exc_info=True)
+        yield None, ("catalog_query_failed",)
+        return
+    try:
+        yield catalog, ()
+    finally:
+        try:
+            lease_manager.__exit__(None, None, None)
+        except Exception:
+            logger.warning("Knowledge Catalog lease cleanup failed.", exc_info=True)
 
 
 def _connect(database_path: Path) -> sqlite3.Connection:
@@ -326,6 +374,59 @@ def _knowledge_source_candidates(
     )
 
 
+def _catalog_candidates(
+    connection: sqlite3.Connection,
+    terms: tuple[str, ...],
+    generation_id: str | None,
+) -> tuple[_Candidate, ...]:
+    if generation_id is None:
+        return ()
+    rows = catalog_route_rows_in(connection, generation_id, terms, limit=_CHANNEL_LIMIT)
+    values: list[_Candidate] = []
+    for rank, row in enumerate(rows, start=1):
+        reference = DesktopEvidenceRef(
+            evidence_id=str(row[0]),
+            document_id=str(row[1]),
+            document_name=str(row[2]),
+            section=_section_from_json(str(row[3])),
+            locator=_json_object(str(row[4])),
+            excerpt=str(row[5]),
+            channels=("catalog",),
+        )
+        route_weight = row[6]
+        if isinstance(route_weight, bool) or not isinstance(route_weight, (int, float)):
+            raise DesktopAnswerError(
+                "desktop_catalog_state_invalid",
+                "The current Knowledge Catalog contains an invalid route weight.",
+            )
+        values.append(_Candidate(reference, "catalog", rank, weight=float(route_weight)))
+    return tuple(values)
+
+
+def _catalog_channel_candidates(
+    connection: sqlite3.Connection,
+    terms: tuple[str, ...],
+    catalog: CatalogGenerationLease | None,
+    variant: DesktopRetrievalVariant,
+    lease_degradations: tuple[str, ...],
+) -> tuple[tuple[_Candidate, ...], tuple[str, ...]]:
+    """Drop only the optional Catalog channel when its derived state is invalid."""
+    if variant not in _CATALOG_VARIANTS:
+        return (), ()
+    if lease_degradations:
+        return (), lease_degradations
+    try:
+        candidates = _catalog_candidates(
+            connection,
+            terms,
+            catalog.generation_id if catalog is not None else None,
+        )
+        return candidates, _catalog_degradation(connection, catalog, variant)
+    except Exception:
+        logger.warning("Knowledge Catalog query failed; using baseline retrieval.", exc_info=True)
+        return (), ("catalog_query_failed",)
+
+
 def _graph_candidates(
     connection: sqlite3.Connection,
     terms: tuple[str, ...],
@@ -365,6 +466,7 @@ def _variant_evidence(
     connection: sqlite3.Connection,
     terms: tuple[str, ...],
     variant: DesktopRetrievalVariant,
+    catalog_candidates: tuple[_Candidate, ...] = (),
 ) -> tuple[tuple[DesktopEvidenceRef, ...], str | None]:
     """Build one evaluation candidate set without adding unrequested channels."""
     if variant == "fts":
@@ -373,7 +475,9 @@ def _variant_evidence(
         return _fuse_candidates(_structure_lexical_candidates(connection, terms)), None
     if variant == "wiki":
         return _fuse_candidates(
-            _wiki_candidates(connection, terms) + _knowledge_source_candidates(connection, terms)
+            _wiki_candidates(connection, terms)
+            + _knowledge_source_candidates(connection, terms)
+            + catalog_candidates
         ), None
 
     baseline = _fuse_candidates(
@@ -381,6 +485,7 @@ def _variant_evidence(
         + _structure_lexical_candidates(connection, terms)
         + _wiki_candidates(connection, terms)
         + _knowledge_source_candidates(connection, terms)
+        + catalog_candidates
     )
     if variant == "baseline":
         return baseline, None
@@ -391,6 +496,21 @@ def _variant_evidence(
         # the independently retrieved baseline.
         return _with_graph_budget(baseline, ()), error.code
     return _with_graph_budget(baseline, graph_candidates), None
+
+
+def _catalog_degradation(
+    connection: sqlite3.Connection,
+    catalog: CatalogGenerationLease | None,
+    variant: DesktopRetrievalVariant,
+) -> tuple[str, ...]:
+    if variant not in _CATALOG_VARIANTS:
+        return ()
+    if catalog is not None:
+        return ("catalog_stale",) if catalog.is_stale else ()
+    row = connection.execute(
+        "SELECT status FROM knowledge_catalog_rebuild_tasks WHERE singleton = 1"
+    ).fetchone()
+    return ("catalog_unavailable",) if row is not None else ()
 
 
 def _scored_rows(
@@ -472,7 +592,7 @@ def _fuse_candidates(candidates: tuple[_Candidate, ...]) -> tuple[DesktopEvidenc
     channel_first: dict[str, str] = {}
     for candidate in candidates:
         evidence_id = candidate.reference.evidence_id
-        scores[evidence_id] += 1 / (_RRF_OFFSET + candidate.rank)
+        scores[evidence_id] += candidate.weight / (_RRF_OFFSET + candidate.rank)
         channels[evidence_id].add(candidate.channel)
         references.setdefault(evidence_id, candidate.reference)
         channel_first.setdefault(candidate.channel, evidence_id)

@@ -123,6 +123,7 @@ class DesktopRawAssetService:
                 ):
                     self._quarantine_if_needed(connection, record, record.integrity_error_code)
                     connection.commit()
+                    self._start_catalog_rebuilds()
                     raise DesktopImportError(
                         "raw_asset_quarantined",
                         "The saved original is quarantined and cannot be read.",
@@ -131,6 +132,7 @@ class DesktopRawAssetService:
                 if error_code is not None:
                     self._quarantine(connection, record, error_code)
                     connection.commit()
+                    self._start_catalog_rebuilds()
                     raise DesktopImportError(error_code, _integrity_message(error_code))
                 content, focus_offset = self._reader_content(
                     connection,
@@ -187,7 +189,17 @@ class DesktopRawAssetService:
                 raise
             finally:
                 connection.close()
+        if quarantined:
+            self._start_catalog_rebuilds()
         return tuple(quarantined)
+
+    def _start_catalog_rebuilds(self) -> None:
+        try:
+            from openkb.desktop_catalog_store import start_catalog_rebuilds
+
+            start_catalog_rebuilds(self.kb_dir)
+        except (OSError, RuntimeError, sqlite3.Error):
+            return
 
     def _connect(self) -> sqlite3.Connection:
         if not self.database_path.is_file():
@@ -264,6 +276,7 @@ class DesktopRawAssetService:
             except UnicodeDecodeError as error:
                 self._quarantine(connection, record, "raw_asset_content_invalid")
                 connection.commit()
+                self._start_catalog_rebuilds()
                 raise DesktopImportError(
                     "raw_asset_content_invalid", "The saved original is not valid text."
                 ) from error
