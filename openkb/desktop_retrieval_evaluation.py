@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import time
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, cast
 
 from openkb.desktop_answer_types import DesktopEvidencePack, DesktopRetrievalModelCost
 from openkb.desktop_graph_feature_flags import (
@@ -27,6 +30,7 @@ from openkb.desktop_grounded_answer import (
     prepare_grounded_evidence_pack,
 )
 from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_page_tree import PageTreeGeneration
 from openkb.desktop_readonly import connect_desktop_read_only
 from openkb.desktop_retrieval import (
     DESKTOP_EVIDENCE_RECALL_K,
@@ -34,6 +38,7 @@ from openkb.desktop_retrieval import (
 )
 from openkb.desktop_retrieval_channels import (
     DESKTOP_EVALUATION_VARIANT_ORDER,
+    PAGE_TREE_EVALUATION_VARIANTS,
     DesktopEvaluationVariant,
 )
 from openkb.desktop_retrieval_evaluation_types import (
@@ -56,12 +61,22 @@ from openkb.desktop_workspace import desktop_state_database_path
 AnswerGenerator = Callable[[str, DesktopEvidencePack], DesktopEvaluationAnswer]
 
 
+class EvaluationPageTreeProvider(Protocol):
+    generations: tuple[DesktopPageTreeGenerationIdentity, ...]
+    degradations: tuple[str, ...]
+
+    def lease(
+        self, kb_dir: Path, document_id: str
+    ) -> AbstractContextManager[PageTreeGeneration | None]: ...
+
+
 @dataclass(frozen=True)
 class _DerivedEvaluationSnapshot:
     knowledge_snapshot_digest: str
     knowledge_snapshot_revision: int
     catalog_generation_ids: tuple[str, ...]
     page_tree_generations: tuple[DesktopPageTreeGenerationIdentity, ...]
+    provider_documents_complete: bool = True
 
     @property
     def page_tree_providers(self) -> tuple[DesktopPageTreeProviderIdentity, ...]:
@@ -77,6 +92,7 @@ class _DerivedEvaluationSnapshot:
         return (
             bool(self.catalog_generation_ids)
             and bool(self.page_tree_generations)
+            and self.provider_documents_complete
             and all(
                 item.base_generation_id is not None
                 and item.provider_kind is not None
@@ -95,12 +111,21 @@ class DesktopRetrievalEvaluator:
         *,
         model_gateway: DesktopModelGateway | None = None,
         answer_generator: AnswerGenerator | None = None,
+        page_tree_provider: EvaluationPageTreeProvider | None = None,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._kb_dir = kb_dir.expanduser().resolve()
-        self._retriever = DesktopEvidenceRetriever(self._kb_dir, model_gateway=model_gateway)
+        if page_tree_provider is None:
+            self._retriever = DesktopEvidenceRetriever(self._kb_dir, model_gateway=model_gateway)
+        else:
+            self._retriever = DesktopEvidenceRetriever(
+                self._kb_dir,
+                model_gateway=model_gateway,
+                page_tree_lease=page_tree_provider.lease,
+            )
         self._database_path = desktop_state_database_path(self._kb_dir)
         self._answer_generator = answer_generator or _production_answer_generator(model_gateway)
+        self._page_tree_provider = page_tree_provider
         self._clock = clock
 
     def evaluate(
@@ -124,7 +149,19 @@ class DesktopRetrievalEvaluator:
                         case.question,
                         variant=variant,
                         retrieval_plan=planning.plan,
-                        degradations=planning.degradations,
+                        degradations=tuple(
+                            dict.fromkeys(
+                                (
+                                    *planning.degradations,
+                                    *(
+                                        self._page_tree_provider.degradations
+                                        if self._page_tree_provider is not None
+                                        and variant in PAGE_TREE_EVALUATION_VARIANTS
+                                        else ()
+                                    ),
+                                )
+                            )
+                        ),
                     )
                     retrieval_latency_ms = (self._clock() - retrieval_started) * 1_000
                     answer_started = self._clock()
@@ -269,19 +306,30 @@ class DesktopRetrievalEvaluator:
         catalog_generation_ids = (
             (str(catalog_row[0]),) if catalog_row is not None and catalog_row[0] is not None else ()
         )
+        default_generations = tuple(
+            DesktopPageTreeGenerationIdentity(
+                document_id=str(row[0]),
+                base_generation_id=str(row[1]) if row[1] is not None else None,
+                provider_kind=str(row[2]) if row[2] is not None else None,
+                provider_version=str(row[3]) if row[3] is not None else None,
+                enrichment_generation_id=str(row[4]) if row[4] is not None else None,
+            )
+            for row in page_tree_rows
+        )
+        provider_generations = (
+            self._page_tree_provider.generations
+            if self._page_tree_provider is not None
+            else default_generations
+        )
         return _DerivedEvaluationSnapshot(
             knowledge_snapshot_digest=knowledge_snapshot_digest,
             knowledge_snapshot_revision=knowledge_snapshot_revision,
             catalog_generation_ids=catalog_generation_ids,
-            page_tree_generations=tuple(
-                DesktopPageTreeGenerationIdentity(
-                    document_id=str(row[0]),
-                    base_generation_id=str(row[1]) if row[1] is not None else None,
-                    provider_kind=str(row[2]) if row[2] is not None else None,
-                    provider_version=str(row[3]) if row[3] is not None else None,
-                    enrichment_generation_id=str(row[4]) if row[4] is not None else None,
-                )
-                for row in page_tree_rows
+            page_tree_generations=provider_generations,
+            provider_documents_complete=(
+                self._page_tree_provider is None
+                or {item.document_id for item in provider_generations}
+                == {item.document_id for item in default_generations}
             ),
         )
 
@@ -646,11 +694,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--promote-local-graph", action="store_true")
     parser.add_argument("--validate-page-tree-promotion", action="store_true")
+    parser.add_argument(
+        "--experimental-pageindex-python",
+        type=Path,
+        help="Isolated Python runtime containing the pinned official PageIndex package.",
+    )
+    parser.add_argument("--pageindex-timeout-seconds", type=float, default=60.0)
+    parser.add_argument("--rebuild-official-pageindex", action="store_true")
     args = parser.parse_args(argv)
     from openkb.desktop_model_transport import desktop_model_gateway_for
 
+    if not math.isfinite(args.pageindex_timeout_seconds) or args.pageindex_timeout_seconds <= 0:
+        parser.error("--pageindex-timeout-seconds must be positive")
+    if args.rebuild_official_pageindex and args.experimental_pageindex_python is None:
+        parser.error("--rebuild-official-pageindex needs --experimental-pageindex-python")
+    page_tree_provider = None
+    if args.experimental_pageindex_python is not None:
+        from openkb.desktop_pageindex_provider import materialize_official_pageindex_provider
+
+        page_tree_provider = materialize_official_pageindex_provider(
+            args.kb_dir,
+            python_executable=args.experimental_pageindex_python,
+            timeout_seconds=args.pageindex_timeout_seconds,
+            force_rebuild=args.rebuild_official_pageindex,
+        )
     evaluator = DesktopRetrievalEvaluator(
-        args.kb_dir, model_gateway=desktop_model_gateway_for(args.kb_dir)
+        args.kb_dir,
+        model_gateway=desktop_model_gateway_for(args.kb_dir),
+        page_tree_provider=cast(EvaluationPageTreeProvider | None, page_tree_provider),
     )
     suite = DesktopRetrievalEvaluationSuite.from_json(args.suite)
     report = evaluator.evaluate(suite, repetitions=args.repetitions)

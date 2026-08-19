@@ -25,3 +25,12 @@ release package or their distributed runtime directories.
 
 This package does not include LibreOffice. Legacy binary DOC/PPT compatibility
 uses only the private, package-local Tika and Java runtime above.
+
+The optional evaluation-only PageIndex environment is not included in the
+Portable Desktop Package. When explicitly installed, it uses PageIndex 0.2.10
+at verified release commit `ba0ef02d78034704be049894c463dc606acbd0d7`
+(MIT), from the official wheel with SHA-256
+`23664dd05636d712eb597a7c9c326f4c14d0b3cf412cd3545662f833af641448`.
+That isolated environment also pins PyPDF2 3.0.1 (BSD), python-dotenv 1.2.2
+(BSD-3-Clause), and PyYAML 6.0.3 (MIT); none are shipped in the default
+Portable Desktop Package through this optional path.

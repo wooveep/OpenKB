@@ -1,0 +1,7 @@
+# Isolated, evaluation-only PageIndex runtime. Install with --no-deps so the
+# upstream SDK's broad Chat/Agents dependencies cannot replace OpenKB's pinned
+# Model Gateway runtime. The adapter imports only page_index_md + utils.
+pageindex @ https://github.com/VectifyAI/PageIndex/releases/download/v0.2.10/pageindex-0.2.10-py3-none-any.whl#sha256=23664dd05636d712eb597a7c9c326f4c14d0b3cf412cd3545662f833af641448
+PyPDF2==3.0.1
+python-dotenv==1.2.2
+PyYAML==6.0.3

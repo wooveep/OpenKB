@@ -113,10 +113,54 @@ def persist_page_tree_generation_in(
     generation: PageTreeGeneration,
 ) -> None:
     """Persist immutable nodes and activate the generation for one Available document."""
-    if generation.document_version_id != document_id or generation.status != "ready":
-        raise ValueError("Document PageTree generation is bound to another version.")
     require_d1_canonical_provider_in(connection, document_id, generation)
     generation = reuse_matching_d1_generation_in(connection, document_id, generation)
+    store_page_tree_generation_in(connection, document_id, generation)
+
+    previous = connection.execute(
+        "SELECT generation_id FROM document_page_tree_current WHERE document_id = ?",
+        (document_id,),
+    ).fetchone()
+    if previous is not None and str(previous[0]) != generation.generation_id:
+        connection.execute(
+            "UPDATE document_page_tree_generations SET status = 'superseded' "
+            "WHERE generation_id = ?",
+            (str(previous[0]),),
+        )
+    connection.execute(
+        "UPDATE document_page_tree_generations SET status = 'current' WHERE generation_id = ?",
+        (generation.generation_id,),
+    )
+    now = _timestamp()
+    connection.execute(
+        """
+        INSERT INTO document_page_tree_current (document_id, generation_id, activated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(document_id) DO UPDATE SET
+            generation_id = excluded.generation_id,
+            activated_at = excluded.activated_at
+        """,
+        (document_id, generation.generation_id, now),
+    )
+    _delete_unleased_superseded_in(connection, document_id)
+    connection.execute(
+        """
+        UPDATE document_page_tree_rebuild_tasks
+        SET status = 'completed', error_code = NULL, updated_at = ?, completed_at = ?
+        WHERE document_id = ?
+        """,
+        (now, now, document_id),
+    )
+
+
+def store_page_tree_generation_in(
+    connection: sqlite3.Connection,
+    document_id: str,
+    generation: PageTreeGeneration,
+) -> None:
+    """Store one validated generation without selecting which provider is active."""
+    if generation.document_version_id != document_id or generation.status != "ready":
+        raise ValueError("Document PageTree generation is bound to another version.")
     available = connection.execute(
         "SELECT 1 FROM source_documents WHERE document_id = ? AND availability = 'available'",
         (document_id,),
@@ -159,41 +203,6 @@ def persist_page_tree_generation_in(
         )
     elif str(existing[0]) != document_id:
         raise ValueError("Document PageTree generation identity collides with another document.")
-
-    previous = connection.execute(
-        "SELECT generation_id FROM document_page_tree_current WHERE document_id = ?",
-        (document_id,),
-    ).fetchone()
-    if previous is not None and str(previous[0]) != generation.generation_id:
-        connection.execute(
-            "UPDATE document_page_tree_generations SET status = 'superseded' "
-            "WHERE generation_id = ?",
-            (str(previous[0]),),
-        )
-    connection.execute(
-        "UPDATE document_page_tree_generations SET status = 'current' WHERE generation_id = ?",
-        (generation.generation_id,),
-    )
-    now = _timestamp()
-    connection.execute(
-        """
-        INSERT INTO document_page_tree_current (document_id, generation_id, activated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(document_id) DO UPDATE SET
-            generation_id = excluded.generation_id,
-            activated_at = excluded.activated_at
-        """,
-        (document_id, generation.generation_id, now),
-    )
-    _delete_unleased_superseded_in(connection, document_id)
-    connection.execute(
-        """
-        UPDATE document_page_tree_rebuild_tasks
-        SET status = 'completed', error_code = NULL, updated_at = ?, completed_at = ?
-        WHERE document_id = ?
-        """,
-        (now, now, document_id),
-    )
 
 
 def _insert_generation_in(
@@ -279,22 +288,32 @@ def load_current_page_tree_in(
 ) -> PageTreeGeneration | None:
     row = connection.execute(
         """
-        SELECT generations.generation_id, generations.provider_kind,
-            generations.provider_version, generations.structural_ir_fingerprint,
-            generations.locator_mapping_digest, generations.created_at, generations.status,
-            generations.reused_from_generation_id
-        FROM document_page_tree_current AS current
-        JOIN document_page_tree_generations AS generations
-            ON generations.generation_id = current.generation_id
-        WHERE current.document_id = ?
+        SELECT generation_id FROM document_page_tree_current WHERE document_id = ?
         """,
         (document_id,),
     ).fetchone()
     if row is None:
         return None
-    if str(row[6]) != "current":
+    return load_page_tree_generation_in(connection, document_id, str(row[0]))
+
+
+def load_page_tree_generation_in(
+    connection: sqlite3.Connection,
+    document_id: str,
+    generation_id: str,
+) -> PageTreeGeneration:
+    """Load one immutable provider generation through the OpenKB PageTree contract."""
+    row = connection.execute(
+        """
+        SELECT provider_kind, provider_version, structural_ir_fingerprint,
+            locator_mapping_digest, created_at, status, reused_from_generation_id
+        FROM document_page_tree_generations
+        WHERE document_id = ? AND generation_id = ?
+        """,
+        (document_id, generation_id),
+    ).fetchone()
+    if row is None or str(row[5]) != "current":
         raise ValueError("The current Document PageTree generation is not current.")
-    generation_id = str(row[0])
     node_rows = connection.execute(
         """
         SELECT node_id, parent_node_id, node_order, depth, kind, title, summary, locator_json
@@ -325,14 +344,14 @@ def load_current_page_tree_in(
     generation = PageTreeGeneration(
         generation_id=generation_id,
         document_version_id=document_id,
-        provider_kind=str(row[1]),
-        provider_version=str(row[2]),
-        structural_ir_fingerprint=str(row[3]),
-        locator_mapping_digest=str(row[4]),
-        created_at=str(row[5]),
+        provider_kind=str(row[0]),
+        provider_version=str(row[1]),
+        structural_ir_fingerprint=str(row[2]),
+        locator_mapping_digest=str(row[3]),
+        created_at=str(row[4]),
         status="ready",
         nodes=nodes,
-        reused_from_generation_id=str(row[7]) if row[7] is not None else None,
+        reused_from_generation_id=str(row[6]) if row[6] is not None else None,
     )
     validate_current_page_tree(generation)
     return generation
@@ -468,7 +487,7 @@ def _rebuild_one(state_dir: Path, database_path: Path, document_id: str) -> None
         with kb_ingest_lock(state_dir):
             connection = _connect(database_path)
             try:
-                blocks, evidence, images = _published_page_tree_input_in(connection, document_id)
+                blocks, evidence, images = published_page_tree_input_in(connection, document_id)
             finally:
                 connection.close()
         generation = build_deterministic_page_tree(
@@ -599,7 +618,7 @@ def _run_page_tree_rebuild_worker(kb_dir: Path) -> None:
             _REBUILD_RERUN_REQUESTS.discard(kb_dir)
 
 
-def _published_page_tree_input_in(
+def published_page_tree_input_in(
     connection: sqlite3.Connection, document_id: str
 ) -> tuple[
     tuple[DocumentIRBlock, ...],
@@ -683,21 +702,20 @@ def _checkpoint_page_tree_input_in(
     document_ir = json.loads(str(row[0]))
     blocks = document_ir_from_checkpoint(document_ir)
     if row[1] is not None:
-        evidence = evidence_from_checkpoint(json.loads(str(row[1])), blocks)
-    else:
-        block_by_ordinal = {block.ordinal: block for block in blocks}
-        evidence_rows = connection.execute(
-            "SELECT evidence_id, ordinal FROM evidence_occurrences "
-            "WHERE document_id = ? ORDER BY ordinal",
-            (document_id,),
-        ).fetchall()
-        if len(evidence_rows) != len(blocks) or any(
-            _integer(value[1]) not in block_by_ordinal for value in evidence_rows
-        ):
-            raise ValueError("Document PageTree Evidence occurrences do not match its IR.")
-        evidence = tuple(
-            (str(value[0]), block_by_ordinal[_integer(value[1])]) for value in evidence_rows
-        )
+        evidence_from_checkpoint(json.loads(str(row[1])), blocks)
+    block_by_ordinal = {block.ordinal: block for block in blocks}
+    evidence_rows = connection.execute(
+        "SELECT evidence_id, ordinal FROM evidence_occurrences "
+        "WHERE document_id = ? ORDER BY ordinal",
+        (document_id,),
+    ).fetchall()
+    if len(evidence_rows) != len(blocks) or any(
+        _integer(value[1]) not in block_by_ordinal for value in evidence_rows
+    ):
+        raise ValueError("Document PageTree Evidence occurrences do not match its IR.")
+    evidence = tuple(
+        (str(value[0]), block_by_ordinal[_integer(value[1])]) for value in evidence_rows
+    )
     return (
         blocks,
         evidence,

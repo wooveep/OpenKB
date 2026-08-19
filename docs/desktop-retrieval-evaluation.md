@@ -67,3 +67,45 @@ revision maintained by SQLite on every retrieval-affecting write. Ordinary
 answers compare only that revision, so after an import or published
 knowledge-page change local graph retrieval remains off until the suite is run
 again without adding a full-corpus scan to question latency.
+
+## Experimental official PageIndex provider
+
+PageIndex is deliberately absent from the default OpenKB and Portable Desktop
+dependencies. Its 0.2.10 SDK requires a newer LiteLLM plus Chat/Agents packages,
+so installing it into the Engine environment would replace audited runtime
+pins and add cold-start cost before the fixed gate has passed. Create a separate
+Windows environment instead:
+
+```powershell
+pwsh -NoProfile -File desktop/scripts/New-PageIndexProviderEnvironment.ps1 `
+  -Destination "$env:LOCALAPPDATA\OpenKB\pageindex-provider-0.2.10"
+```
+
+The lock uses the official MIT-licensed 0.2.10 wheel at verified release commit
+`ba0ef02d78034704be049894c463dc606acbd0d7` and verifies wheel SHA-256
+`23664dd05636d712eb597a7c9c326f4c14d0b3cf412cd3545662f833af641448`.
+The normalized provider identity is
+`official_pageindex@0.2.10+ba0ef02d7803.openkb1`, so an adapter contract change
+cannot silently reuse an older generation.
+Only `page_index_md` and its minimal deterministic runtime are installed; the
+exact runtime set is PyPDF2 3.0.1, python-dotenv 1.2.2, and PyYAML 6.0.3.
+The adapter never invokes PageIndex Chat, Agents, embeddings, or a vector store.
+
+Run the same fixed suite against the experimental provider explicitly:
+
+```powershell
+uv run python -m openkb.desktop_retrieval_evaluation <kb-dir> <suite.json> `
+  --experimental-pageindex-python `
+  "$env:LOCALAPPDATA\OpenKB\pageindex-provider-0.2.10\Scripts\python.exe" `
+  --repetitions 3 --output <pageindex-report.json>
+```
+
+OpenKB renders a temporary Markdown view from its SQLite Document IR, asks the
+pinned SDK only for hierarchy, then normalizes nodes back to immutable OpenKB
+PageTree generations and existing Evidence IDs. The temporary input is removed
+after each call. The provider cache contains no full source text and can be
+deleted; `--rebuild-official-pageindex` reconstructs it from SQLite authority.
+Provider timeout, invalid output, missing runtime, or corrupt cache adds a
+provider-local degradation to the complete report while baseline variants
+continue. The flag never changes ordinary Desktop retrieval defaults or the
+Grounded Answer service.

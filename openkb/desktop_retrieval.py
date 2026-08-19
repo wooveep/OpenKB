@@ -32,9 +32,11 @@ from openkb.desktop_knowledge_source_retrieval import knowledge_source_rows_in
 from openkb.desktop_knowledge_sources import AVAILABLE_EVIDENCE_OCCURRENCES_CTE
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_page_tree_selection import (
+    PageTreeLeaseFactory,
     PageTreeSelectionResult,
     select_page_tree_evidence,
 )
+from openkb.desktop_page_tree_store import lease_current_page_tree
 from openkb.desktop_retrieval_channels import (
     CATALOG_RETRIEVAL_VARIANTS,
     DESKTOP_EVALUATION_VARIANTS,
@@ -88,10 +90,17 @@ class _VariantEvidence:
 class DesktopEvidenceRetriever:
     """Build an Evidence Pack from Available Knowledge with safe fallbacks."""
 
-    def __init__(self, kb_dir: Path, *, model_gateway: DesktopModelGateway | None = None) -> None:
+    def __init__(
+        self,
+        kb_dir: Path,
+        *,
+        model_gateway: DesktopModelGateway | None = None,
+        page_tree_lease: PageTreeLeaseFactory = lease_current_page_tree,
+    ) -> None:
         self._kb_dir = kb_dir.expanduser().resolve()
         self._database_path = desktop_state_database_path(self._kb_dir)
         self._model_gateway = model_gateway
+        self._page_tree_lease = page_tree_lease
 
     def retrieve(
         self, question: str, *, is_cancelled: Callable[[], bool] | None = None
@@ -132,13 +141,7 @@ class DesktopEvidenceRetriever:
         is_cancelled: Callable[[], bool] | None = None,
         _enable_page_tree_selection: bool = False,
     ) -> DesktopEvidencePack:
-        """Retrieve one named vectorless channel for a fixed evaluation plan.
-
-        Normal answers select ``baseline`` until an approved evaluation enables
-        ``local_graph``.  The narrower variants are exposed so the regression
-        harness can compare like-for-like candidate sets without giving each
-        variant a different query plan.
-        """
+        """Retrieve one named vectorless channel for a fixed evaluation plan."""
         if variant not in DESKTOP_EVALUATION_VARIANTS:
             raise ValueError(f"Unsupported Desktop retrieval variant: {variant}")
         normalized_question = validate_question(question)
@@ -195,6 +198,7 @@ class DesktopEvidenceRetriever:
                     variant_evidence.evidence,
                     self._model_gateway,
                     is_cancelled=is_cancelled,
+                    lease_tree=self._page_tree_lease,
                 )
             connection = _connect(self._database_path)
             try:

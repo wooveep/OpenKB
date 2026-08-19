@@ -660,6 +660,7 @@ def test_migration_backfills_stage_and_queues_available_legacy_document(tmp_path
         connection.execute("DELETE FROM stage_run_runtime WHERE stage_run_id = ?", (stage_id,))
         connection.execute("DELETE FROM stage_runs WHERE stage_run_id = ?", (stage_id,))
         for table in (
+            "document_page_tree_provider_current",
             "document_page_tree_enrichment_current",
             "document_page_tree_enrichment_summaries",
             "document_page_tree_enrichment_tasks",
@@ -675,11 +676,13 @@ def test_migration_backfills_stage_and_queues_available_legacy_document(tmp_path
         connection.execute("DROP INDEX import_jobs_document_completed_idx")
         connection.execute("DROP TABLE grounded_answer_retrieval_traces")
         connection.execute("DROP TABLE conversation_answer_retrieval_traces")
-        connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35, 36)")
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35, 36, 37)"
+        )
 
     activation = DesktopKnowledgeBaseRuntime().open(kb_dir)
 
-    assert activation.knowledge_base.schema_version == 36
+    assert activation.knowledge_base.schema_version == 37
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT status FROM stage_runs WHERE job_id = ? AND stage = 'deterministic_page_tree'",
@@ -732,6 +735,7 @@ def test_migration_leaves_page_tree_pending_for_a_legacy_quarantined_import(tmp_
         connection.execute("DELETE FROM stage_run_runtime WHERE stage_run_id = ?", (stage_id,))
         connection.execute("DELETE FROM stage_runs WHERE stage_run_id = ?", (stage_id,))
         for table in (
+            "document_page_tree_provider_current",
             "document_page_tree_enrichment_current",
             "document_page_tree_enrichment_summaries",
             "document_page_tree_enrichment_tasks",
@@ -747,7 +751,9 @@ def test_migration_leaves_page_tree_pending_for_a_legacy_quarantined_import(tmp_
         connection.execute("DROP INDEX import_jobs_document_completed_idx")
         connection.execute("DROP TABLE grounded_answer_retrieval_traces")
         connection.execute("DROP TABLE conversation_answer_retrieval_traces")
-        connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35, 36)")
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35, 36, 37)"
+        )
 
     DesktopKnowledgeBaseRuntime().open(kb_dir)
 

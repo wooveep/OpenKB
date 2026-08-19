@@ -7,7 +7,7 @@ import logging
 import re
 import sqlite3
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +44,7 @@ _CONFLICT = re.compile(
 )
 
 logger = logging.getLogger(__name__)
+PageTreeLeaseFactory = Callable[[Path, str], AbstractContextManager[PageTreeGeneration | None]]
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ def select_page_tree_evidence(
     model_gateway: DesktopModelGateway | None,
     *,
     is_cancelled: Callable[[], bool] | None = None,
+    lease_tree: PageTreeLeaseFactory = lease_current_page_tree,
 ) -> PageTreeSelectionResult:
     """Call PageTree Selection at most once, then return only bound Evidence identities."""
     try:
@@ -76,8 +78,7 @@ def select_page_tree_evidence(
             trees = tuple(
                 tree
                 for document_id in document_ids
-                if (tree := stack.enter_context(lease_current_page_tree(kb_dir, document_id)))
-                is not None
+                if (tree := stack.enter_context(lease_tree(kb_dir, document_id))) is not None
             )
             if not trees:
                 return PageTreeSelectionResult()

@@ -162,3 +162,24 @@ PAGE_TREE_LIFECYCLE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON document_page_tree_generations(document_id, status, created_at DESC)
     """,
 )
+
+
+PAGE_TREE_PROVIDER_EVALUATION_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE document_page_tree_provider_current (
+        document_id TEXT NOT NULL REFERENCES source_documents(document_id) ON DELETE CASCADE,
+        provider_kind TEXT NOT NULL,
+        provider_version TEXT NOT NULL,
+        generation_id TEXT NOT NULL UNIQUE,
+        activated_at TEXT NOT NULL,
+        PRIMARY KEY(document_id, provider_kind, provider_version),
+        FOREIGN KEY(document_id, generation_id)
+            REFERENCES document_page_tree_generations(document_id, generation_id)
+            ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE INDEX document_page_tree_provider_current_identity_idx
+        ON document_page_tree_provider_current(provider_kind, provider_version, document_id)
+    """,
+)
