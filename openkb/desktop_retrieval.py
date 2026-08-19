@@ -25,6 +25,10 @@ from openkb.desktop_knowledge_graph import (
     local_graph_evidence_ids,
     record_query_diagnostic,
 )
+from openkb.desktop_knowledge_sources import (
+    AVAILABLE_EVIDENCE_OCCURRENCES_CTE,
+    knowledge_source_rows_in,
+)
 from openkb.desktop_lexical import cjk_bigrams, is_cjk_text
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
@@ -50,24 +54,6 @@ _RRF_OFFSET = 60
 _TERM_PATTERN = re.compile(r"[A-Za-z0-9_]{2,}|[\u3400-\u9fff]+")
 _CELL_RANGE_PATTERN = re.compile(r"^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$", re.IGNORECASE)
 _SCORE_COLUMNS = frozenset(("display_name", "heading_path", "text"))
-
-_AVAILABLE_EVIDENCE_OCCURRENCES_CTE = """
-WITH available_evidence_occurrences AS (
-    SELECT evidence_occurrences.evidence_id, evidence_occurrences.document_id,
-        source_documents.display_name, document_ir_blocks.heading_path,
-        document_ir_blocks.locator_json, evidence_refs.text, evidence_occurrences.ordinal,
-        ROW_NUMBER() OVER (
-            PARTITION BY evidence_occurrences.evidence_id
-            ORDER BY source_documents.created_at, source_documents.document_id,
-                evidence_occurrences.ordinal
-        ) AS occurrence_rank
-    FROM evidence_occurrences
-    JOIN evidence_refs ON evidence_refs.evidence_id = evidence_occurrences.evidence_id
-    JOIN source_documents ON source_documents.document_id = evidence_occurrences.document_id
-    JOIN document_ir_blocks ON document_ir_blocks.block_id = evidence_occurrences.block_id
-    WHERE source_documents.availability = 'available'
-)
-"""
 
 
 @dataclass(frozen=True)
@@ -254,7 +240,7 @@ def _fts_candidates(
     try:
         rows = connection.execute(
             f"""
-            {_AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+            {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
             SELECT available_evidence_occurrences.evidence_id,
                 available_evidence_occurrences.document_id,
                 available_evidence_occurrences.display_name,
@@ -280,7 +266,7 @@ def _like_rows(connection: sqlite3.Connection, terms: tuple[str, ...]) -> list[t
     clauses = " OR ".join("lower(text) LIKE ?" for _ in terms)
     return connection.execute(
         f"""
-        {_AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+        {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
         SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
         FROM available_evidence_occurrences
         WHERE occurrence_rank = 1 AND ({clauses})
@@ -349,7 +335,7 @@ def _knowledge_generation_candidates(
     score_expression = " + ".join(score_parts)
     rows = connection.execute(
         f"""
-        {_AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+        {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
         SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
         FROM (
             SELECT available_evidence_occurrences.evidence_id,
@@ -376,6 +362,16 @@ def _knowledge_generation_candidates(
     return _ranked_candidates(rows, "knowledge_generation")
 
 
+def _knowledge_source_candidates(
+    connection: sqlite3.Connection, terms: tuple[str, ...]
+) -> tuple[_Candidate, ...]:
+    """Use published claim wording only to route back to its mapped original evidence."""
+    return _ranked_candidates(
+        knowledge_source_rows_in(connection, terms, limit=_CHANNEL_LIMIT),
+        "knowledge_source",
+    )
+
+
 def _graph_candidates(
     connection: sqlite3.Connection,
     terms: tuple[str, ...],
@@ -394,7 +390,7 @@ def _graph_candidates(
     rows = bounded_graph_rows(
         connection,
         f"""
-        {_AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+        {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
         SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
         FROM available_evidence_occurrences
         WHERE occurrence_rank = 1 AND evidence_id IN ({_placeholders(evidence_ids)})
@@ -425,6 +421,7 @@ def _variant_evidence(
         return _fuse_candidates(
             _wiki_candidates(connection, terms)
             + _knowledge_generation_candidates(connection, terms)
+            + _knowledge_source_candidates(connection, terms)
         ), None
 
     baseline = _fuse_candidates(
@@ -432,6 +429,7 @@ def _variant_evidence(
         + _structure_lexical_candidates(connection, terms)
         + _wiki_candidates(connection, terms)
         + _knowledge_generation_candidates(connection, terms)
+        + _knowledge_source_candidates(connection, terms)
     )
     if variant == "baseline":
         return baseline, None
@@ -466,7 +464,7 @@ def _scored_rows(
     score_expression = " + ".join(score_parts)
     return connection.execute(
         f"""
-        {_AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+        {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
         SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
         FROM (
             SELECT evidence_id, document_id, display_name, heading_path, locator_json, text,

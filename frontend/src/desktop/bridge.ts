@@ -25,6 +25,7 @@ import {
   type DesktopKnowledgePage,
   type DesktopKnowledgePages,
   type DesktopKnowledgePageKind,
+  type DesktopKnowledgeSourceCandidate,
   type DesktopDocumentVersionCandidate,
   type DesktopDocumentVersionCandidates,
   type DesktopDocumentVersionCandidateDecision,
@@ -44,6 +45,7 @@ import {
   runtimeLaunchIntents,
   toDesktopBridgeError,
 } from "./bridge-normalizers"
+import { UnavailableKnowledgePageBridge } from "./unavailable-knowledge-page-bridge"
 
 type DesktopWindow = Window & {
   __OPENKB_DESKTOP__?: unknown
@@ -335,6 +337,28 @@ export class TauriDesktopBridge implements DesktopBridge {
     return this.call<DesktopKnowledgePage>("desktop_publish_knowledge_page", { pageId, requestId })
   }
 
+  async searchKnowledgeSources(query: string): Promise<DesktopKnowledgeSourceCandidate[]> {
+    const result = await this.call<{ sources: DesktopKnowledgeSourceCandidate[] }>(
+      "desktop_search_knowledge_sources",
+      { query },
+    )
+    return result.sources
+  }
+
+  async bindKnowledgePageSource(
+    pageId: string,
+    claimText: string,
+    evidenceId: string,
+    requestId: string,
+  ): Promise<DesktopKnowledgePage> {
+    return this.call<DesktopKnowledgePage>("desktop_bind_knowledge_page_source", {
+      pageId,
+      claimText,
+      evidenceId,
+      requestId,
+    })
+  }
+
   async documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates> {
     return this.call<DesktopDocumentVersionCandidates>("desktop_document_version_candidates")
   }
@@ -427,8 +451,8 @@ export class TauriDesktopBridge implements DesktopBridge {
   }
 }
 
-class UnavailableDesktopBridge implements DesktopBridge {
-  private unavailable(): Promise<never> {
+class UnavailableDesktopBridge extends UnavailableKnowledgePageBridge implements DesktopBridge {
+  protected unavailable<T>(): Promise<T> {
     return Promise.reject(
       new DesktopBridgeError(
         "desktop_shell_unavailable",
@@ -663,36 +687,6 @@ class UnavailableDesktopBridge implements DesktopBridge {
     void conversationId
     void assistantMessageId
     void answerVersionId
-    void requestId
-    return this.unavailable()
-  }
-
-  knowledgePages(): Promise<DesktopKnowledgePages> {
-    return this.unavailable()
-  }
-
-  getKnowledgePage(pageId: string): Promise<DesktopKnowledgePage> {
-    void pageId
-    return this.unavailable()
-  }
-
-  saveKnowledgePage(
-    pageId: string | undefined,
-    kind: DesktopKnowledgePageKind,
-    title: string,
-    contentMarkdown: string,
-    requestId: string,
-  ): Promise<DesktopKnowledgePage> {
-    void pageId
-    void kind
-    void title
-    void contentMarkdown
-    void requestId
-    return this.unavailable()
-  }
-
-  publishKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
-    void pageId
     void requestId
     return this.unavailable()
   }

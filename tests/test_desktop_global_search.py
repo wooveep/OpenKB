@@ -18,7 +18,7 @@ def test_global_search_returns_only_user_facing_workspace_content(tmp_path):
         page_id=None,
         kind="concept",
         title="Provider connectivity",
-        content_markdown="Use the configured endpoint.",
+        content_markdown="# Use the configured endpoint",
     )
     pages.publish(page.page_id)
     conversation = DesktopConversationService(kb_dir).create("Network diagnosis")
@@ -43,14 +43,14 @@ def test_global_search_excludes_working_draft_until_publication(tmp_path):
         page_id=None,
         kind="concept",
         title="Release channel",
-        content_markdown="The stable marker is cobalt.",
+        content_markdown="# Stable marker cobalt",
     )
     pages.publish(draft.page_id)
     pages.save_draft(
         page_id=draft.page_id,
         kind="concept",
         title="Release channel",
-        content_markdown="The unpublished marker is vermilion.",
+        content_markdown="# Unpublished marker vermilion",
     )
 
     assert search_desktop_knowledge_base(kb_dir, "cobalt")["results"]

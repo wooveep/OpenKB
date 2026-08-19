@@ -110,7 +110,7 @@ def test_incompatible_change_to_user_revision_is_isolated(tmp_path: Path) -> Non
         page_id=None,
         kind="entity",
         title="Alice",
-        content_markdown="User-owned statement.",
+        content_markdown="# User-owned statement",
     )
     pages.publish(page.page_id)
     source = tmp_path / "incoming.txt"
@@ -124,7 +124,7 @@ def test_incompatible_change_to_user_revision_is_isolated(tmp_path: Path) -> Non
     assert conflicts[0].kind == "entity"
     current = pages.get_page(page.page_id)
     assert current.published_revision is not None
-    assert current.published_revision.content_markdown == "User-owned statement."
+    assert current.published_revision.content_markdown == "# User-owned statement"
 
 
 def test_staged_conflict_choices_publish_atomically_and_delete_review_copies(

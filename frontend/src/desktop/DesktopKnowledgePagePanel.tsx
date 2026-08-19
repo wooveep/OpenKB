@@ -1,4 +1,4 @@
-import { BookMarked, FilePlus2, Loader2, Save, Upload } from "lucide-react"
+import { BookMarked, FilePlus2, Link2, Loader2, Save, Search, Upload } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import MarkdownView from "@/components/MarkdownView"
@@ -12,6 +12,9 @@ import type {
   DesktopKnowledgePageKind,
   DesktopKnowledgePagePublicationState,
   DesktopKnowledgePageSummary,
+  DesktopKnowledgePublicationDiagnostic,
+  DesktopKnowledgeSourceCandidate,
+  DesktopKnowledgeSourceMapEntry,
 } from "./contracts"
 
 type KnowledgePageEditor = {
@@ -21,6 +24,8 @@ type KnowledgePageEditor = {
   contentMarkdown: string
   publicationState: DesktopKnowledgePagePublicationState
   publishedRevisionNumber: number | null
+  sourceMap: DesktopKnowledgeSourceMapEntry[]
+  publicationDiagnostics: DesktopKnowledgePublicationDiagnostic[]
 }
 
 type DraftSaveState = "published" | "unsaved" | "saving" | "saved"
@@ -33,6 +38,8 @@ function newEditor(kind: DesktopKnowledgePageKind): KnowledgePageEditor {
     contentMarkdown: "",
     publicationState: "draft",
     publishedRevisionNumber: null,
+    sourceMap: [],
+    publicationDiagnostics: [],
   }
 }
 
@@ -48,6 +55,11 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
   const [saveState, setSaveState] = useState<DraftSaveState>("unsaved")
   const [error, setError] = useState<string | null>(null)
   const [editTick, setEditTick] = useState(0)
+  const [selectedClaim, setSelectedClaim] = useState("")
+  const [sourceQuery, setSourceQuery] = useState("")
+  const [sourceResults, setSourceResults] = useState<DesktopKnowledgeSourceCandidate[]>([])
+  const [searchingSources, setSearchingSources] = useState(false)
+  const [bindingSource, setBindingSource] = useState(false)
   const pageRead = useRef(0)
   const editorRef = useRef(editor)
   const pageIdRef = useRef<string | undefined>(undefined)
@@ -229,6 +241,47 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
     setLoadingPage(false)
     setError(null)
     setSaveState("unsaved")
+    setSelectedClaim("")
+  }
+
+  const searchSources = async () => {
+    if (!sourceQuery.trim()) return
+    setSearchingSources(true)
+    setError(null)
+    try {
+      setSourceResults(await bridge.searchKnowledgeSources(sourceQuery))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setSearchingSources(false)
+    }
+  }
+
+  const bindSource = async (source: DesktopKnowledgeSourceCandidate) => {
+    if (!selectedClaim) {
+      setError(t("desktop.knowledgeBases.knowledgePages.selectClaimFirst"))
+      return
+    }
+    setBindingSource(true)
+    setError(null)
+    try {
+      await flushDraft()
+      const pageId = pageIdRef.current
+      if (!pageId) throw new Error(t("desktop.knowledgeBases.knowledgePages.saveBeforeBinding"))
+      const page = await bridge.bindKnowledgePageSource(
+        pageId,
+        selectedClaim,
+        source.evidenceId,
+        nextDesktopRequestId("knowledge-page-source"),
+      )
+      applyServerPage(page)
+      updatePageSummary(page)
+      setSelectedClaim("")
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setBindingSource(false)
+    }
   }
 
   const publishPage = async () => {
@@ -262,6 +315,7 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
           <button
             key={page.pageId}
             type="button"
+            disabled={busy}
             aria-current={editor.pageId === page.pageId ? "page" : undefined}
             onClick={() => void selectPage(page.pageId)}
             className={[
@@ -284,7 +338,7 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
     )
   }
 
-  const busy = loadingPage || publishing || saveState === "saving"
+  const busy = loadingPage || publishing || bindingSource || saveState === "saving"
   const canPublish = Boolean(editor.pageId || editor.title.trim())
 
   return (
@@ -292,11 +346,11 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
       <div className="grid min-h-[32rem] lg:grid-cols-[15rem_minmax(0,1fr)]">
         <aside className="border-b border-border/70 bg-muted/20 p-3 lg:border-b-0 lg:border-r">
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={() => void beginNew("concept")}>
+            <Button size="sm" disabled={busy} onClick={() => void beginNew("concept")}>
               <FilePlus2 className="size-3.5" />
               {t("desktop.knowledgeBases.knowledgePages.newConcept")}
             </Button>
-            <Button size="sm" variant="outline" onClick={() => void beginNew("entity")}>
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => void beginNew("entity")}>
               <FilePlus2 className="size-3.5" />
               {t("desktop.knowledgeBases.knowledgePages.newEntity")}
             </Button>
@@ -376,6 +430,12 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
                   value={editor.contentMarkdown}
                   disabled={busy}
                   onChange={(event) => updateEditor({ contentMarkdown: event.target.value })}
+                  onSelect={(event) => {
+                    const target = event.currentTarget
+                    setSelectedClaim(
+                      target.value.slice(target.selectionStart, target.selectionEnd).trim(),
+                    )
+                  }}
                   placeholder={t("desktop.knowledgeBases.knowledgePages.markdownPlaceholder")}
                 />
               </label>
@@ -395,6 +455,82 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
               </div>
             </div>
           </div>
+
+          <div className="mt-5 grid gap-4 rounded-xl border border-border/70 bg-muted/15 p-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+            <div>
+              <div className="flex items-center gap-2">
+                <Link2 className="size-4 text-primary" />
+                <h3 className="text-sm font-semibold">
+                  {t("desktop.knowledgeBases.knowledgePages.sourceBinding")}
+                </h3>
+              </div>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {selectedClaim
+                  ? t("desktop.knowledgeBases.knowledgePages.selectedClaim", { claim: selectedClaim })
+                  : t("desktop.knowledgeBases.knowledgePages.selectClaim")}
+              </p>
+              <div className="mt-3 flex gap-2">
+                <Input
+                  value={sourceQuery}
+                  onChange={(event) => setSourceQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault()
+                      void searchSources()
+                    }
+                  }}
+                  placeholder={t("desktop.knowledgeBases.knowledgePages.sourceSearchPlaceholder")}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={searchingSources || !sourceQuery.trim()}
+                  onClick={() => void searchSources()}
+                >
+                  {searchingSources ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
+                  {t("desktop.knowledgeBases.knowledgePages.searchSources")}
+                </Button>
+              </div>
+              {editor.sourceMap.length ? (
+                <div className="mt-3 space-y-2">
+                  {editor.sourceMap.map((source) => (
+                    <div key={source.sourceId} className="rounded-lg border border-border/60 bg-background px-3 py-2 text-xs">
+                      <p className="font-medium">{source.documentName} · {source.section}</p>
+                      <p className="mt-1 text-muted-foreground">{source.sourceId}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {editor.publicationDiagnostics.length ? (
+                <div className="mt-3 space-y-2" role="alert">
+                  {editor.publicationDiagnostics.map((diagnostic) => (
+                    <p key={`${diagnostic.code}-${diagnostic.sourceId}`} className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                      {diagnostic.message}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+            <div className="max-h-72 space-y-2 overflow-y-auto">
+              {sourceResults.length ? sourceResults.map((source) => (
+                <button
+                  key={source.evidenceId}
+                  type="button"
+                  disabled={bindingSource || !selectedClaim}
+                  onClick={() => void bindSource(source)}
+                  className="block w-full rounded-lg border border-border/70 bg-background px-3 py-2.5 text-left transition-colors hover:border-primary/50 hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <span className="block text-sm font-medium">{source.documentName}</span>
+                  <span className="mt-0.5 block text-xs text-muted-foreground">{source.section}</span>
+                  <span className="mt-2 line-clamp-3 block text-xs leading-5">{source.excerpt}</span>
+                </button>
+              )) : (
+                <p className="py-5 text-center text-sm text-muted-foreground">
+                  {t("desktop.knowledgeBases.knowledgePages.sourceSearchEmpty")}
+                </p>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -410,6 +546,8 @@ function editorFromPage(page: DesktopKnowledgePage): KnowledgePageEditor {
     contentMarkdown: editable?.contentMarkdown ?? "",
     publicationState: page.publicationState,
     publishedRevisionNumber: page.publishedRevisionNumber,
+    sourceMap: editable?.sourceMap ?? [],
+    publicationDiagnostics: page.publicationDiagnostics,
   }
 }
 

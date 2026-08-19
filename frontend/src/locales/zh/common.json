@@ -209,9 +209,17 @@
         "draftSaving": "正在保存工作草稿…",
         "draftSaved": "工作草稿已保存在本地，已发布知识保持不变。",
         "publishedStatus": "已发布修订 {{revision}}，当前没有未发布更改。",
-        "saveDraft": "保存草稿",
-        "publish": "发布",
-        "saveBeforePublish": "请先保存工作草稿，再进行发布。"
+      "saveDraft": "保存草稿",
+      "publish": "发布",
+      "saveBeforePublish": "请先保存工作草稿，再进行发布。",
+      "sourceBinding": "来源绑定",
+      "selectClaim": "请先在 Markdown 编辑器中选择一条事实声明，再选择对应原文证据。",
+      "selectedClaim": "已选择声明：{{claim}}",
+      "selectClaimFirst": "请先在 Markdown 编辑器中选择一条事实声明。",
+      "saveBeforeBinding": "绑定来源前请先保存工作草稿。",
+      "sourceSearchPlaceholder": "搜索文档或章节",
+      "searchSources": "搜索",
+      "sourceSearchEmpty": "搜索可用知识，以绑定原文证据。"
       },
       "modelSettings": {
         "title": "模型默认设置",

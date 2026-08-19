@@ -22,6 +22,7 @@ import type {
   DesktopKnowledgePage,
   DesktopKnowledgePages,
   DesktopKnowledgePageKind,
+  DesktopKnowledgeSourceCandidate,
   DesktopGlobalSearchResults,
   DesktopModelSettings,
   DesktopModelConnectionTest,
@@ -581,6 +582,20 @@ export class MemoryDesktopBridge implements DesktopBridge {
     return this.knowledgePagesStore.publish(pageId)
   }
 
+  async searchKnowledgeSources(query: string): Promise<DesktopKnowledgeSourceCandidate[]> {
+    return this.knowledgePagesStore.searchSources(query)
+  }
+
+  async bindKnowledgePageSource(
+    pageId: string,
+    claimText: string,
+    evidenceId: string,
+    requestId: string,
+  ): Promise<DesktopKnowledgePage> {
+    void requestId
+    return this.knowledgePagesStore.bindSource(pageId, claimText, evidenceId)
+  }
+
   async documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates> {
     return {
       candidates: this.documentVersionCandidateResults.filter((candidate) => candidate.status === "pending"),
@@ -755,7 +770,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 19,
+      schemaVersion: 20,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []

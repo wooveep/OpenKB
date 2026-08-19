@@ -2,7 +2,7 @@
 
 use super::{
     BridgeError, BridgeResult, EngineSupervisor, KnowledgePage, KnowledgePageKind,
-    KnowledgePagesResult,
+    KnowledgePagesResult, KnowledgeSourcesResult,
 };
 use serde_json::json;
 
@@ -75,6 +75,46 @@ impl EngineSupervisor {
             BridgeError::new(
                 "invalid_engine_response",
                 format!("Engine knowledge-page publish response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn search_knowledge_sources(&self, query: String) -> BridgeResult<KnowledgeSourcesResult> {
+        self.ensure_started()?;
+        let value = self.request_started(
+            "workbench.search_knowledge_sources",
+            json!({ "query": query }),
+            None,
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine knowledge-source search has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn bind_knowledge_page_source(
+        &self,
+        page_id: String,
+        claim_text: String,
+        evidence_id: String,
+        request_id: String,
+    ) -> BridgeResult<KnowledgePage> {
+        self.ensure_started()?;
+        let value = self.request_started(
+            "workbench.bind_knowledge_page_source",
+            json!({
+                "page_id": page_id,
+                "claim_text": claim_text,
+                "evidence_id": evidence_id,
+            }),
+            Some(request_id),
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine knowledge-source binding has an invalid shape: {error}"),
             )
         })
     }

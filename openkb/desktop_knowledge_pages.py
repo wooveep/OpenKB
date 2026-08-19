@@ -13,6 +13,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
+from openkb.desktop_knowledge_sources import (
+    DesktopKnowledgePublicationDiagnostic,
+    DesktopKnowledgeSourceCandidate,
+    DesktopKnowledgeSourceMapEntry,
+    bind_source_in,
+    copy_revision_sources_to_draft_in,
+    draft_source_map_in,
+    publication_diagnostics_in,
+    publish_draft_sources_in,
+    revision_source_map_in,
+    search_available_sources_in,
+)
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import atomic_write_text, kb_ingest_lock, kb_read_lock
@@ -73,6 +85,7 @@ class DesktopKnowledgePublishedRevision:
     title: str
     content_markdown: str
     published_at: str
+    source_map: tuple[DesktopKnowledgeSourceMapEntry, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -80,6 +93,7 @@ class DesktopKnowledgePublishedRevision:
             "title": self.title,
             "content_markdown": self.content_markdown,
             "published_at": self.published_at,
+            "source_map": [source.as_dict() for source in self.source_map],
         }
 
 
@@ -88,12 +102,14 @@ class DesktopKnowledgeWorkingDraft:
     title: str
     content_markdown: str
     updated_at: str
+    source_map: tuple[DesktopKnowledgeSourceMapEntry, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
             "title": self.title,
             "content_markdown": self.content_markdown,
             "updated_at": self.updated_at,
+            "source_map": [source.as_dict() for source in self.source_map],
         }
 
 
@@ -126,6 +142,7 @@ class DesktopKnowledgePage(DesktopKnowledgePageSummary):
     materialized_path: str
     published_revision: DesktopKnowledgePublishedRevision | None
     working_draft: DesktopKnowledgeWorkingDraft | None
+    publication_diagnostics: tuple[DesktopKnowledgePublicationDiagnostic, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -135,6 +152,9 @@ class DesktopKnowledgePage(DesktopKnowledgePageSummary):
                 self.published_revision.as_dict() if self.published_revision else None
             ),
             "working_draft": self.working_draft.as_dict() if self.working_draft else None,
+            "publication_diagnostics": [
+                diagnostic.as_dict() for diagnostic in self.publication_diagnostics
+            ],
         }
 
 
@@ -186,6 +206,47 @@ class DesktopKnowledgePageService:
             finally:
                 connection.close()
 
+    def search_sources(self, query: str) -> tuple[DesktopKnowledgeSourceCandidate, ...]:
+        """Find Available canonical evidence for a source-binding picker."""
+        self._require_database()
+        if not isinstance(query, str) or not query.strip():
+            return ()
+        with kb_read_lock(self.state_dir):
+            connection = self._connect()
+            try:
+                try:
+                    return search_available_sources_in(connection, query.strip())
+                except ValueError as error:
+                    raise _source_binding_error(str(error)) from error
+            finally:
+                connection.close()
+
+    def bind_source(self, page_id: str, claim_text: str, evidence_id: str) -> DesktopKnowledgePage:
+        """Bind one selected claim and its marker to Available original evidence."""
+        self._require_database()
+        with kb_ingest_lock(self.state_dir):
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    bind_source_in(
+                        connection,
+                        page_id=page_id,
+                        claim_text=claim_text,
+                        evidence_id=evidence_id,
+                        updated_at=_timestamp(),
+                    )
+                except ValueError as error:
+                    raise _source_binding_error(str(error)) from error
+                page = self._page_in(connection, page_id)
+                connection.commit()
+                return page
+            except BaseException:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+
     def select_page(self, page_id: str) -> DesktopKnowledgePage:
         self._require_database()
         with kb_ingest_lock(self.state_dir):
@@ -216,6 +277,7 @@ class DesktopKnowledgePageService:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 resolved_page_id = page_id or uuid.uuid4().hex
+                had_draft = self._draft_exists_in(connection, resolved_page_id)
                 if page_id is not None:
                     self._require_existing_kind(connection, page_id, normalized_kind)
                 self._require_unique_title(
@@ -246,6 +308,8 @@ class DesktopKnowledgePageService:
                         now,
                     ),
                 )
+                if not had_draft:
+                    copy_revision_sources_to_draft_in(connection, resolved_page_id, now)
                 _select_page_in(connection, resolved_page_id)
                 page = self._page_in(connection, resolved_page_id)
                 connection.commit()
@@ -278,6 +342,14 @@ class DesktopKnowledgePageService:
                     )
                 kind, title, normalized_title, content_markdown = (str(value) for value in draft)
                 self._require_unique_title(connection, kind, normalized_title, page_id=page_id)
+                source_map = draft_source_map_in(connection, page_id)
+                diagnostics = publication_diagnostics_in(connection, content_markdown, source_map)
+                if diagnostics:
+                    codes = ", ".join(item.code for item in diagnostics)
+                    raise DesktopKnowledgePageError(
+                        "knowledge_publication_blocked",
+                        f"Resolve the Working Draft source diagnostics before publishing: {codes}",
+                    )
                 now = _timestamp()
                 revision_number = int(
                     connection.execute(
@@ -333,6 +405,7 @@ class DesktopKnowledgePageService:
                         """,
                         (title, normalized_title, revision_id, now, page_id),
                     )
+                publish_draft_sources_in(connection, page_id, revision_id, now)
                 connection.execute(
                     "DELETE FROM knowledge_page_working_drafts WHERE page_id = ?", (page_id,)
                 )
@@ -371,7 +444,7 @@ class DesktopKnowledgePageService:
             finally:
                 connection.close()
             for row in rows:
-                page = _page_from_row(row)
+                page = self._page_from_row_in(connection=None, row=row)
                 atomic_write_text(self.kb_dir / page.materialized_path, _render_markdown(page))
 
     def _require_existing_kind(
@@ -434,7 +507,46 @@ class DesktopKnowledgePageService:
             raise DesktopKnowledgePageError(
                 "knowledge_page_not_found", f"Page not found: {page_id}"
             )
-        return _page_from_row(row)
+        return self._page_from_row_in(connection=connection, row=row)
+
+    def _page_from_row_in(
+        self, *, connection: sqlite3.Connection | None, row: tuple[object, ...]
+    ) -> DesktopKnowledgePage:
+        owns_connection = connection is None
+        active_connection = connection or self._connect()
+        try:
+            page_id = str(row[0])
+            current = active_connection.execute(
+                "SELECT current_revision_id FROM knowledge_pages WHERE page_id = ?",
+                (page_id,),
+            ).fetchone()
+            published_sources = revision_source_map_in(
+                active_connection, str(current[0]) if current is not None else None
+            )
+            draft_sources = draft_source_map_in(active_connection, page_id)
+            content = str(row[11]) if row[10] is not None else ""
+            diagnostics = (
+                publication_diagnostics_in(active_connection, content, draft_sources)
+                if row[10] is not None
+                else ()
+            )
+            return _page_from_row(
+                row,
+                published_sources=published_sources,
+                draft_sources=draft_sources,
+                diagnostics=diagnostics,
+            )
+        finally:
+            if owns_connection:
+                active_connection.close()
+
+    def _draft_exists_in(self, connection: sqlite3.Connection, page_id: str) -> bool:
+        return (
+            connection.execute(
+                "SELECT 1 FROM knowledge_page_working_drafts WHERE page_id = ?", (page_id,)
+            ).fetchone()
+            is not None
+        )
 
     def _page_exists_in(self, connection: sqlite3.Connection, page_id: str) -> bool:
         return (
@@ -490,13 +602,20 @@ def _discard_abandoned_projection_staging(kb_dir: Path) -> None:
         shutil.rmtree(staging_root, ignore_errors=True)
 
 
-def _page_from_row(row: tuple[object, ...]) -> DesktopKnowledgePage:
+def _page_from_row(
+    row: tuple[object, ...],
+    *,
+    published_sources: tuple[DesktopKnowledgeSourceMapEntry, ...] = (),
+    draft_sources: tuple[DesktopKnowledgeSourceMapEntry, ...] = (),
+    diagnostics: tuple[DesktopKnowledgePublicationDiagnostic, ...] = (),
+) -> DesktopKnowledgePage:
     published = (
         DesktopKnowledgePublishedRevision(
             revision_number=int(str(row[4])),
             title=str(row[7]),
             content_markdown=str(row[8]),
             published_at=str(row[9]),
+            source_map=published_sources,
         )
         if row[4] is not None
         else None
@@ -506,6 +625,7 @@ def _page_from_row(row: tuple[object, ...]) -> DesktopKnowledgePage:
             title=str(row[10]),
             content_markdown=str(row[11]),
             updated_at=str(row[12]),
+            source_map=draft_sources,
         )
         if row[10] is not None
         else None
@@ -520,6 +640,7 @@ def _page_from_row(row: tuple[object, ...]) -> DesktopKnowledgePage:
         materialized_path=str(row[6]),
         published_revision=published,
         working_draft=draft,
+        publication_diagnostics=diagnostics,
     )
 
 
@@ -562,6 +683,26 @@ def _normalize_title(title: str) -> tuple[str, str]:
     return display_title, normalized_title
 
 
+def _source_binding_error(code: str) -> DesktopKnowledgePageError:
+    messages = {
+        "knowledge_page_draft_not_found": "Save a Working Draft before binding a source.",
+        "knowledge_source_unavailable": "Choose evidence from Available Knowledge.",
+        "knowledge_claim_selection_invalid": (
+            "Select one unique, non-empty claim from the current Working Draft."
+        ),
+        "knowledge_claim_selection_structural": (
+            "Choose a factual paragraph, list item, or table row rather than navigation."
+        ),
+        "knowledge_source_query_invalid": (
+            "Use a shorter source search with no more than 24 distinct terms."
+        ),
+    }
+    return DesktopKnowledgePageError(
+        code if code in messages else "knowledge_source_binding_failed",
+        messages.get(code, "The selected claim could not be bound to this source."),
+    )
+
+
 def _render_markdown(page: DesktopKnowledgePage) -> str:
     published = page.published_revision
     if published is None:
@@ -581,7 +722,12 @@ def _render_markdown(page: DesktopKnowledgePage) -> str:
         )
     )
     body = published.content_markdown.rstrip("\n")
-    return f"{frontmatter}\n\n# {published.title}\n\n{body}\n"
+    footnotes = "\n".join(
+        f"[^{source.source_id}]: {source.document_name} / {source.section}".rstrip(" /")
+        for source in published.source_map
+    )
+    suffix = f"\n\n{footnotes}" if footnotes else ""
+    return f"{frontmatter}\n\n# {published.title}\n\n{body}{suffix}\n"
 
 
 def _timestamp() -> str:

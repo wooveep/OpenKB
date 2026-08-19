@@ -11,10 +11,13 @@ pub use crate::engine_wire::{
     CancelResult, DiagnosticBundleResult, DocumentVersionCandidate,
     DocumentVersionCandidateDecision, DocumentVersionCandidatesResult, EngineHealth,
     GroundedAnswer, GroundedAnswersResult, ImportControlResult, ImportJobsResult,
-    ImportSourceInspection, KnowledgeBaseActivationResult, KnowledgePage, KnowledgePageKind,
-    KnowledgePagesResult, KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
+    ImportSourceInspection, KnowledgeBaseActivationResult, KnowledgePageKind,
+    KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
     KnowledgeReconciliationDecision, ModelSettings, RawDocument, RecoveryOverride,
     TextDocumentImportResult,
+};
+pub use crate::engine_wire_knowledge_pages::{
+    KnowledgePage, KnowledgePagesResult, KnowledgeSourcesResult,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};

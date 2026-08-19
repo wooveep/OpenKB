@@ -21,6 +21,7 @@ from openkb.desktop_import_deduplication import (
 from openkb.desktop_knowledge_page_migrations import (
     KNOWLEDGE_PAGE_DRAFT_MIGRATION_STATEMENTS,
 )
+from openkb.desktop_knowledge_source_migrations import KNOWLEDGE_SOURCE_MIGRATION_STATEMENTS
 from openkb.desktop_workspace_migrations import (
     CONVERSATION_MIGRATION_STATEMENTS,
     DEDUPLICATION_MIGRATION_STATEMENTS,
@@ -364,6 +365,7 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (17, GRAPH_FEATURE_FLAG_MIGRATION_STATEMENTS),
     (18, CONVERSATION_MIGRATION_STATEMENTS),
     (19, KNOWLEDGE_PAGE_DRAFT_MIGRATION_STATEMENTS),
+    (20, KNOWLEDGE_SOURCE_MIGRATION_STATEMENTS),
 )
 
 

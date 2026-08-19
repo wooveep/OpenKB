@@ -260,7 +260,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 19,
+            "schema_version": 20,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -737,14 +737,14 @@ def test_engine_autosaves_then_explicitly_publishes_user_knowledge_pages(tmp_pat
                 "page_id": None,
                 "kind": "concept",
                 "title": "Evidence",
-                "content_markdown": "User-owned **knowledge**.",
+                "content_markdown": "# User-owned knowledge",
             },
         ),
         cancel_event=None,
     )
     assert saved["publication_state"] == "draft"
     assert saved["published_revision"] is None
-    assert saved["working_draft"]["content_markdown"] == "User-owned **knowledge**."
+    assert saved["working_draft"]["content_markdown"] == "# User-owned knowledge"
     assert not (kb_dir / str(saved["materialized_path"])).exists()
 
     published = server._dispatch(
@@ -763,7 +763,7 @@ def test_engine_autosaves_then_explicitly_publishes_user_knowledge_pages(tmp_pat
                 "page_id": saved["page_id"],
                 "kind": "concept",
                 "title": "Evidence",
-                "content_markdown": "Unpublished **revision**.",
+                "content_markdown": "# Unpublished revision",
             },
         ),
         cancel_event=None,
@@ -796,8 +796,8 @@ def test_engine_autosaves_then_explicitly_publishes_user_knowledge_pages(tmp_pat
         }
     ]
     assert listed["selected_page_id"] == saved["page_id"]
-    assert read["published_revision"]["content_markdown"] == "User-owned **knowledge**."
-    assert read["working_draft"]["content_markdown"] == "Unpublished **revision**."
+    assert read["published_revision"]["content_markdown"] == "# User-owned knowledge"
+    assert read["working_draft"]["content_markdown"] == "# Unpublished revision"
 
     projection = kb_dir / str(published["materialized_path"])
     projection.unlink()
@@ -811,7 +811,7 @@ def test_engine_autosaves_then_explicitly_publishes_user_knowledge_pages(tmp_pat
         ),
         cancel_event=None,
     )
-    assert "User-owned **knowledge**." in projection.read_text(encoding="utf-8")
+    assert "# User-owned knowledge" in projection.read_text(encoding="utf-8")
     restored = reopened._dispatch(
         DesktopRequest(
             request_id="restored-pages",
@@ -821,6 +821,69 @@ def test_engine_autosaves_then_explicitly_publishes_user_knowledge_pages(tmp_pat
         cancel_event=None,
     )
     assert restored["selected_page_id"] == saved["page_id"]
+
+
+def test_engine_binds_one_knowledge_claim_to_available_original_evidence(tmp_path):
+    """Source search, binding, and publication stay behind the workbench protocol."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "guide.md"
+    source.write_text("# Runtime\n\nThe sidecar starts once per session.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    claim = "OpenKB starts its local engine once."
+    draft = server._dispatch(
+        DesktopRequest(
+            request_id="draft-source-page",
+            method="workbench.save_knowledge_page",
+            params={
+                "page_id": None,
+                "kind": "concept",
+                "title": "Engine lifecycle",
+                "content_markdown": claim,
+            },
+        ),
+        cancel_event=None,
+    )
+
+    searched = server._dispatch(
+        DesktopRequest(
+            request_id="search-page-source",
+            method="workbench.search_knowledge_sources",
+            params={"query": "sidecar session"},
+        ),
+        cancel_event=None,
+    )
+    candidate = next(item for item in searched["sources"] if "starts once" in item["excerpt"])
+    bound = server._dispatch(
+        DesktopRequest(
+            request_id="bind-page-source",
+            method="workbench.bind_knowledge_page_source",
+            params={
+                "page_id": draft["page_id"],
+                "claim_text": claim,
+                "evidence_id": candidate["evidence_id"],
+            },
+        ),
+        cancel_event=None,
+    )
+    published = server._dispatch(
+        DesktopRequest(
+            request_id="publish-source-page",
+            method="workbench.publish_knowledge_page",
+            params={"page_id": draft["page_id"]},
+        ),
+        cancel_event=None,
+    )
+
+    assert len(bound["working_draft"]["source_map"]) == 1
+    assert bound["publication_diagnostics"] == []
+    assert (
+        published["published_revision"]["source_map"][0]["evidence_id"]
+        == (candidate["evidence_id"])
+    )
 
 
 def test_engine_lists_isolated_knowledge_reconciliation_conflicts(tmp_path):

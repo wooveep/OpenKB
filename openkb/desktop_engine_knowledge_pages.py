@@ -37,9 +37,22 @@ def dispatch_knowledge_page_request(
             }
         if request.method == "workbench.knowledge_page":
             return service.select_page(_required_string_param(request, "page_id")).as_dict()
+        if request.method == "workbench.search_knowledge_sources":
+            return {
+                "sources": [
+                    source.as_dict()
+                    for source in service.search_sources(_required_string_param(request, "query"))
+                ]
+            }
         server._begin_workspace_mutation(request, cancel_event)
         if request.method == "workbench.publish_knowledge_page":
             return service.publish(_required_string_param(request, "page_id")).as_dict()
+        if request.method == "workbench.bind_knowledge_page_source":
+            return service.bind_source(
+                _required_string_param(request, "page_id"),
+                _required_string_param(request, "claim_text"),
+                _required_string_param(request, "evidence_id"),
+            ).as_dict()
         return service.save_draft(
             page_id=_optional_page_id(request),
             kind=_required_string_param(request, "kind"),

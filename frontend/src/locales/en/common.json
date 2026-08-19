@@ -209,9 +209,17 @@
         "draftSaving": "Saving Working Draft…",
         "draftSaved": "Working Draft saved locally. Published knowledge is unchanged.",
         "publishedStatus": "Published revision {{revision}}. There are no unpublished changes.",
-        "saveDraft": "Save draft",
-        "publish": "Publish",
-        "saveBeforePublish": "Save a Working Draft before publishing."
+      "saveDraft": "Save draft",
+      "publish": "Publish",
+      "saveBeforePublish": "Save a Working Draft before publishing.",
+      "sourceBinding": "Source binding",
+      "selectClaim": "Select one factual claim in the Markdown editor, then choose its original evidence.",
+      "selectedClaim": "Selected claim: {{claim}}",
+      "selectClaimFirst": "Select one factual claim in the Markdown editor first.",
+      "saveBeforeBinding": "Save a Working Draft before binding a source.",
+      "sourceSearchPlaceholder": "Search document or section",
+      "searchSources": "Search",
+      "sourceSearchEmpty": "Search Available Knowledge to bind original evidence."
       },
       "modelSettings": {
         "title": "Model defaults",

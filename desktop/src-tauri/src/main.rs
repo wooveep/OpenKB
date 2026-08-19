@@ -6,12 +6,13 @@ mod desktop_knowledge_page_commands;
 mod desktop_runtime;
 mod engine_protocol;
 mod engine_wire;
+mod engine_wire_knowledge_pages;
 mod external_url;
 mod process_tree;
 
 use desktop_knowledge_page_commands::{
-    desktop_get_knowledge_page, desktop_knowledge_pages, desktop_publish_knowledge_page,
-    desktop_save_knowledge_page,
+    desktop_bind_knowledge_page_source, desktop_get_knowledge_page, desktop_knowledge_pages,
+    desktop_publish_knowledge_page, desktop_save_knowledge_page, desktop_search_knowledge_sources,
 };
 use desktop_runtime::DesktopRuntimeState;
 use engine_protocol::{
@@ -715,6 +716,8 @@ fn main() {
             desktop_get_knowledge_page,
             desktop_save_knowledge_page,
             desktop_publish_knowledge_page,
+            desktop_search_knowledge_sources,
+            desktop_bind_knowledge_page_source,
             desktop_document_version_candidates,
             desktop_knowledge_reconciliation_conflicts,
             desktop_stage_knowledge_reconciliation_decisions,

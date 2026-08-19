@@ -32,6 +32,8 @@ WORKSPACE_METHODS = frozenset(
         "workbench.knowledge_page",
         "workbench.save_knowledge_page",
         "workbench.publish_knowledge_page",
+        "workbench.search_knowledge_sources",
+        "workbench.bind_knowledge_page_source",
         "workbench.document_version_candidates",
         "workbench.resolve_document_version_candidate",
         "workbench.knowledge_reconciliation_conflicts",
@@ -59,7 +61,7 @@ MODEL_SETTINGS_METHODS = frozenset(
 
 KNOWLEDGE_PAGE_METHODS = frozenset(
     method for method in WORKSPACE_METHODS if "knowledge_page" in method
-)
+) | {"workbench.search_knowledge_sources"}
 
 NON_CANCELABLE_MUTATION_METHODS = frozenset(
     {
@@ -69,6 +71,7 @@ NON_CANCELABLE_MUTATION_METHODS = frozenset(
         "workbench.read_raw_document",
         "workbench.save_knowledge_page",
         "workbench.publish_knowledge_page",
+        "workbench.bind_knowledge_page_source",
         "workbench.resolve_document_version_candidate",
         "workbench.stage_knowledge_reconciliation_decisions",
         "workbench.commit_knowledge_reconciliation_decisions",
