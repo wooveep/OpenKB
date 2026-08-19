@@ -72,10 +72,12 @@ def publish_generation_changes_in(
             """
             INSERT INTO knowledge_generation_items (
                 generation_id, item_key, kind, title, normalized_title,
-                content_markdown, content_sha256, source_document_id, created_at
+                content_markdown, content_sha256, source_document_id, created_at,
+                provenance_state
             )
             SELECT ?, item_key, kind, title, normalized_title,
-                content_markdown, content_sha256, source_document_id, created_at
+                content_markdown, content_sha256, source_document_id, created_at,
+                provenance_state
             FROM knowledge_generation_items WHERE generation_id = ?
             """,
             (generation_id, current_generation_id),
@@ -126,17 +128,24 @@ def stage_generation_projection_in(
     staged = staging_root / uuid.uuid4().hex
     staged.mkdir()
     try:
-        rows = () if generation_id is None else connection.execute(
-            """
-            SELECT item_key, kind, title, content_markdown, source_document_id, created_at
+        rows = (
+            ()
+            if generation_id is None
+            else connection.execute(
+                """
+            SELECT item_key, kind, title, content_markdown, source_document_id, created_at,
+                provenance_state
             FROM knowledge_generation_items
             WHERE generation_id = ?
             ORDER BY kind, item_key
             """,
-            (generation_id,),
-        ).fetchall()
+                (generation_id,),
+            ).fetchall()
+        )
         for row in rows:
-            item_key, kind, title, content, document_id, created_at = (str(value) for value in row)
+            item_key, kind, title, content, document_id, created_at, provenance_state = (
+                str(value) for value in row
+            )
             path = Path(kind) / f"{item_key}.md"
             atomic_write_text(
                 staged / path,
@@ -148,6 +157,7 @@ def stage_generation_projection_in(
                     content_markdown=content,
                     source_document_id=document_id,
                     created_at=created_at,
+                    provenance_state=provenance_state,
                 ),
             )
         return staged
@@ -220,8 +230,9 @@ def _upsert_generation_change_in(
             """
             INSERT INTO knowledge_generation_items (
                 generation_id, item_key, kind, title, normalized_title,
-                content_markdown, content_sha256, source_document_id, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                content_markdown, content_sha256, source_document_id, created_at,
+                provenance_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'legacy_unmapped')
             """,
             (
                 generation_id,
@@ -240,7 +251,7 @@ def _upsert_generation_change_in(
         """
         UPDATE knowledge_generation_items
         SET title = ?, content_markdown = ?, content_sha256 = ?,
-            source_document_id = ?, created_at = ?
+            source_document_id = ?, created_at = ?, provenance_state = 'legacy_unmapped'
         WHERE generation_id = ? AND item_key = ?
         """,
         (
@@ -264,6 +275,7 @@ def _render_generation_markdown(
     content_markdown: str,
     source_document_id: str,
     created_at: str,
+    provenance_state: str,
 ) -> str:
     frontmatter = "\n".join(
         (
@@ -273,7 +285,8 @@ def _render_generation_markdown(
             f"title: {json.dumps(title, ensure_ascii=False)}",
             f"generation: {generation_id}",
             'authority: "published_generation"',
-            f"source_document_id: {json.dumps(source_document_id, ensure_ascii=False)}",
+            f"openkb.provenance: {json.dumps(provenance_state)}",
+            f"openkb.origin_document_id: {json.dumps(source_document_id, ensure_ascii=False)}",
             f"published_at: {json.dumps(created_at, ensure_ascii=False)}",
             "---",
         )

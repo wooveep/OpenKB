@@ -30,6 +30,9 @@ from openkb.desktop_workspace import desktop_state_database_path, desktop_state_
 from openkb.locks import atomic_write_text, kb_ingest_lock, kb_read_lock
 
 DesktopKnowledgePagePublicationState = Literal["draft", "unpublished_changes", "published"]
+DesktopKnowledgeProvenanceState = Literal[
+    "source_backed", "structural", "legacy_unmapped", "unsourced", "invalid"
+]
 _PAGE_KINDS = frozenset({"concept", "entity"})
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,7 @@ page_state AS (
         revisions.title AS published_title,
         revisions.content_markdown AS published_content_markdown,
         revisions.created_at AS published_at,
+        revisions.provenance_state AS published_provenance_state,
         drafts.title AS draft_title,
         drafts.content_markdown AS draft_content_markdown,
         drafts.updated_at AS draft_updated_at
@@ -85,6 +89,7 @@ class DesktopKnowledgePublishedRevision:
     title: str
     content_markdown: str
     published_at: str
+    provenance_state: DesktopKnowledgeProvenanceState
     source_map: tuple[DesktopKnowledgeSourceMapEntry, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
@@ -93,6 +98,7 @@ class DesktopKnowledgePublishedRevision:
             "title": self.title,
             "content_markdown": self.content_markdown,
             "published_at": self.published_at,
+            "provenance_state": self.provenance_state,
             "source_map": [source.as_dict() for source in self.source_map],
         }
 
@@ -102,6 +108,7 @@ class DesktopKnowledgeWorkingDraft:
     title: str
     content_markdown: str
     updated_at: str
+    provenance_state: DesktopKnowledgeProvenanceState
     source_map: tuple[DesktopKnowledgeSourceMapEntry, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
@@ -109,6 +116,7 @@ class DesktopKnowledgeWorkingDraft:
             "title": self.title,
             "content_markdown": self.content_markdown,
             "updated_at": self.updated_at,
+            "provenance_state": self.provenance_state,
             "source_map": [source.as_dict() for source in self.source_map],
         }
 
@@ -351,6 +359,7 @@ class DesktopKnowledgePageService:
                         f"Resolve the Working Draft source diagnostics before publishing: {codes}",
                     )
                 now = _timestamp()
+                provenance_state = "source_backed" if source_map else "structural"
                 revision_number = int(
                     connection.execute(
                         """
@@ -391,10 +400,18 @@ class DesktopKnowledgePageService:
                     """
                     INSERT INTO knowledge_page_revisions (
                         revision_id, page_id, revision_number, title,
-                        content_markdown, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        content_markdown, created_at, provenance_state
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (revision_id, page_id, revision_number, title, content_markdown, now),
+                    (
+                        revision_id,
+                        page_id,
+                        revision_number,
+                        title,
+                        content_markdown,
+                        now,
+                        provenance_state,
+                    ),
                 )
                 if existing is not None:
                     connection.execute(
@@ -524,10 +541,10 @@ class DesktopKnowledgePageService:
                 active_connection, str(current[0]) if current is not None else None
             )
             draft_sources = draft_source_map_in(active_connection, page_id)
-            content = str(row[11]) if row[10] is not None else ""
+            content = str(row[12]) if row[11] is not None else ""
             diagnostics = (
                 publication_diagnostics_in(active_connection, content, draft_sources)
-                if row[10] is not None
+                if row[11] is not None
                 else ()
             )
             return _page_from_row(
@@ -615,6 +632,7 @@ def _page_from_row(
             title=str(row[7]),
             content_markdown=str(row[8]),
             published_at=str(row[9]),
+            provenance_state=cast(DesktopKnowledgeProvenanceState, str(row[10])),
             source_map=published_sources,
         )
         if row[4] is not None
@@ -622,12 +640,13 @@ def _page_from_row(
     )
     draft = (
         DesktopKnowledgeWorkingDraft(
-            title=str(row[10]),
-            content_markdown=str(row[11]),
-            updated_at=str(row[12]),
+            title=str(row[11]),
+            content_markdown=str(row[12]),
+            updated_at=str(row[13]),
+            provenance_state=_draft_provenance_state(draft_sources, diagnostics),
             source_map=draft_sources,
         )
-        if row[10] is not None
+        if row[11] is not None
         else None
     )
     return DesktopKnowledgePage(
@@ -703,6 +722,19 @@ def _source_binding_error(code: str) -> DesktopKnowledgePageError:
     )
 
 
+def _draft_provenance_state(
+    source_map: tuple[DesktopKnowledgeSourceMapEntry, ...],
+    diagnostics: tuple[DesktopKnowledgePublicationDiagnostic, ...],
+) -> DesktopKnowledgeProvenanceState:
+    if not diagnostics:
+        return "source_backed" if source_map else "structural"
+    if not source_map and all(
+        diagnostic.code == "knowledge_claim_source_missing" for diagnostic in diagnostics
+    ):
+        return "unsourced"
+    return "invalid"
+
+
 def _render_markdown(page: DesktopKnowledgePage) -> str:
     published = page.published_revision
     if published is None:
@@ -717,6 +749,7 @@ def _render_markdown(page: DesktopKnowledgePage) -> str:
             f"title: {json.dumps(published.title, ensure_ascii=False)}",
             f"revision: {published.revision_number}",
             'authority: "user_revision"',
+            f"openkb.provenance: {json.dumps(published.provenance_state)}",
             f"updated_at: {json.dumps(published.published_at, ensure_ascii=False)}",
             "---",
         )

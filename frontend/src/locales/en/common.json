@@ -209,6 +209,17 @@
         "draftSaving": "Saving Working Draft…",
         "draftSaved": "Working Draft saved locally. Published knowledge is unchanged.",
         "publishedStatus": "Published revision {{revision}}. There are no unpublished changes.",
+      "provenance": {
+        "source_backed": "Source-backed knowledge",
+        "structural": "Structural navigation",
+        "legacy_unmapped": "Unmapped knowledge revision",
+        "unsourced": "Unsourced note — browse only",
+        "invalid": "Source mapping needs attention"
+      },
+      "sourceAvailability": {
+        "available": "Available",
+        "unavailable": "Unavailable"
+      },
       "saveDraft": "Save draft",
       "publish": "Publish",
       "saveBeforePublish": "Save a Working Draft before publishing.",

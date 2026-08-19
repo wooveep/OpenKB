@@ -57,6 +57,7 @@ export class MemoryKnowledgePageStore {
     const now = new Date().toISOString()
     const resolvedPageId = existing?.pageId ?? `knowledge-page-${requestId}`
     const sourceMap = existing?.workingDraft?.sourceMap ?? existing?.publishedRevision?.sourceMap ?? []
+    const publicationDiagnostics = diagnostics(contentMarkdown, sourceMap)
     const page: DesktopKnowledgePage = {
       pageId: resolvedPageId,
       kind,
@@ -66,8 +67,14 @@ export class MemoryKnowledgePageStore {
       materializedPath: existing?.materializedPath ?? `knowledge-pages/${kind}/${resolvedPageId}.md`,
       updatedAt: now,
       publishedRevision: existing?.publishedRevision ?? null,
-      workingDraft: { title: title.trim(), contentMarkdown, updatedAt: now, sourceMap },
-      publicationDiagnostics: diagnostics(contentMarkdown, sourceMap),
+      workingDraft: {
+        title: title.trim(),
+        contentMarkdown,
+        updatedAt: now,
+        provenanceState: draftProvenance(sourceMap, publicationDiagnostics),
+        sourceMap,
+      },
+      publicationDiagnostics,
     }
     this.pages = existing
       ? this.pages.map((candidate) => candidate.pageId === resolvedPageId ? page : candidate)
@@ -92,6 +99,7 @@ export class MemoryKnowledgePageStore {
         title: current.workingDraft.title,
         contentMarkdown: current.workingDraft.contentMarkdown,
         publishedAt: now,
+        provenanceState: current.workingDraft.provenanceState,
         sourceMap: current.workingDraft.sourceMap,
       },
       workingDraft: null,
@@ -126,13 +134,20 @@ export class MemoryKnowledgePageStore {
       ...MEMORY_SOURCE,
       sourceId,
       claimText: claim,
+      availability: "available",
     }
     const sourceMap = [entry, ...current.workingDraft.sourceMap.filter((item) => item.sourceId !== sourceId)]
+    const publicationDiagnostics = diagnostics(contentMarkdown, sourceMap)
     const next: DesktopKnowledgePage = {
       ...current,
       updatedAt: new Date().toISOString(),
-      workingDraft: { ...current.workingDraft, contentMarkdown, sourceMap },
-      publicationDiagnostics: diagnostics(contentMarkdown, sourceMap),
+      workingDraft: {
+        ...current.workingDraft,
+        contentMarkdown,
+        provenanceState: draftProvenance(sourceMap, publicationDiagnostics),
+        sourceMap,
+      },
+      publicationDiagnostics,
     }
     this.pages = this.pages.map((page) => page.pageId === pageId ? next : page)
     return next
@@ -153,4 +168,12 @@ function diagnostics(content: string, sources: DesktopKnowledgeSourceMapEntry[])
       message: "Restore the source marker before publishing.",
       sourceId: source.sourceId,
     }))
+}
+
+function draftProvenance(
+  sources: DesktopKnowledgeSourceMapEntry[],
+  publicationDiagnostics: ReturnType<typeof diagnostics>,
+) {
+  if (publicationDiagnostics.length) return sources.length ? "invalid" as const : "unsourced" as const
+  return sources.length ? "source_backed" as const : "structural" as const
 }

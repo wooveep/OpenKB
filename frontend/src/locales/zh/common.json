@@ -209,6 +209,17 @@
         "draftSaving": "正在保存工作草稿…",
         "draftSaved": "工作草稿已保存在本地，已发布知识保持不变。",
         "publishedStatus": "已发布修订 {{revision}}，当前没有未发布更改。",
+      "provenance": {
+        "source_backed": "有来源知识",
+        "structural": "结构与导航",
+        "legacy_unmapped": "未映射知识修订",
+        "unsourced": "无来源笔记（仅浏览）",
+        "invalid": "来源映射需要处理"
+      },
+      "sourceAvailability": {
+        "available": "可用",
+        "unavailable": "不可用"
+      },
       "saveDraft": "保存草稿",
       "publish": "发布",
       "saveBeforePublish": "请先保存工作草稿，再进行发布。",

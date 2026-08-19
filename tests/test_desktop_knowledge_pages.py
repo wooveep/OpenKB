@@ -126,7 +126,9 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
         connection.execute("DROP TABLE IF EXISTS knowledge_page_working_sources")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_ui_state")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_working_drafts")
-        connection.execute("DELETE FROM schema_migrations WHERE version IN (19, 20)")
+        connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
+        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
+        connection.execute("DELETE FROM schema_migrations WHERE version IN (19, 20, 21)")
         connection.execute(
             """
             INSERT INTO knowledge_pages (
@@ -147,13 +149,55 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
         connection.commit()
 
     DesktopKnowledgeBaseRuntime().open(kb_dir)
-    migrated = DesktopKnowledgePageService(kb_dir).get_page(page_id)
+    pages = DesktopKnowledgePageService(kb_dir)
+    migrated = pages.get_page(page_id)
 
     assert migrated.publication_state == "published"
     assert migrated.published_revision is not None
     assert migrated.published_revision.content_markdown == "Legacy published content."
     assert migrated.published_revision.source_map == ()
+    assert migrated.published_revision.provenance_state == "legacy_unmapped"
     assert migrated.working_draft is None
+    pages.materialize_current_pages()
+    projection = (kb_dir / migrated.materialized_path).read_text(encoding="utf-8")
+    assert 'openkb.provenance: "legacy_unmapped"' in projection
+    assert "verified:" not in projection
+
+
+def test_v20_source_map_migrates_as_source_backed_without_rewriting_the_revision(tmp_path):
+    """A shipped claim map is preserved rather than mislabeled as legacy-unmapped."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "source.md"
+    source.write_text("# Facts\n\nOriginal mapped evidence.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+    pages = DesktopKnowledgePageService(kb_dir)
+    candidate = pages.search_sources("Original mapped evidence")[0]
+    claim = "This claim already had a valid Source Map in schema v20."
+    draft = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Existing source map",
+        content_markdown=claim,
+    )
+    pages.bind_source(draft.page_id, claim, candidate.evidence_id)
+    before = pages.publish(draft.page_id)
+    assert before.published_revision is not None
+    before_sources = before.published_revision.source_map
+
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
+        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 21")
+        connection.commit()
+
+    DesktopKnowledgeBaseRuntime().open(kb_dir)
+    migrated = DesktopKnowledgePageService(kb_dir).get_page(draft.page_id)
+
+    assert migrated.published_revision is not None
+    assert migrated.published_revision.provenance_state == "source_backed"
+    assert migrated.published_revision.source_map == before_sources
 
 
 def test_later_document_import_does_not_overwrite_a_submitted_user_revision(tmp_path):
@@ -253,8 +297,8 @@ def test_source_search_matches_a_noncanonical_available_d2_occurrence(tmp_path):
     alpha = tmp_path / "alpha-special.md"
     bravo = tmp_path / "bravo-target.md"
     shared = "The shared recovery fact remains canonical across document versions."
-    alpha.write_text(f"# Alpha\n\n{shared}", encoding="utf-8")
-    bravo.write_text(f"# Bravo\n\n{shared}\n\nBravo-only detail.", encoding="utf-8")
+    alpha.write_text(f"# Shared\n\n{shared}", encoding="utf-8")
+    bravo.write_text(f"# Shared\n\n{shared}\n\nBravo-only detail.", encoding="utf-8")
     DesktopKnowledgeBaseRuntime().create(kb_dir)
     DesktopTextImportService(kb_dir).import_text(alpha)
     DesktopTextImportService(kb_dir).import_text(bravo)
@@ -263,6 +307,168 @@ def test_source_search_matches_a_noncanonical_available_d2_occurrence(tmp_path):
 
     shared_match = next(item for item in matches if item.excerpt == shared)
     assert shared_match.document_name == "bravo-target.md"
+
+
+def test_claim_supports_multiple_canonical_sources_without_counting_d2_twice(tmp_path):
+    """Independent evidence survives revisions; repeated occurrences remain one source."""
+    kb_dir = tmp_path / "desktop-kb"
+    first = tmp_path / "first.md"
+    repeated = tmp_path / "repeated.md"
+    second = tmp_path / "second.md"
+    shared = "Primary records show the worker completed recovery."
+    independent = "Audit records independently confirm the recovery result."
+    first.write_text(f"# Guide\n\n{shared}", encoding="utf-8")
+    repeated.write_text(f"# Guide\n\n{shared}\n\nRepeated-only context.", encoding="utf-8")
+    second.write_text(f"# Audit\n\n{independent}", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(first)
+    DesktopTextImportService(kb_dir).import_text(repeated)
+    DesktopTextImportService(kb_dir).import_text(second)
+    pages = DesktopKnowledgePageService(kb_dir)
+    shared_source = next(
+        item for item in pages.search_sources("Primary records") if item.excerpt == shared
+    )
+    independent_source = next(
+        item for item in pages.search_sources("Audit records") if item.excerpt == independent
+    )
+    claim = "The resilience policy is independently corroborated."
+    draft = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Corroborated recovery",
+        content_markdown=claim,
+    )
+
+    pages.bind_source(draft.page_id, claim, shared_source.evidence_id)
+    pages.bind_source(draft.page_id, claim, shared_source.evidence_id)
+    bound = pages.bind_source(draft.page_id, claim, independent_source.evidence_id)
+
+    assert bound.working_draft is not None
+    first_source_ids = tuple(item.source_id for item in bound.working_draft.source_map)
+    assert len(first_source_ids) == 2
+    assert len(set(first_source_ids)) == 2
+    assert all(
+        bound.working_draft.content_markdown.count(f"[^{source_id}]") == 1
+        for source_id in first_source_ids
+    )
+    published = pages.publish(draft.page_id)
+    assert published.published_revision is not None
+    assert published.published_revision.provenance_state == "source_backed"
+
+    pages.save_draft(
+        page_id=draft.page_id,
+        kind="concept",
+        title="Corroborated recovery",
+        content_markdown=published.published_revision.content_markdown,
+    )
+    republished = pages.publish(draft.page_id)
+    assert republished.published_revision is not None
+    assert (
+        tuple(item.source_id for item in republished.published_revision.source_map)
+        == first_source_ids
+    )
+
+    routed = [
+        item
+        for item in DesktopEvidenceRetriever(kb_dir).retrieve("independently corroborated").evidence
+        if "knowledge_source" in item.channels
+    ]
+    assert {item.evidence_id for item in routed} == {
+        shared_source.evidence_id,
+        independent_source.evidence_id,
+    }
+    assert sum(item.evidence_id == shared_source.evidence_id for item in routed) == 1
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM evidence_occurrences WHERE evidence_id = ?",
+            (shared_source.evidence_id,),
+        ).fetchone() == (2,)
+
+
+def test_source_map_resolves_an_available_occurrence_without_rewriting_history(tmp_path):
+    """Availability changes choose a live Document Version and recover dynamically."""
+    kb_dir = tmp_path / "desktop-kb"
+    alpha = tmp_path / "alpha.md"
+    bravo = tmp_path / "bravo.md"
+    shared = "The canonical recovery evidence is shared across versions."
+    alpha.write_text(f"# Guide\n\n{shared}", encoding="utf-8")
+    bravo.write_text(f"# Guide\n\n{shared}\n\nBravo-only context.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    alpha_import = DesktopTextImportService(kb_dir).import_text(alpha)
+    bravo_import = DesktopTextImportService(kb_dir).import_text(bravo)
+    pages = DesktopKnowledgePageService(kb_dir)
+    candidate = next(
+        item for item in pages.search_sources("canonical recovery") if item.excerpt == shared
+    )
+    claim = "Recovery evidence remains available through a surviving version."
+    draft = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Available occurrence",
+        content_markdown=claim,
+    )
+    pages.bind_source(draft.page_id, claim, candidate.evidence_id)
+    published = pages.publish(draft.page_id)
+    assert published.published_revision is not None
+    source_id = published.published_revision.source_map[0].source_id
+    assert published.published_revision.source_map[0].availability == "available"
+    assert (
+        published.published_revision.source_map[0].document_id == alpha_import.document.document_id
+    )
+
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE source_documents SET availability = 'failed' WHERE document_id = ?",
+            (alpha_import.document.document_id,),
+        )
+        connection.commit()
+    fallback = pages.get_page(draft.page_id).published_revision
+    assert fallback is not None
+    assert fallback.source_map[0].availability == "available"
+    assert fallback.source_map[0].document_id == bravo_import.document.document_id
+    routed = next(
+        item
+        for item in DesktopEvidenceRetriever(kb_dir).retrieve("surviving version").evidence
+        if item.evidence_id == candidate.evidence_id
+    )
+    assert routed.document_id == bravo_import.document.document_id
+    with sqlite3.connect(database_path) as connection:
+        stored = connection.execute(
+            "SELECT document_id FROM knowledge_page_revision_sources WHERE source_id = ?",
+            (source_id,),
+        ).fetchone()
+        assert stored == (alpha_import.document.document_id,)
+        connection.execute(
+            "UPDATE source_documents SET availability = 'failed' WHERE document_id = ?",
+            (bravo_import.document.document_id,),
+        )
+        connection.commit()
+
+    unavailable = pages.get_page(draft.page_id).published_revision
+    assert unavailable is not None
+    assert unavailable.source_map[0].availability == "unavailable"
+    assert candidate.evidence_id not in {
+        item.evidence_id
+        for item in DesktopEvidenceRetriever(kb_dir).retrieve("surviving version").evidence
+        if "knowledge_source" in item.channels
+    }
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE source_documents SET availability = 'available' WHERE document_id = ?",
+            (bravo_import.document.document_id,),
+        )
+        connection.commit()
+    restored = pages.get_page(draft.page_id).published_revision
+    assert restored is not None
+    assert restored.source_map[0].availability == "available"
+    assert restored.source_map[0].document_id == bravo_import.document.document_id
+    assert candidate.evidence_id in {
+        item.evidence_id
+        for item in DesktopEvidenceRetriever(kb_dir).retrieve("surviving version").evidence
+        if "knowledge_source" in item.channels
+    }
 
 
 def test_publication_gate_preserves_draft_with_missing_or_unresolved_source_marker(tmp_path):
@@ -357,6 +563,9 @@ def test_publication_gate_preserves_draft_with_missing_or_unresolved_source_mark
     assert {item.code for item in unsourced.publication_diagnostics} == {
         "knowledge_claim_source_missing"
     }
+    assert unsourced.working_draft is not None
+    assert unsourced.working_draft.provenance_state == "unsourced"
+    assert DesktopEvidenceRetriever(kb_dir).retrieve("production timeout exactly").evidence == ()
     with pytest.raises(DesktopKnowledgePageError) as missing_error:
         pages.publish(unsourced.page_id)
     assert missing_error.value.code == "knowledge_publication_blocked"
@@ -387,7 +596,9 @@ def test_publication_gate_preserves_draft_with_missing_or_unresolved_source_mark
         ),
     )
     assert polite_navigation.publication_diagnostics == ()
-    assert pages.publish(polite_navigation.page_id).publication_state == "published"
+    structural_page = pages.publish(polite_navigation.page_id)
+    assert structural_page.published_revision is not None
+    assert structural_page.published_revision.provenance_state == "structural"
 
     with pytest.raises(DesktopKnowledgePageError) as query_error:
         pages.search_sources(" ".join(f"term{index}" for index in range(400)))

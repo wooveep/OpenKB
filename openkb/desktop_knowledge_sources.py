@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass
+from typing import Literal
 
 _SOURCE_MARKER = re.compile(r"\[\^(src-[^\]\s]+)\](?!:)")
 _MARKDOWN_LINK = re.compile(r"!?\[([^]]*)\]\(([^)]+)\)")
@@ -58,11 +59,13 @@ class DesktopKnowledgeSourceCandidate:
 class DesktopKnowledgeSourceMapEntry(DesktopKnowledgeSourceCandidate):
     source_id: str
     claim_text: str
+    availability: Literal["available", "unavailable"]
 
     def as_dict(self) -> dict[str, object]:
         return {
             "source_id": self.source_id,
             "claim_text": self.claim_text,
+            "availability": self.availability,
             **super().as_dict(),
         }
 
@@ -270,6 +273,7 @@ def draft_source_map_in(
     connection: sqlite3.Connection, page_id: str
 ) -> tuple[DesktopKnowledgeSourceMapEntry, ...]:
     return _source_map_rows(
+        connection,
         connection.execute(
             """
             SELECT source_id, evidence_id, claim_text, document_id, document_name,
@@ -278,7 +282,7 @@ def draft_source_map_in(
             WHERE page_id = ? ORDER BY source_id
             """,
             (page_id,),
-        ).fetchall()
+        ).fetchall(),
     )
 
 
@@ -288,6 +292,7 @@ def revision_source_map_in(
     if revision_id is None:
         return ()
     return _source_map_rows(
+        connection,
         connection.execute(
             """
             SELECT source_id, evidence_id, claim_text, document_id, document_name,
@@ -296,7 +301,7 @@ def revision_source_map_in(
             WHERE revision_id = ? ORDER BY source_id
             """,
             (revision_id,),
-        ).fetchall()
+        ).fetchall(),
     )
 
 
@@ -380,18 +385,30 @@ def stable_source_id(evidence_id: str) -> str:
 def _available_source_in(
     connection: sqlite3.Connection, evidence_id: str
 ) -> DesktopKnowledgeSourceCandidate:
-    row = connection.execute(
+    sources = _available_sources_in(connection, (evidence_id,))
+    if evidence_id not in sources:
+        raise ValueError("knowledge_source_unavailable")
+    return sources[evidence_id]
+
+
+def _available_sources_in(
+    connection: sqlite3.Connection, evidence_ids: tuple[str, ...]
+) -> dict[str, DesktopKnowledgeSourceCandidate]:
+    if not evidence_ids:
+        return {}
+    placeholders = ",".join("?" for _ in evidence_ids)
+    rows = connection.execute(
         f"""
         {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
         SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
-        FROM available_evidence_occurrences
-        WHERE occurrence_rank = 1 AND evidence_id = ?
+        FROM available_evidence_occurrences WHERE occurrence_rank = 1
+            AND evidence_id IN ({placeholders})
         """,
-        (evidence_id,),
-    ).fetchone()
-    if row is None:
-        raise ValueError("knowledge_source_unavailable")
-    return _candidate_from_row(row)
+        evidence_ids,
+    ).fetchall()
+    return {
+        candidate.evidence_id: candidate for candidate in (_candidate_from_row(row) for row in rows)
+    }
 
 
 def _available_evidence_ids_in(
@@ -422,20 +439,28 @@ def _candidate_from_row(row: tuple[object, ...]) -> DesktopKnowledgeSourceCandid
     )
 
 
-def _source_map_rows(rows: list[tuple[object, ...]]) -> tuple[DesktopKnowledgeSourceMapEntry, ...]:
-    return tuple(
-        DesktopKnowledgeSourceMapEntry(
-            source_id=str(row[0]),
-            evidence_id=str(row[1]),
-            claim_text=str(row[2]),
-            document_id=str(row[3]),
-            document_name=str(row[4]),
-            section=str(row[5]),
-            locator=_json_object(str(row[6])),
-            excerpt=str(row[7]),
+def _source_map_rows(
+    connection: sqlite3.Connection, rows: list[tuple[object, ...]]
+) -> tuple[DesktopKnowledgeSourceMapEntry, ...]:
+    available = _available_sources_in(connection, tuple(str(row[1]) for row in rows))
+    entries: list[DesktopKnowledgeSourceMapEntry] = []
+    for row in rows:
+        evidence_id = str(row[1])
+        resolved = available.get(evidence_id)
+        entries.append(
+            DesktopKnowledgeSourceMapEntry(
+                source_id=str(row[0]),
+                evidence_id=evidence_id,
+                claim_text=str(row[2]),
+                document_id=resolved.document_id if resolved else str(row[3]),
+                document_name=resolved.document_name if resolved else str(row[4]),
+                section=resolved.section if resolved else str(row[5]),
+                locator=resolved.locator if resolved else _json_object(str(row[6])),
+                excerpt=resolved.excerpt if resolved else str(row[7]),
+                availability="available" if resolved else "unavailable",
+            )
         )
-        for row in rows
-    )
+    return tuple(entries)
 
 
 def _require_claim_selection(content: str, claim: str) -> None:

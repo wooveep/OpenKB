@@ -329,6 +329,7 @@ export interface DesktopGlobalSearchResults {
 
 export type DesktopKnowledgePageKind = "concept" | "entity"
 export type DesktopKnowledgePagePublicationState = "draft" | "unpublished_changes" | "published"
+export type DesktopKnowledgeProvenanceState = "source_backed" | "structural" | "legacy_unmapped" | "unsourced" | "invalid"
 
 export interface DesktopKnowledgePageSummary {
   pageId: string
@@ -351,6 +352,7 @@ export interface DesktopKnowledgeSourceCandidate {
 export interface DesktopKnowledgeSourceMapEntry extends DesktopKnowledgeSourceCandidate {
   sourceId: string
   claimText: string
+  availability: "available" | "unavailable"
 }
 
 export interface DesktopKnowledgePublicationDiagnostic {
@@ -364,6 +366,7 @@ export interface DesktopKnowledgePublishedRevision {
   title: string
   contentMarkdown: string
   publishedAt: string
+  provenanceState: DesktopKnowledgeProvenanceState
   sourceMap: DesktopKnowledgeSourceMapEntry[]
 }
 
@@ -371,6 +374,7 @@ export interface DesktopKnowledgeWorkingDraft {
   title: string
   contentMarkdown: string
   updatedAt: string
+  provenanceState: DesktopKnowledgeProvenanceState
   sourceMap: DesktopKnowledgeSourceMapEntry[]
 }
 

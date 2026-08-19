@@ -11,6 +11,7 @@ import type {
   DesktopKnowledgePage,
   DesktopKnowledgePageKind,
   DesktopKnowledgePagePublicationState,
+  DesktopKnowledgeProvenanceState,
   DesktopKnowledgePageSummary,
   DesktopKnowledgePublicationDiagnostic,
   DesktopKnowledgeSourceCandidate,
@@ -23,6 +24,7 @@ type KnowledgePageEditor = {
   title: string
   contentMarkdown: string
   publicationState: DesktopKnowledgePagePublicationState
+  provenanceState: DesktopKnowledgeProvenanceState
   publishedRevisionNumber: number | null
   sourceMap: DesktopKnowledgeSourceMapEntry[]
   publicationDiagnostics: DesktopKnowledgePublicationDiagnostic[]
@@ -37,6 +39,7 @@ function newEditor(kind: DesktopKnowledgePageKind): KnowledgePageEditor {
     title: "",
     contentMarkdown: "",
     publicationState: "draft",
+    provenanceState: "structural",
     publishedRevisionNumber: null,
     sourceMap: [],
     publicationDiagnostics: [],
@@ -469,6 +472,9 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
                   ? t("desktop.knowledgeBases.knowledgePages.selectedClaim", { claim: selectedClaim })
                   : t("desktop.knowledgeBases.knowledgePages.selectClaim")}
               </p>
+              <p className="mt-2 text-xs font-medium text-muted-foreground">
+                {t(`desktop.knowledgeBases.knowledgePages.provenance.${editor.provenanceState}`)}
+              </p>
               <div className="mt-3 flex gap-2">
                 <Input
                   value={sourceQuery}
@@ -496,7 +502,9 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
                   {editor.sourceMap.map((source) => (
                     <div key={source.sourceId} className="rounded-lg border border-border/60 bg-background px-3 py-2 text-xs">
                       <p className="font-medium">{source.documentName} · {source.section}</p>
-                      <p className="mt-1 text-muted-foreground">{source.sourceId}</p>
+                      <p className="mt-1 text-muted-foreground">
+                        {source.sourceId} · {t(`desktop.knowledgeBases.knowledgePages.sourceAvailability.${source.availability}`)}
+                      </p>
                     </div>
                   ))}
                 </div>
@@ -545,6 +553,7 @@ function editorFromPage(page: DesktopKnowledgePage): KnowledgePageEditor {
     title: editable?.title ?? page.title,
     contentMarkdown: editable?.contentMarkdown ?? "",
     publicationState: page.publicationState,
+    provenanceState: editable?.provenanceState ?? "structural",
     publishedRevisionNumber: page.publishedRevisionNumber,
     sourceMap: editable?.sourceMap ?? [],
     publicationDiagnostics: page.publicationDiagnostics,

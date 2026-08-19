@@ -76,7 +76,21 @@ def test_compatible_addition_advances_the_published_generation(tmp_path: Path) -
     assert reconciliation.current_generation_id() == 2
     assert reconciliation.list_conflicts() == ()
     evidence = DesktopEvidenceRetriever(kb_dir).retrieve("grounded").evidence
-    assert any("knowledge_generation" in item.channels for item in evidence)
+    assert all("knowledge_generation" not in item.channels for item in evidence)
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        assert connection.execute(
+            """
+            SELECT DISTINCT provenance_state FROM knowledge_generation_items
+            WHERE generation_id = 2
+            """
+        ).fetchall() == [("legacy_unmapped",)]
+    materialize_current_generation(kb_dir)
+    generated = next((kb_dir / "knowledge-pages" / "generated").rglob("*.md")).read_text(
+        encoding="utf-8"
+    )
+    assert 'openkb.provenance: "legacy_unmapped"' in generated
+    assert "source_document_id:" not in generated
+    assert "verified:" not in generated
 
 
 def test_d1_document_version_still_reconciles_when_it_reuses_canonical_ir(tmp_path: Path) -> None:

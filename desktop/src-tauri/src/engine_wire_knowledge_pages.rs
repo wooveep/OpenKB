@@ -48,8 +48,26 @@ pub struct KnowledgeSourceMapEntry {
     pub source_id: String,
     #[serde(alias = "claim_text")]
     pub claim_text: String,
+    pub availability: KnowledgeSourceAvailability,
     #[serde(flatten)]
     pub evidence: KnowledgeSourceCandidate,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeSourceAvailability {
+    Available,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeProvenanceState {
+    SourceBacked,
+    Structural,
+    LegacyUnmapped,
+    Unsourced,
+    Invalid,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -71,6 +89,8 @@ pub struct KnowledgePublishedRevision {
     pub content_markdown: String,
     #[serde(alias = "published_at")]
     pub published_at: String,
+    #[serde(alias = "provenance_state")]
+    pub provenance_state: KnowledgeProvenanceState,
     #[serde(default, alias = "source_map")]
     pub source_map: Vec<KnowledgeSourceMapEntry>,
 }
@@ -83,6 +103,8 @@ pub struct KnowledgeWorkingDraft {
     pub content_markdown: String,
     #[serde(alias = "updated_at")]
     pub updated_at: String,
+    #[serde(alias = "provenance_state")]
+    pub provenance_state: KnowledgeProvenanceState,
     #[serde(default, alias = "source_map")]
     pub source_map: Vec<KnowledgeSourceMapEntry>,
 }
