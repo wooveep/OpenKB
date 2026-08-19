@@ -327,7 +327,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
       section: "Document",
       locator: { ordinal: 0 },
       excerpt: `Original content for ${source.name}.`,
-      channels: ["fts", "page_tree"],
+      channels: ["fts", "structure_lexical"],
     }] : []
     const answerId = `answer-${requestId}`
     const answerText = citations.length

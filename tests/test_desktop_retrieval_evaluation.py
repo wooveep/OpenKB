@@ -19,6 +19,7 @@ from openkb.desktop_knowledge_graph import DesktopKnowledgeGraphService
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_retrieval_evaluation import (
+    DesktopRetrievalEvaluationReport,
     DesktopRetrievalEvaluationSuite,
     DesktopRetrievalEvaluator,
 )
@@ -166,7 +167,13 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     )
     report = evaluator.evaluate(DesktopRetrievalEvaluationSuite.from_json(suite_path))
 
-    assert set(report.metrics) == {"fts", "page_tree", "wiki", "baseline", "local_graph"}
+    assert set(report.metrics) == {
+        "fts",
+        "structure_lexical",
+        "wiki",
+        "baseline",
+        "local_graph",
+    }
     assert (
         report.metrics["local_graph"].evidence_recall_at_k
         > report.metrics["baseline"].evidence_recall_at_k
@@ -221,6 +228,20 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     assert payload["knowledge_snapshot_revision"] == report.knowledge_snapshot_revision
     assert payload["metrics"]["local_graph"]["evidence_recall_k"] == 6
     assert payload["gate"]["passed"] is True
+
+    legacy_payload = report.as_dict()
+    legacy_payload["metrics"]["page_tree"] = legacy_payload["metrics"].pop("structure_lexical")
+    for result in legacy_payload["results"]:
+        if result["variant"] == "structure_lexical":
+            result["variant"] = "page_tree"
+    legacy_report_path = tmp_path / "legacy-report.json"
+    legacy_report_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    restored = DesktopRetrievalEvaluationReport.read(legacy_report_path)
+
+    assert "structure_lexical" in restored.metrics
+    assert "page_tree" not in restored.metrics
+    assert {result.variant for result in restored.results} == set(restored.metrics)
 
     other_kb_dir = tmp_path / "other-desktop-kb"
     DesktopKnowledgeBaseRuntime().create(other_kb_dir)

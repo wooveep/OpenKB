@@ -9,7 +9,6 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from openkb.desktop_answer_types import (
     DesktopAnswerError,
@@ -33,6 +32,10 @@ from openkb.desktop_model_gateway import (
     DesktopModelGateway,
     DesktopModelRequest,
 )
+from openkb.desktop_retrieval_channels import (
+    DESKTOP_RETRIEVAL_VARIANTS,
+    DesktopRetrievalVariant,
+)
 from openkb.desktop_workspace import desktop_state_database_path
 
 _MAX_QUERY_LENGTH = 2_000
@@ -47,9 +50,6 @@ _RRF_OFFSET = 60
 _TERM_PATTERN = re.compile(r"[A-Za-z0-9_]{2,}|[\u3400-\u9fff]+")
 _CELL_RANGE_PATTERN = re.compile(r"^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$", re.IGNORECASE)
 _SCORE_COLUMNS = frozenset(("display_name", "heading_path", "text"))
-
-DesktopRetrievalVariant = Literal["fts", "page_tree", "wiki", "baseline", "local_graph"]
-_EVALUATION_RETRIEVAL_VARIANTS = frozenset(("fts", "page_tree", "wiki", "baseline", "local_graph"))
 
 _AVAILABLE_EVIDENCE_OCCURRENCES_CTE = """
 WITH available_evidence_occurrences AS (
@@ -118,7 +118,7 @@ class DesktopEvidenceRetriever:
         harness can compare like-for-like candidate sets without giving each
         variant a different query plan.
         """
-        if variant not in _EVALUATION_RETRIEVAL_VARIANTS:
+        if variant not in DESKTOP_RETRIEVAL_VARIANTS:
             raise ValueError(f"Unsupported Desktop retrieval variant: {variant}")
         normalized_question = _validate_question(question)
         if retrieval_plan is None:
@@ -291,7 +291,7 @@ def _like_rows(connection: sqlite3.Connection, terms: tuple[str, ...]) -> list[t
     ).fetchall()
 
 
-def _page_tree_candidates(
+def _structure_lexical_candidates(
     connection: sqlite3.Connection, terms: tuple[str, ...]
 ) -> tuple[_Candidate, ...]:
     if not terms:
@@ -302,7 +302,7 @@ def _page_tree_candidates(
             terms,
             weighted_columns=(("heading_path", 2), ("text", 1)),
         ),
-        "page_tree",
+        "structure_lexical",
     )
 
 
@@ -419,8 +419,8 @@ def _variant_evidence(
     """Build one evaluation candidate set without adding unrequested channels."""
     if variant == "fts":
         return _fuse_candidates(_fts_candidates(connection, terms)), None
-    if variant == "page_tree":
-        return _fuse_candidates(_page_tree_candidates(connection, terms)), None
+    if variant == "structure_lexical":
+        return _fuse_candidates(_structure_lexical_candidates(connection, terms)), None
     if variant == "wiki":
         return _fuse_candidates(
             _wiki_candidates(connection, terms)
@@ -429,7 +429,7 @@ def _variant_evidence(
 
     baseline = _fuse_candidates(
         _fts_candidates(connection, terms)
-        + _page_tree_candidates(connection, terms)
+        + _structure_lexical_candidates(connection, terms)
         + _wiki_candidates(connection, terms)
         + _knowledge_generation_candidates(connection, terms)
     )
@@ -529,7 +529,7 @@ def _fuse_candidates(candidates: tuple[_Candidate, ...]) -> tuple[DesktopEvidenc
         channel_first.setdefault(candidate.channel, evidence_id)
 
     selected: list[str] = []
-    for channel in ("fts", "page_tree", "wiki"):
+    for channel in ("fts", "structure_lexical", "wiki"):
         first_evidence_id = channel_first.get(channel)
         if first_evidence_id is not None and first_evidence_id not in selected:
             selected.append(first_evidence_id)

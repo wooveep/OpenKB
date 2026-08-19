@@ -1,7 +1,7 @@
 """Fixed-suite ablation reports for Desktop's vectorless retrieval channels.
 
 The evaluator deliberately has no Community, Global GraphRAG, DRIFT, or
-embedding variant.  It compares the shipped lexical/PageTree/wiki baseline to
+embedding variant.  It compares the shipped FTS/Structure Lexical/wiki baseline to
 the optional evidence-anchored local graph, records auditable metrics, and
 returns a conservative eligibility gate instead of silently broadening graph
 use after one encouraging run.
@@ -30,7 +30,12 @@ from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_retrieval import (
     DESKTOP_EVIDENCE_RECALL_K,
     DesktopEvidenceRetriever,
+)
+from openkb.desktop_retrieval_channels import (
+    DESKTOP_RETRIEVAL_VARIANT_ORDER,
+    DESKTOP_RETRIEVAL_VARIANTS,
     DesktopRetrievalVariant,
+    normalize_retrieval_channel,
 )
 from openkb.desktop_workspace import desktop_state_database_path
 from openkb.locks import atomic_write_text
@@ -40,13 +45,6 @@ EvaluationCategory = Literal[
 ]
 _EVALUATION_CATEGORIES: frozenset[EvaluationCategory] = frozenset(
     ("local_fact", "multi_hop", "cross_document_conflict", "global_theme", "absent_answer")
-)
-_RETRIEVAL_VARIANTS: tuple[DesktopRetrievalVariant, ...] = (
-    "fts",
-    "page_tree",
-    "wiki",
-    "baseline",
-    "local_graph",
 )
 
 
@@ -255,6 +253,17 @@ class DesktopRetrievalEvaluationReport:
         """Durably record the exact suite digest and all raw metric values."""
         atomic_write_text(path, json.dumps(self.as_dict(), ensure_ascii=False, indent=2) + "\n")
 
+    @classmethod
+    def read(cls, path: Path) -> DesktopRetrievalEvaluationReport:
+        """Read an auditable report while expanding legacy channel identities."""
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("Desktop retrieval evaluation report is unreadable.") from error
+        if not isinstance(payload, dict):
+            raise ValueError("Desktop retrieval evaluation report must be a JSON object.")
+        return _evaluation_report(payload)
+
 
 class DesktopRetrievalEvaluator:
     """Run a frozen suite against each supported local retrieval variant."""
@@ -292,7 +301,7 @@ class DesktopRetrievalEvaluator:
                 plan, degradations = self._retriever.build_plan(case.question)
                 planning_latency_ms = (self._clock() - planning_started) * 1_000
                 planning_cost = _planning_cost(case.question, plan.source, plan.terms)
-                for variant in _RETRIEVAL_VARIANTS:
+                for variant in DESKTOP_RETRIEVAL_VARIANT_ORDER:
                     started = self._clock()
                     pack = self._retriever.retrieve_variant(
                         case.question,
@@ -314,7 +323,9 @@ class DesktopRetrievalEvaluator:
                             planning_cost.plus(answer.model_cost),
                         )
                     )
-        metrics = {variant: _metrics_for(results, variant) for variant in _RETRIEVAL_VARIANTS}
+        metrics = {
+            variant: _metrics_for(results, variant) for variant in DESKTOP_RETRIEVAL_VARIANT_ORDER
+        }
         knowledge_snapshot_stable = (
             snapshot_captured_consistently
             and knowledge_snapshot_revision == desktop_knowledge_snapshot_revision(self._kb_dir)
@@ -455,6 +466,118 @@ def _optional_nonnegative_int(value: dict[object, object], key: str) -> int | No
         return None
     if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate < 0:
         raise ValueError(f"Desktop retrieval evaluation suite field {key} must be nonnegative.")
+    return candidate
+
+
+def _evaluation_report(value: dict[object, object]) -> DesktopRetrievalEvaluationReport:
+    raw_results = value.get("results")
+    raw_metrics = value.get("metrics")
+    raw_gate = value.get("gate")
+    if not isinstance(raw_results, list):
+        raise ValueError("Desktop retrieval evaluation report results must be an array.")
+    if not isinstance(raw_metrics, dict):
+        raise ValueError("Desktop retrieval evaluation report metrics must be an object.")
+    if not isinstance(raw_gate, dict):
+        raise ValueError("Desktop retrieval evaluation report gate must be an object.")
+    metrics: dict[DesktopRetrievalVariant, DesktopRetrievalEvaluationMetrics] = {}
+    for raw_variant, raw_value in raw_metrics.items():
+        if not isinstance(raw_variant, str) or not isinstance(raw_value, dict):
+            raise ValueError("Desktop retrieval evaluation report has invalid metrics.")
+        variant = normalize_retrieval_channel(raw_variant)
+        if variant not in DESKTOP_RETRIEVAL_VARIANTS or variant in metrics:
+            raise ValueError("Desktop retrieval evaluation report has an invalid variant.")
+        metrics[cast(DesktopRetrievalVariant, variant)] = _report_metrics(raw_value)
+    if set(metrics) != DESKTOP_RETRIEVAL_VARIANTS:
+        raise ValueError("Desktop retrieval evaluation report has incomplete metrics.")
+    return DesktopRetrievalEvaluationReport(
+        suite_snapshot_id=_required_string(value, "suite_snapshot_id"),
+        suite_digest=_required_string(value, "suite_digest"),
+        knowledge_snapshot_digest=_required_string(value, "knowledge_snapshot_digest"),
+        knowledge_snapshot_revision=_report_int(value, "knowledge_snapshot_revision"),
+        repetitions=_report_int(value, "repetitions", minimum=1),
+        results=tuple(_report_result(item) for item in raw_results),
+        metrics=metrics,
+        gate=DesktopRetrievalEvaluationGate(
+            passed=_report_bool(raw_gate, "passed"),
+            evidence_recall_improved=_report_bool(raw_gate, "evidence_recall_improved"),
+            no_critical_evidence_loss=_report_bool(raw_gate, "no_critical_evidence_loss"),
+            citation_precision_non_regression=_report_bool(
+                raw_gate, "citation_precision_non_regression"
+            ),
+            faithfulness_non_regression=_report_bool(raw_gate, "faithfulness_non_regression"),
+            latency_within_budget=_report_bool(raw_gate, "latency_within_budget"),
+            model_cost_within_budget=_report_bool(raw_gate, "model_cost_within_budget"),
+            knowledge_snapshot_stable=_report_bool(raw_gate, "knowledge_snapshot_stable"),
+        ),
+    )
+
+
+def _report_result(value: object) -> DesktopRetrievalEvaluationCaseResult:
+    if not isinstance(value, dict):
+        raise ValueError("Desktop retrieval evaluation report results must be objects.")
+    category = _required_string(value, "category")
+    variant = normalize_retrieval_channel(_required_string(value, "variant"))
+    raw_cost = value.get("model_cost")
+    if category not in _EVALUATION_CATEGORIES or variant not in DESKTOP_RETRIEVAL_VARIANTS:
+        raise ValueError("Desktop retrieval evaluation report result is unsupported.")
+    if not isinstance(raw_cost, dict):
+        raise ValueError("Desktop retrieval evaluation report model_cost must be an object.")
+    return DesktopRetrievalEvaluationCaseResult(
+        case_id=_required_string(value, "case_id"),
+        category=cast(EvaluationCategory, category),
+        repetition=_report_int(value, "repetition", minimum=1),
+        variant=cast(DesktopRetrievalVariant, variant),
+        expected_evidence_ids=_required_strings(value, "expected_evidence_ids"),
+        evidence_recall_at_k=_report_float(value, "evidence_recall_at_k"),
+        citation_precision=_report_float(value, "citation_precision"),
+        answer_faithfulness=_report_float(value, "answer_faithfulness"),
+        latency_ms=_report_float(value, "latency_ms"),
+        model_cost=_report_model_cost(raw_cost),
+        answer_status=_required_string(value, "answer_status"),
+    )
+
+
+def _report_metrics(value: dict[object, object]) -> DesktopRetrievalEvaluationMetrics:
+    raw_cost = value.get("model_cost")
+    if not isinstance(raw_cost, dict):
+        raise ValueError("Desktop retrieval evaluation report model_cost must be an object.")
+    return DesktopRetrievalEvaluationMetrics(
+        case_runs=_report_int(value, "case_runs"),
+        evidence_recall_k=_report_int(value, "evidence_recall_k"),
+        evidence_recall_at_k=_report_float(value, "evidence_recall_at_k"),
+        citation_precision=_report_float(value, "citation_precision"),
+        answer_faithfulness=_report_float(value, "answer_faithfulness"),
+        mean_latency_ms=_report_float(value, "mean_latency_ms"),
+        model_cost=_report_model_cost(raw_cost),
+    )
+
+
+def _report_model_cost(value: dict[object, object]) -> DesktopEvaluationModelCost:
+    return DesktopEvaluationModelCost(
+        model_calls=_report_int(value, "model_calls"),
+        input_characters=_report_int(value, "input_characters"),
+        output_characters=_report_int(value, "output_characters"),
+    )
+
+
+def _report_int(value: dict[object, object], key: str, *, minimum: int = 0) -> int:
+    candidate = value.get(key)
+    if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate < minimum:
+        raise ValueError(f"Desktop retrieval evaluation report field {key} is invalid.")
+    return candidate
+
+
+def _report_float(value: dict[object, object], key: str) -> float:
+    candidate = value.get(key)
+    if isinstance(candidate, bool) or not isinstance(candidate, (int, float)) or candidate < 0:
+        raise ValueError(f"Desktop retrieval evaluation report field {key} is invalid.")
+    return float(candidate)
+
+
+def _report_bool(value: dict[object, object], key: str) -> bool:
+    candidate = value.get(key)
+    if not isinstance(candidate, bool):
+        raise ValueError(f"Desktop retrieval evaluation report field {key} is invalid.")
     return candidate
 
 

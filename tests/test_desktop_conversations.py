@@ -35,6 +35,16 @@ def test_conversation_persists_messages_versions_draft_and_selected_evidence(tmp
     regenerated = service.regenerate(conversation_id, assistant["message_id"])
     versions = regenerated["messages"][1]["answer_versions"]
     assert [version["version_number"] for version in versions] == [1, 2]
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        connection.execute(
+            """
+            UPDATE conversation_answer_citations
+            SET channels_json = '["page_tree"]'
+            WHERE answer_version_id = ?
+            """,
+            (first_version["answer_version_id"],),
+        )
+        connection.commit()
     service.select_answer_version(
         conversation_id,
         assistant["message_id"],
@@ -43,9 +53,11 @@ def test_conversation_persists_messages_versions_draft_and_selected_evidence(tmp
 
     reopened = DesktopConversationService(kb_dir).get(conversation_id)
     assert (
-        reopened["messages"][1]["selected_answer_version_id"]
-        == first_version["answer_version_id"]
+        reopened["messages"][1]["selected_answer_version_id"] == first_version["answer_version_id"]
     )
+    assert reopened["messages"][1]["answer_versions"][0]["citations"][0]["channels"] == [
+        "structure_lexical"
+    ]
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM grounded_answers").fetchone() == (0,)
         assert connection.execute(

@@ -13,7 +13,7 @@ from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
 def test_grounded_answer_persists_available_evidence_citations(tmp_path):
-    """FTS/PageTree evidence becomes an auditable completed answer citation."""
+    """FTS/Structure Lexical evidence becomes an auditable completed citation."""
     kb_dir = tmp_path / "desktop-kb"
     source = tmp_path / "onboarding.txt"
     source.write_text(
@@ -32,7 +32,8 @@ def test_grounded_answer_persists_available_evidence_citations(tmp_path):
     assert citation.document_name == "onboarding.txt"
     assert citation.section == "Onboarding"
     assert citation.locator
-    assert {"fts", "page_tree"}.issubset(citation.channels)
+    assert {"fts", "structure_lexical"}.issubset(citation.channels)
+    assert "page_tree" not in citation.channels
     assert "OpenKB" in answer.answer_text
     assert DesktopGroundedAnswerService(kb_dir).list() == (answer,)
 
@@ -40,6 +41,27 @@ def test_grounded_answer_persists_available_evidence_citations(tmp_path):
         assert connection.execute(
             "SELECT document_name, section, locator_json FROM grounded_answer_citations"
         ).fetchone()[0:2] == ("onboarding.txt", "Onboarding")
+
+
+def test_grounded_answer_normalizes_legacy_page_tree_citations_on_read(tmp_path):
+    """Persisted pre-rename citations remain readable under the canonical identity."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "legacy.txt"
+    source.write_text("# Legacy\n\nThe archive keeps an audit trail.\n", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+    service = DesktopGroundedAnswerService(kb_dir)
+    answer = service.answer("What keeps an audit trail?")
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        connection.execute(
+            "UPDATE grounded_answer_citations SET channels_json = ? WHERE answer_id = ?",
+            ('["fts", "page_tree"]', answer.answer_id),
+        )
+        connection.commit()
+
+    restored = service.list()[0]
+
+    assert restored.citations[0].channels == ("fts", "structure_lexical")
 
 
 def test_grounded_answer_excludes_unavailable_source_documents(tmp_path):

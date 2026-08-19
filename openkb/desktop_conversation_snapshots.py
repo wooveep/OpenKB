@@ -7,6 +7,7 @@ import sqlite3
 from pathlib import Path
 
 from openkb.desktop_answer_types import DesktopGroundedAnswer
+from openkb.desktop_retrieval_channels import normalize_retrieval_channels
 
 
 def insert_answer_version(
@@ -87,9 +88,7 @@ def insert_answer_version(
     )
 
 
-def version_citations(
-    connection: sqlite3.Connection, version_id: str
-) -> list[dict[str, object]]:
+def version_citations(connection: sqlite3.Connection, version_id: str) -> list[dict[str, object]]:
     return [
         {
             "evidence_id": str(row[0]),
@@ -98,7 +97,11 @@ def version_citations(
             "section": str(row[3]),
             "locator": json_object(str(row[4])),
             "excerpt": str(row[5]),
-            "channels": json_list(str(row[6])),
+            "channels": list(
+                normalize_retrieval_channels(
+                    value for value in json_list(str(row[6])) if isinstance(value, str)
+                )
+            ),
             "source_available": bool(row[7]),
         }
         for row in connection.execute(

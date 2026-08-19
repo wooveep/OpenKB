@@ -14,6 +14,7 @@ from openkb.desktop_answer_types import (
     DesktopGroundedAnswer,
     DesktopRetrievalPlan,
 )
+from openkb.desktop_retrieval_channels import normalize_retrieval_channels
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -156,7 +157,7 @@ def _answer_from_row(
             section=str(citation[4]),
             locator=_json_object(str(citation[5])),
             excerpt=str(citation[6]),
-            channels=_string_values(_json_list(str(citation[7]))),
+            channels=normalize_retrieval_channels(_string_values(_json_list(str(citation[7])))),
         )
         for citation in connection.execute(
             """
