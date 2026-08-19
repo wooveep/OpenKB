@@ -31,11 +31,16 @@ def dispatch_knowledge_page_request(
             )
         service = DesktopKnowledgePageService(Path(active.kb_dir))
         if request.method == "workbench.knowledge_pages":
-            return {"pages": [page.as_dict() for page in service.list_pages()]}
+            return {
+                "pages": [page.as_dict() for page in service.list_pages()],
+                "selected_page_id": service.selected_page_id(),
+            }
         if request.method == "workbench.knowledge_page":
-            return service.get_page(_required_string_param(request, "page_id")).as_dict()
+            return service.select_page(_required_string_param(request, "page_id")).as_dict()
         server._begin_workspace_mutation(request, cancel_event)
-        return service.save_page(
+        if request.method == "workbench.publish_knowledge_page":
+            return service.publish(_required_string_param(request, "page_id")).as_dict()
+        return service.save_draft(
             page_id=_optional_page_id(request),
             kind=_required_string_param(request, "kind"),
             title=_required_string_param(request, "title"),

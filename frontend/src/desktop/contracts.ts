@@ -328,22 +328,39 @@ export interface DesktopGlobalSearchResults {
 }
 
 export type DesktopKnowledgePageKind = "concept" | "entity"
+export type DesktopKnowledgePagePublicationState = "draft" | "unpublished_changes" | "published"
 
 export interface DesktopKnowledgePageSummary {
   pageId: string
   kind: DesktopKnowledgePageKind
   title: string
+  publicationState: DesktopKnowledgePagePublicationState
+  publishedRevisionNumber: number | null
+  updatedAt: string
+}
+
+export interface DesktopKnowledgePublishedRevision {
   revisionNumber: number
+  title: string
+  contentMarkdown: string
+  publishedAt: string
+}
+
+export interface DesktopKnowledgeWorkingDraft {
+  title: string
+  contentMarkdown: string
   updatedAt: string
 }
 
 export interface DesktopKnowledgePage extends DesktopKnowledgePageSummary {
-  contentMarkdown: string
   materializedPath: string
+  publishedRevision: DesktopKnowledgePublishedRevision | null
+  workingDraft: DesktopKnowledgeWorkingDraft | null
 }
 
 export interface DesktopKnowledgePages {
   pages: DesktopKnowledgePageSummary[]
+  selectedPageId: string | null
 }
 
 export type DesktopDocumentVersionCandidateDecision = "link_to_candidate" | "keep_separate"
@@ -526,6 +543,7 @@ export interface DesktopBridge {
     contentMarkdown: string,
     requestId: string,
   ): Promise<DesktopKnowledgePage>
+  publishKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage>
   documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates>
   resolveDocumentVersionCandidate(
     candidateId: string,

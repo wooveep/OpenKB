@@ -405,11 +405,7 @@ class DesktopEngineServer:
             from openkb.desktop_engine_search import dispatch_global_search_request
 
             return dispatch_global_search_request(self, request)
-        if request.method in {
-            "workbench.knowledge_pages",
-            "workbench.knowledge_page",
-            "workbench.save_knowledge_page",
-        }:
+        if request.method in engine_methods.KNOWLEDGE_PAGE_METHODS:
             from openkb.desktop_engine_knowledge_pages import dispatch_knowledge_page_request
 
             return dispatch_knowledge_page_request(self, request, cancel_event)

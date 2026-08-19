@@ -59,4 +59,23 @@ impl EngineSupervisor {
             )
         })
     }
+
+    pub fn publish_knowledge_page(
+        &self,
+        page_id: String,
+        request_id: String,
+    ) -> BridgeResult<KnowledgePage> {
+        self.ensure_started()?;
+        let value = self.request_started(
+            "workbench.publish_knowledge_page",
+            json!({ "page_id": page_id }),
+            Some(request_id),
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine knowledge-page publish response has an invalid shape: {error}"),
+            )
+        })
+    }
 }

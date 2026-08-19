@@ -106,12 +106,13 @@ def test_incompatible_change_to_user_revision_is_isolated(tmp_path: Path) -> Non
         DesktopKnowledgeBaseRuntime().create(tmp_path / "knowledge").knowledge_base.kb_dir
     )
     pages = DesktopKnowledgePageService(kb_dir)
-    page = pages.save_page(
+    page = pages.save_draft(
         page_id=None,
         kind="entity",
         title="Alice",
         content_markdown="User-owned statement.",
     )
+    pages.publish(page.page_id)
     source = tmp_path / "incoming.txt"
     source.write_text("# Alice\n\nIncompatible source statement.", encoding="utf-8")
 
@@ -121,7 +122,9 @@ def test_incompatible_change_to_user_revision_is_isolated(tmp_path: Path) -> Non
     assert len(conflicts) == 1
     assert conflicts[0].baseline_kind == "user_revision"
     assert conflicts[0].kind == "entity"
-    assert pages.get_page(page.page_id).content_markdown == "User-owned statement."
+    current = pages.get_page(page.page_id)
+    assert current.published_revision is not None
+    assert current.published_revision.content_markdown == "User-owned statement."
 
 
 def test_staged_conflict_choices_publish_atomically_and_delete_review_copies(

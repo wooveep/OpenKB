@@ -31,6 +31,7 @@ WORKSPACE_METHODS = frozenset(
         "workbench.knowledge_pages",
         "workbench.knowledge_page",
         "workbench.save_knowledge_page",
+        "workbench.publish_knowledge_page",
         "workbench.document_version_candidates",
         "workbench.resolve_document_version_candidate",
         "workbench.knowledge_reconciliation_conflicts",
@@ -56,6 +57,10 @@ MODEL_SETTINGS_METHODS = frozenset(
     method for method in WORKSPACE_METHODS if "model_settings" in method
 ) | {"workbench.export_diagnostic_bundle", "workbench.test_model_connection"}
 
+KNOWLEDGE_PAGE_METHODS = frozenset(
+    method for method in WORKSPACE_METHODS if "knowledge_page" in method
+)
+
 NON_CANCELABLE_MUTATION_METHODS = frozenset(
     {
         "workbench.create_knowledge_base",
@@ -63,6 +68,7 @@ NON_CANCELABLE_MUTATION_METHODS = frozenset(
         "workbench.import_text_document",
         "workbench.read_raw_document",
         "workbench.save_knowledge_page",
+        "workbench.publish_knowledge_page",
         "workbench.resolve_document_version_candidate",
         "workbench.stage_knowledge_reconciliation_decisions",
         "workbench.commit_knowledge_reconciliation_decisions",

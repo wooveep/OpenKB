@@ -44,6 +44,7 @@ import {
   sourceName,
   updateImportTasks,
 } from "./memory-bridge-helpers"
+import { MemoryKnowledgePageStore } from "./memory-knowledge-pages"
 
 /** In-memory Bridge for React component tests; it never touches Tauri or Python. */
 export class MemoryDesktopBridge implements DesktopBridge {
@@ -55,7 +56,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
   private groundedAnswerResults: DesktopGroundedAnswer[] = []
   private conversationResults: DesktopConversation[] = []
   private lastConversationId: string | null = null
-  private knowledgePageResults: DesktopKnowledgePage[] = []
+  private readonly knowledgePagesStore = new MemoryKnowledgePageStore()
   private documentVersionCandidateResults: DesktopDocumentVersionCandidate[] = []
   private knowledgeReconciliationConflictResults: DesktopKnowledgeReconciliationConflict[] = []
   private modelSettingsResult: DesktopModelSettings = {
@@ -555,21 +556,11 @@ export class MemoryDesktopBridge implements DesktopBridge {
   }
 
   async knowledgePages(): Promise<DesktopKnowledgePages> {
-    return {
-      pages: this.knowledgePageResults.map((page) => ({
-        pageId: page.pageId,
-        kind: page.kind,
-        title: page.title,
-        revisionNumber: page.revisionNumber,
-        updatedAt: page.updatedAt,
-      })),
-    }
+    return this.knowledgePagesStore.list()
   }
 
   async getKnowledgePage(pageId: string): Promise<DesktopKnowledgePage> {
-    const page = this.knowledgePageResults.find((candidate) => candidate.pageId === pageId)
-    if (!page) throw new Error("The requested knowledge page was not found.")
-    return page
+    return this.knowledgePagesStore.get(pageId)
   }
 
   async saveKnowledgePage(
@@ -582,25 +573,12 @@ export class MemoryDesktopBridge implements DesktopBridge {
     if (this.activeKnowledgeBaseResult === null) {
       throw new Error("Open a Desktop Knowledge Base before editing knowledge pages.")
     }
-    const now = new Date().toISOString()
-    const existing = pageId === undefined
-      ? undefined
-      : this.knowledgePageResults.find((candidate) => candidate.pageId === pageId)
-    if (pageId !== undefined && !existing) throw new Error("The requested knowledge page was not found.")
-    if (existing && existing.kind !== kind) throw new Error("Knowledge page type cannot change.")
-    const page: DesktopKnowledgePage = {
-      pageId: existing?.pageId ?? `knowledge-page-${requestId}`,
-      kind,
-      title: title.trim(),
-      contentMarkdown,
-      revisionNumber: (existing?.revisionNumber ?? 0) + 1,
-      materializedPath: existing?.materializedPath ?? `knowledge-pages/${kind}/${requestId}.md`,
-      updatedAt: now,
-    }
-    this.knowledgePageResults = existing
-      ? this.knowledgePageResults.map((candidate) => candidate.pageId === page.pageId ? page : candidate)
-      : [page, ...this.knowledgePageResults]
-    return page
+    return this.knowledgePagesStore.saveDraft(pageId, kind, title, contentMarkdown, requestId)
+  }
+
+  async publishKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
+    void requestId
+    return this.knowledgePagesStore.publish(pageId)
   }
 
   async documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates> {
@@ -777,14 +755,14 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 18,
+      schemaVersion: 19,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []
     this.groundedAnswerResults = []
     this.conversationResults = []
     this.lastConversationId = null
-    this.knowledgePageResults = []
+    this.knowledgePagesStore.reset()
     return {
       knowledgeBase: this.activeKnowledgeBaseResult,
       events: [

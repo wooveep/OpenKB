@@ -1,4 +1,4 @@
-import { BookMarked, FilePlus2, Loader2, Save } from "lucide-react"
+import { BookMarked, FilePlus2, Loader2, Save, Upload } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import MarkdownView from "@/components/MarkdownView"
@@ -10,38 +10,149 @@ import { nextDesktopRequestId } from "./request-id"
 import type {
   DesktopKnowledgePage,
   DesktopKnowledgePageKind,
+  DesktopKnowledgePagePublicationState,
   DesktopKnowledgePageSummary,
 } from "./contracts"
 
-type KnowledgePageDraft = {
+type KnowledgePageEditor = {
   pageId: string | undefined
   kind: DesktopKnowledgePageKind
   title: string
   contentMarkdown: string
-  revisionNumber: number | undefined
+  publicationState: DesktopKnowledgePagePublicationState
+  publishedRevisionNumber: number | null
 }
 
-function newDraft(kind: DesktopKnowledgePageKind): KnowledgePageDraft {
-  return { pageId: undefined, kind, title: "", contentMarkdown: "", revisionNumber: undefined }
+type DraftSaveState = "published" | "unsaved" | "saving" | "saved"
+
+function newEditor(kind: DesktopKnowledgePageKind): KnowledgePageEditor {
+  return {
+    pageId: undefined,
+    kind,
+    title: "",
+    contentMarkdown: "",
+    publicationState: "draft",
+    publishedRevisionNumber: null,
+  }
 }
 
-/** Browse and revise SQLite-authoritative Concept and Entity pages. */
+/** Edit an autosaved Working Draft and publish it only through an explicit action. */
 export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId?: string | null }) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
   const [pages, setPages] = useState<DesktopKnowledgePageSummary[]>([])
-  const [draft, setDraft] = useState<KnowledgePageDraft>(() => newDraft("concept"))
+  const [editor, setEditor] = useState<KnowledgePageEditor>(() => newEditor("concept"))
   const [loading, setLoading] = useState(true)
   const [loadingPage, setLoadingPage] = useState(false)
-  const [saving, setSaving] = useState(false)
+  const [publishing, setPublishing] = useState(false)
+  const [saveState, setSaveState] = useState<DraftSaveState>("unsaved")
   const [error, setError] = useState<string | null>(null)
-  const [saved, setSaved] = useState(false)
+  const [editTick, setEditTick] = useState(0)
   const pageRead = useRef(0)
+  const editorRef = useRef(editor)
+  const pageIdRef = useRef<string | undefined>(undefined)
+  const dirtyRef = useRef(false)
+  const editVersionRef = useRef(0)
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve())
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mountedRef = useRef(true)
 
   const refreshPages = useCallback(async () => {
     const result = await bridge.knowledgePages()
     setPages(result.pages)
+    return result
   }, [bridge])
+
+  const updatePageSummary = useCallback((page: DesktopKnowledgePage) => {
+    const summary: DesktopKnowledgePageSummary = {
+      pageId: page.pageId,
+      kind: page.kind,
+      title: page.title,
+      publicationState: page.publicationState,
+      publishedRevisionNumber: page.publishedRevisionNumber,
+      updatedAt: page.updatedAt,
+    }
+    setPages((current) => [summary, ...current.filter((item) => item.pageId !== page.pageId)])
+  }, [])
+
+  const applyServerPage = useCallback((page: DesktopKnowledgePage) => {
+    const next = editorFromPage(page)
+    editorRef.current = next
+    pageIdRef.current = page.pageId
+    dirtyRef.current = false
+    setEditor(next)
+    setSaveState(page.workingDraft ? "saved" : "published")
+  }, [])
+
+  const queueDraftSave = useCallback((snapshot: KnowledgePageEditor, editVersion: number) => {
+    if (mountedRef.current) setSaveState("saving")
+    const operation = saveChainRef.current.then(() => bridge.saveKnowledgePage(
+      snapshot.pageId ?? pageIdRef.current,
+      snapshot.kind,
+      snapshot.title,
+      snapshot.contentMarkdown,
+      nextDesktopRequestId("knowledge-page-draft"),
+    ))
+    void operation.then(
+      (page) => {
+        pageIdRef.current = page.pageId
+        if (!mountedRef.current) return
+        updatePageSummary(page)
+        if (editVersion === editVersionRef.current) {
+          applyServerPage(page)
+          setError(null)
+        } else {
+          const current = { ...editorRef.current, pageId: page.pageId }
+          editorRef.current = current
+          setEditor(current)
+          setSaveState("unsaved")
+        }
+      },
+      (reason) => {
+        if (!mountedRef.current) return
+        setSaveState("unsaved")
+        setError(reason instanceof Error ? reason.message : String(reason))
+      },
+    )
+    saveChainRef.current = operation.then(() => undefined, () => undefined)
+    return operation
+  }, [applyServerPage, bridge, updatePageSummary])
+
+  const flushDraft = useCallback(async () => {
+    if (autosaveTimerRef.current !== null) {
+      clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = null
+    }
+    const snapshot = editorRef.current
+    if (dirtyRef.current) {
+      if (!snapshot.title.trim()) {
+        if (snapshot.pageId) throw new Error(t("desktop.knowledgeBases.knowledgePages.titleRequired"))
+        return
+      }
+      await queueDraftSave(snapshot, editVersionRef.current)
+      return
+    }
+    await saveChainRef.current
+  }, [queueDraftSave, t])
+
+  const selectPage = useCallback(async (pageId: string) => {
+    const read = pageRead.current + 1
+    pageRead.current = read
+    setLoadingPage(true)
+    setError(null)
+    try {
+      await flushDraft()
+      const page = await bridge.getKnowledgePage(pageId)
+      if (read !== pageRead.current) return
+      applyServerPage(page)
+    } catch (reason) {
+      if (read === pageRead.current) {
+        setError(reason instanceof Error ? reason.message : String(reason))
+      }
+    } finally {
+      if (read === pageRead.current) setLoadingPage(false)
+    }
+  }, [applyServerPage, bridge, flushDraft])
 
   useEffect(() => {
     let disposed = false
@@ -50,6 +161,7 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
         if (disposed) return
         setPages(result.pages)
         setError(null)
+        if (!requestedPageId && result.selectedPageId) void selectPage(result.selectedPageId)
       })
       .catch((reason) => {
         if (!disposed) setError(reason instanceof Error ? reason.message : String(reason))
@@ -58,64 +170,84 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
         if (!disposed) setLoading(false)
       })
     return () => { disposed = true }
-  }, [bridge])
-
-  const selectPage = useCallback(async (pageId: string) => {
-    const read = pageRead.current + 1
-    pageRead.current = read
-    setLoadingPage(true)
-    setError(null)
-    setSaved(false)
-    try {
-      const page = await bridge.getKnowledgePage(pageId)
-      if (read !== pageRead.current) return
-      setDraft(draftFromPage(page))
-    } catch (reason) {
-      if (read === pageRead.current) {
-        setError(reason instanceof Error ? reason.message : String(reason))
-      }
-    } finally {
-      if (read === pageRead.current) setLoadingPage(false)
-    }
-  }, [bridge])
+  }, [bridge, requestedPageId, selectPage])
 
   useEffect(() => {
-    if (requestedPageId) {
-      void Promise.resolve().then(() => selectPage(requestedPageId))
-    }
+    if (!requestedPageId) return
+    const timer = window.setTimeout(() => { void selectPage(requestedPageId) }, 0)
+    return () => window.clearTimeout(timer)
   }, [requestedPageId, selectPage])
 
-  const beginNew = (kind: DesktopKnowledgePageKind) => {
-    pageRead.current += 1
-    setDraft(newDraft(kind))
-    setLoadingPage(false)
-    setError(null)
-    setSaved(false)
+  useEffect(() => {
+    if (autosaveTimerRef.current !== null) clearTimeout(autosaveTimerRef.current)
+    const snapshot = editorRef.current
+    if (!dirtyRef.current || !snapshot.title.trim()) return
+    autosaveTimerRef.current = setTimeout(() => {
+      autosaveTimerRef.current = null
+      void queueDraftSave(snapshot, editVersionRef.current)
+    }, 500)
+    return () => {
+      if (autosaveTimerRef.current !== null) clearTimeout(autosaveTimerRef.current)
+    }
+  }, [editTick, queueDraftSave])
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      if (autosaveTimerRef.current !== null) clearTimeout(autosaveTimerRef.current)
+      const snapshot = editorRef.current
+      if (dirtyRef.current && snapshot.title.trim()) {
+        void queueDraftSave(snapshot, editVersionRef.current)
+      }
+    }
+  }, [queueDraftSave])
+
+  const updateEditor = (change: Partial<KnowledgePageEditor>) => {
+    const next = { ...editorRef.current, ...change }
+    editorRef.current = next
+    dirtyRef.current = true
+    editVersionRef.current += 1
+    setEditor(next)
+    setSaveState("unsaved")
+    setEditTick((value) => value + 1)
   }
 
-  const savePage = async () => {
-    if (!draft.title.trim()) {
-      setError(t("desktop.knowledgeBases.knowledgePages.titleRequired"))
+  const beginNew = async (kind: DesktopKnowledgePageKind) => {
+    try {
+      await flushDraft()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
       return
     }
-    setSaving(true)
+    pageRead.current += 1
+    const next = newEditor(kind)
+    editorRef.current = next
+    pageIdRef.current = undefined
+    dirtyRef.current = false
+    setEditor(next)
+    setLoadingPage(false)
     setError(null)
-    setSaved(false)
+    setSaveState("unsaved")
+  }
+
+  const publishPage = async () => {
+    setPublishing(true)
+    setError(null)
     try {
-      const page = await bridge.saveKnowledgePage(
-        draft.pageId,
-        draft.kind,
-        draft.title,
-        draft.contentMarkdown,
-        nextDesktopRequestId("knowledge-page"),
+      await flushDraft()
+      const pageId = pageIdRef.current
+      if (!pageId) throw new Error(t("desktop.knowledgeBases.knowledgePages.saveBeforePublish"))
+      const page = await bridge.publishKnowledgePage(
+        pageId,
+        nextDesktopRequestId("knowledge-page-publish"),
       )
-      setDraft(draftFromPage(page))
+      applyServerPage(page)
       await refreshPages()
-      setSaved(true)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setSaving(false)
+      setPublishing(false)
     }
   }
 
@@ -130,18 +262,21 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
           <button
             key={page.pageId}
             type="button"
-            aria-current={draft.pageId === page.pageId ? "page" : undefined}
+            aria-current={editor.pageId === page.pageId ? "page" : undefined}
             onClick={() => void selectPage(page.pageId)}
             className={[
               "w-full rounded-lg px-2.5 py-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
-              draft.pageId === page.pageId
+              editor.pageId === page.pageId
                 ? "bg-primary text-primary-foreground shadow-sm"
                 : "hover:bg-accent hover:text-accent-foreground",
             ].join(" ")}
           >
             <span className="block truncate text-sm font-medium">{page.title}</span>
             <span className="mt-0.5 block text-xs opacity-70">
-              {t("desktop.knowledgeBases.knowledgePages.revision", { revision: page.revisionNumber })}
+              {t(`desktop.knowledgeBases.knowledgePages.state.${page.publicationState}`)}
+              {page.publishedRevisionNumber
+                ? ` · ${t("desktop.knowledgeBases.knowledgePages.revision", { revision: page.publishedRevisionNumber })}`
+                : ""}
             </span>
           </button>
         ))}
@@ -149,16 +284,19 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
     )
   }
 
+  const busy = loadingPage || publishing || saveState === "saving"
+  const canPublish = Boolean(editor.pageId || editor.title.trim())
+
   return (
     <section className="mt-8 overflow-hidden rounded-apple-lg border border-border/70 bg-background shadow-sm" data-testid="desktop-knowledge-pages">
       <div className="grid min-h-[32rem] lg:grid-cols-[15rem_minmax(0,1fr)]">
         <aside className="border-b border-border/70 bg-muted/20 p-3 lg:border-b-0 lg:border-r">
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={() => beginNew("concept")}>
+            <Button size="sm" onClick={() => void beginNew("concept")}>
               <FilePlus2 className="size-3.5" />
               {t("desktop.knowledgeBases.knowledgePages.newConcept")}
             </Button>
-            <Button size="sm" variant="outline" onClick={() => beginNew("entity")}>
+            <Button size="sm" variant="outline" onClick={() => void beginNew("entity")}>
               <FilePlus2 className="size-3.5" />
               {t("desktop.knowledgeBases.knowledgePages.newEntity")}
             </Button>
@@ -183,35 +321,38 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
               <div className="flex items-center gap-2 text-primary">
                 <BookMarked className="size-4" />
                 <p className="font-mono2 text-xs font-semibold tracking-[0.16em]">
-                  {t(`desktop.knowledgeBases.knowledgePages.${draft.kind}`)}
+                  {t(`desktop.knowledgeBases.knowledgePages.${editor.kind}`)}
                 </p>
               </div>
               <h2 className="mt-2 text-xl font-semibold tracking-tight">
-                {draft.pageId ? draft.title || t("desktop.knowledgeBases.knowledgePages.untitled") : t("desktop.knowledgeBases.knowledgePages.newPage")}
+                {editor.pageId ? editor.title || t("desktop.knowledgeBases.knowledgePages.untitled") : t("desktop.knowledgeBases.knowledgePages.newPage")}
               </h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                {draft.revisionNumber === undefined
-                  ? t("desktop.knowledgeBases.knowledgePages.newDescription")
-                  : t("desktop.knowledgeBases.knowledgePages.authorityDescription", { revision: draft.revisionNumber })}
+                {statusText(t, editor, saveState)}
               </p>
             </div>
-            <Button disabled={saving || loadingPage} onClick={() => void savePage()}>
-              {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-              {saving ? t("desktop.knowledgeBases.knowledgePages.saving") : t("desktop.knowledgeBases.knowledgePages.save")}
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" disabled={busy || !editor.title.trim()} onClick={() => void flushDraft()}>
+                {saveState === "saving" ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+                {t("desktop.knowledgeBases.knowledgePages.saveDraft")}
+              </Button>
+              <Button disabled={busy || !canPublish} onClick={() => void publishPage()}>
+                {publishing ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
+                {t("desktop.knowledgeBases.knowledgePages.publish")}
+              </Button>
+            </div>
           </div>
 
           {error ? <p className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">{error}</p> : null}
-          {saved ? <p className="mt-4 rounded-lg border border-emerald-600/25 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300">{t("desktop.knowledgeBases.knowledgePages.saved")}</p> : null}
 
           <div className="mt-6 grid gap-5 xl:grid-cols-2">
             <div className="space-y-4">
               <label className="block text-sm font-medium">
                 {t("desktop.knowledgeBases.knowledgePages.kindLabel")}
                 <select
-                  value={draft.kind}
-                  disabled={Boolean(draft.pageId) || loadingPage || saving}
-                  onChange={(event) => setDraft((current) => ({ ...current, kind: event.target.value as DesktopKnowledgePageKind }))}
+                  value={editor.kind}
+                  disabled={Boolean(editor.pageId) || busy}
+                  onChange={(event) => updateEditor({ kind: event.target.value as DesktopKnowledgePageKind })}
                   className="mt-1.5 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <option value="concept">{t("desktop.knowledgeBases.knowledgePages.concept")}</option>
@@ -222,9 +363,9 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
                 {t("desktop.knowledgeBases.knowledgePages.titleLabel")}
                 <Input
                   className="mt-1.5"
-                  value={draft.title}
-                  disabled={loadingPage || saving}
-                  onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
+                  value={editor.title}
+                  disabled={busy}
+                  onChange={(event) => updateEditor({ title: event.target.value })}
                   placeholder={t("desktop.knowledgeBases.knowledgePages.titlePlaceholder")}
                 />
               </label>
@@ -232,9 +373,9 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
                 {t("desktop.knowledgeBases.knowledgePages.markdownLabel")}
                 <Textarea
                   className="mt-1.5 min-h-64 resize-y font-mono2 text-[13px] leading-6"
-                  value={draft.contentMarkdown}
-                  disabled={loadingPage || saving}
-                  onChange={(event) => setDraft((current) => ({ ...current, contentMarkdown: event.target.value }))}
+                  value={editor.contentMarkdown}
+                  disabled={busy}
+                  onChange={(event) => updateEditor({ contentMarkdown: event.target.value })}
                   placeholder={t("desktop.knowledgeBases.knowledgePages.markdownPlaceholder")}
                 />
               </label>
@@ -246,8 +387,8 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
               <div className="mt-3 min-h-60">
                 {loadingPage ? (
                   <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />{t("desktop.knowledgeBases.knowledgePages.loading")}</div>
-                ) : draft.contentMarkdown ? (
-                  <MarkdownView source={draft.contentMarkdown} />
+                ) : editor.contentMarkdown ? (
+                  <MarkdownView source={editor.contentMarkdown} />
                 ) : (
                   <p className="text-sm text-muted-foreground">{t("desktop.knowledgeBases.knowledgePages.previewEmpty")}</p>
                 )}
@@ -260,12 +401,27 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
   )
 }
 
-function draftFromPage(page: DesktopKnowledgePage): KnowledgePageDraft {
+function editorFromPage(page: DesktopKnowledgePage): KnowledgePageEditor {
+  const editable = page.workingDraft ?? page.publishedRevision
   return {
     pageId: page.pageId,
     kind: page.kind,
-    title: page.title,
-    contentMarkdown: page.contentMarkdown,
-    revisionNumber: page.revisionNumber,
+    title: editable?.title ?? page.title,
+    contentMarkdown: editable?.contentMarkdown ?? "",
+    publicationState: page.publicationState,
+    publishedRevisionNumber: page.publishedRevisionNumber,
   }
+}
+
+function statusText(
+  t: (key: string, options?: Record<string, unknown>) => string,
+  editor: KnowledgePageEditor,
+  saveState: DraftSaveState,
+): string {
+  if (saveState === "saving") return t("desktop.knowledgeBases.knowledgePages.draftSaving")
+  if (saveState === "unsaved") return t("desktop.knowledgeBases.knowledgePages.unsaved")
+  if (saveState === "saved") return t("desktop.knowledgeBases.knowledgePages.draftSaved")
+  return t("desktop.knowledgeBases.knowledgePages.publishedStatus", {
+    revision: editor.publishedRevisionNumber ?? 0,
+  })
 }

@@ -331,6 +331,10 @@ export class TauriDesktopBridge implements DesktopBridge {
     })
   }
 
+  async publishKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
+    return this.call<DesktopKnowledgePage>("desktop_publish_knowledge_page", { pageId, requestId })
+  }
+
   async documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates> {
     return this.call<DesktopDocumentVersionCandidates>("desktop_document_version_candidates")
   }
@@ -683,6 +687,12 @@ class UnavailableDesktopBridge implements DesktopBridge {
     void kind
     void title
     void contentMarkdown
+    void requestId
+    return this.unavailable()
+  }
+
+  publishKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
+    void pageId
     void requestId
     return this.unavailable()
   }

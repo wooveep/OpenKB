@@ -390,8 +390,40 @@ pub struct KnowledgePageSummary {
     pub page_id: String,
     pub kind: KnowledgePageKind,
     pub title: String,
+    #[serde(alias = "publication_state")]
+    pub publication_state: KnowledgePagePublicationState,
+    #[serde(alias = "published_revision_number")]
+    pub published_revision_number: Option<u32>,
+    #[serde(alias = "updated_at")]
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgePagePublicationState {
+    Draft,
+    UnpublishedChanges,
+    Published,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgePublishedRevision {
     #[serde(alias = "revision_number")]
     pub revision_number: u32,
+    pub title: String,
+    #[serde(alias = "content_markdown")]
+    pub content_markdown: String,
+    #[serde(alias = "published_at")]
+    pub published_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeWorkingDraft {
+    pub title: String,
+    #[serde(alias = "content_markdown")]
+    pub content_markdown: String,
     #[serde(alias = "updated_at")]
     pub updated_at: String,
 }
@@ -403,20 +435,26 @@ pub struct KnowledgePage {
     pub page_id: String,
     pub kind: KnowledgePageKind,
     pub title: String,
-    #[serde(alias = "revision_number")]
-    pub revision_number: u32,
-    #[serde(alias = "content_markdown")]
-    pub content_markdown: String,
+    #[serde(alias = "publication_state")]
+    pub publication_state: KnowledgePagePublicationState,
+    #[serde(alias = "published_revision_number")]
+    pub published_revision_number: Option<u32>,
     #[serde(alias = "materialized_path")]
     pub materialized_path: String,
     #[serde(alias = "updated_at")]
     pub updated_at: String,
+    #[serde(alias = "published_revision")]
+    pub published_revision: Option<KnowledgePublishedRevision>,
+    #[serde(alias = "working_draft")]
+    pub working_draft: Option<KnowledgeWorkingDraft>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgePagesResult {
     pub pages: Vec<KnowledgePageSummary>,
+    #[serde(alias = "selected_page_id")]
+    pub selected_page_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -40,6 +40,12 @@ def _drop_conversation_schema(connection: sqlite3.Connection) -> None:
     connection.execute("DROP TABLE conversations")
 
 
+def _drop_knowledge_page_draft_schema(connection: sqlite3.Connection) -> None:
+    """Return a test fixture to the state before migration 19."""
+    connection.execute("DROP TABLE knowledge_page_ui_state")
+    connection.execute("DROP TABLE knowledge_page_working_drafts")
+
+
 def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_one(tmp_path):
     """One Engine owns one active SQLite knowledge base and checkpoints before a switch."""
     runtime = DesktopKnowledgeBaseRuntime()
@@ -47,7 +53,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 18
+    assert first.knowledge_base.schema_version == 19
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
@@ -69,10 +75,11 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
             (13,),
             (14,),
             (15,),
-                (16,),
-                (17,),
-                (18,),
-            ]
+            (16,),
+            (17,),
+            (18,),
+            (19,),
+        ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
         )
@@ -106,6 +113,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
         _drop_conversation_schema(connection)
+        _drop_knowledge_page_draft_schema(connection)
         connection.execute("DROP TABLE knowledge_reconciliation_resolution_records")
         connection.execute("DROP TABLE knowledge_reconciliation_candidates")
         connection.execute("DROP TABLE knowledge_graph_diagnostics")
@@ -148,6 +156,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 16")
         connection.execute("DELETE FROM schema_migrations WHERE version = 17")
         connection.execute("DELETE FROM schema_migrations WHERE version = 18")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 19")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
@@ -200,6 +209,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
             (16,),
             (17,),
             (18,),
+            (19,),
         ]
         assert connection.execute(
             "SELECT status FROM import_job_runtime WHERE job_id = 'legacy-job'"
@@ -227,6 +237,7 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
 
     with sqlite3.connect(database_path) as connection:
         _drop_conversation_schema(connection)
+        _drop_knowledge_page_draft_schema(connection)
         connection.execute("DROP TABLE knowledge_reconciliation_resolution_records")
         connection.execute("DROP TABLE knowledge_reconciliation_candidates")
         connection.execute("DROP TABLE knowledge_graph_diagnostics")
@@ -267,6 +278,7 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 16")
         connection.execute("DELETE FROM schema_migrations WHERE version = 17")
         connection.execute("DELETE FROM schema_migrations WHERE version = 18")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 19")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
@@ -309,6 +321,7 @@ def test_migration_backfills_independent_version_sources_for_existing_documents(
 
     with sqlite3.connect(database_path) as connection:
         _drop_conversation_schema(connection)
+        _drop_knowledge_page_draft_schema(connection)
         connection.execute("DROP TABLE knowledge_reconciliation_resolution_records")
         connection.execute("DROP TABLE knowledge_reconciliation_candidates")
         connection.execute("DROP TABLE knowledge_graph_diagnostics")
@@ -329,6 +342,7 @@ def test_migration_backfills_independent_version_sources_for_existing_documents(
         connection.execute("DELETE FROM schema_migrations WHERE version = 16")
         connection.execute("DELETE FROM schema_migrations WHERE version = 17")
         connection.execute("DELETE FROM schema_migrations WHERE version = 18")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 19")
 
     DesktopKnowledgeBaseRuntime().open(kb_dir)
 

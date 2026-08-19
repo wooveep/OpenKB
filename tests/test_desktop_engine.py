@@ -260,7 +260,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 18,
+            "schema_version": 19,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -721,8 +721,8 @@ def test_engine_streams_and_returns_a_grounded_answer(tmp_path):
     assert delta_event["params"]["data"]["attempt"] == 1
 
 
-def test_engine_browses_saves_and_re_materializes_user_knowledge_pages(tmp_path):
-    """The Desktop bridge exposes SQLite-authoritative Concept and Entity revisions."""
+def test_engine_autosaves_then_explicitly_publishes_user_knowledge_pages(tmp_path):
+    """The public workbench boundary keeps drafts separate from published reader state."""
     kb_dir = tmp_path / "desktop-kb"
     workspace = DesktopKnowledgeBaseRuntime()
     workspace.create(kb_dir)
@@ -738,6 +738,32 @@ def test_engine_browses_saves_and_re_materializes_user_knowledge_pages(tmp_path)
                 "kind": "concept",
                 "title": "Evidence",
                 "content_markdown": "User-owned **knowledge**.",
+            },
+        ),
+        cancel_event=None,
+    )
+    assert saved["publication_state"] == "draft"
+    assert saved["published_revision"] is None
+    assert saved["working_draft"]["content_markdown"] == "User-owned **knowledge**."
+    assert not (kb_dir / str(saved["materialized_path"])).exists()
+
+    published = server._dispatch(
+        DesktopRequest(
+            request_id="publish-page",
+            method="workbench.publish_knowledge_page",
+            params={"page_id": str(saved["page_id"])},
+        ),
+        cancel_event=None,
+    )
+    revised = server._dispatch(
+        DesktopRequest(
+            request_id="revise-page",
+            method="workbench.save_knowledge_page",
+            params={
+                "page_id": saved["page_id"],
+                "kind": "concept",
+                "title": "Evidence",
+                "content_markdown": "Unpublished **revision**.",
             },
         ),
         cancel_event=None,
@@ -764,13 +790,16 @@ def test_engine_browses_saves_and_re_materializes_user_knowledge_pages(tmp_path)
             "page_id": saved["page_id"],
             "kind": "concept",
             "title": "Evidence",
-            "revision_number": 1,
-            "updated_at": saved["updated_at"],
+            "publication_state": "unpublished_changes",
+            "published_revision_number": 1,
+            "updated_at": revised["updated_at"],
         }
     ]
-    assert read["content_markdown"] == "User-owned **knowledge**."
+    assert listed["selected_page_id"] == saved["page_id"]
+    assert read["published_revision"]["content_markdown"] == "User-owned **knowledge**."
+    assert read["working_draft"]["content_markdown"] == "Unpublished **revision**."
 
-    projection = kb_dir / str(saved["materialized_path"])
+    projection = kb_dir / str(published["materialized_path"])
     projection.unlink()
     reopened = DesktopEngineServer(io.BytesIO(), io.BytesIO())
     reopened._handshake_complete = True
@@ -783,6 +812,15 @@ def test_engine_browses_saves_and_re_materializes_user_knowledge_pages(tmp_path)
         cancel_event=None,
     )
     assert "User-owned **knowledge**." in projection.read_text(encoding="utf-8")
+    restored = reopened._dispatch(
+        DesktopRequest(
+            request_id="restored-pages",
+            method="workbench.knowledge_pages",
+            params={},
+        ),
+        cancel_event=None,
+    )
+    assert restored["selected_page_id"] == saved["page_id"]
 
 
 def test_engine_lists_isolated_knowledge_reconciliation_conflicts(tmp_path):

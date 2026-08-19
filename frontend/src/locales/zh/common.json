@@ -188,12 +188,15 @@
         "concept": "概念",
         "entity": "实体",
         "loading": "正在加载知识页…",
-        "empty": "还没有用户修订。新建一个概念或实体页即可开始。",
+        "empty": "还没有知识页。新建一个概念或实体页即可开始。",
         "newPage": "新建知识页",
         "untitled": "未命名知识页",
-        "newDescription": "为该页面写下第一份用户修订。",
-        "authorityDescription": "用户修订 {{revision}} 是 SQLite 权威状态，并会物化为 Markdown。",
         "revision": "修订 {{revision}}",
+        "state": {
+          "draft": "草稿",
+          "unpublished_changes": "有未发布更改",
+          "published": "已发布"
+        },
         "kindLabel": "页面类型",
         "titleLabel": "页面标题",
         "titlePlaceholder": "例如：检索",
@@ -202,9 +205,13 @@
         "markdownPlaceholder": "编写用户拥有的页面内容…",
         "preview": "阅读视图预览",
         "previewEmpty": "开始编写后可在这里预览 Markdown 页面。",
-        "save": "保存修订",
-        "saving": "正在保存…",
-        "saved": "用户修订已保存，Markdown 阅读视图已刷新。"
+        "unsaved": "有未保存更改；停止输入后 OpenKB 会自动保存。",
+        "draftSaving": "正在保存工作草稿…",
+        "draftSaved": "工作草稿已保存在本地，已发布知识保持不变。",
+        "publishedStatus": "已发布修订 {{revision}}，当前没有未发布更改。",
+        "saveDraft": "保存草稿",
+        "publish": "发布",
+        "saveBeforePublish": "请先保存工作草稿，再进行发布。"
       },
       "modelSettings": {
         "title": "模型默认设置",

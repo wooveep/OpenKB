@@ -188,12 +188,15 @@
         "concept": "Concept",
         "entity": "Entity",
         "loading": "Loading pages…",
-        "empty": "No user revisions yet. Create a Concept or Entity page to begin.",
+        "empty": "No knowledge pages yet. Create a Concept or Entity page to begin.",
         "newPage": "New knowledge page",
         "untitled": "Untitled page",
-        "newDescription": "Write the first user revision for this page.",
-        "authorityDescription": "User revision {{revision}} is the SQLite authority and is materialized as Markdown.",
         "revision": "Revision {{revision}}",
+        "state": {
+          "draft": "Draft",
+          "unpublished_changes": "Unpublished changes",
+          "published": "Published"
+        },
         "kindLabel": "Page type",
         "titleLabel": "Page title",
         "titlePlaceholder": "For example, Retrieval",
@@ -202,9 +205,13 @@
         "markdownPlaceholder": "Write the user-owned page content…",
         "preview": "Reader preview",
         "previewEmpty": "Start writing to preview this Markdown page.",
-        "save": "Save revision",
-        "saving": "Saving…",
-        "saved": "User revision saved and Markdown reader view refreshed."
+        "unsaved": "Unsaved changes. OpenKB will autosave after you pause typing.",
+        "draftSaving": "Saving Working Draft…",
+        "draftSaved": "Working Draft saved locally. Published knowledge is unchanged.",
+        "publishedStatus": "Published revision {{revision}}. There are no unpublished changes.",
+        "saveDraft": "Save draft",
+        "publish": "Publish",
+        "saveBeforePublish": "Save a Working Draft before publishing."
       },
       "modelSettings": {
         "title": "Model defaults",
