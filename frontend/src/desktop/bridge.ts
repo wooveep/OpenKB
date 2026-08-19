@@ -29,12 +29,12 @@ import {
   type DesktopKnowledgePages,
   type DesktopKnowledgePageKind,
   type DesktopKnowledgeSourceCandidate,
+  type DesktopKnowledgeReconciliationCommit,
+  type DesktopKnowledgeReconciliationConflicts,
+  type DesktopKnowledgeReconciliationDecision,
   type DesktopDocumentVersionCandidate,
   type DesktopDocumentVersionCandidates,
   type DesktopDocumentVersionCandidateDecision,
-  type DesktopKnowledgeReconciliationConflicts,
-  type DesktopKnowledgeReconciliationCommit,
-  type DesktopKnowledgeReconciliationDecision,
   type DesktopImportJobs,
   type DesktopRawDocument,
   type DesktopRecoveryOverride,
@@ -49,9 +49,10 @@ import {
   toDesktopBridgeError,
 } from "./bridge-normalizers"
 import { UnavailableKnowledgePageBridge } from "./unavailable-knowledge-page-bridge"
+import { TauriKnowledgeReviewBridge } from "./tauri-knowledge-review-bridge"
 
 /** Production Bridge: the sole React caller of Tauri commands and channels. */
-export class TauriDesktopBridge implements DesktopBridge {
+export class TauriDesktopBridge extends TauriKnowledgeReviewBridge implements DesktopBridge {
   async handshake(): Promise<DesktopBridgeHandshake> {
     return this.call<DesktopBridgeHandshake>("desktop_bridge_handshake")
   }
@@ -392,33 +393,6 @@ export class TauriDesktopBridge implements DesktopBridge {
     })
   }
 
-  async knowledgeReconciliationConflicts(): Promise<DesktopKnowledgeReconciliationConflicts> {
-    return this.call<DesktopKnowledgeReconciliationConflicts>(
-      "desktop_knowledge_reconciliation_conflicts",
-    )
-  }
-
-  async stageKnowledgeReconciliationDecisions(
-    candidateIds: string[],
-    decision: DesktopKnowledgeReconciliationDecision | null,
-    manualMergeContent: string | null,
-    requestId: string,
-  ): Promise<DesktopKnowledgeReconciliationConflicts> {
-    return this.call<DesktopKnowledgeReconciliationConflicts>(
-      "desktop_stage_knowledge_reconciliation_decisions",
-      { candidateIds, decision, manualMergeContent, requestId },
-    )
-  }
-
-  async commitKnowledgeReconciliationDecisions(
-    requestId: string,
-  ): Promise<DesktopKnowledgeReconciliationCommit> {
-    return this.call<DesktopKnowledgeReconciliationCommit>(
-      "desktop_commit_knowledge_reconciliation_decisions",
-      { requestId },
-    )
-  }
-
   async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {
     return this.call<DesktopImportControlResult>("desktop_pause_import_job", { jobId })
   }
@@ -460,7 +434,7 @@ export class TauriDesktopBridge implements DesktopBridge {
     }
   }
 
-  private async call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  protected async call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
     try {
       return await invoke<T>(command, args)
     } catch (error) {

@@ -127,6 +127,13 @@ def search_available_sources_in(
     return tuple(_candidate_from_row(row) for row in rows)
 
 
+def available_source_in(
+    connection: sqlite3.Connection, evidence_id: str
+) -> DesktopKnowledgeSourceCandidate:
+    """Resolve one canonical Evidence ID through a currently Available occurrence."""
+    return _available_source_in(connection, evidence_id)
+
+
 def bind_source_in(
     connection: sqlite3.Connection,
     *,
@@ -379,9 +386,7 @@ def strip_knowledge_source_markers(value: str) -> str:
     return _SOURCE_MARKER.sub("", value)
 
 
-def merge_claim_source_markers(
-    content_markdown: str, sources: tuple[object, ...]
-) -> str:
+def merge_claim_source_markers(content_markdown: str, sources: tuple[object, ...]) -> str:
     """Attach new stable markers to their exact factual claim units."""
     parts = content_markdown.split("\n\n")
     for source in sources:
@@ -398,9 +403,7 @@ def merge_claim_source_markers(
     return "\n\n".join(parts)
 
 
-def knowledge_source_matches_claim(
-    content_markdown: str, source_id: str, claim_text: str
-) -> bool:
+def knowledge_source_matches_claim(content_markdown: str, source_id: str, claim_text: str) -> bool:
     """Return whether one exact factual claim retains its stable source marker."""
     matching_claims = [
         claim
@@ -416,6 +419,19 @@ def knowledge_source_matches_claim(
 
 def stable_source_id(evidence_id: str) -> str:
     return f"src-{hashlib.sha256(evidence_id.encode('utf-8')).hexdigest()[:16]}"
+
+
+def validate_unbound_source_claim(claim_text: str) -> None:
+    """Require one factual claim without OpenKB-owned source-marker syntax."""
+    claim = claim_text.strip()
+    if _SOURCE_MARKER.search(claim):
+        raise ValueError("knowledge_source_marker_reserved")
+    _require_claim_selection(claim, claim)
+
+
+def validate_source_claim_selection(content_markdown: str, claim_text: str) -> None:
+    """Require one exact factual claim unit inside editable Markdown."""
+    _require_claim_selection(content_markdown, claim_text.strip())
 
 
 def _available_source_in(

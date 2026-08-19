@@ -59,6 +59,8 @@ from openkb.desktop_knowledge_analysis import (
 from openkb.desktop_knowledge_analysis_reuse import (
     ReusableKnowledgeAnalysis,
     canonical_analysis_changes_in,
+    canonical_analysis_document_id_in,
+    canonical_analysis_evidence_map_in,
     load_reusable_knowledge_analysis,
 )
 from openkb.desktop_knowledge_graph import (
@@ -66,6 +68,7 @@ from openkb.desktop_knowledge_graph import (
     start_graph_extraction,
 )
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
+from openkb.desktop_missing_sources import record_missing_source_candidates_in
 from openkb.desktop_model_gateway import (
     DesktopModelAttemptEvent,
     DesktopModelCallError,
@@ -671,12 +674,20 @@ class DesktopTextImportService:
         evidence: tuple[tuple[str, DocumentIRBlock], ...],
     ) -> None:
         """Atomically bind canonical Evidence and apply validated structured knowledge."""
-        changes = canonical_analysis_changes_in(
-            connection,
-            document_id,
-            ReusableKnowledgeAnalysis(analysis, analysis_provenance_json, evidence),
+        reusable = ReusableKnowledgeAnalysis(analysis, analysis_provenance_json, evidence)
+        evidence_id_map = canonical_analysis_evidence_map_in(connection, document_id, reusable)
+        changes = analysis.incoming_changes(
+            evidence_id_map,
+            analysis_provenance_json=analysis_provenance_json,
         )
         self._knowledge_reconciliation.record_analysis_changes_in(connection, document_id, changes)
+        record_missing_source_candidates_in(
+            connection,
+            document_id=canonical_analysis_document_id_in(connection, document_id),
+            claims=analysis.missing_source_claims(evidence_id_map),
+            evidence=evidence,
+            analysis_provenance_json=analysis_provenance_json,
+        )
 
     def _record_existing_knowledge_reconciliation(self, document_id: str) -> None:
         """Replay canonical structured analysis, falling back only for legacy imports."""

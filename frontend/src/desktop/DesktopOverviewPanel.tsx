@@ -29,9 +29,14 @@ export function DesktopOverviewPanel({
     void Promise.all([
       bridge.knowledgeReconciliationConflicts(),
       bridge.documentVersionCandidates(),
-    ]).then(([conflicts, versions]) => {
+      bridge.missingSourceCandidates(),
+    ]).then(([conflicts, versions, missingSources]) => {
       if (!disposed) {
-        setReviewCount(conflicts.conflicts.length + versions.candidates.filter((item) => item.status === "pending").length)
+        setReviewCount(
+          conflicts.conflicts.length
+          + versions.candidates.filter((item) => item.status === "pending").length
+          + missingSources.candidates.length,
+        )
       }
     }).catch(() => undefined)
     return () => { disposed = true }

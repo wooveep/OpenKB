@@ -87,6 +87,21 @@ class KnowledgeAnalysisCandidate:
 
 
 @dataclass(frozen=True)
+class KnowledgeAnalysisMissingClaim:
+    """One valid model claim that cannot yet resolve every declared source."""
+
+    kind: Literal["concept", "entity"]
+    title: str
+    normalized_title: str
+    entity_subtype: str | None
+    aliases: tuple[str, ...]
+    tags: tuple[str, ...]
+    claim_text: str
+    source_evidence_ids: tuple[str, ...]
+    reason: Literal["source_not_provided", "source_reference_unresolved"]
+
+
+@dataclass(frozen=True)
 class DesktopKnowledgeAnalysis:
     """The validated document-level result retained in the Stage checkpoint."""
 
@@ -157,6 +172,39 @@ class DesktopKnowledgeAnalysis:
                 )
             )
         return tuple(changes)
+
+    def missing_source_claims(
+        self, evidence_id_map: Mapping[str, str]
+    ) -> tuple[KnowledgeAnalysisMissingClaim, ...]:
+        """Return claim-level review work without rejecting valid sibling claims."""
+        missing: list[KnowledgeAnalysisMissingClaim] = []
+        for candidate in (*self.concepts, *self.entities):
+            title, normalized_title = normalize_knowledge_title(candidate.title)
+            if not title:
+                continue
+            for claim in candidate.claims:
+                if claim.source_evidence_ids and all(
+                    evidence_id in evidence_id_map for evidence_id in claim.source_evidence_ids
+                ):
+                    continue
+                missing.append(
+                    KnowledgeAnalysisMissingClaim(
+                        kind=candidate.kind,
+                        title=title,
+                        normalized_title=normalized_title,
+                        entity_subtype=candidate.subtype,
+                        aliases=candidate.aliases,
+                        tags=candidate.tags,
+                        claim_text=claim.text,
+                        source_evidence_ids=claim.source_evidence_ids,
+                        reason=(
+                            "source_reference_unresolved"
+                            if claim.source_evidence_ids
+                            else "source_not_provided"
+                        ),
+                    )
+                )
+        return tuple(missing)
 
 
 def parse_knowledge_analysis(content: str) -> DesktopKnowledgeAnalysis:

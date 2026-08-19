@@ -136,6 +136,8 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
         connection.execute("DROP TABLE IF EXISTS knowledge_page_working_sources")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_ui_state")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_working_drafts")
+        connection.execute("DROP TABLE knowledge_missing_source_resolution_records")
+        connection.execute("DROP TABLE knowledge_missing_source_candidates")
         connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
         connection.execute(
             "ALTER TABLE knowledge_generation_items DROP COLUMN analysis_provenance_json"
@@ -157,7 +159,7 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
         connection.execute(
             "DELETE FROM schema_migrations "
-            "WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28)"
+            "WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)"
         )
         connection.execute(
             """
@@ -249,6 +251,9 @@ def test_v20_source_map_migrates_as_source_backed_without_rewriting_the_revision
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN entity_subtype")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN stale_after")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
+        connection.execute("DROP TABLE knowledge_missing_source_resolution_records")
+        connection.execute("DROP TABLE knowledge_missing_source_candidates")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 29")
         connection.execute("DELETE FROM schema_migrations WHERE version = 28")
         connection.execute("DELETE FROM schema_migrations WHERE version = 27")
         connection.execute("DELETE FROM schema_migrations WHERE version = 26")

@@ -59,7 +59,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 28
+    assert first.knowledge_base.schema_version == 29
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
@@ -94,6 +94,7 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
             (26,),
             (27,),
             (28,),
+            (29,),
         ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
@@ -179,6 +180,9 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 21")
         connection.execute("DELETE FROM schema_migrations WHERE version = 22")
         connection.execute("DELETE FROM schema_migrations WHERE version = 23")
+        connection.execute("DROP TABLE knowledge_missing_source_resolution_records")
+        connection.execute("DROP TABLE knowledge_missing_source_candidates")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 29")
         connection.execute("DELETE FROM schema_migrations WHERE version = 28")
         connection.execute("DELETE FROM schema_migrations WHERE version = 27")
         connection.execute("DELETE FROM schema_migrations WHERE version = 26")
@@ -246,6 +250,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
             (26,),
             (27,),
             (28,),
+            (29,),
         ]
         assert connection.execute(
             "SELECT status FROM import_job_runtime WHERE job_id = 'legacy-job'"
@@ -321,6 +326,9 @@ def test_v3_import_job_gets_model_stage_before_resume(tmp_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 21")
         connection.execute("DELETE FROM schema_migrations WHERE version = 22")
         connection.execute("DELETE FROM schema_migrations WHERE version = 23")
+        connection.execute("DROP TABLE knowledge_missing_source_resolution_records")
+        connection.execute("DROP TABLE knowledge_missing_source_candidates")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 29")
         connection.execute("DELETE FROM schema_migrations WHERE version = 28")
         connection.execute("DELETE FROM schema_migrations WHERE version = 27")
         connection.execute("DELETE FROM schema_migrations WHERE version = 26")
@@ -397,6 +405,9 @@ def test_migration_backfills_independent_version_sources_for_existing_documents(
         connection.execute("DELETE FROM schema_migrations WHERE version = 21")
         connection.execute("DELETE FROM schema_migrations WHERE version = 22")
         connection.execute("DELETE FROM schema_migrations WHERE version = 23")
+        connection.execute("DROP TABLE knowledge_missing_source_resolution_records")
+        connection.execute("DROP TABLE knowledge_missing_source_candidates")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 29")
         connection.execute("DELETE FROM schema_migrations WHERE version = 28")
         connection.execute("DELETE FROM schema_migrations WHERE version = 27")
         connection.execute("DELETE FROM schema_migrations WHERE version = 26")

@@ -482,6 +482,47 @@ export interface DesktopKnowledgeReconciliationCommit {
   resolvedCandidateIds: string[]
 }
 
+export type DesktopMissingSourceReason =
+  | "source_not_provided"
+  | "source_reference_unresolved"
+export type DesktopMissingSourceOutcome =
+  | "working_draft"
+  | "generated"
+  | "review_required"
+  | "deduplicated"
+  | "dismissed"
+
+export interface DesktopMissingSourceCandidate {
+  candidateId: string
+  category: "missing_source"
+  documentId: string
+  documentName: string
+  kind: DesktopKnowledgePageKind
+  title: string
+  claimText: string
+  reason: DesktopMissingSourceReason
+  section: string
+  locator: Record<string, unknown>
+  createdAt: string
+}
+
+export interface DesktopMissingSourceCandidates {
+  candidates: DesktopMissingSourceCandidate[]
+}
+
+export interface DesktopMissingSourceBinding {
+  candidateId: string
+  decision: "bound"
+  outcome: DesktopMissingSourceOutcome
+  remainingCount: number
+}
+
+export interface DesktopMissingSourceDismissal {
+  decision: "dismissed"
+  resolvedCandidateIds: string[]
+  remainingCount: number
+}
+
 /** The SQLite-authoritative knowledge base currently available to the Desktop Runtime. */
 export interface DesktopKnowledgeBase {
   kbDir: string
@@ -660,6 +701,16 @@ export interface DesktopBridge {
   commitKnowledgeReconciliationDecisions(
     requestId: string,
   ): Promise<DesktopKnowledgeReconciliationCommit>
+  missingSourceCandidates(): Promise<DesktopMissingSourceCandidates>
+  bindMissingSourceCandidate(
+    candidateId: string,
+    evidenceId: string,
+    requestId: string,
+  ): Promise<DesktopMissingSourceBinding>
+  dismissMissingSourceCandidates(
+    candidateIds: string[],
+    requestId: string,
+  ): Promise<DesktopMissingSourceDismissal>
   pauseImportJob(jobId: string): Promise<DesktopImportControlResult>
   resumeImportJob(jobId: string, requestId: string): Promise<DesktopTextDocumentImport>
   recoverImportJob(

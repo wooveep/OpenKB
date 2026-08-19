@@ -6,6 +6,9 @@ import type {
   DesktopKnowledgeExport,
   DesktopKnowledgeExportMode,
   DesktopKnowledgeSourceCandidate,
+  DesktopMissingSourceBinding,
+  DesktopMissingSourceCandidates,
+  DesktopMissingSourceDismissal,
 } from "./contracts"
 
 /** Shared unavailable implementations keep the main production Bridge focused. */
@@ -88,6 +91,30 @@ export abstract class UnavailableKnowledgePageBridge {
     void pageId
     void claimText
     void evidenceId
+    void requestId
+    return this.unavailable()
+  }
+
+  missingSourceCandidates(): Promise<DesktopMissingSourceCandidates> {
+    return this.unavailable()
+  }
+
+  bindMissingSourceCandidate(
+    candidateId: string,
+    evidenceId: string,
+    requestId: string,
+  ): Promise<DesktopMissingSourceBinding> {
+    void candidateId
+    void evidenceId
+    void requestId
+    return this.unavailable()
+  }
+
+  dismissMissingSourceCandidates(
+    candidateIds: string[],
+    requestId: string,
+  ): Promise<DesktopMissingSourceDismissal> {
+    void candidateIds
     void requestId
     return this.unavailable()
   }

@@ -125,6 +125,7 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
   const [knowledgeInitialTab, setKnowledgeInitialTab] = useState<"pages" | "review">("pages")
   const [navigationRequestSequence, setNavigationRequestSequence] = useState(0)
   const [reviewCount, setReviewCount] = useState(0)
+  const [reviewRefreshKey, setReviewRefreshKey] = useState(0)
   const [controllingJobId, setControllingJobId] = useState<string | null>(null)
   const activeKnowledgeBaseRead = useRef(0)
   const activeKnowledgeBasePath = useRef<string | null>(null)
@@ -244,13 +245,18 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
     void Promise.all([
       bridge.knowledgeReconciliationConflicts(),
       bridge.documentVersionCandidates(),
-    ]).then(([conflicts, versions]) => {
+      bridge.missingSourceCandidates(),
+    ]).then(([conflicts, versions, missingSources]) => {
       if (!disposed) {
-        setReviewCount(conflicts.conflicts.length + versions.candidates.filter((item) => item.status === "pending").length)
+        setReviewCount(
+          conflicts.conflicts.length
+          + versions.candidates.filter((item) => item.status === "pending").length
+          + missingSources.candidates.length,
+        )
       }
     }).catch(() => undefined)
     return () => { disposed = true }
-  }, [bridge, engineReady, importTasks, knowledgeBase])
+  }, [bridge, engineReady, importTasks, knowledgeBase, reviewRefreshKey])
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined
@@ -663,6 +669,7 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
                 changeSection("knowledge")
               }}
               onOpenFailedDocuments={() => setFailedDocumentsOpen(true)}
+              onReviewChanged={() => setReviewRefreshKey((value) => value + 1)}
             />
           )}
         </div>

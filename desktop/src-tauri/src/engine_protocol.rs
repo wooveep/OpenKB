@@ -13,7 +13,8 @@ pub use crate::engine_wire::{
     GroundedAnswer, GroundedAnswersResult, ImportControlResult, ImportJobsResult,
     ImportSourceInspection, KnowledgeBaseActivationResult, KnowledgePageKind,
     KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
-    KnowledgeReconciliationDecision, ModelSettings, RawDocument, RecoveryOverride,
+    KnowledgeReconciliationDecision, MissingSourceBindingResult, MissingSourceCandidatesResult,
+    MissingSourceDismissalResult, ModelSettings, RawDocument, RecoveryOverride,
     TextDocumentImportResult,
 };
 pub use crate::engine_wire_knowledge_pages::{
@@ -48,6 +49,8 @@ mod knowledge_pages;
 mod knowledge_reconciliation;
 #[path = "engine_protocol_lifecycle.rs"]
 mod lifecycle;
+#[path = "engine_protocol_missing_sources.rs"]
+mod missing_sources;
 #[path = "engine_protocol_search.rs"]
 mod search;
 #[path = "engine_protocol_settings.rs"]

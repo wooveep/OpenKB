@@ -11,7 +11,7 @@ import type {
 } from "./contracts"
 
 /** Stages individual or batch knowledge-version choices until one explicit commit. */
-export function DesktopKnowledgeReconciliationPanel() {
+export function DesktopKnowledgeReconciliationPanel({ refreshKey = 0 }: { refreshKey?: number }) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
   const [conflicts, setConflicts] = useState<DesktopKnowledgeReconciliationConflict[]>([])
@@ -36,7 +36,7 @@ export function DesktopKnowledgeReconciliationPanel() {
         if (!disposed) setLoading(false)
       })
     return () => { disposed = true }
-  }, [bridge])
+  }, [bridge, refreshKey])
 
   const selectedConflicts = useMemo(
     () => conflicts.filter((conflict) => selectedIds.includes(conflict.candidateId)),

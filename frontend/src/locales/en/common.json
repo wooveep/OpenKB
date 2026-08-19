@@ -328,6 +328,33 @@
         "keepSeparate": "Keep as separate source",
         "saved": "Document version decision saved."
       },
+      "missingSource": {
+        "title": "Missing source claims",
+        "category": "Missing Source",
+        "description": "These factual claims were not connected to Available Evidence during document analysis. Bind a source or dismiss the candidate.",
+        "loading": "Checking missing source claims…",
+        "empty": "No missing source claims need review.",
+        "selectAll": "Select all",
+        "selectedCount": "{{count}} selected",
+        "dismissSelected": "Dismiss selected",
+        "dismissed": "Dismissed {{count}} missing source claims.",
+        "bind": "Bind source",
+        "search": "Search",
+        "searchPlaceholder": "Search Available Evidence…",
+        "noSources": "No matching Available Evidence.",
+        "documentLevel": "Document level",
+        "reasons": {
+          "source_not_provided": "The model did not provide a source for this claim.",
+          "source_reference_unresolved": "The source reference returned by the model could not be resolved."
+        },
+        "outcomes": {
+          "working_draft": "Source bound. The claim is now in the Working Draft.",
+          "generated": "Source bound. The claim entered generated knowledge.",
+          "review_required": "Source bound. The claim now needs conflict review.",
+          "deduplicated": "Source bound to the existing knowledge claim.",
+          "dismissed": "Missing source claim dismissed."
+        }
+      },
       "reconciliation": {
         "title": "Knowledge conflicts",
         "description": "Review incoming Concept and Entity changes. When a Working Draft exists, every result remains a draft until you explicitly publish it.",
@@ -401,6 +428,7 @@
       "tabs": {
         "pages": "Knowledge pages",
         "review": "Review",
+        "missingSources": "Missing sources",
         "conflicts": "Knowledge conflicts",
         "versions": "Document versions"
       },

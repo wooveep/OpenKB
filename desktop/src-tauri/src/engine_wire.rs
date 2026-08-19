@@ -15,6 +15,11 @@ pub use knowledge_reconciliation::{
     KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
     KnowledgeReconciliationDecision,
 };
+#[path = "engine_wire_missing_sources.rs"]
+mod missing_sources;
+pub use missing_sources::{
+    MissingSourceBindingResult, MissingSourceCandidatesResult, MissingSourceDismissalResult,
+};
 #[path = "engine_wire_settings.rs"]
 mod settings;
 pub use settings::{DiagnosticBundleResult, ModelSettings};

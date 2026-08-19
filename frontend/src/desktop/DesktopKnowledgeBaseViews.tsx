@@ -63,6 +63,7 @@ export function ActiveKnowledgeBaseView({
   onNavigate,
   onOpenReview,
   onOpenFailedDocuments,
+  onReviewChanged,
 }: {
   knowledgeBase: DesktopKnowledgeBase
   section: WorkspaceSection
@@ -92,6 +93,7 @@ export function ActiveKnowledgeBaseView({
   onNavigate: (section: WorkspaceSection) => void
   onOpenReview: () => void
   onOpenFailedDocuments: () => void
+  onReviewChanged: () => void
 }) {
   return (
     <section className="min-w-0">
@@ -125,7 +127,14 @@ export function ActiveKnowledgeBaseView({
       <div className={section === "conversations" ? "block" : "hidden"}>
         <DesktopConversationPanel key={knowledgeBase.kbDir} requestKey={navigationRequestSequence} requestedConversationId={requestedConversationId} requestedMessageId={requestedConversationMessageId} onOpenOriginal={onOpenRawDocument} />
       </div>
-      {section === "knowledge" ? <DesktopKnowledgeWorkspace requestKey={navigationRequestSequence} initialTab={knowledgeInitialTab} requestedPageId={requestedKnowledgePageId} /> : null}
+      {section === "knowledge" ? (
+        <DesktopKnowledgeWorkspace
+          requestKey={navigationRequestSequence}
+          initialTab={knowledgeInitialTab}
+          requestedPageId={requestedKnowledgePageId}
+          onReviewChanged={onReviewChanged}
+        />
+      ) : null}
       {section === "settings" ? <div className="mx-auto max-w-5xl"><DesktopModelSettingsPanel key={knowledgeBase.kbDir} kbDir={knowledgeBase.kbDir} /></div> : null}
     </section>
   )

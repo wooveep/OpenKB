@@ -33,6 +33,18 @@ def canonical_analysis_changes_in(
     reusable: ReusableKnowledgeAnalysis,
 ) -> tuple[IncomingKnowledgeChange, ...]:
     """Map one checkpoint's transient Evidence IDs by stable Document IR ordinal."""
+    evidence_id_map = canonical_analysis_evidence_map_in(connection, document_id, reusable)
+    return reusable.analysis.incoming_changes(
+        evidence_id_map, analysis_provenance_json=reusable.provenance_json
+    )
+
+
+def canonical_analysis_evidence_map_in(
+    connection: sqlite3.Connection,
+    document_id: str,
+    reusable: ReusableKnowledgeAnalysis,
+) -> dict[str, str]:
+    """Resolve prompt Evidence IDs to the document version's canonical Evidence IDs."""
     rows = connection.execute(
         """
         SELECT blocks.ordinal, occurrences.evidence_id
@@ -43,14 +55,25 @@ def canonical_analysis_changes_in(
         (document_id,),
     ).fetchall()
     canonical_by_ordinal = {int(row[0]): str(row[1]) for row in rows}
-    evidence_id_map = {
+    return {
         evidence_id: canonical_by_ordinal[block.ordinal]
         for evidence_id, block in reusable.evidence
         if block.ordinal in canonical_by_ordinal
     }
-    return reusable.analysis.incoming_changes(
-        evidence_id_map, analysis_provenance_json=reusable.provenance_json
-    )
+
+
+def canonical_analysis_document_id_in(
+    connection: sqlite3.Connection, document_id: str
+) -> str:
+    """Return the content authority shared by D1 document versions."""
+    row = connection.execute(
+        """
+        SELECT COALESCE(canonical_document_id, document_id)
+        FROM document_content_fingerprints WHERE document_id = ?
+        """,
+        (document_id,),
+    ).fetchone()
+    return str(row[0]) if row is not None else document_id
 
 
 def load_reusable_knowledge_analysis(

@@ -328,6 +328,33 @@
         "keepSeparate": "保留为独立来源",
         "saved": "文档版本决定已保存。"
       },
+      "missingSource": {
+        "title": "缺少来源的事实声明",
+        "category": "缺少来源",
+        "description": "文档分析时，这些事实声明未能关联到可用证据。你可以绑定来源，或忽略该候选项。",
+        "loading": "正在检查缺少来源的声明…",
+        "empty": "没有需要审核的缺少来源声明。",
+        "selectAll": "全选",
+        "selectedCount": "已选择 {{count}} 项",
+        "dismissSelected": "忽略所选项",
+        "dismissed": "已忽略 {{count}} 个缺少来源的声明。",
+        "bind": "绑定来源",
+        "search": "搜索",
+        "searchPlaceholder": "搜索可用证据…",
+        "noSources": "没有匹配的可用证据。",
+        "documentLevel": "文档级",
+        "reasons": {
+          "source_not_provided": "模型没有为该声明提供来源。",
+          "source_reference_unresolved": "模型返回的来源引用无法解析。"
+        },
+        "outcomes": {
+          "working_draft": "来源已绑定，声明已进入工作草稿。",
+          "generated": "来源已绑定，声明已进入生成知识。",
+          "review_required": "来源已绑定，声明现需进行冲突审核。",
+          "deduplicated": "来源已绑定到已有知识声明。",
+          "dismissed": "已忽略缺少来源的声明。"
+        }
+      },
       "reconciliation": {
         "title": "知识冲突",
         "description": "审核导入的概念和实体变更。存在工作草稿时，所有协调结果仍是草稿，必须由你显式发布。",
@@ -401,6 +428,7 @@
       "tabs": {
         "pages": "知识页",
         "review": "待审核",
+        "missingSources": "缺少来源",
         "conflicts": "知识冲突",
         "versions": "文档版本"
       },

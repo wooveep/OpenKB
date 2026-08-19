@@ -276,7 +276,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 28,
+            "schema_version": 29,
             "last_checkpoint_at": None,
         },
         "events": [

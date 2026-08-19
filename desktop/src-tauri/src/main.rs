@@ -3,6 +3,7 @@
 //! OpenKB Desktop Shell: native window ownership and typed Engine mediation.
 
 mod desktop_knowledge_page_commands;
+mod desktop_missing_source_commands;
 mod desktop_runtime;
 mod engine_protocol;
 mod engine_wire;
@@ -16,6 +17,10 @@ use desktop_knowledge_page_commands::{
     desktop_permanently_delete_knowledge_page, desktop_publish_knowledge_page,
     desktop_restore_knowledge_page, desktop_save_knowledge_page, desktop_search_knowledge_sources,
     desktop_set_knowledge_page_stale_after, desktop_verify_knowledge_page,
+};
+use desktop_missing_source_commands::{
+    desktop_bind_missing_source_candidate, desktop_dismiss_missing_source_candidates,
+    desktop_missing_source_candidates,
 };
 use desktop_runtime::DesktopRuntimeState;
 use engine_protocol::{
@@ -737,6 +742,9 @@ fn main() {
             desktop_knowledge_reconciliation_conflicts,
             desktop_stage_knowledge_reconciliation_decisions,
             desktop_commit_knowledge_reconciliation_decisions,
+            desktop_missing_source_candidates,
+            desktop_bind_missing_source_candidate,
+            desktop_dismiss_missing_source_candidates,
             desktop_resolve_document_version_candidate,
             desktop_read_raw_document,
             desktop_pause_import_job,

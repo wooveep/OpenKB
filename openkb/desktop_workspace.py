@@ -1,10 +1,4 @@
-"""SQLite-backed Desktop Knowledge Base creation and runtime binding.
-
-The Desktop Runtime owns one active knowledge base at a time.  This module is
-deliberately narrow: it establishes the new on-disk format and checkpointing
-boundary that later import and retrieval work can build on, without teaching
-the Tauri shell about SQLite or legacy workspace files.
-"""
+"""SQLite-backed Desktop Knowledge Base creation and runtime binding."""
 
 from __future__ import annotations
 
@@ -40,6 +34,7 @@ from openkb.desktop_knowledge_source_migrations import KNOWLEDGE_SOURCE_MIGRATIO
 from openkb.desktop_knowledge_verification_migrations import (
     KNOWLEDGE_VERIFICATION_MIGRATION_STATEMENTS,
 )
+from openkb.desktop_missing_source_migrations import MISSING_SOURCE_MIGRATION_STATEMENTS
 from openkb.desktop_okf_projection_migrations import OKF_PROJECTION_MIGRATION_STATEMENTS
 from openkb.desktop_workspace_migrations import (
     CONVERSATION_MIGRATION_STATEMENTS,
@@ -391,6 +386,7 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (26, KNOWLEDGE_ANALYSIS_MIGRATION_STATEMENTS),
     (27, KNOWLEDGE_ANALYSIS_PROVENANCE_MIGRATION_STATEMENTS),
     (28, KNOWLEDGE_ANALYSIS_METADATA_MIGRATION_STATEMENTS),
+    (29, MISSING_SOURCE_MIGRATION_STATEMENTS),
 )
 class DesktopKnowledgeBaseRuntime:
     """Own the one active Desktop Knowledge Base for one Python Engine."""

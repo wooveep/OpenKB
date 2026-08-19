@@ -15,6 +15,7 @@ import type { DesktopKnowledgeExportMode } from "./contracts"
 import { DesktopDocumentVersionCandidatePanel } from "./DesktopDocumentVersionCandidatePanel"
 import { DesktopKnowledgePagePanel } from "./DesktopKnowledgePagePanel"
 import { DesktopKnowledgeReconciliationPanel } from "./DesktopKnowledgeReconciliationPanel"
+import { DesktopMissingSourcePanel } from "./DesktopMissingSourcePanel"
 import { nextDesktopRequestId } from "./request-id"
 
 /** Knowledge pages, review queues, and explicit portable exports share one workspace. */
@@ -22,14 +23,22 @@ export function DesktopKnowledgeWorkspace({
   initialTab = "pages",
   requestedPageId,
   requestKey = 0,
+  onReviewChanged,
 }: {
   initialTab?: "pages" | "review"
   requestedPageId?: string | null
   requestKey?: number
+  onReviewChanged?: () => void
 }) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
   const [exporting, setExporting] = useState(false)
+  const [knowledgeReviewRevision, setKnowledgeReviewRevision] = useState(0)
+
+  const handleMissingSourceResolved = () => {
+    setKnowledgeReviewRevision((revision) => revision + 1)
+    onReviewChanged?.()
+  }
 
   const exportKnowledge = async (mode: DesktopKnowledgeExportMode) => {
     if (exporting) return
@@ -109,8 +118,11 @@ export function DesktopKnowledgeWorkspace({
           <DesktopKnowledgePagePanel requestedPageId={requestedPageId} />
         </TabsContent>
         <TabsContent value="review">
-          <Tabs defaultValue="conflicts" className="mt-5">
+          <Tabs defaultValue="missing_sources" className="mt-5">
             <TabsList>
+              <TabsTrigger value="missing_sources">
+                {t("desktop.knowledge.tabs.missingSources")}
+              </TabsTrigger>
               <TabsTrigger value="conflicts">
                 {t("desktop.knowledge.tabs.conflicts")}
               </TabsTrigger>
@@ -118,8 +130,11 @@ export function DesktopKnowledgeWorkspace({
                 {t("desktop.knowledge.tabs.versions")}
               </TabsTrigger>
             </TabsList>
+            <TabsContent value="missing_sources">
+              <DesktopMissingSourcePanel onResolved={handleMissingSourceResolved} />
+            </TabsContent>
             <TabsContent value="conflicts">
-              <DesktopKnowledgeReconciliationPanel />
+              <DesktopKnowledgeReconciliationPanel refreshKey={knowledgeReviewRevision} />
             </TabsContent>
             <TabsContent value="versions">
               <DesktopDocumentVersionCandidatePanel />
