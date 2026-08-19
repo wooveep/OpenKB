@@ -56,16 +56,32 @@ def dispatch_knowledge_reconciliation_request(
             if decision is not None and not isinstance(decision, str):
                 raise DesktopRequestError(
                     "invalid_params",
-                    "Knowledge reconciliation decision must be publish_incoming or keep_current.",
+                    "Knowledge reconciliation decision must be a supported review action.",
                 )
-            if decision not in {None, "publish_incoming", "keep_current"}:
+            if decision not in {
+                None,
+                "publish_incoming",
+                "keep_current",
+                "keep_draft",
+                "apply_incoming",
+                "replace_draft",
+                "manual_merge",
+            }:
                 raise DesktopRequestError(
                     "invalid_params",
-                    "Knowledge reconciliation decision must be publish_incoming or keep_current.",
+                    "Knowledge reconciliation decision must be a supported review action.",
+                )
+            manual_merge_content = request.params.get("manual_merge_content")
+            if manual_merge_content is not None and not isinstance(manual_merge_content, str):
+                raise DesktopRequestError(
+                    "invalid_params",
+                    "Knowledge reconciliation manual_merge_content must be Markdown text.",
                 )
             server._begin_workspace_mutation(request, cancel_event)
             conflicts = DesktopKnowledgeReconciliationResolutionService(kb_dir).stage_decisions(
-                tuple(candidate_ids), decision
+                tuple(candidate_ids),
+                decision,
+                manual_merge_content=manual_merge_content,
             )
             return {"conflicts": [conflict.as_dict() for conflict in conflicts]}
         if request.method == "workbench.commit_knowledge_reconciliation_decisions":

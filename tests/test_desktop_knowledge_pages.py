@@ -135,7 +135,9 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN stale_after")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
-        connection.execute("DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23)")
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24)"
+        )
         connection.execute(
             """
             INSERT INTO knowledge_pages (
@@ -209,6 +211,7 @@ def test_v20_source_map_migrates_as_source_backed_without_rewriting_the_revision
         connection.execute("DELETE FROM schema_migrations WHERE version = 21")
         connection.execute("DELETE FROM schema_migrations WHERE version = 22")
         connection.execute("DELETE FROM schema_migrations WHERE version = 23")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 24")
         connection.commit()
 
     DesktopKnowledgeBaseRuntime().open(kb_dir)

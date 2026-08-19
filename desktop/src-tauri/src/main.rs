@@ -502,11 +502,17 @@ async fn desktop_stage_knowledge_reconciliation_decisions(
     state: State<'_, DesktopState>,
     candidate_ids: Vec<String>,
     decision: Option<KnowledgeReconciliationDecision>,
+    manual_merge_content: Option<String>,
     request_id: String,
 ) -> Result<KnowledgeReconciliationConflictsResult, BridgeError> {
     let engine = Arc::clone(&state.engine);
     tauri::async_runtime::spawn_blocking(move || {
-        engine.stage_knowledge_reconciliation_decisions(candidate_ids, decision, request_id)
+        engine.stage_knowledge_reconciliation_decisions(
+            candidate_ids,
+            decision,
+            manual_merge_content,
+            request_id,
+        )
     })
     .await
     .map_err(|error| BridgeError {

@@ -29,12 +29,17 @@ impl EngineSupervisor {
         &self,
         candidate_ids: Vec<String>,
         decision: Option<KnowledgeReconciliationDecision>,
+        manual_merge_content: Option<String>,
         request_id: String,
     ) -> BridgeResult<KnowledgeReconciliationConflictsResult> {
         self.ensure_started()?;
         let value = self.request_started(
             "workbench.stage_knowledge_reconciliation_decisions",
-            json!({ "candidate_ids": candidate_ids, "decision": decision }),
+            json!({
+                "candidate_ids": candidate_ids,
+                "decision": decision,
+                "manual_merge_content": manual_merge_content,
+            }),
             Some(request_id),
         )?;
         serde_json::from_value(value).map_err(|error| {

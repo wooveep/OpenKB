@@ -24,10 +24,17 @@ from openkb.desktop_knowledge_generations import (
     stage_generation_projection_in,
 )
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
+from openkb.desktop_knowledge_sources import prune_obsolete_draft_sources_in
+from openkb.desktop_knowledge_three_way_merge import apply_incoming_to_draft
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
-_DECISIONS = frozenset({"publish_incoming", "keep_current"})
+_TWO_WAY_DECISIONS = frozenset({"publish_incoming", "keep_current"})
+_THREE_WAY_DECISIONS = frozenset(
+    {"keep_draft", "apply_incoming", "replace_draft", "manual_merge"}
+)
+_DECISIONS = _TWO_WAY_DECISIONS | _THREE_WAY_DECISIONS
+_DRAFT_UPDATE_DECISIONS = frozenset({"apply_incoming", "replace_draft", "manual_merge"})
 logger = logging.getLogger(__name__)
 
 
@@ -44,11 +51,18 @@ class _StagedCandidate:
     baseline_kind: str
     baseline_id: str
     baseline_content_markdown: str
+    reconciliation_mode: str
+    target_page_id: str | None
+    working_draft_title: str | None
+    working_draft_content_markdown: str | None
+    working_draft_content_sha256: str | None
+    working_draft_updated_at: str | None
     decision: str
+    staged_content_markdown: str | None
 
 
 class DesktopKnowledgeReconciliationResolutionService:
-    """Keep review choices inert until one explicit, atomic publish action."""
+    """Keep review choices inert until one explicit, atomic queue commit."""
 
     def __init__(self, kb_dir: Path) -> None:
         self._kb_dir = kb_dir.expanduser().resolve()
@@ -56,28 +70,40 @@ class DesktopKnowledgeReconciliationResolutionService:
         self._database_path = desktop_state_database_path(self._kb_dir)
 
     def stage_decisions(
-        self, candidate_ids: tuple[str, ...], decision: str | None
+        self,
+        candidate_ids: tuple[str, ...],
+        decision: str | None,
+        *,
+        manual_merge_content: str | None = None,
     ) -> tuple[DesktopKnowledgeReconciliationConflict, ...]:
         """Persist an individual or batch choice without changing publication."""
         identifiers = _candidate_ids(candidate_ids)
         if decision is not None and decision not in _DECISIONS:
             raise DesktopImportError(
                 "invalid_knowledge_reconciliation_decision",
-                "Choose publish_incoming or keep_current for a knowledge conflict.",
+                "Choose an action supported by this knowledge reconciliation mode.",
+            )
+        if decision == "manual_merge":
+            if len(identifiers) != 1 or manual_merge_content is None:
+                raise DesktopImportError(
+                    "invalid_knowledge_reconciliation_manual_merge",
+                    "Manual merge requires one conflict and explicit merged Markdown.",
+                )
+        elif manual_merge_content is not None:
+            raise DesktopImportError(
+                "invalid_knowledge_reconciliation_manual_merge",
+                "Merged Markdown is accepted only for the manual_merge action.",
             )
         with kb_ingest_lock(self._state_dir):
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 for candidate_id in identifiers:
-                    _require_pending_candidate_in(connection, candidate_id)
-                    connection.execute(
-                        """
-                        UPDATE knowledge_reconciliation_candidates
-                        SET staged_decision = ?
-                        WHERE candidate_id = ?
-                        """,
-                        (decision, candidate_id),
+                    _stage_candidate_in(
+                        connection,
+                        candidate_id=candidate_id,
+                        decision=decision,
+                        manual_merge_content=manual_merge_content,
                     )
                 connection.commit()
             except BaseException:
@@ -88,7 +114,7 @@ class DesktopKnowledgeReconciliationResolutionService:
         return DesktopKnowledgeReconciliationService(self._kb_dir).list_conflicts()
 
     def commit_staged_decisions(self) -> DesktopKnowledgeReconciliationCommit:
-        """Publish all staged choices together and erase their review-copy text."""
+        """Commit staged publications or Draft updates and erase review-copy text."""
         with kb_ingest_lock(self._state_dir):
             connection = self._connect()
             staged_projection: Path | None = None
@@ -101,13 +127,19 @@ class DesktopKnowledgeReconciliationResolutionService:
                         "Choose at least one conflict before committing the review queue.",
                     )
                 _require_distinct_publications(candidates)
+                _require_distinct_draft_updates(candidates)
                 current_generation_id = current_generation_id_in(connection)
                 for candidate in candidates:
                     _require_current_baseline_in(connection, current_generation_id, candidate)
+                    if candidate.reconciliation_mode == "three_way":
+                        _require_current_draft_in(connection, candidate)
+                    else:
+                        _require_no_current_draft_in(connection, candidate)
                 published = tuple(
                     _generation_change(candidate)
                     for candidate in candidates
-                    if candidate.decision == "publish_incoming"
+                    if candidate.reconciliation_mode == "two_way"
+                    and candidate.decision == "publish_incoming"
                 )
                 generation_id = (
                     publish_generation_changes_in(
@@ -120,14 +152,41 @@ class DesktopKnowledgeReconciliationResolutionService:
                     else None
                 )
                 now = _timestamp()
+                draft_results: dict[str, str] = {}
+                for candidate in candidates:
+                    if candidate.reconciliation_mode != "three_way":
+                        continue
+                    result = _three_way_result(candidate)
+                    draft_results[candidate.candidate_id] = result
+                    if candidate.decision in _DRAFT_UPDATE_DECISIONS:
+                        connection.execute(
+                            """
+                            UPDATE knowledge_page_working_drafts
+                            SET content_markdown = ?, updated_at = ?
+                            WHERE page_id = ?
+                            """,
+                            (result, now, candidate.target_page_id),
+                        )
+                        assert candidate.target_page_id is not None
+                        prune_obsolete_draft_sources_in(
+                            connection,
+                            candidate.target_page_id,
+                            result,
+                            previous_content_markdown=(
+                                candidate.working_draft_content_markdown
+                                if candidate.decision == "apply_incoming"
+                                else None
+                            ),
+                        )
                 for candidate in candidates:
                     resolution_id = uuid.uuid4().hex
                     connection.execute(
                         """
                         INSERT INTO knowledge_reconciliation_resolution_records (
                             resolution_id, candidate_id, document_id, kind, normalized_title,
-                            decision, published_generation_id, resolved_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            decision, target_page_id, published_generation_id,
+                            result_content_sha256, resolved_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             resolution_id,
@@ -136,7 +195,15 @@ class DesktopKnowledgeReconciliationResolutionService:
                             candidate.kind,
                             candidate.normalized_title,
                             candidate.decision,
+                            candidate.target_page_id,
                             generation_id if candidate.decision == "publish_incoming" else None,
+                            (
+                                knowledge_content_sha256(
+                                    draft_results[candidate.candidate_id]
+                                )
+                                if candidate.candidate_id in draft_results
+                                else None
+                            ),
                             now,
                         ),
                     )
@@ -147,11 +214,14 @@ class DesktopKnowledgeReconciliationResolutionService:
                             resolution_status = ?,
                             resolved_at = ?,
                             content_markdown = '',
-                            baseline_content_markdown = NULL
+                            baseline_content_markdown = NULL,
+                            working_draft_content_markdown = NULL,
+                            working_draft_content_sha256 = NULL,
+                            staged_content_markdown = NULL
                         WHERE candidate_id = ?
                         """,
                         (
-                            "published" if candidate.decision == "publish_incoming" else "kept",
+                            _resolution_status(candidate.decision),
                             now,
                             candidate.candidate_id,
                         ),
@@ -164,7 +234,14 @@ class DesktopKnowledgeReconciliationResolutionService:
                 outcome = DesktopKnowledgeReconciliationCommit(
                     published_generation_id=generation_id,
                     published_count=len(published),
-                    kept_count=len(candidates) - len(published),
+                    draft_updated_count=sum(
+                        candidate.decision in _DRAFT_UPDATE_DECISIONS
+                        for candidate in candidates
+                    ),
+                    kept_count=sum(
+                        candidate.decision in {"keep_current", "keep_draft"}
+                        for candidate in candidates
+                    ),
                     resolved_candidate_ids=tuple(
                         candidate.candidate_id for candidate in candidates
                     ),
@@ -206,15 +283,50 @@ def _candidate_ids(candidate_ids: tuple[str, ...]) -> tuple[str, ...]:
     return identifiers
 
 
-def _require_pending_candidate_in(connection: sqlite3.Connection, candidate_id: str) -> None:
+def _stage_candidate_in(
+    connection: sqlite3.Connection,
+    *,
+    candidate_id: str,
+    decision: str | None,
+    manual_merge_content: str | None,
+) -> None:
     row = connection.execute(
         """
-        SELECT documents.availability
-        FROM knowledge_reconciliation_candidates AS candidates
-        JOIN source_documents AS documents ON documents.document_id = candidates.document_id
-        WHERE candidates.candidate_id = ?
-            AND candidates.status = 'pending_conflict'
-            AND candidates.resolution_status IS NULL
+        WITH candidate AS (
+            SELECT candidates.*,
+                COALESCE(
+                    candidates.target_page_id,
+                    (
+                        SELECT matching_drafts.page_id
+                        FROM knowledge_page_working_drafts AS matching_drafts
+                        WHERE matching_drafts.kind = candidates.kind
+                            AND matching_drafts.normalized_title = candidates.normalized_title
+                        ORDER BY matching_drafts.updated_at DESC, matching_drafts.page_id
+                        LIMIT 1
+                    ),
+                    (
+                        SELECT pages.page_id FROM knowledge_pages AS pages
+                        WHERE pages.kind = candidates.kind
+                            AND pages.normalized_title = candidates.normalized_title
+                    )
+                ) AS resolved_page_id
+            FROM knowledge_reconciliation_candidates AS candidates
+            WHERE candidates.candidate_id = ?
+                AND candidates.status = 'pending_conflict'
+                AND candidates.resolution_status IS NULL
+        )
+        SELECT documents.availability, candidate.baseline_kind, candidate.baseline_id,
+            candidate.baseline_title, candidate.baseline_content_markdown,
+            candidate.resolved_page_id, revisions.revision_id, revisions.title,
+            revisions.content_markdown, drafts.title, drafts.content_markdown,
+            drafts.updated_at
+        FROM candidate
+        JOIN source_documents AS documents ON documents.document_id = candidate.document_id
+        LEFT JOIN knowledge_pages AS pages ON pages.page_id = candidate.resolved_page_id
+        LEFT JOIN knowledge_page_revisions AS revisions
+            ON revisions.revision_id = pages.current_revision_id
+        LEFT JOIN knowledge_page_working_drafts AS drafts
+            ON drafts.page_id = candidate.resolved_page_id
         """,
         (candidate_id,),
     ).fetchone()
@@ -228,6 +340,72 @@ def _require_pending_candidate_in(connection: sqlite3.Connection, candidate_id: 
             "knowledge_reconciliation_candidate_unavailable",
             "The source document must remain available before choosing a knowledge conflict.",
         )
+    if decision is None:
+        connection.execute(
+            """
+            UPDATE knowledge_reconciliation_candidates
+            SET staged_decision = NULL, staged_content_markdown = NULL
+            WHERE candidate_id = ?
+            """,
+            (candidate_id,),
+        )
+        return
+
+    target_page_id = str(row[5]) if row[5] is not None else None
+    current_revision_id = str(row[6]) if row[6] is not None else None
+    draft_content = str(row[10]) if row[10] is not None else None
+    is_three_way = target_page_id is not None and draft_content is not None
+    allowed = _THREE_WAY_DECISIONS if is_three_way else _TWO_WAY_DECISIONS
+    if decision not in allowed:
+        mode = "three-way Working Draft" if is_three_way else "two-way published"
+        raise DesktopImportError(
+            "invalid_knowledge_reconciliation_decision",
+            f"The {decision} action is not valid for a {mode} conflict.",
+        )
+
+    baseline_kind = str(row[1]) if row[1] is not None else None
+    baseline_id = str(row[2]) if row[2] is not None else None
+    baseline_title = str(row[3]) if row[3] is not None else None
+    baseline_content = str(row[4]) if row[4] is not None else None
+    if current_revision_id is not None:
+        baseline_kind = "user_revision"
+        baseline_id = current_revision_id
+        baseline_title = str(row[7])
+        baseline_content = str(row[8])
+    if None in {baseline_kind, baseline_id, baseline_title, baseline_content}:
+        raise DesktopImportError(
+            "knowledge_reconciliation_baseline_changed",
+            "This conflict no longer has a published baseline. Refresh before choosing again.",
+        )
+
+    draft_title = str(row[9]) if is_three_way else None
+    draft_updated_at = str(row[11]) if is_three_way else None
+    connection.execute(
+        """
+        UPDATE knowledge_reconciliation_candidates
+        SET reconciliation_mode = ?, target_page_id = ?, baseline_kind = ?,
+            baseline_id = ?, baseline_title = ?, baseline_content_markdown = ?,
+            working_draft_title = ?, working_draft_content_markdown = ?,
+            working_draft_content_sha256 = ?, working_draft_updated_at = ?,
+            staged_decision = ?, staged_content_markdown = ?
+        WHERE candidate_id = ?
+        """,
+        (
+            "three_way" if is_three_way else "two_way",
+            target_page_id,
+            baseline_kind,
+            baseline_id,
+            baseline_title,
+            baseline_content,
+            draft_title,
+            draft_content if is_three_way else None,
+            knowledge_content_sha256(draft_content) if draft_content is not None else None,
+            draft_updated_at,
+            decision,
+            manual_merge_content if decision == "manual_merge" else None,
+            candidate_id,
+        ),
+    )
 
 
 def _staged_candidates_in(connection: sqlite3.Connection) -> tuple[_StagedCandidate, ...]:
@@ -237,7 +415,12 @@ def _staged_candidates_in(connection: sqlite3.Connection) -> tuple[_StagedCandid
             candidates.kind, candidates.title, candidates.normalized_title,
             candidates.content_markdown, candidates.content_sha256,
             candidates.baseline_kind, candidates.baseline_id,
-            candidates.baseline_content_markdown, candidates.staged_decision
+            candidates.baseline_content_markdown, candidates.reconciliation_mode,
+            candidates.target_page_id, candidates.working_draft_title,
+            candidates.working_draft_content_markdown,
+            candidates.working_draft_content_sha256,
+            candidates.working_draft_updated_at, candidates.staged_decision,
+            candidates.staged_content_markdown
         FROM knowledge_reconciliation_candidates AS candidates
         JOIN source_documents AS documents ON documents.document_id = candidates.document_id
         WHERE candidates.status = 'pending_conflict'
@@ -260,7 +443,14 @@ def _staged_candidates_in(connection: sqlite3.Connection) -> tuple[_StagedCandid
             baseline_kind=str(row[8]),
             baseline_id=str(row[9]),
             baseline_content_markdown=str(row[10]),
-            decision=str(row[11]),
+            reconciliation_mode=str(row[11]),
+            target_page_id=str(row[12]) if row[12] is not None else None,
+            working_draft_title=str(row[13]) if row[13] is not None else None,
+            working_draft_content_markdown=str(row[14]) if row[14] is not None else None,
+            working_draft_content_sha256=str(row[15]) if row[15] is not None else None,
+            working_draft_updated_at=str(row[16]) if row[16] is not None else None,
+            decision=str(row[17]),
+            staged_content_markdown=str(row[18]) if row[18] is not None else None,
         )
         if candidate.decision not in _DECISIONS:
             raise DesktopImportError(
@@ -271,6 +461,16 @@ def _staged_candidates_in(connection: sqlite3.Connection) -> tuple[_StagedCandid
             raise DesktopImportError(
                 "knowledge_reconciliation_candidate_unavailable",
                 "The source document must remain available before committing review choices.",
+            )
+        allowed = (
+            _THREE_WAY_DECISIONS
+            if candidate.reconciliation_mode == "three_way"
+            else _TWO_WAY_DECISIONS
+        )
+        if candidate.decision not in allowed:
+            raise DesktopImportError(
+                "knowledge_reconciliation_stage_invalid",
+                "A staged action does not match its reconciliation mode.",
             )
         values.append(candidate)
     return tuple(values)
@@ -290,21 +490,61 @@ def _require_distinct_publications(candidates: tuple[_StagedCandidate, ...]) -> 
         identities.add(identity)
 
 
+def _require_distinct_draft_updates(candidates: tuple[_StagedCandidate, ...]) -> None:
+    pages: set[str] = set()
+    for candidate in candidates:
+        if candidate.decision not in _DRAFT_UPDATE_DECISIONS:
+            continue
+        if candidate.target_page_id is None:
+            raise DesktopImportError(
+                "knowledge_reconciliation_working_draft_changed",
+                "The staged Working Draft is no longer available.",
+            )
+        if candidate.target_page_id in pages:
+            raise DesktopImportError(
+                "knowledge_reconciliation_multiple_draft_updates",
+                "Apply only one incoming change to each Working Draft per commit.",
+            )
+        pages.add(candidate.target_page_id)
+
+
 def _require_current_baseline_in(
     connection: sqlite3.Connection,
     current_generation_id: int | None,
     candidate: _StagedCandidate,
 ) -> None:
     if candidate.baseline_kind == "user_revision":
+        if candidate.target_page_id is not None:
+            row = connection.execute(
+                "SELECT current_revision_id FROM knowledge_pages WHERE page_id = ?",
+                (candidate.target_page_id,),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT pages.current_revision_id
+                FROM knowledge_pages AS pages
+                WHERE pages.kind = ? AND pages.normalized_title = ?
+                """,
+                (candidate.kind, candidate.normalized_title),
+            ).fetchone()
+        if row is not None and str(row[0]) == candidate.baseline_id:
+            return
+    elif candidate.baseline_kind == "unpublished_page":
         row = connection.execute(
             """
-            SELECT pages.current_revision_id
-            FROM knowledge_pages AS pages
-            WHERE pages.kind = ? AND pages.normalized_title = ?
+            SELECT drafts.page_id
+            FROM knowledge_page_working_drafts AS drafts
+            LEFT JOIN knowledge_pages AS pages ON pages.page_id = drafts.page_id
+            WHERE drafts.page_id = ? AND pages.current_revision_id IS NULL
             """,
-            (candidate.kind, candidate.normalized_title),
+            (candidate.target_page_id,),
         ).fetchone()
-        if row is not None and str(row[0]) == candidate.baseline_id:
+        if (
+            row is not None
+            and candidate.target_page_id is not None
+            and candidate.baseline_id == candidate.target_page_id
+        ):
             return
     elif candidate.baseline_kind == "published_generation" and current_generation_id is not None:
         row = connection.execute(
@@ -322,6 +562,101 @@ def _require_current_baseline_in(
         "knowledge_reconciliation_baseline_changed",
         "This conflict changed after it was staged. Refresh it and choose again before committing.",
     )
+
+
+def _require_current_draft_in(
+    connection: sqlite3.Connection, candidate: _StagedCandidate
+) -> None:
+    if candidate.target_page_id is None:
+        raise DesktopImportError(
+            "knowledge_reconciliation_working_draft_changed",
+            "The staged Working Draft is no longer available.",
+        )
+    row = connection.execute(
+        """
+        SELECT title, content_markdown, updated_at
+        FROM knowledge_page_working_drafts WHERE page_id = ?
+        """,
+        (candidate.target_page_id,),
+    ).fetchone()
+    if (
+        row is not None
+        and candidate.working_draft_title == str(row[0])
+        and candidate.working_draft_content_sha256
+        == knowledge_content_sha256(str(row[1]))
+        and candidate.working_draft_updated_at == str(row[2])
+    ):
+        return
+    raise DesktopImportError(
+        "knowledge_reconciliation_working_draft_changed",
+        "This Working Draft changed after staging. Refresh it and choose again.",
+    )
+
+
+def _require_no_current_draft_in(
+    connection: sqlite3.Connection, candidate: _StagedCandidate
+) -> None:
+    row = connection.execute(
+        """
+        SELECT drafts.page_id
+        FROM knowledge_page_working_drafts AS drafts
+        LEFT JOIN knowledge_pages AS pages ON pages.page_id = drafts.page_id
+        WHERE drafts.page_id = ?
+            OR (
+                drafts.kind = ?
+                AND (
+                    drafts.normalized_title = ?
+                    OR pages.normalized_title = ?
+                )
+            )
+        LIMIT 1
+        """,
+        (
+            candidate.target_page_id,
+            candidate.kind,
+            candidate.normalized_title,
+            candidate.normalized_title,
+        ),
+    ).fetchone()
+    if row is None:
+        return
+    raise DesktopImportError(
+        "knowledge_reconciliation_working_draft_changed",
+        "A matching Working Draft now exists. Refresh it and choose a three-way action.",
+    )
+
+
+def _three_way_result(candidate: _StagedCandidate) -> str:
+    draft = candidate.working_draft_content_markdown
+    if draft is None:
+        raise DesktopImportError(
+            "knowledge_reconciliation_working_draft_changed",
+            "The staged Working Draft snapshot is missing.",
+        )
+    if candidate.decision == "keep_draft":
+        return draft
+    if candidate.decision == "apply_incoming":
+        return apply_incoming_to_draft(
+            baseline=candidate.baseline_content_markdown,
+            draft=draft,
+            incoming=candidate.content_markdown,
+        )
+    if candidate.decision == "replace_draft":
+        return candidate.content_markdown
+    if candidate.decision == "manual_merge" and candidate.staged_content_markdown is not None:
+        return candidate.staged_content_markdown
+    raise DesktopImportError(
+        "knowledge_reconciliation_stage_invalid",
+        "The staged three-way action has no deterministic Draft result.",
+    )
+
+
+def _resolution_status(decision: str) -> str:
+    if decision == "publish_incoming":
+        return "published"
+    if decision in {"keep_current", "keep_draft"}:
+        return "kept"
+    return "draft_updated"
 
 
 def _generation_change(candidate: _StagedCandidate) -> KnowledgeGenerationChange:

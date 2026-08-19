@@ -334,6 +334,7 @@ class DesktopTextImportService:
             self._record_knowledge_reconciliation(document.document_id, blocks)
             return self._result(state.job_id, document.document_id, deduplicated=deduplicated)
         except _DuplicateImport as duplicate:
+            self._record_existing_knowledge_reconciliation(duplicate.document_id)
             return self._result(state.job_id, duplicate.document_id, deduplicated=True)
         except DesktopModelCallError as error:
             logger.warning(
@@ -558,6 +559,15 @@ class DesktopTextImportService:
             self._knowledge_reconciliation.record_document_changes(document_id, blocks)
         except (DesktopImportError, OSError, sqlite3.Error, ValueError) as error:
             logger.warning("Could not reconcile imported knowledge for %s: %s", document_id, error)
+
+    def _record_existing_knowledge_reconciliation(self, document_id: str) -> None:
+        """D0 reuse skips parsing but still applies the current Draft boundary."""
+        try:
+            self._knowledge_reconciliation.record_existing_document_changes(document_id)
+        except (DesktopImportError, OSError, sqlite3.Error, ValueError) as error:
+            logger.warning(
+                "Could not reconcile reused imported knowledge for %s: %s", document_id, error
+            )
 
     def _honor_control(self, state: ImportJobState, stage: str) -> None:
         action = self._control.action

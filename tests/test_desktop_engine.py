@@ -19,6 +19,7 @@ from openkb.desktop_engine import (
 )
 from openkb.desktop_import import DesktopImportControl, DesktopImportError, DesktopTextImportService
 from openkb.desktop_import_store import DesktopImportStore
+from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
@@ -260,7 +261,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 23,
+            "schema_version": 24,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -1035,6 +1036,7 @@ def test_engine_lists_isolated_knowledge_reconciliation_conflicts(tmp_path):
         cancel_event=None,
     )
     assert committed["published_count"] == 1
+    assert committed["draft_updated_count"] == 0
     assert server._dispatch(
         DesktopRequest(
             request_id="knowledge-conflicts-after-commit",
@@ -1043,6 +1045,70 @@ def test_engine_lists_isolated_knowledge_reconciliation_conflicts(tmp_path):
         ),
         cancel_event=None,
     ) == {"conflicts": []}
+
+
+def test_engine_stages_a_manual_three_way_merge_as_a_working_draft(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    pages = DesktopKnowledgePageService(kb_dir)
+    page = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Evidence",
+        content_markdown="# Published revision",
+    )
+    published = pages.publish(page.page_id)
+    pages.save_draft(
+        page_id=page.page_id,
+        kind="concept",
+        title="Evidence",
+        content_markdown="Working Draft content.",
+    )
+    source = tmp_path / "incoming.txt"
+    source.write_text("# Concept: Evidence\n\nIncoming content.", encoding="utf-8")
+    DesktopTextImportService(kb_dir).import_text(source)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    queue = server._dispatch(
+        DesktopRequest(
+            request_id="three-way-conflicts",
+            method="workbench.knowledge_reconciliation_conflicts",
+            params={},
+        ),
+        cancel_event=None,
+    )
+    conflict = queue["conflicts"][0]
+    assert conflict["reconciliation_mode"] == "three_way"
+    assert conflict["working_draft_content_markdown"] == "Working Draft content."
+    staged = server._dispatch(
+        DesktopRequest(
+            request_id="stage-manual-merge",
+            method="workbench.stage_knowledge_reconciliation_decisions",
+            params={
+                "candidate_ids": [conflict["candidate_id"]],
+                "decision": "manual_merge",
+                "manual_merge_content": "Human merged Draft.",
+            },
+        ),
+        cancel_event=None,
+    )
+    assert staged["conflicts"][0]["staged_content_markdown"] == "Human merged Draft."
+    committed = server._dispatch(
+        DesktopRequest(
+            request_id="commit-manual-merge",
+            method="workbench.commit_knowledge_reconciliation_decisions",
+            params={},
+        ),
+        cancel_event=None,
+    )
+
+    assert committed["draft_updated_count"] == 1
+    current = pages.get_page(page.page_id)
+    assert current.published_revision == published.published_revision
+    assert current.working_draft is not None
+    assert current.working_draft.content_markdown == "Human merged Draft."
 
 
 def test_engine_returns_a_persisted_interrupted_answer_after_user_stop(tmp_path):

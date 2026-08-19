@@ -2,6 +2,7 @@ import { Check, GitPullRequest, Loader2, RotateCcw } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
+import { Textarea } from "@/components/ui/textarea"
 import { useDesktopBridge } from "./bridge-context"
 import { nextDesktopRequestId } from "./request-id"
 import type {
@@ -43,6 +44,12 @@ export function DesktopKnowledgeReconciliationPanel() {
   )
   const stagedCount = conflicts.filter((conflict) => conflict.stagedDecision !== null).length
   const allSelected = Boolean(conflicts.length) && selectedConflicts.length === conflicts.length
+  const selectedMode = selectedConflicts.length
+    && selectedConflicts.every((conflict) => (
+      conflict.reconciliationMode === selectedConflicts[0]?.reconciliationMode
+    ))
+    ? selectedConflicts[0]?.reconciliationMode
+    : null
 
   const replaceConflicts = (next: DesktopKnowledgeReconciliationConflict[]) => {
     setConflicts(next)
@@ -53,6 +60,7 @@ export function DesktopKnowledgeReconciliationPanel() {
   const stage = async (
     candidateIds: string[],
     decision: DesktopKnowledgeReconciliationDecision | null,
+    manualMergeContent: string | null = null,
   ) => {
     if (!candidateIds.length) return
     setWorking(true)
@@ -62,6 +70,7 @@ export function DesktopKnowledgeReconciliationPanel() {
       const result = await bridge.stageKnowledgeReconciliationDecisions(
         candidateIds,
         decision,
+        manualMergeContent,
         nextDesktopRequestId("knowledge-reconciliation"),
       )
       replaceConflicts(result.conflicts)
@@ -90,6 +99,7 @@ export function DesktopKnowledgeReconciliationPanel() {
       replaceConflicts(conflicts.filter((conflict) => !resolved.has(conflict.candidateId)))
       setSaved(t("desktop.knowledgeBases.reconciliation.commitSaved", {
         published: result.publishedCount,
+        draftUpdated: result.draftUpdatedCount,
         kept: result.keptCount,
       }))
     } catch (reason) {
@@ -160,21 +170,52 @@ export function DesktopKnowledgeReconciliationPanel() {
                 {t("desktop.knowledgeBases.reconciliation.selectedCount", { count: selectedConflicts.length })}
               </span>
               <div className="ml-auto flex flex-wrap gap-2">
-                <Button
-                  size="sm"
-                  disabled={working || !selectedConflicts.length}
-                  onClick={() => void stage(selectedConflicts.map((item) => item.candidateId), "publish_incoming")}
-                >
-                  {t("desktop.knowledgeBases.reconciliation.publishIncoming")}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={working || !selectedConflicts.length}
-                  onClick={() => void stage(selectedConflicts.map((item) => item.candidateId), "keep_current")}
-                >
-                  {t("desktop.knowledgeBases.reconciliation.keepCurrent")}
-                </Button>
+                {selectedMode === "two_way" ? (
+                  <>
+                    <Button
+                      size="sm"
+                      disabled={working}
+                      onClick={() => void stage(selectedConflicts.map((item) => item.candidateId), "publish_incoming")}
+                    >
+                      {t("desktop.knowledgeBases.reconciliation.publishIncoming")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={working}
+                      onClick={() => void stage(selectedConflicts.map((item) => item.candidateId), "keep_current")}
+                    >
+                      {t("desktop.knowledgeBases.reconciliation.keepCurrent")}
+                    </Button>
+                  </>
+                ) : null}
+                {selectedMode === "three_way" ? (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={working}
+                      onClick={() => void stage(selectedConflicts.map((item) => item.candidateId), "keep_draft")}
+                    >
+                      {t("desktop.knowledgeBases.reconciliation.keepDraft")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      disabled={working}
+                      onClick={() => void stage(selectedConflicts.map((item) => item.candidateId), "apply_incoming")}
+                    >
+                      {t("desktop.knowledgeBases.reconciliation.applyIncoming")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={working}
+                      onClick={() => void stage(selectedConflicts.map((item) => item.candidateId), "replace_draft")}
+                    >
+                      {t("desktop.knowledgeBases.reconciliation.replaceDraft")}
+                    </Button>
+                  </>
+                ) : null}
                 <Button
                   size="sm"
                   variant="ghost"
@@ -197,7 +238,9 @@ export function DesktopKnowledgeReconciliationPanel() {
                   disabled={working}
                   selected={selectedIds.includes(conflict.candidateId)}
                   onToggleSelected={() => toggleSelected(conflict.candidateId)}
-                  onStage={(decision) => void stage([conflict.candidateId], decision)}
+                  onStage={(decision, manualMergeContent) => (
+                    void stage([conflict.candidateId], decision, manualMergeContent)
+                  )}
                 />
               ))}
             </div>
@@ -223,14 +266,19 @@ function ConflictCard({
   disabled: boolean
   selected: boolean
   onToggleSelected: () => void
-  onStage: (decision: DesktopKnowledgeReconciliationDecision | null) => void
+  onStage: (
+    decision: DesktopKnowledgeReconciliationDecision | null,
+    manualMergeContent?: string | null,
+  ) => void
 }) {
   const { t } = useTranslation("common")
-  const decisionLabel = conflict.stagedDecision === "publish_incoming"
-    ? t("desktop.knowledgeBases.reconciliation.stagedPublish")
-    : conflict.stagedDecision === "keep_current"
-      ? t("desktop.knowledgeBases.reconciliation.stagedKeep")
-      : null
+  const [manualMerge, setManualMerge] = useState(
+    conflict.stagedContentMarkdown
+      ?? conflict.workingDraftContentMarkdown
+      ?? conflict.contentMarkdown,
+  )
+  const decisionLabel = stagedDecisionLabel(t, conflict.stagedDecision)
+  const isThreeWay = conflict.reconciliationMode === "three_way"
   return (
     <article className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -258,25 +306,51 @@ function ConflictCard({
           document: conflict.documentName,
         })}
       </p>
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+      <div className={`mt-4 grid gap-3 ${isThreeWay ? "lg:grid-cols-3" : "sm:grid-cols-2"}`}>
+        <ConflictExcerpt
+          label={conflict.baselineKind !== "published_generation"
+            ? t("desktop.knowledgeBases.reconciliation.currentPublishedRevision")
+            : t("desktop.knowledgeBases.reconciliation.publishedKnowledge")}
+          content={conflict.baselineKind === "unpublished_page"
+            ? t("desktop.knowledgeBases.reconciliation.noPublishedRevision")
+            : conflict.baselineContentMarkdown}
+        />
+        {isThreeWay ? (
+          <ConflictExcerpt
+            label={t("desktop.knowledgeBases.reconciliation.workingDraft")}
+            content={conflict.workingDraftContentMarkdown ?? ""}
+            baselineContent={conflict.baselineContentMarkdown}
+          />
+        ) : null}
         <ConflictExcerpt
           label={t("desktop.knowledgeBases.reconciliation.incoming")}
           content={conflict.contentMarkdown}
-        />
-        <ConflictExcerpt
-          label={conflict.baselineKind === "user_revision"
-            ? t("desktop.knowledgeBases.reconciliation.userRevision")
-            : t("desktop.knowledgeBases.reconciliation.publishedKnowledge")}
-          content={conflict.baselineContentMarkdown}
+          baselineContent={conflict.baselineContentMarkdown}
         />
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
-        <Button size="sm" disabled={disabled} onClick={() => onStage("publish_incoming")}>
-          {t("desktop.knowledgeBases.reconciliation.publishIncoming")}
-        </Button>
-        <Button size="sm" variant="outline" disabled={disabled} onClick={() => onStage("keep_current")}>
-          {t("desktop.knowledgeBases.reconciliation.keepCurrent")}
-        </Button>
+        {isThreeWay ? (
+          <>
+            <Button size="sm" variant="outline" disabled={disabled} onClick={() => onStage("keep_draft")}>
+              {t("desktop.knowledgeBases.reconciliation.keepDraft")}
+            </Button>
+            <Button size="sm" disabled={disabled} onClick={() => onStage("apply_incoming")}>
+              {t("desktop.knowledgeBases.reconciliation.applyIncoming")}
+            </Button>
+            <Button size="sm" variant="destructive" disabled={disabled} onClick={() => onStage("replace_draft")}>
+              {t("desktop.knowledgeBases.reconciliation.replaceDraft")}
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button size="sm" disabled={disabled} onClick={() => onStage("publish_incoming")}>
+              {t("desktop.knowledgeBases.reconciliation.publishIncoming")}
+            </Button>
+            <Button size="sm" variant="outline" disabled={disabled} onClick={() => onStage("keep_current")}>
+              {t("desktop.knowledgeBases.reconciliation.keepCurrent")}
+            </Button>
+          </>
+        )}
         {conflict.stagedDecision ? (
           <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onStage(null)}>
             <RotateCcw className="size-3.5" />
@@ -284,15 +358,84 @@ function ConflictCard({
           </Button>
         ) : null}
       </div>
+      {isThreeWay ? (
+        <div className="mt-4 rounded-lg border border-border/70 bg-background/70 p-3">
+          <label className="text-xs font-medium text-muted-foreground" htmlFor={`manual-merge-${conflict.candidateId}`}>
+            {t("desktop.knowledgeBases.reconciliation.manualMerge")}
+          </label>
+          <Textarea
+            id={`manual-merge-${conflict.candidateId}`}
+            className="mt-2 min-h-28 font-mono text-xs"
+            disabled={disabled}
+            value={manualMerge}
+            onChange={(event) => setManualMerge(event.target.value)}
+          />
+          <Button
+            className="mt-2"
+            size="sm"
+            variant="outline"
+            disabled={disabled}
+            onClick={() => onStage("manual_merge", manualMerge)}
+          >
+            {t("desktop.knowledgeBases.reconciliation.stageManualMerge")}
+          </Button>
+        </div>
+      ) : null}
     </article>
   )
 }
 
-function ConflictExcerpt({ label, content }: { label: string; content: string }) {
+function stagedDecisionLabel(
+  t: ReturnType<typeof useTranslation>["t"],
+  decision: DesktopKnowledgeReconciliationDecision | null,
+): string | null {
+  if (decision === null) return null
+  const labels: Record<DesktopKnowledgeReconciliationDecision, string> = {
+    publish_incoming: "stagedPublish",
+    keep_current: "stagedKeep",
+    keep_draft: "stagedKeepDraft",
+    apply_incoming: "stagedApplyIncoming",
+    replace_draft: "stagedReplaceDraft",
+    manual_merge: "stagedManualMerge",
+  }
+  return t(`desktop.knowledgeBases.reconciliation.${labels[decision]}`)
+}
+
+function ConflictExcerpt({
+  label,
+  content,
+  baselineContent,
+}: {
+  label: string
+  content: string
+  baselineContent?: string
+}) {
+  const { t } = useTranslation("common")
+  const difference = baselineContent === undefined
+    ? null
+    : summarizeDifference(baselineContent, content)
   return (
     <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
       <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">{label}</p>
-      <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-sm leading-6">{content}</p>
+      {difference ? (
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          {t("desktop.knowledgeBases.reconciliation.diffSummary", difference)}
+        </p>
+      ) : null}
+      <p className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-sm leading-6">{content}</p>
     </div>
   )
+}
+
+function summarizeDifference(baseline: string, value: string): { added: number; removed: number } {
+  const baselineLines = new Set(markdownLines(baseline))
+  const valueLines = new Set(markdownLines(value))
+  return {
+    added: [...valueLines].filter((line) => !baselineLines.has(line)).length,
+    removed: [...baselineLines].filter((line) => !valueLines.has(line)).length,
+  }
+}
+
+function markdownLines(value: string): string[] {
+  return value.split("\n").map((line) => line.trim()).filter(Boolean)
 }

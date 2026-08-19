@@ -586,13 +586,20 @@ export class MemoryDesktopBridge extends MemoryKnowledgePageBridge implements De
   async stageKnowledgeReconciliationDecisions(
     candidateIds: string[],
     decision: DesktopKnowledgeReconciliationDecision | null,
+    manualMergeContent: string | null,
     requestId: string,
   ): Promise<DesktopKnowledgeReconciliationConflicts> {
     void requestId
     const selected = new Set(candidateIds)
     if (!selected.size) throw new Error("Choose one or more knowledge conflicts first.")
     this.knowledgeReconciliationConflictResults = this.knowledgeReconciliationConflictResults.map((conflict) => (
-      selected.has(conflict.candidateId) ? { ...conflict, stagedDecision: decision } : conflict
+      selected.has(conflict.candidateId)
+        ? {
+            ...conflict,
+            stagedDecision: decision,
+            stagedContentMarkdown: decision === "manual_merge" ? manualMergeContent : null,
+          }
+        : conflict
     ))
     return this.knowledgeReconciliationConflicts()
   }
@@ -606,13 +613,19 @@ export class MemoryDesktopBridge extends MemoryKnowledgePageBridge implements De
     )
     if (!staged.length) throw new Error("Choose at least one knowledge conflict before committing.")
     const published = staged.filter((conflict) => conflict.stagedDecision === "publish_incoming")
+    const draftUpdated = staged.filter((conflict) => (
+      conflict.stagedDecision === "apply_incoming"
+      || conflict.stagedDecision === "replace_draft"
+      || conflict.stagedDecision === "manual_merge"
+    ))
     this.knowledgeReconciliationConflictResults = this.knowledgeReconciliationConflictResults.filter(
       (conflict) => conflict.stagedDecision === null,
     )
     return {
       publishedGenerationId: published.length ? 1 : null,
       publishedCount: published.length,
-      keptCount: staged.length - published.length,
+      draftUpdatedCount: draftUpdated.length,
+      keptCount: staged.length - published.length - draftUpdated.length,
       resolvedCandidateIds: staged.map((conflict) => conflict.candidateId),
     }
   }
@@ -726,7 +739,7 @@ export class MemoryDesktopBridge extends MemoryKnowledgePageBridge implements De
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 23,
+      schemaVersion: 24,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []

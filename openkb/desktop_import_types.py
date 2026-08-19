@@ -111,7 +111,13 @@ class DesktopKnowledgeReconciliationConflict:
     baseline_title: str
     baseline_content_markdown: str
     observed_generation_id: int | None
+    reconciliation_mode: str
+    target_page_id: str | None
+    working_draft_title: str | None
+    working_draft_content_markdown: str | None
+    working_draft_updated_at: str | None
     staged_decision: str | None
+    staged_content_markdown: str | None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -125,7 +131,13 @@ class DesktopKnowledgeReconciliationConflict:
             "baseline_title": self.baseline_title,
             "baseline_content_markdown": self.baseline_content_markdown,
             "observed_generation_id": self.observed_generation_id,
+            "reconciliation_mode": self.reconciliation_mode,
+            "target_page_id": self.target_page_id,
+            "working_draft_title": self.working_draft_title,
+            "working_draft_content_markdown": self.working_draft_content_markdown,
+            "working_draft_updated_at": self.working_draft_updated_at,
             "staged_decision": self.staged_decision,
+            "staged_content_markdown": self.staged_content_markdown,
         }
 
 
@@ -135,6 +147,7 @@ class DesktopKnowledgeReconciliationCommit:
 
     published_generation_id: int | None
     published_count: int
+    draft_updated_count: int
     kept_count: int
     resolved_candidate_ids: tuple[str, ...]
 
@@ -142,6 +155,7 @@ class DesktopKnowledgeReconciliationCommit:
         return {
             "published_generation_id": self.published_generation_id,
             "published_count": self.published_count,
+            "draft_updated_count": self.draft_updated_count,
             "kept_count": self.kept_count,
             "resolved_candidate_ids": list(self.resolved_candidate_ids),
         }

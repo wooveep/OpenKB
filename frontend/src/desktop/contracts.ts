@@ -437,8 +437,18 @@ export interface DesktopDocumentVersionCandidates {
   candidates: DesktopDocumentVersionCandidate[]
 }
 
-export type DesktopKnowledgeReconciliationBaselineKind = "published_generation" | "user_revision"
-export type DesktopKnowledgeReconciliationDecision = "publish_incoming" | "keep_current"
+export type DesktopKnowledgeReconciliationBaselineKind =
+  | "published_generation"
+  | "user_revision"
+  | "unpublished_page"
+export type DesktopKnowledgeReconciliationMode = "two_way" | "three_way"
+export type DesktopKnowledgeReconciliationDecision =
+  | "publish_incoming"
+  | "keep_current"
+  | "keep_draft"
+  | "apply_incoming"
+  | "replace_draft"
+  | "manual_merge"
 
 export interface DesktopKnowledgeReconciliationConflict {
   candidateId: string
@@ -451,7 +461,13 @@ export interface DesktopKnowledgeReconciliationConflict {
   baselineTitle: string
   baselineContentMarkdown: string
   observedGenerationId: number | null
+  reconciliationMode: DesktopKnowledgeReconciliationMode
+  targetPageId: string | null
+  workingDraftTitle: string | null
+  workingDraftContentMarkdown: string | null
+  workingDraftUpdatedAt: string | null
   stagedDecision: DesktopKnowledgeReconciliationDecision | null
+  stagedContentMarkdown: string | null
 }
 
 export interface DesktopKnowledgeReconciliationConflicts {
@@ -461,6 +477,7 @@ export interface DesktopKnowledgeReconciliationConflicts {
 export interface DesktopKnowledgeReconciliationCommit {
   publishedGenerationId: number | null
   publishedCount: number
+  draftUpdatedCount: number
   keptCount: number
   resolvedCandidateIds: string[]
 }
@@ -622,6 +639,7 @@ export interface DesktopBridge {
   stageKnowledgeReconciliationDecisions(
     candidateIds: string[],
     decision: DesktopKnowledgeReconciliationDecision | null,
+    manualMergeContent: string | null,
     requestId: string,
   ): Promise<DesktopKnowledgeReconciliationConflicts>
   commitKnowledgeReconciliationDecisions(

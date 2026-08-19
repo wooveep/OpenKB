@@ -388,6 +388,60 @@ def publication_diagnostics_in(
     return tuple(diagnostics)
 
 
+def prune_obsolete_draft_sources_in(
+    connection: sqlite3.Connection,
+    page_id: str,
+    content_markdown: str,
+    *,
+    previous_content_markdown: str | None = None,
+) -> None:
+    """Drop bindings that no longer describe a claim in replacement Draft content."""
+    rows = connection.execute(
+        """
+        SELECT source_id, claim_text
+        FROM knowledge_page_working_sources
+        WHERE page_id = ?
+        """,
+        (page_id,),
+    ).fetchall()
+    if not rows:
+        return
+    obsolete: list[tuple[str, str]] = []
+    for source_id_value, claim_text_value in rows:
+        source_id = str(source_id_value)
+        claim_text = str(claim_text_value)
+        was_valid = previous_content_markdown is None or _source_matches_claim(
+            previous_content_markdown, source_id, claim_text
+        )
+        if was_valid and not _source_matches_claim(content_markdown, source_id, claim_text):
+            obsolete.append((page_id, source_id))
+    connection.executemany(
+        """
+        DELETE FROM knowledge_page_working_sources
+        WHERE page_id = ? AND source_id = ?
+        """,
+        obsolete,
+    )
+
+
+def strip_knowledge_source_markers(value: str) -> str:
+    """Return knowledge Markdown without internal Source Map reference markers."""
+    return _SOURCE_MARKER.sub("", value)
+
+
+def _source_matches_claim(content_markdown: str, source_id: str, claim_text: str) -> bool:
+    marker_occurrences = _SOURCE_MARKER.findall(content_markdown)
+    matching_claims = [
+        claim
+        for claim in _claim_units(content_markdown)
+        if source_id in _SOURCE_MARKER.findall(claim)
+    ]
+    if marker_occurrences.count(source_id) != 1 or len(matching_claims) != 1:
+        return False
+    actual = _normalized_claim_text(strip_knowledge_source_markers(matching_claims[0]))
+    return actual == _normalized_claim_text(claim_text)
+
+
 def stable_source_id(evidence_id: str) -> str:
     return f"src-{hashlib.sha256(evidence_id.encode('utf-8')).hexdigest()[:16]}"
 

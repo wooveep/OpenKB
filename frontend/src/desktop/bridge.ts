@@ -409,11 +409,12 @@ export class TauriDesktopBridge implements DesktopBridge {
   async stageKnowledgeReconciliationDecisions(
     candidateIds: string[],
     decision: DesktopKnowledgeReconciliationDecision | null,
+    manualMergeContent: string | null,
     requestId: string,
   ): Promise<DesktopKnowledgeReconciliationConflicts> {
     return this.call<DesktopKnowledgeReconciliationConflicts>(
       "desktop_stage_knowledge_reconciliation_decisions",
-      { candidateIds, decision, requestId },
+      { candidateIds, decision, manualMergeContent, requestId },
     )
   }
 
@@ -738,10 +739,12 @@ class UnavailableDesktopBridge extends UnavailableKnowledgePageBridge implements
   stageKnowledgeReconciliationDecisions(
     candidateIds: string[],
     decision: DesktopKnowledgeReconciliationDecision | null,
+    manualMergeContent: string | null,
     requestId: string,
   ): Promise<DesktopKnowledgeReconciliationConflicts> {
     void candidateIds
     void decision
+    void manualMergeContent
     void requestId
     return this.unavailable()
   }
