@@ -8,16 +8,13 @@ changing any runtime default.
 
 from __future__ import annotations
 
-import argparse
-import json
-import math
 import sqlite3
 import time
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 from openkb.desktop_answer_types import DesktopEvidencePack, DesktopRetrievalModelCost
 from openkb.desktop_graph_feature_flags import (
@@ -55,6 +52,8 @@ from openkb.desktop_retrieval_evaluation_types import (
     DesktopRetrievalEvaluationMetrics,
     DesktopRetrievalEvaluationReport,
     DesktopRetrievalEvaluationSuite,
+    evaluation_corpus_digest,
+    evaluation_derived_snapshot_digest,
 )
 from openkb.desktop_workspace import desktop_state_database_path
 
@@ -129,12 +128,17 @@ class DesktopRetrievalEvaluator:
         self._clock = clock
 
     def evaluate(
-        self, suite: DesktopRetrievalEvaluationSuite, *, repetitions: int = 1
+        self,
+        suite: DesktopRetrievalEvaluationSuite,
+        *,
+        repetitions: int = 1,
+        pageindex_worker_sha256: str | None = None,
     ) -> DesktopRetrievalEvaluationReport:
         """Measure every fixed case without enabling deferred graph capabilities."""
         if repetitions < 1:
             raise ValueError("Desktop retrieval evaluation repetitions must be at least one.")
         snapshot = self._derived_snapshot()
+        corpus_digest = self._evaluated_corpus_digest(suite)
         results: list[DesktopRetrievalEvaluationCaseResult] = []
         for case in suite.cases:
             expected_evidence_ids = self._expected_evidence_ids(case)
@@ -219,6 +223,14 @@ class DesktopRetrievalEvaluator:
                 results,
                 metrics,
                 knowledge_snapshot_stable=knowledge_snapshot_stable,
+            ),
+            corpus_digest=corpus_digest,
+            pageindex_worker_sha256=pageindex_worker_sha256,
+            final_knowledge_snapshot_digest=final_snapshot.knowledge_snapshot_digest,
+            final_knowledge_snapshot_revision=final_snapshot.knowledge_snapshot_revision,
+            final_derived_snapshot_digest=evaluation_derived_snapshot_digest(
+                final_snapshot.catalog_generation_ids,
+                final_snapshot.page_tree_generations,
             ),
         )
 
@@ -368,6 +380,38 @@ class DesktopRetrievalEvaluator:
             connection.rollback()
             connection.close()
         return tuple(resolved)
+
+    def _evaluated_corpus_digest(self, suite: DesktopRetrievalEvaluationSuite) -> str:
+        """Bind the report to the exact Available raw assets used by the suite."""
+        names = tuple(
+            sorted(
+                {
+                    selector.document_name
+                    for case in suite.cases
+                    for selector in case.expected_evidence
+                }
+            )
+        )
+        if not names:
+            raise ValueError("Desktop retrieval evaluation corpus is empty.")
+        connection = connect_desktop_read_only(self._database_path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT display_name, asset_sha256
+                FROM source_documents
+                WHERE availability = 'available'
+                ORDER BY display_name, document_id
+                """
+            ).fetchall()
+        except sqlite3.Error as error:
+            raise ValueError("Desktop retrieval evaluation corpus is unavailable.") from error
+        finally:
+            connection.close()
+        records = tuple((str(row[0]), str(row[1])) for row in rows)
+        if len(records) != len(names) or tuple(name for name, _digest in records) != names:
+            raise ValueError("Desktop retrieval evaluation corpus does not match the fixed suite.")
+        return evaluation_corpus_digest(records)
 
 
 def _retrieval_model_cost(cost: DesktopRetrievalModelCost) -> DesktopEvaluationModelCost:
@@ -520,6 +564,42 @@ def _metrics_for(
         retrieval_p95_ms=_p95(tuple(result.retrieval_latency_ms for result in selected)),
         model_cost=cost,
         degradation_runs=sum(bool(result.degradation_reasons) for result in selected),
+    )
+
+
+def recompute_page_tree_evaluation_gate(
+    report: DesktopRetrievalEvaluationReport,
+    suite: DesktopRetrievalEvaluationSuite,
+    *,
+    derived_identity_bound: bool,
+) -> DesktopPageTreeEvaluationGate:
+    """Rebuild a serialized report's metrics and gate from case-level results."""
+    results = list(report.results)
+    metrics = {
+        variant: _metrics_for(results, variant) for variant in DESKTOP_EVALUATION_VARIANT_ORDER
+    }
+    if metrics != report.metrics:
+        raise ValueError("Desktop retrieval evaluation metrics do not match its results.")
+    knowledge_snapshot_stable = (
+        report.final_knowledge_snapshot_digest is not None
+        and report.final_knowledge_snapshot_revision is not None
+        and report.knowledge_snapshot_digest == report.final_knowledge_snapshot_digest
+        and report.knowledge_snapshot_revision == report.final_knowledge_snapshot_revision
+    )
+    derived_generations_stable = (
+        report.final_derived_snapshot_digest is not None
+        and evaluation_derived_snapshot_digest(
+            report.catalog_generation_ids, report.page_tree_generations
+        )
+        == report.final_derived_snapshot_digest
+    )
+    return _page_tree_gate(
+        suite,
+        results,
+        metrics,
+        knowledge_snapshot_stable=knowledge_snapshot_stable,
+        derived_generations_stable=derived_generations_stable,
+        derived_identity_bound=derived_identity_bound,
     )
 
 
@@ -687,53 +767,9 @@ def _local_graph_gate(
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run a JSON suite; a nonzero exit code prevents an unproven expansion."""
-    parser = argparse.ArgumentParser(description="Evaluate Desktop vectorless retrieval variants.")
-    parser.add_argument("kb_dir", type=Path)
-    parser.add_argument("suite", type=Path)
-    parser.add_argument("--repetitions", type=int, default=1)
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--promote-local-graph", action="store_true")
-    parser.add_argument("--validate-page-tree-promotion", action="store_true")
-    parser.add_argument(
-        "--experimental-pageindex-python",
-        type=Path,
-        help="Isolated Python runtime containing the pinned official PageIndex package.",
-    )
-    parser.add_argument("--pageindex-timeout-seconds", type=float, default=60.0)
-    parser.add_argument("--rebuild-official-pageindex", action="store_true")
-    args = parser.parse_args(argv)
-    from openkb.desktop_model_transport import desktop_model_gateway_for
+    from openkb.desktop_retrieval_evaluation_cli import run
 
-    if not math.isfinite(args.pageindex_timeout_seconds) or args.pageindex_timeout_seconds <= 0:
-        parser.error("--pageindex-timeout-seconds must be positive")
-    if args.rebuild_official_pageindex and args.experimental_pageindex_python is None:
-        parser.error("--rebuild-official-pageindex needs --experimental-pageindex-python")
-    page_tree_provider = None
-    if args.experimental_pageindex_python is not None:
-        from openkb.desktop_pageindex_provider import materialize_official_pageindex_provider
-
-        page_tree_provider = materialize_official_pageindex_provider(
-            args.kb_dir,
-            python_executable=args.experimental_pageindex_python,
-            timeout_seconds=args.pageindex_timeout_seconds,
-            force_rebuild=args.rebuild_official_pageindex,
-        )
-    evaluator = DesktopRetrievalEvaluator(
-        args.kb_dir,
-        model_gateway=desktop_model_gateway_for(args.kb_dir),
-        page_tree_provider=cast(EvaluationPageTreeProvider | None, page_tree_provider),
-    )
-    suite = DesktopRetrievalEvaluationSuite.from_json(args.suite)
-    report = evaluator.evaluate(suite, repetitions=args.repetitions)
-    if args.output is None:
-        print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
-    else:
-        report.write(args.output)
-    if args.promote_local_graph and report.local_graph_gate.passed:
-        evaluator.promote_local_graph(report)
-    if args.validate_page_tree_promotion and report.gate.passed:
-        evaluator.require_page_tree_promotion_eligible(report, suite)
-    return 0 if report.gate.passed else 2
+    return run(argv)
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised by the maintainer command.

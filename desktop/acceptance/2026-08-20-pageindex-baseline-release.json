@@ -1,0 +1,15 @@
+{
+    "schemaVersion":  1,
+    "product":  "OpenKB",
+    "version":  "0.1.0-pageindex-baseline",
+    "platform":  "windows-x64",
+    "archive":  {
+                    "file":  "OpenKB-0.1.0-pageindex-baseline-windows-x64.zip",
+                    "bytes":  601134321,
+                    "sha256":  "b0172b03a46a2f4fc1a1aff96cf832b7587a91df43d6273e37aa4ad46012daac"
+                },
+    "payload":  {
+                    "bytes":  1294631857,
+                    "manifest":  "release-manifest.json"
+                }
+}

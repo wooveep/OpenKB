@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "Test-PageIndexPortablePackage.ps1")
 
 function Assert-That {
     param(
@@ -149,6 +150,76 @@ function Assert-SuccessResponse {
     Assert-That -Condition ($Response.PSObject.Properties.Name -contains "result") -Message "Frozen Engine request $RequestId returned no result."
 }
 
+function Assert-UnconfiguredImportReachedModelBoundary {
+    param(
+        [Parameter(Mandatory = $true)] $Response,
+        [Parameter(Mandatory = $true)] [string] $RequestId,
+        [Parameter(Mandatory = $true)] [string] $SourceName,
+        [Parameter(Mandatory = $true)] [System.IO.Stream] $InputStream,
+        [Parameter(Mandatory = $true)] [System.IO.Stream] $OutputStream,
+        [Parameter(Mandatory = $true)] $Events
+    )
+
+    Assert-That `
+        -Condition ($Response.PSObject.Properties.Name -contains "error") `
+        -Message "Frozen Engine unexpectedly published $SourceName without mandatory Knowledge Analysis."
+    Assert-That `
+        -Condition ($Response.error.code -eq "model_configuration_invalid") `
+        -Message "Frozen Engine returned the wrong unconfigured-model error for $SourceName."
+
+    $jobsRequestId = "$RequestId-jobs"
+    Write-Frame -Stream $InputStream -Message @{
+        jsonrpc = "2.0"; id = $jobsRequestId; method = "workbench.import_jobs"; params = @{}
+    }
+    $jobs = Read-Response -Stream $OutputStream -RequestId $jobsRequestId -Events $Events
+    Assert-SuccessResponse -Response $jobs -RequestId $jobsRequestId
+    $task = @(
+        $jobs.result.jobs | Where-Object { $_.job.source_name -eq $SourceName }
+    ) | Select-Object -First 1
+    Assert-That -Condition ($null -ne $task) -Message "Frozen Engine did not retain the $SourceName import job."
+    Assert-That -Condition ($task.job.status -eq "quarantined") -Message "Frozen Engine did not quarantine $SourceName."
+    Assert-That -Condition ($null -eq $task.document) -Message "Frozen Engine published $SourceName without Knowledge Analysis."
+    Assert-That `
+        -Condition ($task.quarantine.error_code -eq "model_configuration_invalid") `
+        -Message "Frozen Engine retained the wrong quarantine reason for $SourceName."
+
+    $stages = @{}
+    foreach ($stage in @($task.stages)) {
+        $stages[[string] $stage.stage] = $stage
+    }
+    foreach ($stageName in @("preflight", "raw_asset", "document_ir", "evidence", "deterministic_page_tree")) {
+        Assert-That `
+            -Condition ($null -ne $stages[$stageName] -and $stages[$stageName].status -eq "completed") `
+            -Message "Frozen Engine did not complete $stageName before the model boundary for $SourceName."
+    }
+    Assert-That `
+        -Condition ($stages["model_analysis"].status -eq "failed") `
+        -Message "Frozen Engine did not stop $SourceName at mandatory Knowledge Analysis."
+}
+
+function Lock-FileRangeWithRetry {
+    param(
+        [Parameter(Mandatory = $true)] [System.IO.FileStream] $Stream,
+        [Parameter(Mandatory = $true)] [int64] $Offset,
+        [Parameter(Mandatory = $true)] [int64] $Length,
+        [int] $TimeoutSeconds = 30
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ($true) {
+        try {
+            $Stream.Lock($Offset, $Length)
+            return
+        }
+        catch [System.IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
 function Test-FrozenEngine {
     param(
         [Parameter(Mandatory = $true)] [string] $EnginePath,
@@ -165,11 +236,16 @@ function Test-FrozenEngine {
     # The Engine reserves stdout for framed protocol messages. Let stderr inherit
     # the build log so ONNX diagnostics cannot fill an unread redirected pipe.
     $startInfo.RedirectStandardError = $false
-    $startInfo.Environment["PATH"] = "$env:SystemRoot\System32;$env:SystemRoot"
-    $startInfo.Environment["HF_HUB_OFFLINE"] = "1"
-    $startInfo.Environment["TRANSFORMERS_OFFLINE"] = "1"
-    $startInfo.Environment["PIP_NO_INDEX"] = "1"
-    $startInfo.Environment["UV_OFFLINE"] = "1"
+    $startInfo.EnvironmentVariables["PATH"] = "$env:SystemRoot\System32;$env:SystemRoot"
+    $startInfo.EnvironmentVariables["HF_HUB_OFFLINE"] = "1"
+    $startInfo.EnvironmentVariables["TRANSFORMERS_OFFLINE"] = "1"
+    $startInfo.EnvironmentVariables["PIP_NO_INDEX"] = "1"
+    $startInfo.EnvironmentVariables["UV_OFFLINE"] = "1"
+    $startInfo.EnvironmentVariables["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    $startInfo.EnvironmentVariables["HTTP_PROXY"] = "http://127.0.0.1:9"
+    $startInfo.EnvironmentVariables["HTTPS_PROXY"] = "http://127.0.0.1:9"
+    $startInfo.EnvironmentVariables["ALL_PROXY"] = "http://127.0.0.1:9"
+    $startInfo.EnvironmentVariables["NO_PROXY"] = ""
     $engine = New-Object System.Diagnostics.Process
     $engine.StartInfo = $startInfo
     Assert-That -Condition ($engine.Start()) -Message "Could not start frozen OpenKB Engine."
@@ -208,7 +284,11 @@ function Test-FrozenEngine {
             [System.IO.FileShare]::ReadWrite
         )
         $lockStream.SetLength(1)
-        $lockStream.Lock(0, 1)
+        # Knowledge-base creation may queue a short derived-state rebuild that
+        # legitimately still owns the ingest lock after the create response.
+        # Wait for that owner before taking the test lock used to exercise
+        # cancellation; do not make package acceptance depend on host speed.
+        Lock-FileRangeWithRetry -Stream $lockStream -Offset 0 -Length 1
         try {
             Write-Frame -Stream $input -Message @{
                 jsonrpc = "2.0"; id = "package-read"; method = "workbench.knowledge_pages"; params = @{}
@@ -253,19 +333,13 @@ function Test-FrozenEngine {
             jsonrpc = "2.0"; id = "package-import"; method = "workbench.import_text_document"; params = @{ source_path = $sourceMarkdown }
         }
         $imported = Read-Response -Stream $output -RequestId "package-import" -Events $events
-        Assert-SuccessResponse -Response $imported -RequestId "package-import"
-        Assert-That -Condition ($imported.result.job.status -eq "completed") -Message "Frozen Engine did not complete an offline Markdown import."
-        Assert-That -Condition ($imported.result.document.availability -eq "available") -Message "Frozen Engine did not publish the offline Markdown import."
-        $documentId = [string] $imported.result.document.document_id
-        Assert-That -Condition (-not [string]::IsNullOrWhiteSpace($documentId)) -Message "Frozen Engine returned no imported document identifier."
-
-        Write-Frame -Stream $input -Message @{
-            jsonrpc = "2.0"; id = "package-read-import"; method = "workbench.read_raw_document"; params = @{ document_id = $documentId; page = 0 }
-        }
-        $readImported = Read-Response -Stream $output -RequestId "package-read-import" -Events $events
-        Assert-SuccessResponse -Response $readImported -RequestId "package-read-import"
-        Assert-That -Condition ($readImported.result.name -eq "package-source.md") -Message "Frozen Engine returned the wrong imported source document."
-        Assert-That -Condition (@($readImported.result.source_images).Count -eq 1) -Message "Frozen Engine did not preserve a relative Markdown source image."
+        Assert-UnconfiguredImportReachedModelBoundary `
+            -Response $imported `
+            -RequestId "package-import" `
+            -SourceName "package-source.md" `
+            -InputStream $input `
+            -OutputStream $output `
+            -Events $events
 
         $scannedPdf = Join-Path $ScratchDirectory "package-scanned.pdf"
         $scannedPdfFixture = Join-Path $PSScriptRoot "..\test-assets\scanned-ocr.pdf.base64"
@@ -281,9 +355,13 @@ function Test-FrozenEngine {
         # model-response budget. Allow slower clean Windows machines to load it once.
         Write-Host "Testing frozen scanned-PDF import..."
         $scannedImport = Read-Response -Stream $output -RequestId "package-scan-import" -Events $events -TimeoutSeconds 180
-        Assert-SuccessResponse -Response $scannedImport -RequestId "package-scan-import"
-        Assert-That -Condition ($scannedImport.result.job.status -eq "completed") -Message "Frozen Engine did not complete an offline scanned-PDF import."
-        Assert-That -Condition ($scannedImport.result.document.availability -eq "available") -Message "Frozen Engine did not publish the scanned-PDF import."
+        Assert-UnconfiguredImportReachedModelBoundary `
+            -Response $scannedImport `
+            -RequestId "package-scan-import" `
+            -SourceName "package-scanned.pdf" `
+            -InputStream $input `
+            -OutputStream $output `
+            -Events $events
 
         # Keep this last: the deliberately invalid endpoint becomes KB-local
         # configuration, and must not affect the offline parser smoke checks.
@@ -374,11 +452,16 @@ function Test-ShellProcessTree {
     $startInfo.FileName = $shellPath
     $startInfo.WorkingDirectory = $PackageRoot
     $startInfo.UseShellExecute = $false
-    $startInfo.Environment["PATH"] = "$env:SystemRoot\System32;$env:SystemRoot"
-    $startInfo.Environment["HF_HUB_OFFLINE"] = "1"
-    $startInfo.Environment["TRANSFORMERS_OFFLINE"] = "1"
-    $startInfo.Environment["PIP_NO_INDEX"] = "1"
-    $startInfo.Environment["UV_OFFLINE"] = "1"
+    $startInfo.EnvironmentVariables["PATH"] = "$env:SystemRoot\System32;$env:SystemRoot"
+    $startInfo.EnvironmentVariables["HF_HUB_OFFLINE"] = "1"
+    $startInfo.EnvironmentVariables["TRANSFORMERS_OFFLINE"] = "1"
+    $startInfo.EnvironmentVariables["PIP_NO_INDEX"] = "1"
+    $startInfo.EnvironmentVariables["UV_OFFLINE"] = "1"
+    $startInfo.EnvironmentVariables["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    $startInfo.EnvironmentVariables["HTTP_PROXY"] = "http://127.0.0.1:9"
+    $startInfo.EnvironmentVariables["HTTPS_PROXY"] = "http://127.0.0.1:9"
+    $startInfo.EnvironmentVariables["ALL_PROXY"] = "http://127.0.0.1:9"
+    $startInfo.EnvironmentVariables["NO_PROXY"] = ""
     $shell = New-Object System.Diagnostics.Process
     $shell.StartInfo = $startInfo
     Assert-That -Condition ($shell.Start()) -Message "Could not start OpenKB.exe from the portable package."
@@ -443,6 +526,11 @@ function Assert-PackageLayout {
         (Join-Path $PackageRoot "LICENSE"),
         (Join-Path $PackageRoot "THIRD_PARTY_NOTICES.md"),
         (Join-Path $PackageRoot "runtime\engine\OpenKBEngine.exe"),
+        (Join-Path $PackageRoot "runtime\pageindex\OpenKBPageIndex.exe"),
+        (Join-Path $PackageRoot "runtime\pageindex\PageIndex-MIT.txt"),
+        (Join-Path $PackageRoot "runtime\pageindex\requirements-pageindex-experimental.lock"),
+        (Join-Path $PackageRoot "runtime\pageindex\requirements-pageindex-build.lock"),
+        (Join-Path $PackageRoot "runtime\pageindex\fixed-suite.json"),
         (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\config.yaml"),
         (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_det_infer.onnx"),
         (Join-Path $PackageRoot "runtime\engine\_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_rec_infer.onnx"),
@@ -466,16 +554,35 @@ function Assert-PackageLayout {
     foreach ($property in @("schemaVersion", "product", "version", "platform", "entryPoint", "payloadBytes", "componentBytes", "files")) {
         Assert-That -Condition ($manifest.PSObject.Properties.Name -contains $property) -Message "Portable package manifest is missing $property."
     }
-    Assert-That -Condition ($manifest.schemaVersion -eq 2) -Message "Portable package manifest has an unsupported schema."
+    Assert-That -Condition ($manifest.schemaVersion -eq 3) -Message "Portable package manifest has an unsupported schema."
     Assert-That -Condition ($manifest.product -eq "OpenKB") -Message "Portable package manifest has the wrong product."
     Assert-That -Condition ($manifest.platform -eq "windows-x64") -Message "Portable package manifest has the wrong platform."
     Assert-That -Condition ($manifest.version -is [string] -and -not [string]::IsNullOrWhiteSpace($manifest.version)) -Message "Portable package manifest has an invalid version."
     Assert-That -Condition ($manifest.entryPoint -eq "OpenKB.exe") -Message "Portable package manifest has the wrong entry point."
     Assert-That -Condition ($manifest.payloadBytes -is [int] -or $manifest.payloadBytes -is [int64]) -Message "Portable package manifest has an invalid payload size."
-    foreach ($component in @("shell", "engine", "webView2", "deepdoc", "legacyOffice")) {
+    foreach ($component in @("shell", "engine", "webView2", "deepdoc", "legacyOffice", "pageIndex")) {
         Assert-That -Condition ($manifest.componentBytes.PSObject.Properties.Name -contains $component) -Message "Portable package manifest is missing the $component size."
         Assert-That -Condition ($manifest.componentBytes.$component -is [int] -or $manifest.componentBytes.$component -is [int64]) -Message "Portable package manifest has an invalid $component size."
     }
+    Assert-That -Condition ($null -ne $manifest.experimentalProviders.pageIndex) -Message "Portable package manifest is missing PageIndex provider identity."
+    Assert-That -Condition ($manifest.experimentalProviders.pageIndex.packaged -eq $true) -Message "Portable package manifest does not mark PageIndex as packaged."
+    Assert-That -Condition ($manifest.experimentalProviders.pageIndex.defaultEnabled -eq $false) -Message "Experimental PageIndex must remain disabled by default."
+    Assert-That -Condition ($manifest.experimentalProviders.pageIndex.packageVersion -eq "0.2.10") -Message "Portable package manifest has the wrong PageIndex version."
+    Assert-That -Condition ($manifest.experimentalProviders.pageIndex.sourceCommit -eq "ba0ef02d78034704be049894c463dc606acbd0d7") -Message "Portable package manifest has the wrong PageIndex source commit."
+    Assert-That -Condition ($manifest.experimentalProviders.pageIndex.providerKind -eq "official_pageindex") -Message "Portable package manifest has the wrong PageIndex provider kind."
+    Assert-That -Condition ($manifest.experimentalProviders.pageIndex.entryPoint -eq "runtime/pageindex/OpenKBPageIndex.exe") -Message "Portable package manifest has the wrong PageIndex entry point."
+    $evaluation = $manifest.experimentalProviders.pageIndex.evaluation
+    $suitePath = Join-Path $PackageRoot "runtime\pageindex\fixed-suite.json"
+    $suite = Get-Content -Raw -LiteralPath $suitePath | ConvertFrom-Json
+    Assert-That -Condition ($evaluation.suite -eq "runtime/pageindex/fixed-suite.json") -Message "Portable package manifest has the wrong fixed suite path."
+    Assert-That -Condition ($evaluation.suiteSnapshotId -eq $suite.snapshot_id) -Message "Portable package manifest has the wrong fixed suite snapshot."
+    Assert-That -Condition ($evaluation.suiteDigest -match "^[0-9a-f]{64}$") -Message "Portable package manifest has an invalid fixed suite digest."
+    Assert-That -Condition ($evaluation.caseCount -eq @($suite.cases).Count) -Message "Portable package manifest has the wrong fixed suite case count."
+    Assert-That -Condition ($evaluation.corpusDigest -match "^[0-9a-f]{64}$") -Message "Portable package manifest has an invalid fixed corpus digest."
+    foreach ($corpusFile in @($evaluation.corpusFiles)) {
+        Assert-That -Condition (Test-Path -LiteralPath (Join-Path $PackageRoot "runtime\pageindex\$corpusFile") -PathType Leaf) -Message "Portable package fixed corpus is incomplete: $corpusFile"
+    }
+    Assert-That -Condition ((@($evaluation.variants) -join "|") -eq "fts|structure_lexical|wiki|baseline|local_graph|document_page_tree|catalog + document_page_tree") -Message "Portable package manifest has the wrong fixed evaluation variants."
     $records = @($manifest.files)
     Assert-That -Condition ($records.Count -gt 0) -Message "Portable package manifest has no file records."
     [int64] $recordBytes = 0
@@ -510,6 +617,7 @@ function Assert-PackageLayout {
         webView2 = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\webview2")
         deepdoc = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\engine\_internal\deepdoc")
         legacyOffice = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\engine\_internal\legacy-office")
+        pageIndex = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\pageindex")
     }
     foreach ($component in $actualComponentBytes.Keys) {
         Assert-That -Condition ([int64] $manifest.componentBytes.$component -eq [int64] $actualComponentBytes[$component]) -Message "Portable package manifest has an incorrect $component size."
@@ -531,13 +639,18 @@ function Assert-PackageLayout {
 $PackageDirectory = [System.IO.Path]::GetFullPath($PackageDirectory)
 Assert-That -Condition (Test-Path -LiteralPath $PackageDirectory -PathType Container) -Message "Portable package directory does not exist: $PackageDirectory"
 
-$temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("OpenKB 离线 包 " + [Guid]::NewGuid().ToString("N"))
+$unicodeDirectory = "OpenKB " + [char]0x79BB + [char]0x7EBF + " " + [char]0x5305 + " "
+$temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ($unicodeDirectory + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $temporaryRoot | Out-Null
 try {
     Copy-Item -LiteralPath $PackageDirectory -Destination $temporaryRoot -Recurse
     $copiedPackage = Join-Path $temporaryRoot (Split-Path -Leaf $PackageDirectory)
     Assert-PackageLayout -PackageRoot $copiedPackage
-    Test-FrozenEngine -EnginePath (Join-Path $copiedPackage "runtime\engine\OpenKBEngine.exe") -WorkingDirectory $copiedPackage -ScratchDirectory $temporaryRoot
+    $pageIndexWorker = Join-Path $copiedPackage "runtime\pageindex\OpenKBPageIndex.exe"
+    $engine = Join-Path $copiedPackage "runtime\engine\OpenKBEngine.exe"
+    Test-FrozenPageIndexWorker -WorkerPath $pageIndexWorker -ScratchDirectory $temporaryRoot
+    Test-PackagedPageIndexAdapter -EnginePath $engine -WorkerPath $pageIndexWorker -ScratchDirectory $temporaryRoot
+    Test-FrozenEngine -EnginePath $engine -WorkingDirectory $copiedPackage -ScratchDirectory $temporaryRoot
     Test-ShellProcessTree -PackageRoot $copiedPackage
     Write-Host "Portable package acceptance passed: $copiedPackage"
 }

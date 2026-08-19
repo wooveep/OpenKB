@@ -53,7 +53,8 @@ class PageIndexEvaluationProvider:
 def materialize_official_pageindex_provider(
     kb_dir: Path,
     *,
-    python_executable: Path | None,
+    python_executable: Path | None = None,
+    worker_executable: Path | None = None,
     timeout_seconds: float = PAGEINDEX_DEFAULT_TIMEOUT_SECONDS,
     force_rebuild: bool = False,
     invoke: ProviderInvoker | None = None,
@@ -110,6 +111,7 @@ def materialize_official_pageindex_provider(
                     images,
                     cache_dir=cache_dir,
                     python_executable=python_executable,
+                    worker_executable=worker_executable,
                     timeout_seconds=timeout_seconds,
                     invoke=invoke,
                     allow_cache=not force_rebuild,

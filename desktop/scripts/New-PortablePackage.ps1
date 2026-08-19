@@ -45,7 +45,15 @@ function Get-DirectoryBytes {
 function Write-ReleaseManifest {
     param(
         [Parameter(Mandatory = $true)] [string] $PackageRoot,
-        [Parameter(Mandatory = $true)] [string] $PackageVersion
+        [Parameter(Mandatory = $true)] [string] $PackageVersion,
+        [Parameter(Mandatory = $true)] [string] $PageIndexPackageVersion,
+        [Parameter(Mandatory = $true)] [string] $PageIndexSourceCommit,
+        [Parameter(Mandatory = $true)] [string] $PageIndexProviderVersion,
+        [Parameter(Mandatory = $true)] [string] $EvaluationSuiteSnapshotId,
+        [Parameter(Mandatory = $true)] [string] $EvaluationSuiteDigest,
+        [Parameter(Mandatory = $true)] [int] $EvaluationCaseCount,
+        [Parameter(Mandatory = $true)] [string] $EvaluationCorpusDigest,
+        [Parameter(Mandatory = $true)] [string[]] $EvaluationCorpusFiles
     )
 
     $files = @(
@@ -65,7 +73,7 @@ function Write-ReleaseManifest {
         $payloadBytes += [int64] $file.bytes
     }
     $manifest = [ordered]@{
-        schemaVersion = 2
+        schemaVersion = 3
         product = "OpenKB"
         version = $PackageVersion
         platform = "windows-x64"
@@ -78,6 +86,35 @@ function Write-ReleaseManifest {
             webView2 = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\webview2")
             deepdoc = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\engine\_internal\deepdoc")
             legacyOffice = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\engine\_internal\legacy-office")
+            pageIndex = Get-DirectoryBytes -Path (Join-Path $PackageRoot "runtime\pageindex")
+        }
+        experimentalProviders = [ordered]@{
+            pageIndex = [ordered]@{
+                packaged = $true
+                defaultEnabled = $false
+                packageVersion = $PageIndexPackageVersion
+                sourceCommit = $PageIndexSourceCommit
+                providerKind = "official_pageindex"
+                providerVersion = $PageIndexProviderVersion
+                entryPoint = "runtime/pageindex/OpenKBPageIndex.exe"
+                evaluation = [ordered]@{
+                    suite = "runtime/pageindex/fixed-suite.json"
+                    suiteSnapshotId = $EvaluationSuiteSnapshotId
+                    suiteDigest = $EvaluationSuiteDigest
+                    caseCount = $EvaluationCaseCount
+                    corpusDigest = $EvaluationCorpusDigest
+                    corpusFiles = @($EvaluationCorpusFiles)
+                    variants = @(
+                        "fts",
+                        "structure_lexical",
+                        "wiki",
+                        "baseline",
+                        "local_graph",
+                        "document_page_tree",
+                        "catalog + document_page_tree"
+                    )
+                }
+            }
         }
         files = $files
     }
@@ -180,6 +217,63 @@ finally {
     Pop-Location
 }
 
+$pageIndexSuite = Join-Path $desktopRoot "test-assets\pageindex-evaluation\fixed-suite.json"
+$pageIndexIdentityJson = & uv run python -c "import json, sys; from pathlib import Path; from openkb.desktop_pageindex_acceptance import pageindex_evaluation_corpus_identity; from openkb.desktop_pageindex_adapter import PAGEINDEX_PACKAGE_VERSION, PAGEINDEX_PROVIDER_VERSION, PAGEINDEX_SOURCE_COMMIT; from openkb.desktop_retrieval_evaluation_types import DesktopRetrievalEvaluationSuite; path = Path(sys.argv[1]); suite = DesktopRetrievalEvaluationSuite.from_json(path); corpus_digest, corpus_files = pageindex_evaluation_corpus_identity(path); print(json.dumps({'packageVersion': PAGEINDEX_PACKAGE_VERSION, 'providerVersion': PAGEINDEX_PROVIDER_VERSION, 'sourceCommit': PAGEINDEX_SOURCE_COMMIT, 'suiteSnapshotId': suite.snapshot_id, 'suiteDigest': suite.digest, 'caseCount': len(suite.cases), 'corpusDigest': corpus_digest, 'corpusFiles': corpus_files}))" $pageIndexSuite
+if ($LASTEXITCODE -ne 0) {
+    throw "PageIndex provider identity check failed with exit code $LASTEXITCODE."
+}
+$pageIndexIdentity = $pageIndexIdentityJson | ConvertFrom-Json
+$pageIndexRoot = Join-Path $buildRoot "pageindex"
+$pageIndexEnvironment = Join-Path $pageIndexRoot "environment"
+$pageIndexDist = Join-Path $pageIndexRoot "dist"
+$pageIndexWork = Join-Path $pageIndexRoot "work"
+$pageIndexSpec = Join-Path $pageIndexRoot "spec"
+if (Test-Path -LiteralPath $pageIndexRoot) {
+    Remove-Item -LiteralPath $pageIndexRoot -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $pageIndexRoot, $pageIndexDist, $pageIndexWork, $pageIndexSpec | Out-Null
+
+Invoke-Checked "PageIndex build environment" { & uv venv $pageIndexEnvironment --python $enginePythonVersion }
+$pageIndexPython = Join-Path $pageIndexEnvironment "Scripts\python.exe"
+Invoke-Checked "PageIndex runtime dependency install" {
+    & uv pip install `
+        --python $pageIndexPython `
+        --no-deps `
+        --requirement (Join-Path $repoRoot "requirements-pageindex-experimental.lock")
+}
+Invoke-Checked "PageIndex build dependency install" {
+    & uv pip install `
+        --python $pageIndexPython `
+        --requirement (Join-Path $repoRoot "requirements-pageindex-build.lock")
+}
+Invoke-Checked "PageIndex isolated runtime check" {
+    & $pageIndexPython (Join-Path $repoRoot "openkb\desktop_pageindex_worker.py") --check
+}
+
+Push-Location $repoRoot
+try {
+    Invoke-Checked "PageIndex worker freeze" {
+        & $pageIndexPython -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onedir `
+            --name OpenKBPageIndex `
+            --distpath $pageIndexDist `
+            --workpath $pageIndexWork `
+            --specpath $pageIndexSpec `
+            --hidden-import pageindex.page_index_md `
+            --collect-data pageindex `
+            --copy-metadata pageindex `
+            --copy-metadata PyPDF2 `
+            --copy-metadata python-dotenv `
+            --copy-metadata PyYAML `
+            (Join-Path $repoRoot "openkb\desktop_pageindex_worker.py")
+    }
+}
+finally {
+    Pop-Location
+}
+
 Push-Location $srcTauri
 try {
     Invoke-Checked "Tauri Shell build" { & $tauriCli build --config $tauriConfig --no-bundle }
@@ -191,10 +285,13 @@ finally {
 $shellExe = Join-Path $srcTauri "target\release\OpenKB.exe"
 $engineDirectory = Join-Path $engineDist "OpenKBEngine"
 $engineExe = Join-Path $engineDirectory "OpenKBEngine.exe"
+$pageIndexDirectory = Join-Path $pageIndexDist "OpenKBPageIndex"
+$pageIndexExe = Join-Path $pageIndexDirectory "OpenKBPageIndex.exe"
 $webViewRuntime = Join-Path $srcTauri "runtime\webview2"
 foreach ($requiredPath in @(
     $shellExe,
     $engineExe,
+    $pageIndexExe,
     (Join-Path $webViewRuntime "msedgewebview2.exe"),
     (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\config.yaml"),
     (Join-Path $engineDirectory "_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_det_infer.onnx"),
@@ -221,10 +318,28 @@ New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
 
 Copy-Item -LiteralPath $shellExe -Destination (Join-Path $packageRoot "OpenKB.exe") -Force
 Copy-DirectoryContents -Source $engineDirectory -Destination (Join-Path $packageRoot "runtime\engine")
+Copy-DirectoryContents -Source $pageIndexDirectory -Destination (Join-Path $packageRoot "runtime\pageindex")
 Copy-DirectoryContents -Source $webViewRuntime -Destination (Join-Path $packageRoot "runtime\webview2")
+Copy-Item -LiteralPath (Join-Path $repoRoot "requirements-pageindex-experimental.lock") -Destination (Join-Path $packageRoot "runtime\pageindex") -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot "requirements-pageindex-build.lock") -Destination (Join-Path $packageRoot "runtime\pageindex") -Force
+Copy-Item -LiteralPath (Join-Path $desktopRoot "licenses\PageIndex-MIT.txt") -Destination (Join-Path $packageRoot "runtime\pageindex") -Force
+Copy-Item -LiteralPath $pageIndexSuite -Destination (Join-Path $packageRoot "runtime\pageindex\fixed-suite.json") -Force
+foreach ($corpusFile in @($pageIndexIdentity.corpusFiles)) {
+    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $pageIndexSuite) $corpusFile) -Destination (Join-Path $packageRoot "runtime\pageindex") -Force
+}
 Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $packageRoot -Force
 Copy-Item -LiteralPath (Join-Path $desktopRoot "THIRD_PARTY_NOTICES.md") -Destination $packageRoot -Force
-Write-ReleaseManifest -PackageRoot $packageRoot -PackageVersion $Version
+Write-ReleaseManifest `
+    -PackageRoot $packageRoot `
+    -PackageVersion $Version `
+    -PageIndexPackageVersion $pageIndexIdentity.packageVersion `
+    -PageIndexSourceCommit $pageIndexIdentity.sourceCommit `
+    -PageIndexProviderVersion $pageIndexIdentity.providerVersion `
+    -EvaluationSuiteSnapshotId $pageIndexIdentity.suiteSnapshotId `
+    -EvaluationSuiteDigest $pageIndexIdentity.suiteDigest `
+    -EvaluationCaseCount $pageIndexIdentity.caseCount `
+    -EvaluationCorpusDigest $pageIndexIdentity.corpusDigest `
+    -EvaluationCorpusFiles @($pageIndexIdentity.corpusFiles)
 
 $zipPath = Join-Path $OutputDirectory "$packageName.zip"
 $checksumPath = "$zipPath.sha256"
@@ -234,6 +349,7 @@ foreach ($existingOutput in @($zipPath, $checksumPath, $summaryPath)) {
         Remove-Item -LiteralPath $existingOutput -Force
     }
 }
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::CreateFromDirectory(
     $packageRoot,
     $zipPath,

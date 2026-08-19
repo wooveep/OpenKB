@@ -15,6 +15,11 @@ import pytest
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_import_artifacts import DocumentIRBlock, build_evidence
 from openkb.desktop_page_tree import DETERMINISTIC_PROVIDER_KIND
+from openkb.desktop_pageindex_acceptance import (
+    pageindex_evaluation_corpus_identity,
+    run_pageindex_package_acceptance,
+    validate_pageindex_evaluation,
+)
 from openkb.desktop_pageindex_adapter import (
     PAGEINDEX_PROVIDER_KIND,
     PAGEINDEX_PROVIDER_VERSION,
@@ -25,6 +30,7 @@ from openkb.desktop_pageindex_adapter import (
 from openkb.desktop_pageindex_provider import materialize_official_pageindex_provider
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_retrieval_evaluation import DesktopRetrievalEvaluator
+from openkb.desktop_retrieval_evaluation_types import DesktopRetrievalEvaluationSuite
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
@@ -65,6 +71,19 @@ def _pageindex_result(input_path: Path, output_path: Path, _timeout: float) -> N
     )
 
 
+def _package_acceptance_result(input_path: Path, output_path: Path, _timeout: float) -> None:
+    markdown = input_path.read_text(encoding="utf-8")
+    output_path.write_text(
+        json.dumps(
+            {
+                "line_count": markdown.count("\n") + 1,
+                "structure": [{"title": "Portable PageIndex", "node_id": "0001", "line_num": 1}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _refresh_cache_digest(payload) -> None:
     checkpoint_text = json.dumps(
         payload["checkpoint"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -90,6 +109,33 @@ def test_subprocess_invoker_preserves_virtual_environment_launcher(tmp_path, mon
     _subprocess_invoker(launcher)(input_path, output_path, 1.0)
 
     assert captured[0][0] == os.path.abspath(launcher)
+    assert captured[0][1].endswith("desktop_pageindex_worker.py")
+
+
+def test_subprocess_invoker_runs_a_frozen_worker_directly(tmp_path, monkeypatch) -> None:
+    input_path = tmp_path / "document.md"
+    output_path = tmp_path / "tree.json"
+    input_path.write_text("# Guide\n", encoding="utf-8")
+    worker = Path("portable/runtime/pageindex/OpenKBPageIndex.exe")
+    captured: list[tuple[str, ...]] = []
+
+    def run(command, **_kwargs):
+        captured.append(tuple(command))
+        output_path.write_text("{}", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr("openkb.desktop_pageindex_adapter.subprocess.run", run)
+
+    _subprocess_invoker(None, worker)(input_path, output_path, 1.0)
+
+    assert captured == [
+        (os.path.abspath(worker), str(input_path), str(output_path)),
+    ]
+
+
+def test_subprocess_invoker_rejects_two_runtime_kinds() -> None:
+    with pytest.raises(ValueError):
+        _subprocess_invoker(Path("python"), Path("OpenKBPageIndex.exe"))
 
 
 def test_adapter_normalizes_pageindex_nodes_to_existing_evidence_and_safe_cache(tmp_path) -> None:
@@ -372,9 +418,180 @@ def test_provider_failure_is_reported_without_changing_available_baseline(tmp_pa
     assert not snapshot.identity_bound
 
 
+def test_packaged_acceptance_contains_provider_failures_without_changing_kb(tmp_path) -> None:
+    worker = tmp_path / "OpenKBPageIndex.exe"
+    worker.write_bytes(b"test placeholder")
+
+    def timeout(_input: Path, _output: Path, seconds: float) -> None:
+        raise subprocess.TimeoutExpired("OpenKBPageIndex.exe", seconds)
+
+    def crash(_input: Path, _output: Path, _seconds: float) -> None:
+        raise PageIndexProviderError("pageindex_provider_unavailable", "test crash")
+
+    result = run_pageindex_package_acceptance(
+        tmp_path / "acceptance",
+        worker,
+        valid_invoke=_package_acceptance_result,
+        timeout_invoke=timeout,
+        crash_invoke=crash,
+    )
+
+    assert result["passed"] is True
+    assert result["scenarios"] == {
+        "timeout": "pageindex_provider_timeout",
+        "invalid_tree": "pageindex_provider_invalid_tree",
+        "cache_corruption": "rebuilt",
+        "provider_crash": "pageindex_provider_unavailable",
+        "baseline_available": True,
+        "sqlite_integrity": True,
+    }
+
+
+def test_package_evaluation_validation_binds_suite_provider_and_report(tmp_path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    source_suite = root / "desktop" / "test-assets" / "pageindex-evaluation" / "fixed-suite.json"
+    package_root = tmp_path / "package"
+    pageindex_root = package_root / "runtime" / "pageindex"
+    pageindex_root.mkdir(parents=True)
+    suite_path = pageindex_root / "fixed-suite.json"
+    suite_path.write_bytes(source_suite.read_bytes())
+    corpus_digest, corpus_files = pageindex_evaluation_corpus_identity(source_suite)
+    for file_name in corpus_files:
+        (pageindex_root / file_name).write_bytes((source_suite.parent / file_name).read_bytes())
+    worker = pageindex_root / "OpenKBPageIndex.exe"
+    worker.write_bytes(b"fixed packaged worker")
+    worker_sha256 = hashlib.sha256(worker.read_bytes()).hexdigest()
+    source_report = root / "desktop" / "acceptance" / "2026-08-20-pageindex-retrieval-report.json"
+    report_payload = json.loads(source_report.read_text(encoding="utf-8"))
+    report_payload["pageindex_worker_sha256"] = worker_sha256
+    report_path = tmp_path / "bound-report.json"
+    report_path.write_text(json.dumps(report_payload), encoding="utf-8")
+    suite = DesktopRetrievalEvaluationSuite.from_json(suite_path)
+    manifest_path = package_root / "release-manifest.json"
+    manifest = {
+        "schemaVersion": 3,
+        "experimentalProviders": {
+            "pageIndex": {
+                "defaultEnabled": False,
+                "providerKind": PAGEINDEX_PROVIDER_KIND,
+                "providerVersion": PAGEINDEX_PROVIDER_VERSION,
+                "entryPoint": "runtime/pageindex/OpenKBPageIndex.exe",
+                "evaluation": {
+                    "suiteSnapshotId": suite.snapshot_id,
+                    "suiteDigest": suite.digest,
+                    "caseCount": len(suite.cases),
+                    "corpusDigest": corpus_digest,
+                    "corpusFiles": list(corpus_files),
+                    "variants": [
+                        "fts",
+                        "structure_lexical",
+                        "wiki",
+                        "baseline",
+                        "local_graph",
+                        "document_page_tree",
+                        "catalog + document_page_tree",
+                    ],
+                },
+            }
+        },
+        "files": [
+            {
+                "path": "runtime/pageindex/OpenKBPageIndex.exe",
+                "sha256": worker_sha256,
+                "bytes": worker.stat().st_size,
+            }
+        ],
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    validation = validate_pageindex_evaluation(manifest_path, suite_path, report_path)
+
+    assert validation["valid"] is True
+    assert validation["passed"] is False
+    assert validation["suite_digest"] == suite.digest
+    assert validation["provider_version"] == PAGEINDEX_PROVIDER_VERSION
+    assert validation["report_sha256"] == hashlib.sha256(report_path.read_bytes()).hexdigest()
+    assert validation["corpus_digest"] == corpus_digest
+    assert validation["worker_sha256"] == worker_sha256
+
+    worker.write_bytes(b"changed packaged worker")
+    changed_worker_sha256 = hashlib.sha256(worker.read_bytes()).hexdigest()
+    manifest["files"][0]["sha256"] = changed_worker_sha256
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="corpus or worker"):
+        validate_pageindex_evaluation(manifest_path, suite_path, report_path)
+    worker.write_bytes(b"fixed packaged worker")
+    manifest["files"][0]["sha256"] = worker_sha256
+
+    corpus_file = pageindex_root / corpus_files[0]
+    original_corpus = corpus_file.read_bytes()
+    corpus_file.write_bytes(original_corpus + b"\nchanged")
+    changed_corpus_digest, _files = pageindex_evaluation_corpus_identity(suite_path)
+    manifest["experimentalProviders"]["pageIndex"]["evaluation"]["corpusDigest"] = (
+        changed_corpus_digest
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="corpus or worker"):
+        validate_pageindex_evaluation(manifest_path, suite_path, report_path)
+    corpus_file.write_bytes(original_corpus)
+    manifest["experimentalProviders"]["pageIndex"]["evaluation"]["corpusDigest"] = corpus_digest
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    invalid_report = tmp_path / "unbound-report.json"
+    invalid_report.write_text('{"gate":{"passed":true}}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        validate_pageindex_evaluation(manifest_path, suite_path, invalid_report)
+
+    incomplete_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    incomplete_payload["results"].pop()
+    incomplete_report = tmp_path / "incomplete-report.json"
+    incomplete_report.write_text(json.dumps(incomplete_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="coverage"):
+        validate_pageindex_evaluation(manifest_path, suite_path, incomplete_report)
+
+    forged_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    forged_payload["gate"] = {key: True for key in forged_payload["gate"]}
+    forged_report = tmp_path / "forged-gate-report.json"
+    forged_report.write_text(json.dumps(forged_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="gate"):
+        validate_pageindex_evaluation(manifest_path, suite_path, forged_report)
+
+    unbound_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    unbound_payload["page_tree_generations"].pop()
+    unbound_report = tmp_path / "unbound-generation-report.json"
+    unbound_report.write_text(json.dumps(unbound_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="gate"):
+        validate_pageindex_evaluation(manifest_path, suite_path, unbound_report)
+
+    catalogless_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    catalogless_payload["catalog_generation_ids"] = []
+    for result in catalogless_payload["results"]:
+        result["catalog_generation_ids"] = []
+    catalogless_report = tmp_path / "catalogless-report.json"
+    catalogless_report.write_text(json.dumps(catalogless_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="gate"):
+        validate_pageindex_evaluation(manifest_path, suite_path, catalogless_report)
+
+    stale_snapshot_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    stale_snapshot_payload["knowledge_snapshot_digest"] = "0" * 64
+    stale_snapshot_report = tmp_path / "stale-snapshot-report.json"
+    stale_snapshot_report.write_text(json.dumps(stale_snapshot_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="gate"):
+        validate_pageindex_evaluation(manifest_path, suite_path, stale_snapshot_report)
+
+    manifest["experimentalProviders"]["pageIndex"]["providerVersion"] = "stale-provider"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError):
+        validate_pageindex_evaluation(manifest_path, suite_path, report_path)
+
+
 def test_experimental_dependency_is_exact_isolated_and_vectorless() -> None:
     root = Path(__file__).resolve().parents[1]
     lock = (root / "requirements-pageindex-experimental.lock").read_text(encoding="utf-8")
+    build_lock = (root / "requirements-pageindex-build.lock").read_text(encoding="utf-8")
+    package_script = (root / "desktop" / "scripts" / "New-PortablePackage.ps1").read_text(
+        encoding="utf-8"
+    )
     project = (root / "pyproject.toml").read_text(encoding="utf-8")
     assert "pageindex-0.2.10-py3-none-any.whl#sha256=" in lock
     assert PAGEINDEX_PROVIDER_VERSION == "0.2.10+ba0ef02d7803.openkb1"
@@ -384,3 +601,8 @@ def test_experimental_dependency_is_exact_isolated_and_vectorless() -> None:
     assert '"pageindex==' not in project.casefold()
     assert '"pageindex @' not in project.casefold()
     assert all(name not in lock.casefold() for name in ("faiss", "embedding", "chromadb"))
+    assert "pyinstaller==6.22.0" in build_lock
+    assert "--onedir" in package_script
+    assert "--copy-metadata pageindex" in package_script
+    assert "defaultEnabled = $false" in package_script
+    assert (root / "desktop" / "licenses" / "PageIndex-MIT.txt").is_file()

@@ -70,11 +70,12 @@ again without adding a full-corpus scan to question latency.
 
 ## Experimental official PageIndex provider
 
-PageIndex is deliberately absent from the default OpenKB and Portable Desktop
-dependencies. Its 0.2.10 SDK requires a newer LiteLLM plus Chat/Agents packages,
-so installing it into the Engine environment would replace audited runtime
-pins and add cold-start cost before the fixed gate has passed. Create a separate
-Windows environment instead:
+PageIndex remains absent from the default Engine environment and is disabled
+for ordinary Desktop retrieval. Its 0.2.10 SDK requires a newer LiteLLM plus
+Chat/Agents packages, so installing it into the Engine would replace audited
+runtime pins. A Portable Desktop build carries a separate
+`runtime/pageindex/OpenKBPageIndex.exe` onedir worker; source checkouts may
+create the equivalent isolated Windows environment instead:
 
 ```powershell
 pwsh -NoProfile -File desktop/scripts/New-PageIndexProviderEnvironment.ps1 `
@@ -98,6 +99,17 @@ uv run python -m openkb.desktop_retrieval_evaluation <kb-dir> <suite.json> `
   --experimental-pageindex-python `
   "$env:LOCALAPPDATA\OpenKB\pageindex-provider-0.2.10\Scripts\python.exe" `
   --repetitions 3 --output <pageindex-report.json>
+```
+
+To evaluate the exact worker shipped in a candidate Portable Package, use the
+worker flag instead of the Python flag:
+
+```powershell
+uv run python -m openkb.desktop_retrieval_evaluation <kb-dir> <suite.json> `
+  --experimental-pageindex-worker `
+  "<portable-package>\runtime\pageindex\OpenKBPageIndex.exe" `
+  --rebuild-official-pageindex --repetitions 3 `
+  --output <pageindex-package-report.json>
 ```
 
 OpenKB renders a temporary Markdown view from its SQLite Document IR, asks the

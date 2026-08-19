@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "pageindex-portable-corpus-v1",
+  "max_graph_latency_ms": 1000,
+  "max_graph_model_calls": 20,
+  "cases": [
+    {
+      "case_id": "local-relay",
+      "category": "local_fact",
+      "question": "What does the Relay do with deliveries?",
+      "expected_evidence": [
+        {
+          "document_name": "delivery-system.md",
+          "text_contains": "The Relay forwards deliveries."
+        }
+      ],
+      "expected_answer_terms": ["Relay", "forwards"]
+    },
+    {
+      "case_id": "control-path",
+      "category": "multi_hop",
+      "question": "Which components form the controlplane raptor release path?",
+      "expected_evidence": [
+        {
+          "document_name": "delivery-system.md",
+          "text_contains": "The Relay forwards deliveries."
+        },
+        {
+          "document_name": "delivery-system.md",
+          "text_contains": "The Gate validates deliveries."
+        }
+      ],
+      "expected_answer_terms": ["Relay", "Gate"],
+      "long_document": true
+    },
+    {
+      "case_id": "policy-conflict",
+      "category": "cross_document_conflict",
+      "question": "What conflict does policyconflict zeta describe?",
+      "expected_evidence": [
+        {
+          "document_name": "policy-a.md",
+          "text_contains": "permits encrypted storage"
+        },
+        {
+          "document_name": "policy-b.md",
+          "text_contains": "rejects plaintext storage"
+        }
+      ],
+      "expected_answer_terms": ["permits", "rejects"]
+    },
+    {
+      "case_id": "retention-theme",
+      "category": "global_theme",
+      "question": "How do the Archive and Ledger support retentiontheme omega?",
+      "expected_evidence": [
+        {
+          "document_name": "archive.md",
+          "text_contains": "keeps records for audit"
+        },
+        {
+          "document_name": "ledger.md",
+          "text_contains": "carries audit history"
+        }
+      ],
+      "expected_answer_terms": ["Archive", "Ledger"]
+    },
+    {
+      "case_id": "not-present",
+      "category": "absent_answer",
+      "question": "What is the lunarfridge quantumzzle calibration value?",
+      "expected_evidence": [],
+      "expected_answer_terms": [],
+      "expect_absent_answer": true
+    }
+  ]
+}

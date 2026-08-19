@@ -1,0 +1,84 @@
+{
+    "schemaVersion":  1,
+    "measuredAtUtc":  "2026-08-20T01:16:14.6176844Z",
+    "environment":  {
+                        "machine":  "DESKTOP-20ODNT8",
+                        "os":  "Microsoft Windows 11 Enterprise LTSC",
+                        "osVersion":  "10.0.26100",
+                        "architecture":  "64-bit",
+                        "cpu":  "AMD Ryzen 7 9700X 8-Core Processor             ",
+                        "logicalProcessors":  6,
+                        "totalMemoryBytes":  12864348160,
+                        "powershell":  "5.1.26100.9168"
+                    },
+    "package":  {
+                    "candidateArchiveBytes":  614885444,
+                    "baselineArchiveBytes":  601134321,
+                    "candidateExpandedBytes":  1328385625,
+                    "baselineExpandedBytes":  1295161402,
+                    "candidatePayloadBytes":  1327783381,
+                    "baselinePayloadBytes":  1294631857,
+                    "pageIndexComponentBytes":  27334114
+                },
+    "engine":  {
+                   "providerLazyLoaded":  true,
+                   "baseline":  {
+                                    "samplesMs":  [
+                                                      291.466,
+                                                      295.644,
+                                                      299.742,
+                                                      299.421,
+                                                      299.49
+                                                  ],
+                                    "p95Ms":  299.742,
+                                    "peakWorkingSetBytes":  43950080
+                                },
+                   "candidate":  {
+                                     "samplesMs":  [
+                                                       304.801,
+                                                       298.862,
+                                                       309.969,
+                                                       299.76,
+                                                       284.212
+                                                   ],
+                                     "p95Ms":  309.969,
+                                     "peakWorkingSetBytes":  44068864
+                                 },
+                   "coldStartP95DeltaMs":  10.227,
+                   "coldStartBudgetMs":  1000,
+                   "coldStartPassed":  true
+               },
+    "pageIndex":  {
+                      "packageVersion":  "0.2.10",
+                      "providerVersion":  "0.2.10+ba0ef02d7803.openkb1",
+                      "defaultEnabled":  false,
+                      "selfCheckMs":  172.071,
+                      "firstQueryLatencyMs":  167.785,
+                      "queryP95Ms":  172.222,
+                      "peakWorkingSetBytes":  35520512,
+                      "crashContained":  true
+                  },
+    "fixedEvaluation":  {
+                            "report":  "2026-08-20-pageindex-retrieval-report.json",
+                            "sha256":  "c5e154102c13172cb45118aae5e475d5c8358bcd40124cbf8dc8f4d5f24f4c3e",
+                            "valid":  true,
+                            "passed":  false,
+                            "suiteSnapshotId":  "pageindex-portable-corpus-v1",
+                            "suiteDigest":  "63e4dee7d01fc61893248dfea275b425effdc1805af87d81de39301462fdcbde",
+                            "corpusDigest":  "6e92fd1f6eab474948d0930c2eef89ee8ecb3c968425cc010922575fa3766fca",
+                            "caseCount":  5,
+                            "variantCount":  7,
+                            "repetitions":  1,
+                            "providerKind":  "official_pageindex",
+                            "providerVersion":  "0.2.10+ba0ef02d7803.openkb1",
+                            "workerSha256":  "90fbd82b501e18fff6a7dd22cd09a23fefe9f5adaa80f5d2f8c89a8c5314a51c"
+                        },
+    "decision":  {
+                     "result":  "not_promoted",
+                     "defaultProvider":  "deterministic",
+                     "pageIndexDefaultEnabled":  false,
+                     "failures":  [
+                                      "fixed_evaluation_gate_failed"
+                                  ]
+                 }
+}

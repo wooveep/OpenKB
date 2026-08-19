@@ -759,6 +759,10 @@ def _parse_request(frame: dict[str, object]) -> DesktopRequest:
 
 def main() -> int:
     """Run the packaged Engine child process."""
+    if sys.argv[1:]:
+        from openkb.desktop_pageindex_acceptance import run_cli
+
+        return run_cli(sys.argv[1:])
     configure_desktop_engine_logging()
     logger.info("OpenKB Desktop Engine started.")
     try:

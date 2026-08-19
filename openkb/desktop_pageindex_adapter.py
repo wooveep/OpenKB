@@ -79,6 +79,7 @@ def build_official_pageindex_generation(
     *,
     cache_dir: Path,
     python_executable: Path | None = None,
+    worker_executable: Path | None = None,
     timeout_seconds: float = PAGEINDEX_DEFAULT_TIMEOUT_SECONDS,
     invoke: ProviderInvoker | None = None,
     allow_cache: bool = True,
@@ -100,7 +101,7 @@ def build_official_pageindex_generation(
         return cached
 
     markdown, rendered_blocks = _render_document_ir(blocks)
-    provider_invoke = invoke or _subprocess_invoker(python_executable)
+    provider_invoke = invoke or _subprocess_invoker(python_executable, worker_executable)
     try:
         with tempfile.TemporaryDirectory(prefix="openkb-pageindex-") as temporary:
             temporary_dir = Path(temporary)
@@ -216,23 +217,36 @@ def _image_identities(generation: PageTreeGeneration) -> tuple[tuple[str, int], 
     )
 
 
-def _subprocess_invoker(python_executable: Path | None) -> ProviderInvoker:
-    if python_executable is None:
+def _subprocess_invoker(
+    python_executable: Path | None,
+    worker_executable: Path | None = None,
+) -> ProviderInvoker:
+    if python_executable is not None and worker_executable is not None:
+        raise ValueError("Select either an isolated Python runtime or a frozen PageIndex worker.")
+    if python_executable is None and worker_executable is None:
         raise PageIndexProviderError(
             "pageindex_provider_not_configured",
-            "An isolated official PageIndex Python runtime was not selected.",
+            "An isolated official PageIndex runtime was not selected.",
         )
     # Do not resolve this path: POSIX virtual environments commonly expose
     # ``bin/python`` as a symlink, and resolving it drops the environment's
     # package context in the child process.
-    executable = Path(os.path.abspath(python_executable.expanduser()))
-    worker = Path(__file__).with_name("desktop_pageindex_worker.py")
+    selected = worker_executable if worker_executable is not None else python_executable
+    assert selected is not None
+    executable = Path(os.path.abspath(selected.expanduser()))
+    source_worker = Path(__file__).with_name("desktop_pageindex_worker.py")
+    frozen = worker_executable is not None
 
     def invoke(input_path: Path, output_path: Path, timeout_seconds: float) -> None:
         environment = _provider_environment()
         try:
+            command = (
+                (str(executable), str(input_path), str(output_path))
+                if frozen
+                else (str(executable), str(source_worker), str(input_path), str(output_path))
+            )
             completed = subprocess.run(
-                (str(executable), str(worker), str(input_path), str(output_path)),
+                command,
                 check=False,
                 capture_output=True,
                 text=True,

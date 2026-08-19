@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Iterable, Literal, cast
 
 from openkb.desktop_retrieval_channels import (
     DESKTOP_EVALUATION_VARIANTS,
@@ -126,6 +126,42 @@ class DesktopRetrievalEvaluationSuite:
         )
 
 
+def evaluation_corpus_digest(records: Iterable[tuple[str, str]]) -> str:
+    """Hash a unique, ordered source-file inventory without retaining content."""
+    normalized = sorted({(name, digest) for name, digest in records})
+    if not normalized or len({name for name, _digest in normalized}) != len(normalized):
+        raise ValueError("Desktop retrieval evaluation corpus inventory is invalid.")
+    if any(
+        Path(name).name != name
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+        for name, digest in normalized
+    ):
+        raise ValueError("Desktop retrieval evaluation corpus inventory is invalid.")
+    payload = [{"file": name, "sha256": digest} for name, digest in normalized]
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def evaluation_corpus_identity(suite_path: Path) -> tuple[str, tuple[str, ...]]:
+    """Hash the exact source files named by a fixed evaluation suite."""
+    suite = DesktopRetrievalEvaluationSuite.from_json(suite_path)
+    file_names = tuple(
+        sorted(
+            {selector.document_name for case in suite.cases for selector in case.expected_evidence}
+        )
+    )
+    records: list[tuple[str, str]] = []
+    for name in file_names:
+        path = suite_path.parent / name
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as error:
+            raise ValueError("Desktop retrieval evaluation corpus is incomplete.") from error
+        records.append((name, digest))
+    return evaluation_corpus_digest(records), file_names
+
+
 @dataclass(frozen=True, order=True)
 class DesktopPageTreeProviderIdentity:
     provider_kind: str
@@ -156,6 +192,19 @@ class DesktopPageTreeGenerationIdentity:
             "provider_version": self.provider_version,
             "enrichment_generation_id": self.enrichment_generation_id,
         }
+
+
+def evaluation_derived_snapshot_digest(
+    catalog_generation_ids: tuple[str, ...],
+    page_tree_generations: tuple[DesktopPageTreeGenerationIdentity, ...],
+) -> str:
+    """Hash the complete derived-generation identity used by one evaluation."""
+    payload = {
+        "catalog_generation_ids": list(catalog_generation_ids),
+        "page_tree_generations": [item.as_dict() for item in page_tree_generations],
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -283,6 +332,11 @@ class DesktopRetrievalEvaluationReport:
     metrics: dict[DesktopEvaluationVariant, DesktopRetrievalEvaluationMetrics]
     gate: DesktopPageTreeEvaluationGate
     local_graph_gate: DesktopLocalGraphEvaluationGate
+    corpus_digest: str | None = None
+    pageindex_worker_sha256: str | None = None
+    final_knowledge_snapshot_digest: str | None = None
+    final_knowledge_snapshot_revision: int | None = None
+    final_derived_snapshot_digest: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -300,6 +354,11 @@ class DesktopRetrievalEvaluationReport:
             "metrics": {variant: metrics.as_dict() for variant, metrics in self.metrics.items()},
             "gate": self.gate.as_dict(),
             "local_graph_gate": self.local_graph_gate.as_dict(),
+            "corpus_digest": self.corpus_digest,
+            "pageindex_worker_sha256": self.pageindex_worker_sha256,
+            "final_knowledge_snapshot_digest": self.final_knowledge_snapshot_digest,
+            "final_knowledge_snapshot_revision": self.final_knowledge_snapshot_revision,
+            "final_derived_snapshot_digest": self.final_derived_snapshot_digest,
         }
 
     def write(self, path: Path) -> None:
@@ -396,6 +455,15 @@ def _evaluation_report(value: dict[object, object]) -> DesktopRetrievalEvaluatio
             if isinstance(raw_graph_gate, dict)
             else _failed_local_graph_gate()
         ),
+        corpus_digest=_optional_sha256(value, "corpus_digest"),
+        pageindex_worker_sha256=_optional_sha256(value, "pageindex_worker_sha256"),
+        final_knowledge_snapshot_digest=_optional_sha256(value, "final_knowledge_snapshot_digest"),
+        final_knowledge_snapshot_revision=(
+            _report_int(value, "final_knowledge_snapshot_revision")
+            if value.get("final_knowledge_snapshot_revision") is not None
+            else None
+        ),
+        final_derived_snapshot_digest=_optional_sha256(value, "final_derived_snapshot_digest"),
     )
 
 
@@ -543,6 +611,19 @@ def _optional_string(value: dict[object, object], key: str) -> str | None:
     if not isinstance(candidate, str) or not candidate.strip():
         raise ValueError(f"Desktop retrieval evaluation field {key} must be a string or null.")
     return candidate.strip()
+
+
+def _optional_sha256(value: dict[object, object], key: str) -> str | None:
+    candidate = value.get(key)
+    if candidate is None:
+        return None
+    if (
+        not isinstance(candidate, str)
+        or len(candidate) != 64
+        or any(character not in "0123456789abcdef" for character in candidate)
+    ):
+        raise ValueError(f"Desktop retrieval evaluation field {key} must be a SHA-256.")
+    return candidate
 
 
 def _page_tree_latency_budget(value: dict[object, object]) -> float:

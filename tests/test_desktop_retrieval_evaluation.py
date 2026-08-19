@@ -38,6 +38,7 @@ from openkb.desktop_retrieval_evaluation_types import (
     DesktopRetrievalEvaluationCase,
     DesktopRetrievalEvaluationCaseResult,
     DesktopRetrievalEvaluationMetrics,
+    evaluation_corpus_identity,
 )
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
@@ -208,6 +209,11 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     )
     report = evaluator.evaluate(DesktopRetrievalEvaluationSuite.from_json(suite_path))
 
+    expected_corpus_digest, _files = evaluation_corpus_identity(suite_path)
+    assert report.corpus_digest == expected_corpus_digest
+    assert report.final_knowledge_snapshot_digest == report.knowledge_snapshot_digest
+    assert report.final_knowledge_snapshot_revision == report.knowledge_snapshot_revision
+    assert report.final_derived_snapshot_digest is not None
     assert set(report.metrics) == {
         "fts",
         "structure_lexical",
@@ -335,6 +341,8 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     assert payload["suite_snapshot_id"] == "desktop-vectorless-fixture-v1"
     assert payload["knowledge_snapshot_digest"] == report.knowledge_snapshot_digest
     assert payload["knowledge_snapshot_revision"] == report.knowledge_snapshot_revision
+    assert payload["corpus_digest"] == report.corpus_digest
+    assert payload["final_derived_snapshot_digest"] == report.final_derived_snapshot_digest
     assert payload["metrics"]["local_graph"]["evidence_recall_k"] == 6
     assert payload["gate"]["passed"] is True
     assert payload["local_graph_gate"]["passed"] is True
@@ -368,6 +376,8 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     late_source.write_text("The later source changes the retrieval corpus.\n", encoding="utf-8")
     importer.import_text(late_source)
     assert not local_graph_default_enabled(kb_dir)
+    with pytest.raises(ValueError, match="corpus does not match the fixed suite"):
+        evaluator.evaluate(suite)
 
 
 def test_evaluation_snapshot_tracks_base_and_enrichment_generations(tmp_path) -> None:
