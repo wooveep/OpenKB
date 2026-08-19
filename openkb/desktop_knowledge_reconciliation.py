@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import re
 import sqlite3
 import uuid
@@ -31,9 +32,15 @@ from openkb.desktop_knowledge_reconciliation_changes import (
 )
 from openkb.desktop_knowledge_sources import strip_knowledge_source_markers
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
+from openkb.desktop_okf_projection import (
+    activate_okf_projection,
+    discard_okf_projection_staging,
+    stage_okf_projection_in,
+)
 from openkb.desktop_workspace import desktop_state_database_path
 
 _FIELD_PATTERN = re.compile(r"^\s*(?:[-*+]\s*)?(?P<key>[^:：\n]{1,80})\s*[:：]\s*\S")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -72,6 +79,8 @@ class DesktopKnowledgeReconciliationService:
         a short SQLite transaction and must not acquire that file lock again.
         """
         connection = self._connect()
+        staged_projection: Path | None = None
+        conflicts: list[DesktopKnowledgeReconciliationConflict] = []
         try:
             with connection:
                 document = connection.execute(
@@ -84,7 +93,7 @@ class DesktopKnowledgeReconciliationService:
                 if document is None:
                     return ()
                 document_name = str(document[0])
-                conflicts: list[DesktopKnowledgeReconciliationConflict] = []
+                initial_generation_id = current_generation_id_in(connection)
                 for parsed_change in extract_incoming_knowledge_changes(blocks, document_name):
                     current_generation_id = current_generation_id_in(connection)
                     for change in _resolved_kinds_in(
@@ -98,9 +107,22 @@ class DesktopKnowledgeReconciliationService:
                         )
                         if conflict is not None:
                             conflicts.append(conflict)
-                return tuple(conflicts)
+                if current_generation_id_in(connection) != initial_generation_id:
+                    staged_projection = stage_okf_projection_in(connection, self._kb_dir)
+        except BaseException:
+            if staged_projection is not None:
+                discard_okf_projection_staging(staged_projection)
+            raise
         finally:
             connection.close()
+        if staged_projection is not None:
+            try:
+                activate_okf_projection(self._kb_dir, staged_projection)
+            except Exception:
+                logger.exception("Could not activate auto-reconciled OKF projection.")
+            finally:
+                discard_okf_projection_staging(staged_projection)
+        return tuple(conflicts)
 
     def list_conflicts(self) -> tuple[DesktopKnowledgeReconciliationConflict, ...]:
         """Return pending two-way conflicts and Draft-aware three-way changes."""

@@ -86,10 +86,12 @@ def test_compatible_addition_advances_the_published_generation(tmp_path: Path) -
             """
         ).fetchall() == [("legacy_unmapped",)]
     materialize_current_generation(kb_dir)
-    generated = next((kb_dir / "knowledge-pages" / "generated").rglob("*.md")).read_text(
-        encoding="utf-8"
-    )
-    assert 'openkb.provenance: "legacy_unmapped"' in generated
+    generated = next(
+        path
+        for path in (kb_dir / "knowledge-pages" / "generated").rglob("*.md")
+        if path.name != "index.md"
+    ).read_text(encoding="utf-8")
+    assert "provenance: legacy_unmapped" in generated
     assert "source_document_id:" not in generated
     assert "verified:" not in generated
 
@@ -693,8 +695,19 @@ def test_committed_conflict_recovers_its_projection_after_activation_failure(
     committed = resolution.commit_staged_decisions()
 
     assert committed.published_generation_id == reconciliation.current_generation_id()
-    assert not (kb_dir / "knowledge-pages" / "generated").exists()
+    previous_projection = tuple(
+        path
+        for path in (kb_dir / "knowledge-pages" / "generated").rglob("*.md")
+        if path.name != "index.md"
+    )
+    assert len(previous_projection) == 1
+    assert "Fact: Paris" in previous_projection[0].read_text(encoding="utf-8")
+    assert "Fact: Lyon" not in previous_projection[0].read_text(encoding="utf-8")
     materialize_current_generation(kb_dir)
-    projections = tuple((kb_dir / "knowledge-pages" / "generated").rglob("*.md"))
+    projections = tuple(
+        path
+        for path in (kb_dir / "knowledge-pages" / "generated").rglob("*.md")
+        if path.name != "index.md"
+    )
     assert len(projections) == 1
     assert "Fact: Lyon" in projections[0].read_text(encoding="utf-8")

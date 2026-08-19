@@ -30,9 +30,7 @@ from openkb.desktop_workspace import desktop_state_database_path, desktop_state_
 from openkb.locks import kb_ingest_lock
 
 _TWO_WAY_DECISIONS = frozenset({"publish_incoming", "keep_current"})
-_THREE_WAY_DECISIONS = frozenset(
-    {"keep_draft", "apply_incoming", "replace_draft", "manual_merge"}
-)
+_THREE_WAY_DECISIONS = frozenset({"keep_draft", "apply_incoming", "replace_draft", "manual_merge"})
 _DECISIONS = _TWO_WAY_DECISIONS | _THREE_WAY_DECISIONS
 _DRAFT_UPDATE_DECISIONS = frozenset({"apply_incoming", "replace_draft", "manual_merge"})
 logger = logging.getLogger(__name__)
@@ -198,9 +196,7 @@ class DesktopKnowledgeReconciliationResolutionService:
                             candidate.target_page_id,
                             generation_id if candidate.decision == "publish_incoming" else None,
                             (
-                                knowledge_content_sha256(
-                                    draft_results[candidate.candidate_id]
-                                )
+                                knowledge_content_sha256(draft_results[candidate.candidate_id])
                                 if candidate.candidate_id in draft_results
                                 else None
                             ),
@@ -226,17 +222,15 @@ class DesktopKnowledgeReconciliationResolutionService:
                             candidate.candidate_id,
                         ),
                     )
-                if generation_id is not None:
-                    staged_projection = stage_generation_projection_in(
-                        connection, self._kb_dir, generation_id
-                    )
+                staged_projection = stage_generation_projection_in(
+                    connection, self._kb_dir, generation_id
+                )
                 connection.commit()
                 outcome = DesktopKnowledgeReconciliationCommit(
                     published_generation_id=generation_id,
                     published_count=len(published),
                     draft_updated_count=sum(
-                        candidate.decision in _DRAFT_UPDATE_DECISIONS
-                        for candidate in candidates
+                        candidate.decision in _DRAFT_UPDATE_DECISIONS for candidate in candidates
                     ),
                     kept_count=sum(
                         candidate.decision in {"keep_current", "keep_draft"}
@@ -564,9 +558,7 @@ def _require_current_baseline_in(
     )
 
 
-def _require_current_draft_in(
-    connection: sqlite3.Connection, candidate: _StagedCandidate
-) -> None:
+def _require_current_draft_in(connection: sqlite3.Connection, candidate: _StagedCandidate) -> None:
     if candidate.target_page_id is None:
         raise DesktopImportError(
             "knowledge_reconciliation_working_draft_changed",
@@ -582,8 +574,7 @@ def _require_current_draft_in(
     if (
         row is not None
         and candidate.working_draft_title == str(row[0])
-        and candidate.working_draft_content_sha256
-        == knowledge_content_sha256(str(row[1]))
+        and candidate.working_draft_content_sha256 == knowledge_content_sha256(str(row[1]))
         and candidate.working_draft_updated_at == str(row[2])
     ):
         return

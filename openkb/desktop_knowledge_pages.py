@@ -17,9 +17,7 @@ from openkb.desktop_knowledge_lifecycle import (
 from openkb.desktop_knowledge_page_errors import DesktopKnowledgePageError
 from openkb.desktop_knowledge_page_projection import (
     activate_knowledge_page_projection,
-    discard_abandoned_knowledge_page_projection_staging,
     discard_knowledge_page_projection_staging,
-    render_knowledge_page_markdown,
     stage_knowledge_page_projection,
 )
 from openkb.desktop_knowledge_sources import (
@@ -41,8 +39,9 @@ from openkb.desktop_knowledge_verification import (
     verification_status_in,
     verify_current_revision_in,
 )
+from openkb.desktop_okf_projection import materialize_okf_projection
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
-from openkb.locks import atomic_write_text, kb_ingest_lock, kb_read_lock
+from openkb.locks import kb_ingest_lock, kb_read_lock
 
 DesktopKnowledgePagePublicationState = Literal["draft", "unpublished_changes", "published"]
 DesktopKnowledgeProvenanceState = Literal[
@@ -450,7 +449,7 @@ class DesktopKnowledgePageService(DesktopKnowledgeLifecycleMixin):
                     "DELETE FROM knowledge_page_working_drafts WHERE page_id = ?", (page_id,)
                 )
                 page = self._page_in(connection, page_id)
-                staged = stage_knowledge_page_projection(self.kb_dir, page)
+                staged = stage_knowledge_page_projection(connection, self.kb_dir, page)
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -472,6 +471,7 @@ class DesktopKnowledgePageService(DesktopKnowledgeLifecycleMixin):
         self._require_database()
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
+            staged: Path | None = None
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
@@ -481,36 +481,27 @@ class DesktopKnowledgePageService(DesktopKnowledgeLifecycleMixin):
                 except ValueError as error:
                     raise verification_error(str(error)) from error
                 page = self._page_in(connection, page_id)
+                staged = stage_knowledge_page_projection(connection, self.kb_dir, page)
                 connection.commit()
-                return page
             except BaseException:
                 connection.rollback()
+                if staged is not None:
+                    discard_knowledge_page_projection_staging(staged)
                 raise
             finally:
                 connection.close()
+            try:
+                activate_knowledge_page_projection(self.kb_dir, page, staged)
+            except Exception:
+                logger.exception("Could not activate Desktop user knowledge Markdown projection.")
+            finally:
+                discard_knowledge_page_projection_staging(staged)
+            return page
 
     def materialize_current_pages(self) -> None:
-        """Rebuild published Markdown only; Working Drafts never enter the projection."""
+        """Rebuild the complete OKF projection; Working Drafts remain excluded."""
         self._require_database()
-        with kb_ingest_lock(self.state_dir):
-            discard_abandoned_knowledge_page_projection_staging(self.kb_dir)
-            connection = self._connect()
-            try:
-                rows = connection.execute(
-                    f"""
-                    {_PAGE_STATE_CTE}
-                    SELECT * FROM page_state WHERE published_revision_number IS NOT NULL
-                    ORDER BY kind, page_id
-                    """
-                ).fetchall()
-            finally:
-                connection.close()
-            for row in rows:
-                page = self._page_from_row_in(connection=None, row=row)
-                (self.kb_dir / page.materialized_path).parent.mkdir(parents=True, exist_ok=True)
-                atomic_write_text(
-                    self.kb_dir / page.materialized_path, render_knowledge_page_markdown(page)
-                )
+        materialize_okf_projection(self.kb_dir)
 
     def _require_existing_kind(
         self, connection: sqlite3.Connection, page_id: str, kind: str

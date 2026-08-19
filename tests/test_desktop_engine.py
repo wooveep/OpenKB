@@ -261,7 +261,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 24,
+            "schema_version": 25,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -791,13 +791,13 @@ def test_engine_autosaves_then_explicitly_publishes_user_knowledge_pages(tmp_pat
             "page_id": saved["page_id"],
             "kind": "concept",
             "title": "Evidence",
-                "publication_state": "unpublished_changes",
-                "published_revision_number": 1,
-                "updated_at": revised["updated_at"],
-                "lifecycle_state": "stable",
-                "stale_after": None,
-                "is_stale": False,
-            }
+            "publication_state": "unpublished_changes",
+            "published_revision_number": 1,
+            "updated_at": revised["updated_at"],
+            "lifecycle_state": "stable",
+            "stale_after": None,
+            "is_stale": False,
+        }
     ]
     assert listed["selected_page_id"] == saved["page_id"]
     assert read["published_revision"]["content_markdown"] == "# User-owned knowledge"

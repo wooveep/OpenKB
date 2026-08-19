@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 from openkb.desktop_knowledge_page_errors import DesktopKnowledgePageError
-from openkb.desktop_knowledge_page_projection import (
-    discard_knowledge_page_projection_staging,
-    restore_knowledge_page_projection_deletion,
-    stage_knowledge_page_projection_deletion,
-)
 from openkb.desktop_knowledge_verification import invalidate_current_verification_in
+from openkb.desktop_okf_projection import (
+    activate_okf_projection,
+    stage_okf_projection_in,
+)
+from openkb.desktop_okf_projection import (
+    discard_okf_projection_staging as discard_knowledge_page_projection_staging,
+)
 from openkb.locks import kb_ingest_lock
 
 if TYPE_CHECKING:
@@ -82,7 +84,6 @@ class DesktopKnowledgeLifecycleMixin:
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             staged: Path | None = None
-            relative_path: str | None = None
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 row = connection.execute(
@@ -103,7 +104,6 @@ class DesktopKnowledgeLifecycleMixin:
                 previous_state: DesktopKnowledgeLifecycleState = "draft"
                 previous_stale_after: str | None = None
                 if row is not None:
-                    relative_path = str(row[0])
                     previous_state = cast(DesktopKnowledgeLifecycleState, str(row[1]))
                     previous_stale_after = str(row[2]) if row[2] is not None else None
                     if previous_state != "deprecated":
@@ -111,9 +111,6 @@ class DesktopKnowledgeLifecycleMixin:
                             "knowledge_page_deprecation_required",
                             "Deprecate this Knowledge Page before permanent deletion.",
                         )
-                    staged = stage_knowledge_page_projection_deletion(
-                        self.kb_dir, relative_path
-                    )
                 now = _timestamp()
                 _record_event(
                     connection,
@@ -136,26 +133,32 @@ class DesktopKnowledgeLifecycleMixin:
                     """,
                     (page_id,),
                 )
+                staged = stage_okf_projection_in(connection, self.kb_dir)
                 connection.commit()
             except BaseException:
                 connection.rollback()
-                if relative_path is not None:
-                    restore_knowledge_page_projection_deletion(
-                        self.kb_dir, relative_path, staged
-                    )
+                if staged is not None:
+                    discard_knowledge_page_projection_staging(staged)
                 raise
             finally:
                 connection.close()
             if staged is not None:
                 try:
-                    discard_knowledge_page_projection_staging(staged)
-                except OSError:
-                    logger.warning(
-                        "knowledge_page_projection_cleanup_deferred page_id=%s staged=%s",
-                        page_id,
-                        staged,
-                        exc_info=True,
+                    activate_okf_projection(self.kb_dir, staged)
+                except Exception:
+                    logger.exception(
+                        "Could not activate Desktop knowledge lifecycle projection."
                     )
+                finally:
+                    try:
+                        discard_knowledge_page_projection_staging(staged)
+                    except OSError:
+                        logger.warning(
+                            "knowledge_page_projection_cleanup_deferred page_id=%s staged=%s",
+                            page_id,
+                            staged,
+                            exc_info=True,
+                        )
 
     def _change_lifecycle(
         self,
@@ -168,6 +171,7 @@ class DesktopKnowledgeLifecycleMixin:
         self._require_database()
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
+            staged: Path | None = None
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 row = connection.execute(
@@ -222,13 +226,22 @@ class DesktopKnowledgeLifecycleMixin:
                     occurred_at=now,
                 )
                 page = self._page_in(connection, page_id)
+                staged = stage_okf_projection_in(connection, self.kb_dir)
                 connection.commit()
-                return page
             except BaseException:
                 connection.rollback()
+                if staged is not None:
+                    discard_knowledge_page_projection_staging(staged)
                 raise
             finally:
                 connection.close()
+            try:
+                activate_okf_projection(self.kb_dir, staged)
+            except Exception:
+                logger.exception("Could not activate Desktop knowledge lifecycle projection.")
+            finally:
+                discard_knowledge_page_projection_staging(staged)
+            return page
 
 
 _UNCHANGED = object()

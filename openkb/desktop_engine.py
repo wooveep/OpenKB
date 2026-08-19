@@ -31,12 +31,12 @@ from openkb.desktop_import import (
 )
 from openkb.desktop_import_sources import inspect_import_sources
 from openkb.desktop_import_types import DesktopRecoveryOverride
-from openkb.desktop_knowledge_generations import materialize_current_generation
-from openkb.desktop_knowledge_pages import DesktopKnowledgePageError, DesktopKnowledgePageService
+from openkb.desktop_knowledge_pages import DesktopKnowledgePageError
 from openkb.desktop_legacy_office_parsers import shutdown_legacy_office_runtime
 from openkb.desktop_logging import configure_desktop_engine_logging
 from openkb.desktop_model_gateway import MODEL_CALL_DEADLINE_SECONDS, DesktopModelGateway
 from openkb.desktop_model_transport import desktop_model_gateway_for
+from openkb.desktop_okf_projection import materialize_okf_projection
 from openkb.desktop_raw_assets import DesktopRawAssetService
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
@@ -448,7 +448,9 @@ class DesktopEngineServer:
                         "invalid_params", "workbench.create_knowledge_base name must be a string."
                     )
                 self._begin_workspace_mutation(request, cancel_event)
-                return self._workspace.create(Path(kb_dir), name=name).as_dict()
+                activation = self._workspace.create(Path(kb_dir), name=name)
+                materialize_okf_projection(Path(activation.knowledge_base.kb_dir))
+                return activation.as_dict()
 
             if request.method == "workbench.open_knowledge_base":
                 kb_dir = _required_path_param(request, "kb_dir")
@@ -459,8 +461,7 @@ class DesktopEngineServer:
 
                 recover_stale_conversation_generations(active_kb_dir)
                 DesktopRawAssetService(active_kb_dir).verify_available_documents()
-                DesktopKnowledgePageService(active_kb_dir).materialize_current_pages()
-                materialize_current_generation(active_kb_dir)
+                materialize_okf_projection(active_kb_dir)
                 self._start_recoverable_imports(active_kb_dir)
                 return activation.as_dict()
 

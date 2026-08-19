@@ -34,6 +34,7 @@ from openkb.desktop_knowledge_source_migrations import KNOWLEDGE_SOURCE_MIGRATIO
 from openkb.desktop_knowledge_verification_migrations import (
     KNOWLEDGE_VERIFICATION_MIGRATION_STATEMENTS,
 )
+from openkb.desktop_okf_projection_migrations import OKF_PROJECTION_MIGRATION_STATEMENTS
 from openkb.desktop_workspace_migrations import (
     CONVERSATION_MIGRATION_STATEMENTS,
     DEDUPLICATION_MIGRATION_STATEMENTS,
@@ -382,6 +383,7 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (22, KNOWLEDGE_VERIFICATION_MIGRATION_STATEMENTS),
     (23, KNOWLEDGE_LIFECYCLE_MIGRATION_STATEMENTS),
     (24, THREE_WAY_KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS),
+    (25, OKF_PROJECTION_MIGRATION_STATEMENTS),
 )
 
 

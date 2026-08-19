@@ -53,7 +53,7 @@ def test_working_draft_does_not_replace_published_revision_until_explicit_publis
     assert revised.published_revision.content_markdown == "# First working draft"
     assert revised.working_draft is not None
     assert revised.working_draft.content_markdown == "# Second working draft"
-    assert 'authority: "user_revision"' in projection.read_text(encoding="utf-8")
+    assert "authority: user_revision" in projection.read_text(encoding="utf-8")
     assert "# First working draft" in projection.read_text(encoding="utf-8")
 
     projection.unlink()
@@ -133,10 +133,11 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
         connection.execute("DROP TABLE IF EXISTS knowledge_page_working_drafts")
         connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
+        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN entity_subtype")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN stale_after")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
         connection.execute(
-            "DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24)"
+            "DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25)"
         )
         connection.execute(
             """
@@ -175,7 +176,7 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
     assert migrated.working_draft is None
     pages.materialize_current_pages()
     projection = (kb_dir / migrated.materialized_path).read_text(encoding="utf-8")
-    assert 'openkb.provenance: "legacy_unmapped"' in projection
+    assert "provenance: legacy_unmapped" in projection
     assert "verified:" not in projection
 
 
@@ -206,11 +207,13 @@ def test_v20_source_map_migrates_as_source_backed_without_rewriting_the_revision
         connection.execute("DROP TABLE knowledge_page_verifications")
         connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
+        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN entity_subtype")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN stale_after")
         connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
         connection.execute("DELETE FROM schema_migrations WHERE version = 21")
         connection.execute("DELETE FROM schema_migrations WHERE version = 22")
         connection.execute("DELETE FROM schema_migrations WHERE version = 23")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 25")
         connection.execute("DELETE FROM schema_migrations WHERE version = 24")
         connection.commit()
 

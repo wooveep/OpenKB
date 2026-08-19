@@ -22,9 +22,7 @@ from openkb.desktop_workspace_migrations import (
 
 
 def _knowledge_base(tmp_path: Path) -> Path:
-    return Path(
-        DesktopKnowledgeBaseRuntime().create(tmp_path / "knowledge").knowledge_base.kb_dir
-    )
+    return Path(DesktopKnowledgeBaseRuntime().create(tmp_path / "knowledge").knowledge_base.kb_dir)
 
 
 def _two_way_conflict(kb_dir: Path, tmp_path: Path) -> str:
@@ -69,6 +67,19 @@ def test_two_way_commit_rejects_a_working_draft_created_after_staging(
 
     assert changed.value.code == "knowledge_reconciliation_working_draft_changed"
     assert reconciliation.current_generation_id() == original_generation
+
+
+def test_keep_current_commit_refreshes_the_okf_resolution_log(tmp_path: Path) -> None:
+    kb_dir = _knowledge_base(tmp_path)
+    candidate_id = _two_way_conflict(kb_dir, tmp_path)
+    resolution = DesktopKnowledgeReconciliationResolutionService(kb_dir)
+    resolution.stage_decisions((candidate_id,), "keep_current")
+
+    resolution.commit_staged_decisions()
+
+    change_log = (kb_dir / "knowledge-pages/log.md").read_text(encoding="utf-8")
+    assert candidate_id in change_log
+    assert "keep_current" in change_log
 
 
 def test_v24_migration_reclassifies_a_generation_candidate_with_a_draft(
@@ -164,6 +175,8 @@ def test_v24_migration_reclassifies_a_generation_candidate_with_a_draft(
             """,
             auto_candidate,
         )
+        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN entity_subtype")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 25")
         connection.execute("DELETE FROM schema_migrations WHERE version = 24")
 
     DesktopKnowledgeBaseRuntime().open(kb_dir)
@@ -212,9 +225,7 @@ def test_draft_only_page_blocks_incoming_from_automatic_publication(
         content_markdown="User-authored unpublished claim.",
     )
     incoming = tmp_path / "incoming-draft-only.txt"
-    incoming.write_text(
-        "# Concept: Retrieval\n\nIncoming document claim.", encoding="utf-8"
-    )
+    incoming.write_text("# Concept: Retrieval\n\nIncoming document claim.", encoding="utf-8")
 
     DesktopTextImportService(kb_dir).import_text(incoming)
 
@@ -261,9 +272,7 @@ def test_auto_reconciled_duplicate_never_retains_a_working_draft_snapshot(
         content_markdown="[Private draft](private-draft.md)",
     )
     incoming = tmp_path / "duplicate.txt"
-    incoming.write_text(
-        f"# Concept: Retrieval\n\n{published_body}", encoding="utf-8"
-    )
+    incoming.write_text(f"# Concept: Retrieval\n\n{published_body}", encoding="utf-8")
     imported = DesktopTextImportService(kb_dir).import_text(incoming)
 
     assert DesktopKnowledgeReconciliationService(kb_dir).list_conflicts() == ()
@@ -308,9 +317,7 @@ def test_source_markers_do_not_create_false_deduplicated_reimport_conflicts(
     )
     assert bound.working_draft is not None
     duplicate_source = tmp_path / "duplicate.txt"
-    duplicate_source.write_text(
-        f"# Concept: Retrieval\n\nKnown fact.{trailing}", encoding="utf-8"
-    )
+    duplicate_source.write_text(f"# Concept: Retrieval\n\nKnown fact.{trailing}", encoding="utf-8")
 
     duplicate = DesktopTextImportService(kb_dir).import_text(duplicate_source)
 
@@ -336,9 +343,7 @@ def test_incoming_title_matches_an_unpublished_draft_rename(tmp_path: Path) -> N
         content_markdown="# Renamed Working Draft",
     )
     incoming = tmp_path / "renamed.txt"
-    incoming.write_text(
-        "# New Name\n\nIncoming renamed-page claim.", encoding="utf-8"
-    )
+    incoming.write_text("# New Name\n\nIncoming renamed-page claim.", encoding="utf-8")
 
     DesktopTextImportService(kb_dir).import_text(incoming)
 
@@ -360,18 +365,14 @@ def test_apply_incoming_applies_non_overlapping_baseline_delta_to_draft(
         page_id=None,
         kind="concept",
         title="Retrieval",
-        content_markdown=(
-            "[Mode local](mode-local.md)\n\n[Owner platform](owner-platform.md)"
-        ),
+        content_markdown=("[Mode local](mode-local.md)\n\n[Owner platform](owner-platform.md)"),
     )
     pages.publish(page.page_id)
     pages.save_draft(
         page_id=page.page_id,
         kind="concept",
         title="Retrieval",
-        content_markdown=(
-            "[Mode local](mode-local.md)\n\n[Owner user](owner-user.md)"
-        ),
+        content_markdown=("[Mode local](mode-local.md)\n\n[Owner user](owner-user.md)"),
     )
     incoming = tmp_path / "incoming.txt"
     incoming.write_text(
@@ -412,9 +413,7 @@ def test_apply_incoming_requires_manual_merge_for_overlapping_changes(
         content_markdown="[Mode user](mode-user.md)",
     )
     incoming = tmp_path / "incoming.txt"
-    incoming.write_text(
-        "# Concept: Retrieval\n\n[Mode global](mode-global.md)", encoding="utf-8"
-    )
+    incoming.write_text("# Concept: Retrieval\n\n[Mode global](mode-global.md)", encoding="utf-8")
     DesktopTextImportService(kb_dir).import_text(incoming)
     conflict = DesktopKnowledgeReconciliationService(kb_dir).list_conflicts()[0]
     resolution = DesktopKnowledgeReconciliationResolutionService(kb_dir)
@@ -451,13 +450,9 @@ def test_apply_incoming_rejects_conflicting_same_anchor_insertions(
             title="Retrieval",
             content_markdown=draft_content,
         )
-    incoming_content = "\n\n".join(
-        value for value in (baseline, "Mode: global") if value
-    )
+    incoming_content = "\n\n".join(value for value in (baseline, "Mode: global") if value)
     incoming = tmp_path / "same-anchor.txt"
-    incoming.write_text(
-        f"# Concept: Retrieval\n\n{incoming_content}", encoding="utf-8"
-    )
+    incoming.write_text(f"# Concept: Retrieval\n\n{incoming_content}", encoding="utf-8")
     DesktopTextImportService(kb_dir).import_text(incoming)
     conflict = DesktopKnowledgeReconciliationService(kb_dir).list_conflicts()[0]
     resolution = DesktopKnowledgeReconciliationResolutionService(kb_dir)
