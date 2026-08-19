@@ -154,7 +154,7 @@ def model_details_for_job(
             next_timeout_seconds, remaining_seconds, error_code, reason, suggested_action
         FROM model_calls
         WHERE job_id = ?
-        ORDER BY created_at
+        ORDER BY created_at, rowid
         """,
         (job_id,),
     ).fetchall()

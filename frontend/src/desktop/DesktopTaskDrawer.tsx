@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/drawer"
 import { Button } from "@/components/ui/button"
 import type { DesktopImportBatchSummary } from "./DesktopDocumentImportPanel"
+import { DesktopKnowledgeAnalysisProgress } from "./DesktopKnowledgeAnalysisProgress"
 import type { DesktopImportTask } from "./contracts"
 
 type ImportTaskAction = "pause" | "resume" | "cancel"
@@ -68,6 +69,9 @@ export function DesktopTaskDrawer({
                       <span className="text-sm font-medium">{task.job.progress}%</span>
                     </div>
                     <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary" style={{ width: `${task.job.progress}%` }} /></div>
+                    {task.knowledgeAnalysis ? (
+                      <DesktopKnowledgeAnalysisProgress progress={task.knowledgeAnalysis} />
+                    ) : null}
                     <ol className="mt-3 flex flex-wrap gap-1.5" aria-label={t("desktop.tasks.stages")}>
                       {task.stages.map((stage) => (
                         <li key={stage.stageRunId} className="rounded-full border border-border/70 bg-muted/20 px-2 py-1 text-[11px] text-muted-foreground">

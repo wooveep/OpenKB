@@ -520,6 +520,30 @@ pub struct QuarantinedDocument {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeAnalysisPhase {
+    Batches,
+    Merge,
+    Completed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeAnalysisProgress {
+    pub total: u32,
+    pub completed: u32,
+    pub active: u32,
+    pub failed: u32,
+    #[serde(alias = "current_batch")]
+    pub current_batch: Option<u32>,
+    pub phase: KnowledgeAnalysisPhase,
+    #[serde(alias = "current_timeout_seconds")]
+    pub current_timeout_seconds: Option<f64>,
+    #[serde(alias = "remaining_seconds")]
+    pub remaining_seconds: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryOverride {
     pub model: Option<String>,
@@ -535,6 +559,8 @@ pub struct TextDocumentImportResult {
     #[serde(default, alias = "model_calls")]
     pub model_calls: Vec<ModelCall>,
     pub quarantine: Option<QuarantinedDocument>,
+    #[serde(default, alias = "knowledge_analysis")]
+    pub knowledge_analysis: Option<KnowledgeAnalysisProgress>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -546,6 +572,8 @@ pub struct ImportTask {
     #[serde(default, alias = "model_calls")]
     pub model_calls: Vec<ModelCall>,
     pub quarantine: Option<QuarantinedDocument>,
+    #[serde(default, alias = "knowledge_analysis")]
+    pub knowledge_analysis: Option<KnowledgeAnalysisProgress>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -690,4 +718,29 @@ pub(crate) fn write_frame<W: Write>(writer: &mut W, value: &Value) -> BridgeResu
                 format!("Could not write Engine stream: {error}"),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KnowledgeAnalysisPhase, KnowledgeAnalysisProgress};
+    use serde_json::json;
+
+    #[test]
+    fn knowledge_analysis_progress_accepts_python_snake_case_fields() {
+        let progress: KnowledgeAnalysisProgress = serde_json::from_value(json!({
+            "total": 3,
+            "completed": 1,
+            "active": 1,
+            "failed": 0,
+            "current_batch": 2,
+            "phase": "batches",
+            "current_timeout_seconds": 30.0,
+            "remaining_seconds": 44.0
+        }))
+        .expect("Knowledge Analysis progress should deserialize");
+
+        assert_eq!(progress.current_batch, Some(2));
+        assert!(matches!(progress.phase, KnowledgeAnalysisPhase::Batches));
+        assert_eq!(progress.current_timeout_seconds, Some(30.0));
+    }
 }

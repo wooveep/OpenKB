@@ -449,6 +449,15 @@
       "empty": "当前知识库没有导入任务。",
       "batch": "导入批次",
       "batchSummary": "共 {{total}} 份 · 已完成 {{completed}} · 进行中 {{active}} · 失败 {{failed}}",
+      "knowledgeAnalysis": "Knowledge Analysis 批次",
+      "knowledgeAnalysisSummary": "共 {{total}} 批 · 已完成 {{completed}} · 进行中 {{active}} · 失败 {{failed}}",
+      "knowledgeAnalysisCurrent": "当前第 {{current}} / {{total}} 批",
+      "knowledgeAnalysisBudget": "本次超时 {{timeout}} 秒 · 逻辑调用剩余 {{remaining}} 秒",
+      "knowledgeAnalysisPhases": {
+        "batches": "分析自然章节",
+        "merge": "合并文档结果",
+        "completed": "已完成"
+      },
       "stages": "导入阶段"
     },
     "documents": {

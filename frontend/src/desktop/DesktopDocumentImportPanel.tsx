@@ -25,6 +25,7 @@ import type {
   DesktopImportTask,
 } from "./contracts"
 import { currentDocumentTasks, taskIsFailed } from "./desktop-document-tasks"
+import { DesktopKnowledgeAnalysisProgress } from "./DesktopKnowledgeAnalysisProgress"
 
 export interface DesktopImportBatchSummary {
   total: number
@@ -416,6 +417,9 @@ function ImportTaskCard({
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${task.job.progress}%` }} />
       </div>
+      {task.knowledgeAnalysis ? (
+        <DesktopKnowledgeAnalysisProgress progress={task.knowledgeAnalysis} />
+      ) : null}
       {task.job.deduplication ? (
         <p className="mt-3 text-sm text-muted-foreground">
           {task.job.deduplication.level === "D0"

@@ -264,6 +264,32 @@ class DesktopQuarantinedDocument:
 
 
 @dataclass(frozen=True)
+class DesktopKnowledgeAnalysisProgress:
+    """Durable long-document batch progress shown by Documents and Task Center."""
+
+    total: int
+    completed: int
+    active: int
+    failed: int
+    current_batch: int | None
+    phase: str
+    current_timeout_seconds: float | None
+    remaining_seconds: float | None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "total": self.total,
+            "completed": self.completed,
+            "active": self.active,
+            "failed": self.failed,
+            "current_batch": self.current_batch,
+            "phase": self.phase,
+            "current_timeout_seconds": self.current_timeout_seconds,
+            "remaining_seconds": self.remaining_seconds,
+        }
+
+
+@dataclass(frozen=True)
 class DesktopRecoveryOverride:
     """One manual recovery's model settings, never a knowledge-base default."""
 
@@ -280,6 +306,7 @@ class DesktopTextImportResult:
     stages: tuple[DesktopStageRun, ...]
     model_calls: tuple[DesktopModelCall, ...] = ()
     quarantine: DesktopQuarantinedDocument | None = None
+    knowledge_analysis: DesktopKnowledgeAnalysisProgress | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -288,6 +315,9 @@ class DesktopTextImportResult:
             "stages": [stage.as_dict() for stage in self.stages],
             "model_calls": [call.as_dict() for call in self.model_calls],
             "quarantine": self.quarantine.as_dict() if self.quarantine is not None else None,
+            "knowledge_analysis": (
+                self.knowledge_analysis.as_dict() if self.knowledge_analysis is not None else None
+            ),
         }
 
 
@@ -300,6 +330,7 @@ class DesktopImportTask:
     stages: tuple[DesktopStageRun, ...]
     model_calls: tuple[DesktopModelCall, ...] = ()
     quarantine: DesktopQuarantinedDocument | None = None
+    knowledge_analysis: DesktopKnowledgeAnalysisProgress | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -308,4 +339,7 @@ class DesktopImportTask:
             "stages": [stage.as_dict() for stage in self.stages],
             "model_calls": [call.as_dict() for call in self.model_calls],
             "quarantine": self.quarantine.as_dict() if self.quarantine is not None else None,
+            "knowledge_analysis": (
+                self.knowledge_analysis.as_dict() if self.knowledge_analysis is not None else None
+            ),
         }

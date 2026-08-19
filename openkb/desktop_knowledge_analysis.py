@@ -19,7 +19,9 @@ from openkb.desktop_knowledge_sources import stable_source_id
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
 
 KNOWLEDGE_ANALYSIS_SCHEMA_VERSION = "openkb.knowledge-analysis.v1"
-KNOWLEDGE_ANALYSIS_SCOPE = "document"
+KNOWLEDGE_ANALYSIS_SCOPE: Literal["document"] = "document"
+KNOWLEDGE_ANALYSIS_BATCH_SCOPE: Literal["batch"] = "batch"
+KnowledgeAnalysisScope = Literal["document", "batch"]
 KNOWLEDGE_ANALYSIS_SYSTEM_PROMPT = """Analyze one document into evidence-bound knowledge.
 Return exactly one JSON object and no prose or Markdown fence. The object must contain:
 - schema_version: "openkb.knowledge-analysis.v1"
@@ -46,6 +48,9 @@ _MAX_ALIAS_OR_TAG_CHARACTERS = 160
 _MAX_CLAIMS_PER_CANDIDATE = 64
 _MAX_CLAIM_CHARACTERS = 4_000
 _MAX_EVIDENCE_PER_CLAIM = 8
+_MAX_AGGREGATE_CANDIDATES_PER_KIND = 4_096
+_MAX_AGGREGATE_CLAIMS_PER_CANDIDATE = 4_096
+_MAX_AGGREGATE_EVIDENCE_PER_CLAIM = 4_096
 _MAX_EVIDENCE_TEXT_CHARACTERS = 12_000
 
 
@@ -108,11 +113,12 @@ class DesktopKnowledgeAnalysis:
     document_description: str
     concepts: tuple[KnowledgeAnalysisCandidate, ...]
     entities: tuple[KnowledgeAnalysisCandidate, ...]
+    analysis_scope: KnowledgeAnalysisScope = KNOWLEDGE_ANALYSIS_SCOPE
 
     def as_dict(self) -> dict[str, object]:
         return {
             "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
-            "analysis_scope": KNOWLEDGE_ANALYSIS_SCOPE,
+            "analysis_scope": self.analysis_scope,
             "document_description": self.document_description,
             "concepts": [candidate.as_dict() for candidate in self.concepts],
             "entities": [candidate.as_dict() for candidate in self.entities],
@@ -207,7 +213,12 @@ class DesktopKnowledgeAnalysis:
         return tuple(missing)
 
 
-def parse_knowledge_analysis(content: str) -> DesktopKnowledgeAnalysis:
+def parse_knowledge_analysis(
+    content: str,
+    *,
+    expected_scope: KnowledgeAnalysisScope = KNOWLEDGE_ANALYSIS_SCOPE,
+    aggregate: bool = False,
+) -> DesktopKnowledgeAnalysis:
     """Parse and strictly validate one provider response without retrying it."""
     try:
         payload = json.loads(_json_object_text(content))
@@ -225,22 +236,49 @@ def parse_knowledge_analysis(content: str) -> DesktopKnowledgeAnalysis:
         raise _invalid_response("Knowledge Analysis returned an unsupported response shape.")
     if payload.get("schema_version") != KNOWLEDGE_ANALYSIS_SCHEMA_VERSION:
         raise _invalid_response("Knowledge Analysis returned an unsupported schema version.")
-    if payload.get("analysis_scope") != KNOWLEDGE_ANALYSIS_SCOPE:
-        raise _invalid_response("Knowledge Analysis must use document scope.")
+    if payload.get("analysis_scope") != expected_scope:
+        raise _invalid_response(f"Knowledge Analysis must use {expected_scope} scope.")
     description = _string(
         payload.get("document_description"),
         "document_description",
         maximum=_MAX_DESCRIPTION_CHARACTERS,
         allow_empty=True,
     )
-    concepts = _candidates(payload.get("concepts"), "concept")
-    entities = _candidates(payload.get("entities"), "entity")
+    maximum_candidates = (
+        _MAX_AGGREGATE_CANDIDATES_PER_KIND
+        if aggregate
+        else _MAX_CANDIDATES_PER_KIND
+    )
+    maximum_claims = (
+        _MAX_AGGREGATE_CLAIMS_PER_CANDIDATE
+        if aggregate
+        else _MAX_CLAIMS_PER_CANDIDATE
+    )
+    maximum_sources = (
+        _MAX_AGGREGATE_EVIDENCE_PER_CLAIM
+        if aggregate
+        else _MAX_EVIDENCE_PER_CLAIM
+    )
+    concepts = _candidates(
+        payload.get("concepts"),
+        "concept",
+        maximum_candidates=maximum_candidates,
+        maximum_claims=maximum_claims,
+        maximum_sources=maximum_sources,
+    )
+    entities = _candidates(
+        payload.get("entities"),
+        "entity",
+        maximum_candidates=maximum_candidates,
+        maximum_claims=maximum_claims,
+        maximum_sources=maximum_sources,
+    )
     identities = [
         (item.kind, normalize_knowledge_title(item.title)[1]) for item in (*concepts, *entities)
     ]
     if len(identities) != len(set(identities)):
         raise _invalid_response("Knowledge Analysis returned duplicate candidate identities.")
-    return DesktopKnowledgeAnalysis(description, concepts, entities)
+    return DesktopKnowledgeAnalysis(description, concepts, entities, expected_scope)
 
 
 def knowledge_analysis_from_checkpoint(payload: object) -> DesktopKnowledgeAnalysis | None:
@@ -250,7 +288,9 @@ def knowledge_analysis_from_checkpoint(payload: object) -> DesktopKnowledgeAnaly
     normalized = payload.get("normalized_result")
     if not isinstance(normalized, dict):
         return None
-    return parse_knowledge_analysis(json.dumps(normalized, ensure_ascii=False))
+    return parse_knowledge_analysis(
+        json.dumps(normalized, ensure_ascii=False), aggregate="batch_count" in payload
+    )
 
 
 def knowledge_analysis_provenance_json(
@@ -315,9 +355,14 @@ def knowledge_analysis_prompt(
 
 
 def _candidates(
-    value: object, kind: Literal["concept", "entity"]
+    value: object,
+    kind: Literal["concept", "entity"],
+    *,
+    maximum_candidates: int,
+    maximum_claims: int,
+    maximum_sources: int,
 ) -> tuple[KnowledgeAnalysisCandidate, ...]:
-    if not isinstance(value, list) or len(value) > _MAX_CANDIDATES_PER_KIND:
+    if not isinstance(value, list) or _exceeds_limit(value, maximum_candidates):
         raise _invalid_response(f"Knowledge Analysis {kind} candidates are invalid.")
     candidates: list[KnowledgeAnalysisCandidate] = []
     for item in value:
@@ -332,12 +377,14 @@ def _candidates(
         aliases = _string_list(item.get("aliases"), "aliases")
         tags = _string_list(item.get("tags"), "tags")
         claims_value = item.get("claims")
-        if not isinstance(claims_value, list) or len(claims_value) > _MAX_CLAIMS_PER_CANDIDATE:
+        if not isinstance(claims_value, list) or _exceeds_limit(
+            claims_value, maximum_claims
+        ):
             raise _invalid_response("Knowledge Analysis claims are invalid.")
         unique_claims: list[KnowledgeAnalysisClaim] = []
         claim_indexes: dict[str, int] = {}
         for claim_value in claims_value:
-            claim = _claim(claim_value)
+            claim = _claim(claim_value, maximum_sources=maximum_sources)
             existing_index = claim_indexes.get(claim.text)
             if existing_index is None:
                 claim_indexes[claim.text] = len(unique_claims)
@@ -347,7 +394,7 @@ def _candidates(
             source_ids = tuple(
                 dict.fromkeys((*existing.source_evidence_ids, *claim.source_evidence_ids))
             )
-            if len(source_ids) > _MAX_EVIDENCE_PER_CLAIM:
+            if len(source_ids) > maximum_sources:
                 raise _invalid_response("Knowledge Analysis claim sources are invalid.")
             unique_claims[existing_index] = KnowledgeAnalysisClaim(existing.text, source_ids)
         claims = tuple(unique_claims)
@@ -361,12 +408,14 @@ def _candidates(
     return tuple(candidates)
 
 
-def _claim(value: object) -> KnowledgeAnalysisClaim:
+def _claim(value: object, *, maximum_sources: int) -> KnowledgeAnalysisClaim:
     if not isinstance(value, dict) or set(value) != {"text", "source_evidence_ids"}:
         raise _invalid_response("Knowledge Analysis claim is invalid.")
     text = _string(value.get("text"), "claim text", maximum=_MAX_CLAIM_CHARACTERS)
     source_values = value.get("source_evidence_ids")
-    if not isinstance(source_values, list) or len(source_values) > _MAX_EVIDENCE_PER_CLAIM:
+    if not isinstance(source_values, list) or _exceeds_limit(
+        source_values, maximum_sources
+    ):
         raise _invalid_response("Knowledge Analysis claim sources are invalid.")
     source_ids: list[str] = []
     for source in source_values:
@@ -374,6 +423,10 @@ def _claim(value: object) -> KnowledgeAnalysisClaim:
         if evidence_id not in source_ids:
             source_ids.append(evidence_id)
     return KnowledgeAnalysisClaim(text, tuple(source_ids))
+
+
+def _exceeds_limit(value: list[object], maximum: int) -> bool:
+    return len(value) > maximum
 
 
 def _string_list(value: object, field: str) -> tuple[str, ...]:

@@ -130,6 +130,17 @@ export interface DesktopQuarantinedDocument {
   attemptCount: number
 }
 
+export interface DesktopKnowledgeAnalysisProgress {
+  total: number
+  completed: number
+  active: number
+  failed: number
+  currentBatch: number | null
+  phase: "batches" | "merge" | "completed"
+  currentTimeoutSeconds: number | null
+  remainingSeconds: number | null
+}
+
 /** Optional settings used only by one manual recovery run. */
 export interface DesktopRecoveryOverride {
   model?: string
@@ -196,6 +207,7 @@ export interface DesktopTextDocumentImport {
   stages: DesktopImportStageRun[]
   modelCalls: DesktopModelCall[]
   quarantine: DesktopQuarantinedDocument | null
+  knowledgeAnalysis?: DesktopKnowledgeAnalysisProgress | null
 }
 
 export interface DesktopImportTask {
@@ -204,6 +216,7 @@ export interface DesktopImportTask {
   stages: DesktopImportStageRun[]
   modelCalls: DesktopModelCall[]
   quarantine: DesktopQuarantinedDocument | null
+  knowledgeAnalysis?: DesktopKnowledgeAnalysisProgress | null
 }
 
 export interface DesktopImportJobs {

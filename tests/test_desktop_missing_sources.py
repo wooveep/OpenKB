@@ -311,3 +311,87 @@ def test_bulk_dismiss_deletes_candidate_bodies_and_keeps_minimal_records(
     with pytest.raises(DesktopImportError) as deleted:
         service.bind(candidate_ids[0], "not-restorable")
     assert deleted.value.code == "missing_source_candidate_not_found"
+
+
+def test_bulk_dismiss_redacts_long_document_batch_and_merge_checkpoints(
+    tmp_path: Path,
+) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "long.md"
+    source.write_text(
+        "\n\n".join(
+            f"# Section {ordinal}\n\nOriginal evidence for section {ordinal}."
+            for ordinal in range(7)
+        ),
+        encoding="utf-8",
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    secret = "Batch checkpoint secret candidate."
+    supported = "A retained supported batch claim."
+
+    def transport(request, _timeout_seconds):
+        payload = json.loads(request.content)
+        if request.operation == "knowledge_analysis_batch":
+            evidence_id = str(payload["evidence"][0]["evidence_id"])
+            return json.dumps(
+                {
+                    "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+                    "analysis_scope": "batch",
+                    "document_description": "Batch review.",
+                    "concepts": [
+                        {
+                            "title": "Batched review",
+                            "aliases": [],
+                            "tags": [],
+                            "claims": [
+                                {"text": secret, "source_evidence_ids": []},
+                                {"text": supported, "source_evidence_ids": [evidence_id]},
+                            ],
+                        }
+                    ],
+                    "entities": [],
+                }
+            )
+        first = dict(payload["batch_results"][0]["concepts"][0])
+        first["claims"] = [dict(claim) for claim in first["claims"]]
+        supported_sources = {
+            source_id
+            for batch in payload["batch_results"]
+            for source_id in batch["concepts"][0]["claims"][1]["source_evidence_ids"]
+        }
+        first["claims"][1]["source_evidence_ids"] = sorted(supported_sources)
+        return json.dumps(
+            {
+                "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+                "analysis_scope": "document",
+                "document_description": "Merged review.",
+                "concepts": [first],
+                "entities": [],
+            }
+        )
+
+    DesktopTextImportService(
+        kb_dir, model_gateway=DesktopModelGateway(transport)
+    ).import_text(source)
+    service = DesktopMissingSourceService(kb_dir)
+    candidate = next(item for item in service.list_candidates() if item.claim_text == secret)
+
+    service.dismiss((candidate.candidate_id,))
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        payloads = [
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT checkpoint_json FROM stage_run_runtime WHERE checkpoint_json IS NOT NULL
+                UNION ALL
+                SELECT checkpoint_json FROM knowledge_analysis_batches
+                    WHERE checkpoint_json IS NOT NULL
+                UNION ALL
+                SELECT checkpoint_json FROM knowledge_analysis_merges
+                    WHERE checkpoint_json IS NOT NULL
+                """
+            ).fetchall()
+        ]
+    assert all(secret not in payload for payload in payloads)
+    assert any(supported in payload for payload in payloads)

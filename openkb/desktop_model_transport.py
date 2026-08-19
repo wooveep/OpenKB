@@ -14,6 +14,10 @@ import yaml
 from openkb.config import LlmCredentialBundle, resolve_credential_bundle
 from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SYSTEM_PROMPT
+from openkb.desktop_knowledge_analysis_batches import (
+    KNOWLEDGE_ANALYSIS_BATCH_SYSTEM_PROMPT,
+    KNOWLEDGE_ANALYSIS_MERGE_SYSTEM_PROMPT,
+)
 from openkb.desktop_model_gateway import (
     INITIAL_RESPONSE_TIMEOUT_SECONDS,
     DesktopModelCancelledError,
@@ -315,6 +319,16 @@ def _messages_for(request: DesktopModelRequest) -> list[dict[str, str]]:
     if request.operation == "knowledge_analysis":
         return [
             {"role": "system", "content": KNOWLEDGE_ANALYSIS_SYSTEM_PROMPT},
+            {"role": "user", "content": request.content},
+        ]
+    if request.operation == "knowledge_analysis_batch":
+        return [
+            {"role": "system", "content": KNOWLEDGE_ANALYSIS_BATCH_SYSTEM_PROMPT},
+            {"role": "user", "content": request.content},
+        ]
+    if request.operation == "knowledge_analysis_merge":
+        return [
+            {"role": "system", "content": KNOWLEDGE_ANALYSIS_MERGE_SYSTEM_PROMPT},
             {"role": "user", "content": request.content},
         ]
     if request.operation == "retrieval_plan":

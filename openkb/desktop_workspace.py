@@ -12,6 +12,9 @@ from openkb.desktop_import_deduplication import (
     backfill_deduplication_metadata,
     deduplication_backfill_needed,
 )
+from openkb.desktop_knowledge_analysis_batch_migrations import (
+    KNOWLEDGE_ANALYSIS_BATCH_MIGRATION_STATEMENTS,
+)
 from openkb.desktop_knowledge_analysis_migrations import (
     KNOWLEDGE_ANALYSIS_METADATA_MIGRATION_STATEMENTS,
     KNOWLEDGE_ANALYSIS_MIGRATION_STATEMENTS,
@@ -387,6 +390,7 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (27, KNOWLEDGE_ANALYSIS_PROVENANCE_MIGRATION_STATEMENTS),
     (28, KNOWLEDGE_ANALYSIS_METADATA_MIGRATION_STATEMENTS),
     (29, MISSING_SOURCE_MIGRATION_STATEMENTS),
+    (30, KNOWLEDGE_ANALYSIS_BATCH_MIGRATION_STATEMENTS),
 )
 class DesktopKnowledgeBaseRuntime:
     """Own the one active Desktop Knowledge Base for one Python Engine."""

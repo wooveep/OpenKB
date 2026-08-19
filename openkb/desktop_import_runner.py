@@ -47,14 +47,13 @@ from openkb.desktop_import_types import (
     DesktopTextImportResult,
 )
 from openkb.desktop_knowledge_analysis import (
-    KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
-    KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
     DesktopKnowledgeAnalysis,
     knowledge_analysis_from_checkpoint,
-    knowledge_analysis_prompt,
     knowledge_analysis_provenance_from_checkpoint,
-    knowledge_analysis_provenance_json,
-    parse_knowledge_analysis,
+)
+from openkb.desktop_knowledge_analysis_batches import (
+    DesktopKnowledgeAnalysisBatchStore,
+    run_knowledge_analysis,
 )
 from openkb.desktop_knowledge_analysis_reuse import (
     ReusableKnowledgeAnalysis,
@@ -132,6 +131,7 @@ class DesktopTextImportService:
         self._model_ledger = DesktopImportModelLedger(kb_dir)
         self._document_versions = DesktopDocumentVersionService(kb_dir)
         self._knowledge_reconciliation = DesktopKnowledgeReconciliationService(kb_dir)
+        self._knowledge_analysis_batches = DesktopKnowledgeAnalysisBatchStore(kb_dir)
         self._quarantine = DesktopImportQuarantineStore(kb_dir)
         self._recovery = DesktopImportRecoveryStore(kb_dir, on_stage_progress=on_stage_progress)
         self._control = control or DesktopImportControl()
@@ -326,43 +326,34 @@ class DesktopTextImportService:
                         error_code="model_analysis_not_configured",
                     )
                 else:
-                    result = self._analyze_document(
-                        state,
-                        active_stage,
-                        knowledge_analysis_prompt(state.source.name, evidence),
-                    )
-                    try:
-                        knowledge_analysis = parse_knowledge_analysis(result.content)
-                    except DesktopImportError as error:
-                        error.attempt_count = result.attempt_count
-                        raise
-                    analysis_provenance_json = knowledge_analysis_provenance_json(
+                    run = run_knowledge_analysis(
+                        store=self._knowledge_analysis_batches,
+                        job_id=state.job_id,
+                        stage_run_id=state.stage_ids[active_stage],
+                        document_name=state.source.name,
+                        evidence=evidence,
                         provider=self._model_gateway.provider_name,
                         model=self._model_gateway.model_name,
-                        prompt_digest=KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
                         engine_version=__version__,
+                        analyze=lambda operation, prompt: self._analyze_document(
+                            state, active_stage, operation, prompt
+                        ),
+                        honor_control=lambda: self._honor_control(state, active_stage),
+                        on_batch_completed=lambda completed, total: self._store.emit_stage(
+                            state,
+                            active_stage,
+                            "running",
+                            80 + min(4, round((completed / total) * 4)),
+                        ),
                     )
+                    knowledge_analysis = run.analysis
+                    analysis_provenance_json = run.provenance_json
                     self._store.set_stage(
                         state,
                         active_stage,
                         "completed",
                         85,
-                        checkpoint={
-                            "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
-                            "analysis_scope": "document",
-                            "provider": self._model_gateway.provider_name,
-                            "model": self._model_gateway.model_name,
-                            "prompt_digest": KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
-                            "engine_version": __version__,
-                            "attempt_metadata": {
-                                "call_id": result.call_id,
-                                "attempt_count": result.attempt_count,
-                            },
-                            "response_sha256": hashlib.sha256(
-                                result.content.encode("utf-8")
-                            ).hexdigest(),
-                            "normalized_result": knowledge_analysis.as_dict(),
-                        },
+                        checkpoint=run.checkpoint,
                     )
             else:
                 analysis_checkpoint = self._checkpoint(state, "model_analysis")
@@ -504,7 +495,9 @@ class DesktopTextImportService:
                 self._recovery.mark_failed(state, active_stage, wrapped.code)
             raise wrapped from error
 
-    def _analyze_document(self, state: ImportJobState, stage: str, text: str) -> DesktopModelResult:
+    def _analyze_document(
+        self, state: ImportJobState, stage: str, operation: str, text: str
+    ) -> DesktopModelResult:
         if self._model_gateway is None:
             raise DesktopImportError(
                 "desktop_import_state_invalid", "Model Gateway is unavailable."
@@ -529,7 +522,7 @@ class DesktopTextImportService:
             self._model_ledger.record_attempt(
                 job_id=state.job_id,
                 stage_run_id=state.stage_ids[stage],
-                operation="knowledge_analysis",
+                operation=operation,
                 event=event,
             )
             self._store.emit_stage(
@@ -541,7 +534,7 @@ class DesktopTextImportService:
             )
 
         return self._model_gateway.analyze(
-            DesktopModelRequest("knowledge_analysis", state.source.name, text),
+            DesktopModelRequest(operation, state.source.name, text),
             on_event=record_attempt,
         )
 
@@ -643,6 +636,7 @@ class DesktopTextImportService:
             stages=task.stages,
             model_calls=task.model_calls,
             quarantine=task.quarantine,
+            knowledge_analysis=task.knowledge_analysis,
         )
 
     def _record_document_version_candidates(

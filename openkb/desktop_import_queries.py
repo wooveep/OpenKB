@@ -15,6 +15,7 @@ from openkb.desktop_import_types import (
     DesktopImportTask,
     DesktopStageRun,
 )
+from openkb.desktop_knowledge_analysis_batches import knowledge_analysis_progress_in
 
 _DEDUPLICATION_REASONS = {
     "D0": "raw_asset_sha256_match",
@@ -30,6 +31,7 @@ def task_from_row(
     job_id = str(row[0])
     stages = stages_for_job(connection, job_id, stage_order_sql)
     model_calls, quarantine = model_details_for_job(connection, job_id)
+    knowledge_analysis = knowledge_analysis_progress_in(connection, job_id, model_calls)
     deduplication = _deduplication_for_job(connection, job_id)
     runtime_status = str(row[1])
     if runtime_status == "running":
@@ -53,6 +55,7 @@ def task_from_row(
         stages=stages,
         model_calls=model_calls,
         quarantine=quarantine,
+        knowledge_analysis=knowledge_analysis,
     )
 
 

@@ -449,6 +449,15 @@
       "empty": "There are no import tasks in this knowledge base.",
       "batch": "Import batch",
       "batchSummary": "{{total}} documents · {{completed}} completed · {{active}} active · {{failed}} failed",
+      "knowledgeAnalysis": "Knowledge Analysis Batch",
+      "knowledgeAnalysisSummary": "{{total}} batches · {{completed}} completed · {{active}} active · {{failed}} failed",
+      "knowledgeAnalysisCurrent": "Batch {{current}} of {{total}}",
+      "knowledgeAnalysisBudget": "Current timeout {{timeout}}s · logical budget remaining {{remaining}}s",
+      "knowledgeAnalysisPhases": {
+        "batches": "Analyzing sections",
+        "merge": "Merging document",
+        "completed": "Completed"
+      },
       "stages": "Import stages"
     },
     "documents": {

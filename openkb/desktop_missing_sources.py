@@ -16,7 +16,7 @@ from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
 from openkb.desktop_knowledge_analysis import (
     KnowledgeAnalysisCandidate,
     KnowledgeAnalysisMissingClaim,
-    knowledge_analysis_from_checkpoint,
+    parse_knowledge_analysis,
 )
 from openkb.desktop_knowledge_analysis_reuse import canonical_analysis_document_id_in
 from openkb.desktop_knowledge_generations import (
@@ -360,7 +360,7 @@ def _redact_dismissed_claims_in(
     for document_id, identities in removals.items():
         checkpoint_row = connection.execute(
             """
-            SELECT runtime.stage_run_id, runtime.checkpoint_json
+            SELECT jobs.job_id, runtime.stage_run_id, runtime.checkpoint_json
             FROM import_jobs AS jobs
             JOIN stage_runs AS stages ON stages.job_id = jobs.job_id
                 AND stages.stage = 'model_analysis' AND stages.status = 'completed'
@@ -375,55 +375,135 @@ def _redact_dismissed_claims_in(
                 "import_checkpoint_invalid",
                 "The Missing Source Candidate analysis checkpoint is unavailable.",
             )
-        try:
-            checkpoint = json.loads(str(checkpoint_row[1]))
-        except json.JSONDecodeError as error:
-            raise DesktopImportError(
-                "import_checkpoint_invalid",
-                "The Missing Source Candidate analysis checkpoint is invalid.",
-            ) from error
-        analysis = knowledge_analysis_from_checkpoint(checkpoint)
-        if analysis is None:
-            raise DesktopImportError(
-                "import_checkpoint_invalid",
-                "The Missing Source Candidate analysis checkpoint is invalid.",
-            )
-
-        def retained_candidates(
-            candidates: tuple[KnowledgeAnalysisCandidate, ...],
-        ) -> tuple[KnowledgeAnalysisCandidate, ...]:
-            retained: list[KnowledgeAnalysisCandidate] = []
-            for candidate in candidates:
-                normalized_title = normalize_knowledge_title(candidate.title)[1]
-                claims = []
-                for claim in candidate.claims:
-                    identity = (candidate.kind, normalized_title, claim.text)
-                    if identity in identities:
-                        continue
-                    claims.append(claim)
-                if claims:
-                    retained.append(replace(candidate, claims=tuple(claims)))
-            return tuple(retained)
-
-        redacted = replace(
-            analysis,
-            concepts=retained_candidates(analysis.concepts),
-            entities=retained_candidates(analysis.entities),
-        )
         # D1 document versions can share this checkpoint. An earlier dismissal
         # may therefore have already removed the same claim identity.
-        checkpoint["normalized_result"] = redacted.as_dict()
+        checkpoint = _redacted_analysis_checkpoint(
+            _checkpoint_payload(checkpoint_row[2]), identities
+        )
+        now = _timestamp()
+        job_id = str(checkpoint_row[0])
+        batch_rows = connection.execute(
+            """
+            SELECT batch_id, checkpoint_json FROM knowledge_analysis_batches
+            WHERE job_id = ? AND checkpoint_json IS NOT NULL
+            ORDER BY batch_ordinal
+            """,
+            (job_id,),
+        ).fetchall()
+        redacted_batches: list[dict[str, object]] = []
+        for batch_id, batch_payload in batch_rows:
+            redacted_batch = _redacted_analysis_checkpoint(
+                _checkpoint_payload(batch_payload), identities
+            )
+            redacted_batches.append(redacted_batch)
+            connection.execute(
+                """
+                UPDATE knowledge_analysis_batches SET checkpoint_json = ?, updated_at = ?
+                WHERE batch_id = ?
+                """,
+                (_checkpoint_json(redacted_batch), now, str(batch_id)),
+            )
+        batch_digests = [
+            hashlib.sha256(_checkpoint_json(batch).encode("utf-8")).hexdigest()
+            for batch in redacted_batches
+        ]
+        if "batch_checkpoint_sha256s" in checkpoint:
+            checkpoint["batch_checkpoint_sha256s"] = batch_digests
         connection.execute(
             """
             UPDATE stage_run_runtime SET checkpoint_json = ?, updated_at = ?
             WHERE stage_run_id = ?
             """,
-            (
-                json.dumps(checkpoint, ensure_ascii=False),
-                _timestamp(),
-                str(checkpoint_row[0]),
-            ),
+            (_checkpoint_json(checkpoint), now, str(checkpoint_row[1])),
         )
+        merge_row = connection.execute(
+            """
+            SELECT checkpoint_json FROM knowledge_analysis_merges
+            WHERE job_id = ? AND checkpoint_json IS NOT NULL
+            """,
+            (job_id,),
+        ).fetchone()
+        if merge_row is not None:
+            redacted_merge = _redacted_analysis_checkpoint(
+                _checkpoint_payload(merge_row[0]), identities
+            )
+            if "batch_checkpoint_sha256s" in redacted_merge:
+                redacted_merge["batch_checkpoint_sha256s"] = batch_digests
+            connection.execute(
+                """
+                UPDATE knowledge_analysis_merges SET checkpoint_json = ?, updated_at = ?
+                WHERE job_id = ?
+                """,
+                (_checkpoint_json(redacted_merge), now, job_id),
+            )
+
+
+def _checkpoint_payload(payload: object) -> dict[str, object]:
+    try:
+        checkpoint = json.loads(str(payload))
+    except json.JSONDecodeError as error:
+        raise DesktopImportError(
+            "import_checkpoint_invalid",
+            "The Missing Source Candidate analysis checkpoint is invalid.",
+        ) from error
+    if not isinstance(checkpoint, dict):
+        raise DesktopImportError(
+            "import_checkpoint_invalid",
+            "The Missing Source Candidate analysis checkpoint is invalid.",
+        )
+    return checkpoint
+
+
+def _checkpoint_json(checkpoint: dict[str, object]) -> str:
+    return json.dumps(
+        checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _redacted_analysis_checkpoint(
+    checkpoint: dict[str, object], identities: set[tuple[str, str, str]]
+) -> dict[str, object]:
+    normalized = checkpoint.get("normalized_result")
+    if not isinstance(normalized, dict):
+        raise DesktopImportError(
+            "import_checkpoint_invalid",
+            "The Missing Source Candidate analysis checkpoint is invalid.",
+        )
+    scope = normalized.get("analysis_scope")
+    if scope not in {"document", "batch"}:
+        raise DesktopImportError(
+            "import_checkpoint_invalid",
+            "The Missing Source Candidate analysis checkpoint is invalid.",
+        )
+    analysis = parse_knowledge_analysis(
+        json.dumps(normalized),
+        expected_scope=scope,
+        aggregate=scope == "document" and "batch_count" in checkpoint,
+    )
+
+    def retained_candidates(
+        candidates: tuple[KnowledgeAnalysisCandidate, ...],
+    ) -> tuple[KnowledgeAnalysisCandidate, ...]:
+        retained: list[KnowledgeAnalysisCandidate] = []
+        for candidate in candidates:
+            normalized_title = normalize_knowledge_title(candidate.title)[1]
+            claims = tuple(
+                claim
+                for claim in candidate.claims
+                if (candidate.kind, normalized_title, claim.text) not in identities
+            )
+            if claims:
+                retained.append(replace(candidate, claims=claims))
+        return tuple(retained)
+
+    redacted = replace(
+        analysis,
+        concepts=retained_candidates(analysis.concepts),
+        entities=retained_candidates(analysis.entities),
+    )
+    updated = dict(checkpoint)
+    updated["normalized_result"] = redacted.as_dict()
+    return updated
 
 
 def _candidate_payload_in(connection: sqlite3.Connection, candidate_id: str) -> tuple[object, ...]:
