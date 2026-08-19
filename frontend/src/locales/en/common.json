@@ -458,6 +458,34 @@
         "merge": "Merging document",
         "completed": "Completed"
       },
+      "reanalysis": {
+        "title": "Knowledge Reanalysis",
+        "description": "{{count}} Available documents can be explicitly reanalysed with the current model.",
+        "startBulk": "Reanalyse all",
+        "retry": "Retry",
+        "runSummary": "{{total}} documents · {{completed}} completed · {{failed}} failed",
+        "batchProgress": "{{completed}}/{{total}} batches complete · current {{current}}",
+        "attempt": "Attempt {{attempt}} · timeout {{timeout}}s · {{remaining}}s remaining",
+        "modes": {
+          "single": "Single document",
+          "bulk": "Bulk run"
+        },
+        "statuses": {
+          "pending": "Pending",
+          "running": "Running",
+          "completed": "Completed",
+          "partial_failure": "Partially failed",
+          "failed": "Failed"
+        },
+        "phases": {
+          "pending": "Waiting",
+          "batches": "Analyzing sections",
+          "merge": "Merging document",
+          "reconciliation": "Updating knowledge review",
+          "completed": "Completed",
+          "failed": "Failed"
+        }
+      },
       "stages": "Import stages"
     },
     "documents": {
@@ -470,6 +498,20 @@
       "evidenceUnits": "Evidence locations",
       "assetHash": "Raw asset",
       "empty": "No documents match this filter.",
+      "analysis": {
+        "title": "Knowledge Analysis",
+        "action": "Reanalyse",
+        "running": "Reanalysing…",
+        "schema": "Schema",
+        "model": "Model",
+        "engine": "Engine",
+        "analyzedAt": "Analysed",
+        "states": {
+          "current": "Analysis current",
+          "analysis_outdated": "Analysis outdated",
+          "missing": "Analysis missing"
+        }
+      },
       "filters": {
         "all": "All statuses",
         "available": "Available",

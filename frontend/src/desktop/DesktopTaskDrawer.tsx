@@ -9,7 +9,9 @@ import {
 import { Button } from "@/components/ui/button"
 import type { DesktopImportBatchSummary } from "./DesktopDocumentImportPanel"
 import { DesktopKnowledgeAnalysisProgress } from "./DesktopKnowledgeAnalysisProgress"
+import { DesktopKnowledgeReanalysisTasks } from "./DesktopKnowledgeReanalysisTasks"
 import type { DesktopImportTask } from "./contracts"
+import type { KnowledgeReanalysisController } from "./useKnowledgeReanalysis"
 
 type ImportTaskAction = "pause" | "resume" | "cancel"
 
@@ -19,6 +21,7 @@ export function DesktopTaskDrawer({
   batchSummary,
   tasks,
   controllingJobId,
+  knowledgeReanalysis,
   onOpenChange,
   onControl,
 }: {
@@ -26,6 +29,7 @@ export function DesktopTaskDrawer({
   batchSummary: DesktopImportBatchSummary | null
   tasks: DesktopImportTask[]
   controllingJobId: string | null
+  knowledgeReanalysis: KnowledgeReanalysisController
   onOpenChange: (open: boolean) => void
   onControl: (jobId: string, action: ImportTaskAction) => void
 }) {
@@ -40,6 +44,7 @@ export function DesktopTaskDrawer({
             <DrawerTitle>{t("desktop.tasks.title")}</DrawerTitle>
             <DrawerDescription>{t("desktop.tasks.description")}</DrawerDescription>
           </DrawerHeader>
+          <DesktopKnowledgeReanalysisTasks controller={knowledgeReanalysis} />
           {tasks.length || batchSummary ? (
             <div className="space-y-2">
               {batchSummary ? <section className="mb-4 rounded-xl border border-border/70 bg-muted/20 p-4">
@@ -90,7 +95,9 @@ export function DesktopTaskDrawer({
                 )
               })}
             </div>
-          ) : <p className="py-8 text-center text-sm text-muted-foreground">{t("desktop.tasks.empty")}</p>}
+          ) : knowledgeReanalysis.overview.runs.length || knowledgeReanalysis.overview.documents.length ? null : (
+            <p className="py-8 text-center text-sm text-muted-foreground">{t("desktop.tasks.empty")}</p>
+          )}
         </div>
       </DrawerContent>
     </Drawer>

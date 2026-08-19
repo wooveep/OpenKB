@@ -15,6 +15,9 @@ pub use knowledge_reconciliation::{
     KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
     KnowledgeReconciliationDecision,
 };
+#[path = "engine_wire_knowledge_reanalysis.rs"]
+mod knowledge_reanalysis;
+pub use knowledge_reanalysis::{KnowledgeReanalysisOverview, KnowledgeReanalysisRun};
 #[path = "engine_wire_missing_sources.rs"]
 mod missing_sources;
 pub use missing_sources::{
@@ -192,6 +195,8 @@ pub enum EngineEvent {
     ImportStageProgress(ImportStageProgressEventData),
     #[serde(rename = "answer.delta")]
     AnswerDelta(AnswerDeltaEventData),
+    #[serde(rename = "knowledge_reanalysis.updated")]
+    KnowledgeReanalysisUpdated(KnowledgeReanalysisUpdatedEventData),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -202,6 +207,15 @@ pub struct EngineRequestEventData {
     pub ok: Option<bool>,
     #[serde(alias = "error_code")]
     pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeReanalysisUpdatedEventData {
+    #[serde(alias = "run_id")]
+    pub run_id: String,
+    #[serde(alias = "job_id")]
+    pub job_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -722,7 +736,7 @@ pub(crate) fn write_frame<W: Write>(writer: &mut W, value: &Value) -> BridgeResu
 
 #[cfg(test)]
 mod tests {
-    use super::{KnowledgeAnalysisPhase, KnowledgeAnalysisProgress};
+    use super::{BridgeEvent, EngineEvent, KnowledgeAnalysisPhase, KnowledgeAnalysisProgress};
     use serde_json::json;
 
     #[test]
@@ -742,5 +756,21 @@ mod tests {
         assert_eq!(progress.current_batch, Some(2));
         assert!(matches!(progress.phase, KnowledgeAnalysisPhase::Batches));
         assert_eq!(progress.current_timeout_seconds, Some(30.0));
+    }
+
+    #[test]
+    fn knowledge_reanalysis_event_accepts_python_snake_case_fields() {
+        let event: BridgeEvent = serde_json::from_value(json!({
+            "sequence": 7,
+            "kind": "knowledge_reanalysis.updated",
+            "data": {"run_id": "run-1", "job_id": "job-1"}
+        }))
+        .expect("Knowledge Reanalysis event should deserialize");
+
+        assert!(matches!(
+            event.event,
+            EngineEvent::KnowledgeReanalysisUpdated(data)
+                if data.run_id == "run-1" && data.job_id == "job-1"
+        ));
     }
 }

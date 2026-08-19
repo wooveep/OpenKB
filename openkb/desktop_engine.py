@@ -36,7 +36,6 @@ from openkb.desktop_legacy_office_parsers import shutdown_legacy_office_runtime
 from openkb.desktop_logging import configure_desktop_engine_logging
 from openkb.desktop_model_gateway import MODEL_CALL_DEADLINE_SECONDS, DesktopModelGateway
 from openkb.desktop_model_transport import desktop_model_gateway_for
-from openkb.desktop_okf_projection import materialize_okf_projection
 from openkb.desktop_raw_assets import DesktopRawAssetService
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
@@ -173,6 +172,7 @@ class DesktopEngineServer:
         self._active_lock = threading.Lock()
         self._workers: set[threading.Thread] = set()
         self._workers_lock = threading.Lock()
+        self._knowledge_reanalysis_lease = 0
         self._sequence = 0
         self._sequence_lock = threading.Lock()
 
@@ -200,6 +200,7 @@ class DesktopEngineServer:
 
         # EOF also means the owning Shell is gone. Do not let active work keep
         # running simply because it did not send an explicit shutdown request.
+        self._shutdown.set()
         with self._active_lock:
             for cancel_event in self._active_requests.values():
                 cancel_event.set()
@@ -409,6 +410,10 @@ class DesktopEngineServer:
             from openkb.desktop_engine_knowledge_pages import dispatch_knowledge_page_request
 
             return dispatch_knowledge_page_request(self, request, cancel_event)
+        if request.method in engine_methods.KNOWLEDGE_REANALYSIS_METHODS:
+            from openkb import desktop_engine_knowledge_reanalysis as reanalysis
+
+            return reanalysis.dispatch_knowledge_reanalysis_request(self, request, cancel_event)
         if request.method in {
             "workbench.document_version_candidates",
             "workbench.resolve_document_version_candidate",
@@ -423,7 +428,9 @@ class DesktopEngineServer:
 
             return dispatch_knowledge_reconciliation_request(self, request, cancel_event)
         if request.method in self._INTERRUPTION_PRESERVING_METHODS:
-            return self._dispatch_grounded_answer_request(request, cancel_event)
+            from openkb.desktop_engine_answers import dispatch_grounded_answer_request
+
+            return dispatch_grounded_answer_request(self, request, cancel_event)
         if request.method in engine_methods.MODEL_SETTINGS_METHODS:
             from openkb.desktop_engine_model_settings import dispatch_model_settings_request
 
@@ -440,30 +447,15 @@ class DesktopEngineServer:
                     "request_cancelled", "Desktop Bridge request was cancelled."
                 )
 
-            if request.method == "workbench.create_knowledge_base":
-                kb_dir = _required_path_param(request, "kb_dir")
-                name = request.params.get("name")
-                if name is not None and not isinstance(name, str):
-                    raise DesktopRequestError(
-                        "invalid_params", "workbench.create_knowledge_base name must be a string."
-                    )
-                self._begin_workspace_mutation(request, cancel_event)
-                activation = self._workspace.create(Path(kb_dir), name=name)
-                materialize_okf_projection(Path(activation.knowledge_base.kb_dir))
-                return activation.as_dict()
+            if request.method in {
+                "workbench.create_knowledge_base",
+                "workbench.open_knowledge_base",
+            }:
+                from openkb.desktop_engine_workspace_activation import (
+                    dispatch_knowledge_base_activation,
+                )
 
-            if request.method == "workbench.open_knowledge_base":
-                kb_dir = _required_path_param(request, "kb_dir")
-                self._begin_workspace_mutation(request, cancel_event)
-                activation = self._workspace.open(Path(kb_dir))
-                active_kb_dir = Path(activation.knowledge_base.kb_dir)
-                from openkb.desktop_conversations import recover_stale_conversation_generations
-
-                recover_stale_conversation_generations(active_kb_dir)
-                DesktopRawAssetService(active_kb_dir).verify_available_documents()
-                materialize_okf_projection(active_kb_dir)
-                self._start_recoverable_imports(active_kb_dir)
-                return activation.as_dict()
+                return dispatch_knowledge_base_activation(self, request, cancel_event)
 
             if request.method == "workbench.inspect_import_sources":
                 return inspect_import_sources(
@@ -471,13 +463,6 @@ class DesktopEngineServer:
                 ).as_dict()
             active = self._workspace.active()
             return {"knowledge_base": active.as_dict() if active is not None else None}
-
-    def _dispatch_grounded_answer_request(
-        self, request: DesktopRequest, cancel_event: threading.Event | None
-    ) -> dict[str, object]:
-        from openkb.desktop_engine_answers import dispatch_grounded_answer_request
-
-        return dispatch_grounded_answer_request(self, request, cancel_event)
 
     def _dispatch_import_request(
         self, request: DesktopRequest, cancel_event: threading.Event | None

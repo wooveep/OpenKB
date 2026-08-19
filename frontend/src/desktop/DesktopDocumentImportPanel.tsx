@@ -7,6 +7,7 @@ import {
   Search,
   Upload,
   X,
+  RefreshCw,
 } from "lucide-react"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -26,6 +27,7 @@ import type {
 } from "./contracts"
 import { currentDocumentTasks, taskIsFailed } from "./desktop-document-tasks"
 import { DesktopKnowledgeAnalysisProgress } from "./DesktopKnowledgeAnalysisProgress"
+import type { KnowledgeReanalysisController } from "./useKnowledgeReanalysis"
 
 export interface DesktopImportBatchSummary {
   total: number
@@ -48,6 +50,7 @@ export function DesktopDocumentImportPanel({
   summary,
   tasks,
   controllingJobId,
+  knowledgeReanalysis,
   onManualPathChange,
   onAddManualPath,
   onChooseSources,
@@ -69,6 +72,7 @@ export function DesktopDocumentImportPanel({
   summary: DesktopImportBatchSummary | null
   tasks: DesktopImportTask[]
   controllingJobId: string | null
+  knowledgeReanalysis: KnowledgeReanalysisController
   onManualPathChange: (value: string) => void
   onAddManualPath: () => void
   onChooseSources: (picker: DesktopImportSourcePicker) => void
@@ -201,6 +205,7 @@ export function DesktopDocumentImportPanel({
         key={requestKey}
         tasks={tasks}
         controllingJobId={controllingJobId}
+        knowledgeReanalysis={knowledgeReanalysis}
         onControl={onControl}
         onOpenOriginal={onOpenOriginal}
         onOpenFailedDocuments={onOpenFailedDocuments}
@@ -213,6 +218,7 @@ export function DesktopDocumentImportPanel({
 function DocumentList({
   tasks,
   controllingJobId,
+  knowledgeReanalysis,
   onControl,
   onOpenOriginal,
   onOpenFailedDocuments,
@@ -220,6 +226,7 @@ function DocumentList({
 }: {
   tasks: DesktopImportTask[]
   controllingJobId: string | null
+  knowledgeReanalysis: KnowledgeReanalysisController
   onControl: (jobId: string, action: ImportTaskAction) => void
   onOpenOriginal: (documentId: string) => void
   onOpenFailedDocuments: () => void
@@ -233,6 +240,12 @@ function DocumentList({
     documents.find((task) => task.document?.documentId === requestedDocumentId) ?? null
   ))
   const normalizedQuery = query.trim().toLowerCase()
+  const analysisByDocument = new Map(
+    knowledgeReanalysis.overview.documents.map((item) => [item.documentId, item]),
+  )
+  const activeAnalysisDocuments = new Set(knowledgeReanalysis.overview.runs.flatMap((run) => (
+    run.jobs.filter((job) => ["pending", "running"].includes(job.status)).map((job) => job.documentId)
+  )))
   const filtered = documents.filter((task) => {
     const matchesQuery = !normalizedQuery
       || task.job.sourceName.toLowerCase().includes(normalizedQuery)
@@ -267,11 +280,15 @@ function DocumentList({
           <ul className="divide-y divide-border/70">
             {filtered.map((task) => {
               const statusKey = task.document?.availability === "failed" ? "quarantined" : task.job.status
+              const analysis = task.document ? analysisByDocument.get(task.document.documentId) : undefined
               return (
               <li key={task.document?.documentId ?? task.job.jobId}>
                 <button type="button" onClick={() => setSelected(task)} className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-4 py-3 text-left outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
                   <span className="min-w-0"><strong className="block truncate text-sm font-medium">{task.document?.name ?? task.job.sourceName}</strong><span className="mt-0.5 block truncate text-xs text-muted-foreground">{task.job.sourceName}</span></span>
-                  <span className="text-right"><span className="block text-xs font-medium">{t(`desktop.knowledgeBases.importStatuses.${statusKey}`)}</span><span className="mt-0.5 block text-xs text-muted-foreground">{task.job.progress}%</span></span>
+                  <span className="text-right">
+                    <span className="block text-xs font-medium">{t(`desktop.knowledgeBases.importStatuses.${statusKey}`)}</span>
+                    {analysis ? <span className="mt-0.5 block text-xs text-muted-foreground">{t(`desktop.documents.analysis.states.${analysis.state}`)}</span> : <span className="mt-0.5 block text-xs text-muted-foreground">{task.job.progress}%</span>}
+                  </span>
                 </button>
               </li>
               )
@@ -285,10 +302,68 @@ function DocumentList({
             <SheetTitle>{selected?.document?.name ?? selected?.job.sourceName}</SheetTitle>
             <SheetDescription>{t("desktop.documents.details")}</SheetDescription>
           </SheetHeader>
-          {selected ? <ImportTaskCard className="mt-5" task={selected} controlling={controllingJobId === selected.job.jobId} onControl={onControl} onOpenOriginal={onOpenOriginal} /> : null}
+          {selected ? <>
+            {selected.document?.availability === "available" ? (
+              <DocumentAnalysisCard
+                analysis={analysisByDocument.get(selected.document.documentId)}
+                active={activeAnalysisDocuments.has(selected.document.documentId)}
+                working={knowledgeReanalysis.workingId !== null}
+                error={knowledgeReanalysis.error}
+                onReanalyse={() => void knowledgeReanalysis.start([selected.document!.documentId])}
+              />
+            ) : null}
+            <ImportTaskCard className="mt-4" task={selected} controlling={controllingJobId === selected.job.jobId} onControl={onControl} onOpenOriginal={onOpenOriginal} />
+          </> : null}
         </SheetContent>
       </Sheet>
     </>
+  )
+}
+
+function DocumentAnalysisCard({
+  analysis,
+  active,
+  working,
+  error,
+  onReanalyse,
+}: {
+  analysis: KnowledgeReanalysisController["overview"]["documents"][number] | undefined
+  active: boolean
+  working: boolean
+  error: string | null
+  onReanalyse: () => void
+}) {
+  const { t } = useTranslation("common")
+  return (
+    <section className="mt-5 rounded-xl border border-border/70 bg-muted/20 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-medium">{t("desktop.documents.analysis.title")}</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {analysis
+              ? t(`desktop.documents.analysis.states.${analysis.state}`)
+              : t("desktop.documents.analysis.states.missing")}
+          </p>
+        </div>
+        <Button size="sm" variant="outline" disabled={active || working} onClick={onReanalyse}>
+          {active ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+          {active ? t("desktop.documents.analysis.running") : t("desktop.documents.analysis.action")}
+        </Button>
+      </div>
+      {analysis ? (
+        <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+          <dt className="text-muted-foreground">{t("desktop.documents.analysis.schema")}</dt>
+          <dd className="truncate text-right">{analysis.schemaVersion ?? "—"}</dd>
+          <dt className="text-muted-foreground">{t("desktop.documents.analysis.model")}</dt>
+          <dd className="truncate text-right">{analysis.provider && analysis.model ? `${analysis.provider}/${analysis.model}` : "—"}</dd>
+          <dt className="text-muted-foreground">{t("desktop.documents.analysis.engine")}</dt>
+          <dd className="truncate text-right">{analysis.engineVersion ?? "—"}</dd>
+          <dt className="text-muted-foreground">{t("desktop.documents.analysis.analyzedAt")}</dt>
+          <dd className="truncate text-right">{analysis.analyzedAt ? new Date(analysis.analyzedAt).toLocaleString() : "—"}</dd>
+        </dl>
+      ) : null}
+      {error ? <p className="mt-3 text-xs text-destructive" role="alert">{error}</p> : null}
+    </section>
   )
 }
 

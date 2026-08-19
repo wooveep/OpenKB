@@ -48,11 +48,11 @@ import {
   runtimeLaunchIntents,
   toDesktopBridgeError,
 } from "./bridge-normalizers"
-import { UnavailableKnowledgePageBridge } from "./unavailable-knowledge-page-bridge"
-import { TauriKnowledgeReviewBridge } from "./tauri-knowledge-review-bridge"
+import { TauriKnowledgeReanalysisBridge } from "./tauri-knowledge-reanalysis-bridge"
+import { UnavailableKnowledgeReanalysisBridge } from "./unavailable-knowledge-reanalysis-bridge"
 
 /** Production Bridge: the sole React caller of Tauri commands and channels. */
-export class TauriDesktopBridge extends TauriKnowledgeReviewBridge implements DesktopBridge {
+export class TauriDesktopBridge extends TauriKnowledgeReanalysisBridge implements DesktopBridge {
   async handshake(): Promise<DesktopBridgeHandshake> {
     return this.call<DesktopBridgeHandshake>("desktop_bridge_handshake")
   }
@@ -443,7 +443,7 @@ export class TauriDesktopBridge extends TauriKnowledgeReviewBridge implements De
   }
 }
 
-class UnavailableDesktopBridge extends UnavailableKnowledgePageBridge implements DesktopBridge {
+class UnavailableDesktopBridge extends UnavailableKnowledgeReanalysisBridge implements DesktopBridge {
   protected unavailable<T>(): Promise<T> {
     return Promise.reject(
       new DesktopBridgeError(

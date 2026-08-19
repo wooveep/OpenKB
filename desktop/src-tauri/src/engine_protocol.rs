@@ -12,10 +12,10 @@ pub use crate::engine_wire::{
     DocumentVersionCandidateDecision, DocumentVersionCandidatesResult, EngineHealth,
     GroundedAnswer, GroundedAnswersResult, ImportControlResult, ImportJobsResult,
     ImportSourceInspection, KnowledgeBaseActivationResult, KnowledgePageKind,
-    KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
-    KnowledgeReconciliationDecision, MissingSourceBindingResult, MissingSourceCandidatesResult,
-    MissingSourceDismissalResult, ModelSettings, RawDocument, RecoveryOverride,
-    TextDocumentImportResult,
+    KnowledgeReanalysisOverview, KnowledgeReanalysisRun, KnowledgeReconciliationCommit,
+    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision,
+    MissingSourceBindingResult, MissingSourceCandidatesResult, MissingSourceDismissalResult,
+    ModelSettings, RawDocument, RecoveryOverride, TextDocumentImportResult,
 };
 pub use crate::engine_wire_knowledge_pages::{
     KnowledgeExportMode, KnowledgeExportResult, KnowledgePage, KnowledgePageDeletionResult,
@@ -45,6 +45,8 @@ mod conversations;
 mod document_versions;
 #[path = "engine_protocol_knowledge_pages.rs"]
 mod knowledge_pages;
+#[path = "engine_protocol_knowledge_reanalysis.rs"]
+mod knowledge_reanalysis;
 #[path = "engine_protocol_knowledge_reconciliation.rs"]
 mod knowledge_reconciliation;
 #[path = "engine_protocol_lifecycle.rs"]

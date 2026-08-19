@@ -52,6 +52,9 @@ WORKSPACE_METHODS = frozenset(
         "workbench.save_model_settings",
         "workbench.test_model_connection",
         "workbench.export_diagnostic_bundle",
+        "workbench.knowledge_reanalysis",
+        "workbench.start_knowledge_reanalysis",
+        "workbench.retry_knowledge_reanalysis",
     }
 )
 
@@ -71,6 +74,10 @@ MODEL_SETTINGS_METHODS = frozenset(
 KNOWLEDGE_PAGE_METHODS = frozenset(
     method for method in WORKSPACE_METHODS if "knowledge_page" in method
 ) | {"workbench.search_knowledge_sources", "workbench.export_knowledge_bundle"}
+
+KNOWLEDGE_REANALYSIS_METHODS = frozenset(
+    method for method in WORKSPACE_METHODS if "knowledge_reanalysis" in method
+)
 
 NON_CANCELABLE_MUTATION_METHODS = frozenset(
     {
@@ -99,5 +106,7 @@ NON_CANCELABLE_MUTATION_METHODS = frozenset(
         "workbench.save_conversation_draft",
         "workbench.select_answer_version",
         "workbench.export_diagnostic_bundle",
+        "workbench.start_knowledge_reanalysis",
+        "workbench.retry_knowledge_reanalysis",
     }
 )

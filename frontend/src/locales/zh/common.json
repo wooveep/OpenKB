@@ -458,6 +458,34 @@
         "merge": "合并文档结果",
         "completed": "已完成"
       },
+      "reanalysis": {
+        "title": "知识重新分析",
+        "description": "可使用当前模型显式重分析 {{count}} 份可用文档。",
+        "startBulk": "全部重新分析",
+        "retry": "重试",
+        "runSummary": "共 {{total}} 份 · 已完成 {{completed}} · 失败 {{failed}}",
+        "batchProgress": "已完成 {{completed}}/{{total}} 批 · 当前第 {{current}} 批",
+        "attempt": "第 {{attempt}} 次 · 超时 {{timeout}} 秒 · 剩余 {{remaining}} 秒",
+        "modes": {
+          "single": "单份文档",
+          "bulk": "批量任务"
+        },
+        "statuses": {
+          "pending": "等待中",
+          "running": "进行中",
+          "completed": "已完成",
+          "partial_failure": "部分失败",
+          "failed": "失败"
+        },
+        "phases": {
+          "pending": "等待中",
+          "batches": "分析自然章节",
+          "merge": "合并文档结果",
+          "reconciliation": "更新知识审核",
+          "completed": "已完成",
+          "failed": "失败"
+        }
+      },
       "stages": "导入阶段"
     },
     "documents": {
@@ -470,6 +498,20 @@
       "evidenceUnits": "可定位证据",
       "assetHash": "原始资产",
       "empty": "没有符合当前筛选的文档。",
+      "analysis": {
+        "title": "知识分析",
+        "action": "重新分析",
+        "running": "正在重新分析…",
+        "schema": "结构版本",
+        "model": "模型",
+        "engine": "引擎版本",
+        "analyzedAt": "分析时间",
+        "states": {
+          "current": "分析为最新",
+          "analysis_outdated": "分析已过期",
+          "missing": "尚未分析"
+        }
+      },
       "filters": {
         "all": "全部状态",
         "available": "可用",

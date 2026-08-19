@@ -30,6 +30,7 @@ import { DesktopBridgeError } from "./contracts"
 import { nextDesktopRequestId } from "./request-id"
 import { useDeferredImportSources } from "./useDeferredImportSources"
 import { useDesktopRuntimeEvents } from "./useDesktopRuntimeEvents"
+import { useKnowledgeReanalysis } from "./useKnowledgeReanalysis"
 import type {
   DesktopImportTask,
   DesktopGlobalSearchResult,
@@ -133,6 +134,7 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
   const trayTipShown = useRef(false)
   const importInspectionRead = useRef(0)
   const addImportSourcesRef = useRef<(paths: string[]) => void>(() => undefined)
+  const knowledgeReanalysis = useKnowledgeReanalysis({ bridge, kbDir: knowledgeBase?.kbDir ?? null, engineReady })
 
   const refreshActiveKnowledgeBase = useCallback(async () => {
     const read = activeKnowledgeBaseRead.current + 1
@@ -586,7 +588,7 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
     }
   }
 
-  const activeTaskCount = importTasks.filter((task) => ["pending", "running", "paused", "recoverable"].includes(task.job.status)).length
+  const activeTaskCount = importTasks.filter((task) => ["pending", "running", "paused", "recoverable"].includes(task.job.status)).length + knowledgeReanalysis.activeJobCount
 
   return (
     <>
@@ -649,6 +651,7 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
               importBatchSummary={importBatchSummary}
               importTasks={importTasks}
               controllingJobId={controllingJobId}
+              knowledgeReanalysis={knowledgeReanalysis}
               requestedConversationId={requestedConversationId}
               requestedConversationMessageId={requestedConversationMessageId}
               requestedDocumentId={requestedDocumentId}
@@ -765,6 +768,7 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
         batchSummary={importBatchSummary}
         tasks={importTasks}
         controllingJobId={controllingJobId}
+        knowledgeReanalysis={knowledgeReanalysis}
         onOpenChange={setTaskDrawerOpen}
         onControl={(jobId, action) => void controlImportJob(jobId, action)}
       />

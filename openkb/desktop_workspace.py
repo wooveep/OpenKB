@@ -8,6 +8,9 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from openkb import desktop_knowledge_lifecycle_migrations as lifecycle_migrations
+from openkb import desktop_knowledge_page_migrations as knowledge_page_migrations
+from openkb import desktop_knowledge_reanalysis_migrations as reanalysis_migrations
 from openkb.desktop_import_deduplication import (
     backfill_deduplication_metadata,
     deduplication_backfill_needed,
@@ -20,12 +23,6 @@ from openkb.desktop_knowledge_analysis_migrations import (
     KNOWLEDGE_ANALYSIS_MIGRATION_STATEMENTS,
     KNOWLEDGE_ANALYSIS_PROVENANCE_MIGRATION_STATEMENTS,
     register_knowledge_analysis_migration_functions,
-)
-from openkb.desktop_knowledge_lifecycle_migrations import (
-    KNOWLEDGE_LIFECYCLE_MIGRATION_STATEMENTS,
-)
-from openkb.desktop_knowledge_page_migrations import (
-    KNOWLEDGE_PAGE_DRAFT_MIGRATION_STATEMENTS,
 )
 from openkb.desktop_knowledge_provenance_migrations import (
     KNOWLEDGE_PROVENANCE_MIGRATION_STATEMENTS,
@@ -379,11 +376,11 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (16, KNOWLEDGE_GRAPH_MIGRATION_STATEMENTS),
     (17, GRAPH_FEATURE_FLAG_MIGRATION_STATEMENTS),
     (18, CONVERSATION_MIGRATION_STATEMENTS),
-    (19, KNOWLEDGE_PAGE_DRAFT_MIGRATION_STATEMENTS),
+    (19, knowledge_page_migrations.KNOWLEDGE_PAGE_DRAFT_MIGRATION_STATEMENTS),
     (20, KNOWLEDGE_SOURCE_MIGRATION_STATEMENTS),
     (21, KNOWLEDGE_PROVENANCE_MIGRATION_STATEMENTS),
     (22, KNOWLEDGE_VERIFICATION_MIGRATION_STATEMENTS),
-    (23, KNOWLEDGE_LIFECYCLE_MIGRATION_STATEMENTS),
+    (23, lifecycle_migrations.KNOWLEDGE_LIFECYCLE_MIGRATION_STATEMENTS),
     (24, THREE_WAY_KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS),
     (25, OKF_PROJECTION_MIGRATION_STATEMENTS),
     (26, KNOWLEDGE_ANALYSIS_MIGRATION_STATEMENTS),
@@ -391,7 +388,10 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (28, KNOWLEDGE_ANALYSIS_METADATA_MIGRATION_STATEMENTS),
     (29, MISSING_SOURCE_MIGRATION_STATEMENTS),
     (30, KNOWLEDGE_ANALYSIS_BATCH_MIGRATION_STATEMENTS),
+    (31, reanalysis_migrations.KNOWLEDGE_REANALYSIS_MIGRATION_STATEMENTS),
 )
+
+
 class DesktopKnowledgeBaseRuntime:
     """Own the one active Desktop Knowledge Base for one Python Engine."""
 

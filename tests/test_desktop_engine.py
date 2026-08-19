@@ -205,6 +205,14 @@ def test_engine_cancels_an_active_caller_owned_request():
     assert responses["workbench-request"]["error"]["code"] == "request_cancelled"
 
 
+def test_engine_eof_stops_background_runtime_work():
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO())
+
+    server.serve()
+
+    assert server._shutdown.is_set()
+
+
 def test_engine_does_not_report_a_started_knowledge_base_activation_as_cancelled(tmp_path):
     """An activation that can mutate the active binding remains truthful through its reply."""
     started = threading.Event()
@@ -276,7 +284,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 30,
+            "schema_version": 31,
             "last_checkpoint_at": None,
         },
         "events": [

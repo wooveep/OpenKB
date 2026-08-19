@@ -245,20 +245,10 @@ def parse_knowledge_analysis(
         allow_empty=True,
     )
     maximum_candidates = (
-        _MAX_AGGREGATE_CANDIDATES_PER_KIND
-        if aggregate
-        else _MAX_CANDIDATES_PER_KIND
+        _MAX_AGGREGATE_CANDIDATES_PER_KIND if aggregate else _MAX_CANDIDATES_PER_KIND
     )
-    maximum_claims = (
-        _MAX_AGGREGATE_CLAIMS_PER_CANDIDATE
-        if aggregate
-        else _MAX_CLAIMS_PER_CANDIDATE
-    )
-    maximum_sources = (
-        _MAX_AGGREGATE_EVIDENCE_PER_CLAIM
-        if aggregate
-        else _MAX_EVIDENCE_PER_CLAIM
-    )
+    maximum_claims = _MAX_AGGREGATE_CLAIMS_PER_CANDIDATE if aggregate else _MAX_CLAIMS_PER_CANDIDATE
+    maximum_sources = _MAX_AGGREGATE_EVIDENCE_PER_CLAIM if aggregate else _MAX_EVIDENCE_PER_CLAIM
     concepts = _candidates(
         payload.get("concepts"),
         "concept",
@@ -294,12 +284,17 @@ def knowledge_analysis_from_checkpoint(payload: object) -> DesktopKnowledgeAnaly
 
 
 def knowledge_analysis_provenance_json(
-    *, provider: str, model: str, prompt_digest: str, engine_version: str
+    *,
+    provider: str,
+    model: str,
+    prompt_digest: str,
+    engine_version: str,
+    schema_version: str = KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
 ) -> str:
     """Serialize non-secret producer identity for SQLite and OKF projection."""
     return json.dumps(
         {
-            "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+            "schema_version": schema_version,
             "provider": provider,
             "model": model,
             "prompt_digest": prompt_digest,
@@ -316,17 +311,23 @@ def knowledge_analysis_provenance_from_checkpoint(payload: object) -> str:
         raise DesktopImportError(
             "import_checkpoint_invalid", "Knowledge Analysis checkpoint is invalid."
         )
-    fields = ("provider", "model", "prompt_digest", "engine_version")
+    fields = ("provider", "model", "engine_version")
     values = tuple(payload.get(field) for field in fields)
-    if not all(isinstance(value, str) and value for value in values):
+    prompt_digest = payload.get("analysis_prompt_digest", payload.get("prompt_digest"))
+    normalized = payload.get("normalized_result")
+    schema_version = normalized.get("schema_version") if isinstance(normalized, dict) else None
+    if not all(
+        isinstance(value, str) and value for value in (*values, prompt_digest, schema_version)
+    ):
         raise DesktopImportError(
             "import_checkpoint_invalid", "Knowledge Analysis provenance is invalid."
         )
     return knowledge_analysis_provenance_json(
         provider=str(values[0]),
         model=str(values[1]),
-        prompt_digest=str(values[2]),
-        engine_version=str(values[3]),
+        prompt_digest=str(prompt_digest),
+        engine_version=str(values[2]),
+        schema_version=str(schema_version),
     )
 
 
@@ -377,9 +378,7 @@ def _candidates(
         aliases = _string_list(item.get("aliases"), "aliases")
         tags = _string_list(item.get("tags"), "tags")
         claims_value = item.get("claims")
-        if not isinstance(claims_value, list) or _exceeds_limit(
-            claims_value, maximum_claims
-        ):
+        if not isinstance(claims_value, list) or _exceeds_limit(claims_value, maximum_claims):
             raise _invalid_response("Knowledge Analysis claims are invalid.")
         unique_claims: list[KnowledgeAnalysisClaim] = []
         claim_indexes: dict[str, int] = {}
@@ -413,9 +412,7 @@ def _claim(value: object, *, maximum_sources: int) -> KnowledgeAnalysisClaim:
         raise _invalid_response("Knowledge Analysis claim is invalid.")
     text = _string(value.get("text"), "claim text", maximum=_MAX_CLAIM_CHARACTERS)
     source_values = value.get("source_evidence_ids")
-    if not isinstance(source_values, list) or _exceeds_limit(
-        source_values, maximum_sources
-    ):
+    if not isinstance(source_values, list) or _exceeds_limit(source_values, maximum_sources):
         raise _invalid_response("Knowledge Analysis claim sources are invalid.")
     source_ids: list[str] = []
     for source in source_values:

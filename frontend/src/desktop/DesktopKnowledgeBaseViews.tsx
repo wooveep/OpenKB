@@ -16,6 +16,7 @@ import type {
   DesktopKnowledgeBase,
 } from "./contracts"
 import type { WorkspaceSection } from "./DesktopWorkbenchShell"
+import type { KnowledgeReanalysisController } from "./useKnowledgeReanalysis"
 
 type ImportTaskAction = "pause" | "resume" | "cancel"
 
@@ -47,6 +48,7 @@ export function ActiveKnowledgeBaseView({
   importBatchSummary,
   importTasks,
   controllingJobId,
+  knowledgeReanalysis,
   requestedConversationId,
   requestedConversationMessageId,
   requestedDocumentId,
@@ -77,6 +79,7 @@ export function ActiveKnowledgeBaseView({
   importBatchSummary: DesktopImportBatchSummary | null
   importTasks: DesktopImportTask[]
   controllingJobId: string | null
+  knowledgeReanalysis: KnowledgeReanalysisController
   requestedConversationId: string | null
   requestedConversationMessageId: string | null
   requestedDocumentId: string | null
@@ -111,6 +114,7 @@ export function ActiveKnowledgeBaseView({
             summary={importBatchSummary}
             tasks={importTasks}
             controllingJobId={controllingJobId}
+            knowledgeReanalysis={knowledgeReanalysis}
             requestedDocumentId={requestedDocumentId}
             requestKey={navigationRequestSequence}
             onManualPathChange={onImportPathChange}

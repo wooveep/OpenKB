@@ -19,6 +19,8 @@ import type {
   DesktopConversationList,
   DesktopKnowledgeBase,
   DesktopKnowledgeBaseActivation,
+  DesktopKnowledgeReanalysisOverview,
+  DesktopKnowledgeReanalysisRun,
   DesktopGlobalSearchResults,
   DesktopModelSettings,
   DesktopModelConnectionTest,
@@ -304,6 +306,28 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
 
   async importJobs(): Promise<{ jobs: DesktopImportTask[] }> {
     return { jobs: this.importJobResults }
+  }
+
+  async knowledgeReanalysis(): Promise<DesktopKnowledgeReanalysisOverview> {
+    return { documents: [], runs: [] }
+  }
+
+  async startKnowledgeReanalysis(
+    documentIds: string[],
+    requestId: string,
+  ): Promise<DesktopKnowledgeReanalysisRun> {
+    void documentIds
+    void requestId
+    throw new Error("Knowledge Reanalysis is not available in the renderer preview.")
+  }
+
+  async retryKnowledgeReanalysis(
+    jobId: string,
+    requestId: string,
+  ): Promise<DesktopKnowledgeReanalysisRun> {
+    void jobId
+    void requestId
+    throw new Error("Knowledge Reanalysis is not available in the renderer preview.")
   }
 
   async askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer> {

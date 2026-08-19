@@ -1,5 +1,11 @@
 /** The only React-facing contract for the Desktop Shell and Python Engine. */
 
+import type {
+  DesktopKnowledgeReanalysisOverview,
+  DesktopKnowledgeReanalysisRun,
+} from "./knowledge-reanalysis-contracts"
+export type * from "./knowledge-reanalysis-contracts"
+
 export const DESKTOP_BRIDGE_PROTOCOL_VERSION = 1
 
 export interface DesktopBridgeHandshake {
@@ -16,6 +22,7 @@ export type DesktopBridgeEvent =
   | DesktopEngineBridgeEvent
   | DesktopImportStageProgressEvent
   | DesktopGroundedAnswerDeltaEvent
+  | DesktopKnowledgeReanalysisUpdatedEvent
 
 export interface DesktopEngineBridgeEvent {
   sequence: number
@@ -58,6 +65,15 @@ export interface DesktopGroundedAnswerDeltaEvent {
     delta: string
     replace: boolean
     attempt: number
+  }
+}
+
+export interface DesktopKnowledgeReanalysisUpdatedEvent {
+  sequence: number
+  kind: "knowledge_reanalysis.updated"
+  data: {
+    runId: string
+    jobId: string
   }
 }
 
@@ -663,6 +679,12 @@ export interface DesktopBridge {
   ): Promise<DesktopRawDocument>
   importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport>
   importJobs(): Promise<DesktopImportJobs>
+  knowledgeReanalysis(): Promise<DesktopKnowledgeReanalysisOverview>
+  startKnowledgeReanalysis(
+    documentIds: string[],
+    requestId: string,
+  ): Promise<DesktopKnowledgeReanalysisRun>
+  retryKnowledgeReanalysis(jobId: string, requestId: string): Promise<DesktopKnowledgeReanalysisRun>
   askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer>
   retryInterruptedAnswer(answerId: string, requestId: string): Promise<DesktopGroundedAnswer>
   groundedAnswers(): Promise<DesktopGroundedAnswers>
