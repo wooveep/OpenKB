@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
+from openkb.desktop_knowledge_lifecycle import (
+    DesktopKnowledgeLifecycleMixin,
+    DesktopKnowledgeLifecycleState,
+)
+from openkb.desktop_knowledge_page_errors import DesktopKnowledgePageError
 from openkb.desktop_knowledge_page_projection import (
     activate_knowledge_page_projection,
     discard_abandoned_knowledge_page_projection_staging,
@@ -32,6 +37,7 @@ from openkb.desktop_knowledge_sources import (
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
 from openkb.desktop_knowledge_verification import (
     DesktopKnowledgeVerificationStatus,
+    verification_error,
     verification_status_in,
     verify_current_revision_in,
 )
@@ -71,7 +77,17 @@ page_state AS (
         revisions.provenance_state AS published_provenance_state,
         drafts.title AS draft_title,
         drafts.content_markdown AS draft_content_markdown,
-        drafts.updated_at AS draft_updated_at
+        drafts.updated_at AS draft_updated_at,
+        CASE
+            WHEN pages.page_id IS NULL THEN 'draft'
+            ELSE pages.lifecycle_state
+        END AS lifecycle_state,
+        pages.stale_after AS stale_after,
+        CASE
+            WHEN pages.stale_after IS NOT NULL
+                AND julianday(pages.stale_after) <= julianday('now') THEN 1
+            ELSE 0
+        END AS is_stale
     FROM page_ids
     LEFT JOIN knowledge_pages AS pages ON pages.page_id = page_ids.page_id
     LEFT JOIN knowledge_page_revisions AS revisions
@@ -80,16 +96,6 @@ page_state AS (
         ON drafts.page_id = page_ids.page_id
 )
 """
-
-
-class DesktopKnowledgePageError(RuntimeError):
-    """A stable domain error for Desktop Knowledge Page operations."""
-
-    code: str
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
 
 
 @dataclass(frozen=True)
@@ -140,6 +146,9 @@ class DesktopKnowledgePageSummary:
     publication_state: DesktopKnowledgePagePublicationState
     published_revision_number: int | None
     updated_at: str
+    lifecycle_state: DesktopKnowledgeLifecycleState
+    stale_after: str | None
+    is_stale: bool
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -149,6 +158,9 @@ class DesktopKnowledgePageSummary:
             "publication_state": self.publication_state,
             "published_revision_number": self.published_revision_number,
             "updated_at": self.updated_at,
+            "lifecycle_state": self.lifecycle_state,
+            "stale_after": self.stale_after,
+            "is_stale": self.is_stale,
         }
 
 
@@ -177,7 +189,7 @@ class DesktopKnowledgePage(DesktopKnowledgePageSummary):
         }
 
 
-class DesktopKnowledgePageService:
+class DesktopKnowledgePageService(DesktopKnowledgeLifecycleMixin):
     """Autosave one Working Draft and publish immutable user revisions explicitly."""
 
     def __init__(self, kb_dir: Path) -> None:
@@ -467,7 +479,7 @@ class DesktopKnowledgePageService:
                         connection, page_id=page_id, verified_at=_timestamp()
                     )
                 except ValueError as error:
-                    raise _verification_error(str(error)) from error
+                    raise verification_error(str(error)) from error
                 page = self._page_in(connection, page_id)
                 connection.commit()
                 return page
@@ -589,6 +601,7 @@ class DesktopKnowledgePageService:
                 revision_id=str(current[0]) if current is not None else None,
                 content_markdown=str(row[8]) if row[4] is not None else "",
                 provenance_state=str(row[10]) if row[4] is not None else "structural",
+                lifecycle_state=str(row[14]),
                 source_map=published_sources,
                 has_working_draft=row[11] is not None,
             )
@@ -678,6 +691,9 @@ def _page_from_row(
         publication_state=cast(DesktopKnowledgePagePublicationState, str(row[3])),
         published_revision_number=int(str(row[4])) if row[4] is not None else None,
         updated_at=str(row[5]),
+        lifecycle_state=cast(DesktopKnowledgeLifecycleState, str(row[14])),
+        stale_after=str(row[15]) if row[15] is not None else None,
+        is_stale=bool(row[16]),
         materialized_path=str(row[6]),
         published_revision=published,
         working_draft=draft,
@@ -694,6 +710,9 @@ def _summary(page: DesktopKnowledgePage) -> DesktopKnowledgePageSummary:
         publication_state=page.publication_state,
         published_revision_number=page.published_revision_number,
         updated_at=page.updated_at,
+        lifecycle_state=page.lifecycle_state,
+        stale_after=page.stale_after,
+        is_stale=page.is_stale,
     )
 
 
@@ -742,24 +761,6 @@ def _source_binding_error(code: str) -> DesktopKnowledgePageError:
     return DesktopKnowledgePageError(
         code if code in messages else "knowledge_source_binding_failed",
         messages.get(code, "The selected claim could not be bound to this source."),
-    )
-
-
-def _verification_error(code: str) -> DesktopKnowledgePageError:
-    messages = {
-        "knowledge_verification_requires_current_publication": (
-            "Publish the Working Draft before verifying the Current Published Revision."
-        ),
-        "knowledge_verification_blocked": (
-            "All factual claims must pass the Publication Gate before verification."
-        ),
-        "knowledge_verification_legacy_unmapped": (
-            "Bind this legacy revision to original evidence before verification."
-        ),
-    }
-    return DesktopKnowledgePageError(
-        code if code in messages else "knowledge_verification_failed",
-        messages.get(code, "This knowledge revision could not be verified."),
     )
 
 

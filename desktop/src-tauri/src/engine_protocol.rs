@@ -17,7 +17,7 @@ pub use crate::engine_wire::{
     TextDocumentImportResult,
 };
 pub use crate::engine_wire_knowledge_pages::{
-    KnowledgePage, KnowledgePagesResult, KnowledgeSourcesResult,
+    KnowledgePage, KnowledgePageDeletionResult, KnowledgePagesResult, KnowledgeSourcesResult,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};

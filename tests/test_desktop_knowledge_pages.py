@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import sqlite3
 import uuid
 from pathlib import Path
 
 import pytest
 
+import openkb.desktop_knowledge_lifecycle as knowledge_lifecycle_module
 import openkb.desktop_knowledge_pages as knowledge_pages_module
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_pages import (
@@ -123,6 +125,7 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
     now = "2026-08-19T00:00:00+00:00"
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE knowledge_page_lifecycle_events")
         connection.execute("DROP TABLE knowledge_page_verifications")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_revision_sources")
         connection.execute("DROP TABLE IF EXISTS knowledge_page_working_sources")
@@ -130,7 +133,9 @@ def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_pa
         connection.execute("DROP TABLE IF EXISTS knowledge_page_working_drafts")
         connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
-        connection.execute("DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22)")
+        connection.execute("ALTER TABLE knowledge_pages DROP COLUMN stale_after")
+        connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
+        connection.execute("DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23)")
         connection.execute(
             """
             INSERT INTO knowledge_pages (
@@ -195,11 +200,15 @@ def test_v20_source_map_migrates_as_source_backed_without_rewriting_the_revision
 
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE knowledge_page_lifecycle_events")
         connection.execute("DROP TABLE knowledge_page_verifications")
         connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
         connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
+        connection.execute("ALTER TABLE knowledge_pages DROP COLUMN stale_after")
+        connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
         connection.execute("DELETE FROM schema_migrations WHERE version = 21")
         connection.execute("DELETE FROM schema_migrations WHERE version = 22")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 23")
         connection.commit()
 
     DesktopKnowledgeBaseRuntime().open(kb_dir)
@@ -427,6 +436,181 @@ def test_verification_rechecks_the_publication_gate_and_trust_only_breaks_score_
     with pytest.raises(DesktopKnowledgePageError) as gate_error:
         pages.verify(first_page.page_id)
     assert gate_error.value.code == "knowledge_verification_blocked"
+
+
+def test_lifecycle_stales_deprecates_and_restores_without_changing_original_evidence(tmp_path):
+    """Lifecycle changes invalidate review while Evidence remains independently available."""
+    kb_dir = tmp_path / "desktop-kb"
+    stale_source = tmp_path / "stale.md"
+    fresh_source = tmp_path / "fresh.md"
+    stale_source.write_text("# Policy\n\nStale-source routing evidence.", encoding="utf-8")
+    fresh_source.write_text("# Policy\n\nFresh-source routing evidence.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(stale_source)
+    DesktopTextImportService(kb_dir).import_text(fresh_source)
+    pages = DesktopKnowledgePageService(kb_dir)
+    stale_evidence = next(
+        source
+        for source in pages.search_sources("Stale-source")
+        if "Stale-source" in source.excerpt
+    )
+    fresh_evidence = next(
+        source
+        for source in pages.search_sources("Fresh-source")
+        if "Fresh-source" in source.excerpt
+    )
+
+    stale_claim = "Routing policy follows the stale source."
+    stale_draft = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Stale routing",
+        content_markdown=stale_claim,
+    )
+    pages.bind_source(stale_draft.page_id, stale_claim, stale_evidence.evidence_id)
+    pages.publish(stale_draft.page_id)
+    pages.verify(stale_draft.page_id)
+
+    fresh_claim = "Routing policy follows the fresh source."
+    fresh_draft = pages.save_draft(
+        page_id=None,
+        kind="entity",
+        title="Fresh routing",
+        content_markdown=fresh_claim,
+    )
+    pages.bind_source(fresh_draft.page_id, fresh_claim, fresh_evidence.evidence_id)
+    pages.publish(fresh_draft.page_id)
+
+    stale_at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).isoformat()
+    stale = pages.set_stale_after(stale_draft.page_id, stale_at)
+    assert stale.lifecycle_state == "stable"
+    assert stale.stale_after == stale_at
+    assert stale.is_stale is True
+    assert stale.verification.state == "unverified"
+    assert stale.verification.reason == "lifecycle_changed"
+    assert stale.verification.can_verify is True
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        routed = knowledge_source_rows_in(connection, ("routing",), limit=8)
+        invalidation = connection.execute(
+            "SELECT invalidation_reason FROM knowledge_page_verifications"
+        ).fetchone()
+    assert [str(row[0]) for row in routed[:2]] == [
+        fresh_evidence.evidence_id,
+        stale_evidence.evidence_id,
+    ]
+    assert invalidation == ("lifecycle_changed",)
+
+    deprecated = pages.deprecate(stale_draft.page_id)
+    assert deprecated.page_id == stale_draft.page_id
+    assert deprecated.lifecycle_state == "deprecated"
+    assert deprecated.published_revision == stale.published_revision
+    assert deprecated.verification.reason == "deprecated_not_verifiable"
+    assert deprecated.verification.can_verify is False
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        routed = knowledge_source_rows_in(connection, ("routing",), limit=8)
+    assert stale_evidence.evidence_id not in {str(row[0]) for row in routed}
+
+    restored = pages.restore(stale_draft.page_id)
+    assert restored.page_id == stale_draft.page_id
+    assert restored.lifecycle_state == "stable"
+    assert restored.published_revision == stale.published_revision
+    cleared = pages.set_stale_after(stale_draft.page_id, None)
+    assert cleared.stale_after is None
+    assert cleared.is_stale is False
+    original_pack = DesktopEvidenceRetriever(kb_dir).retrieve("Stale-source routing evidence")
+    assert stale_evidence.evidence_id in {item.evidence_id for item in original_pack.evidence}
+
+
+def test_permanent_delete_requires_deprecation_and_confirmation_but_keeps_source_corpus(tmp_path):
+    """Confirmed page deletion removes Knowledge history, never imported source authority."""
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "source.md"
+    source.write_text(
+        "# Source\n\nOriginal evidence survives Knowledge deletion.", encoding="utf-8"
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    pages = DesktopKnowledgePageService(kb_dir)
+    candidate = pages.search_sources("Original evidence survives")[0]
+    claim = "Knowledge deletion preserves its original evidence."
+    draft = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Deletion lifecycle",
+        content_markdown=claim,
+    )
+    pages.bind_source(draft.page_id, claim, candidate.evidence_id)
+    published = pages.publish(draft.page_id)
+    pages.verify(draft.page_id)
+    pages.save_draft(
+        page_id=draft.page_id,
+        kind="concept",
+        title="Deletion lifecycle",
+        content_markdown=published.published_revision.content_markdown,
+    )
+
+    with pytest.raises(DesktopKnowledgePageError) as stable_error:
+        pages.permanent_delete(draft.page_id, confirmation_page_id=draft.page_id)
+    assert stable_error.value.code == "knowledge_page_deprecation_required"
+    pages.deprecate(draft.page_id)
+    with pytest.raises(DesktopKnowledgePageError) as confirmation_error:
+        pages.permanent_delete(draft.page_id, confirmation_page_id="wrong-page")
+    assert confirmation_error.value.code == "knowledge_page_delete_confirmation_invalid"
+
+    pages.permanent_delete(draft.page_id, confirmation_page_id=draft.page_id)
+
+    with pytest.raises(DesktopKnowledgePageError) as missing_error:
+        pages.get_page(draft.page_id)
+    assert missing_error.value.code == "knowledge_page_not_found"
+    assert not (kb_dir / published.materialized_path).exists()
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM knowledge_page_revisions WHERE page_id = ?", (draft.page_id,)
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM knowledge_page_working_drafts WHERE page_id = ?",
+            (draft.page_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM source_documents WHERE document_id = ?",
+            (imported.document.document_id,),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM evidence_refs WHERE evidence_id = ?", (candidate.evidence_id,)
+        ).fetchone() == (1,)
+
+
+def test_permanent_delete_reports_success_when_post_commit_staging_cleanup_is_deferred(
+    tmp_path, monkeypatch
+):
+    """A locked staging file cannot turn an already committed deletion into failure."""
+    kb_dir = tmp_path / "desktop-kb"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    pages = DesktopKnowledgePageService(kb_dir)
+    draft = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Deferred cleanup",
+        content_markdown="See [Configuration](configuration.md) for details.",
+    )
+    pages.publish(draft.page_id)
+    pages.deprecate(draft.page_id)
+
+    def fail_cleanup(_staged: Path) -> None:
+        raise OSError("projection file is locked")
+
+    monkeypatch.setattr(
+        knowledge_lifecycle_module,
+        "discard_knowledge_page_projection_staging",
+        fail_cleanup,
+    )
+
+    pages.permanent_delete(draft.page_id, confirmation_page_id=draft.page_id)
+
+    with pytest.raises(DesktopKnowledgePageError) as missing_error:
+        pages.get_page(draft.page_id)
+    assert missing_error.value.code == "knowledge_page_not_found"
 
 
 def test_source_search_matches_a_noncanonical_available_d2_occurrence(tmp_path):

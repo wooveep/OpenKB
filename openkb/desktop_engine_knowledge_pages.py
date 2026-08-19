@@ -49,6 +49,22 @@ def dispatch_knowledge_page_request(
             return service.publish(_required_string_param(request, "page_id")).as_dict()
         if request.method == "workbench.verify_knowledge_page":
             return service.verify(_required_string_param(request, "page_id")).as_dict()
+        if request.method == "workbench.set_knowledge_page_stale_after":
+            return service.set_stale_after(
+                _required_string_param(request, "page_id"),
+                _optional_stale_after_param(request),
+            ).as_dict()
+        if request.method == "workbench.deprecate_knowledge_page":
+            return service.deprecate(_required_string_param(request, "page_id")).as_dict()
+        if request.method == "workbench.restore_knowledge_page":
+            return service.restore(_required_string_param(request, "page_id")).as_dict()
+        if request.method == "workbench.permanently_delete_knowledge_page":
+            page_id = _required_string_param(request, "page_id")
+            service.permanent_delete(
+                page_id,
+                confirmation_page_id=_required_string_param(request, "confirmation_page_id"),
+            )
+            return {"page_id": page_id, "deleted": True}
         if request.method == "workbench.bind_knowledge_page_source":
             return service.bind_source(
                 _required_string_param(request, "page_id"),
@@ -83,5 +99,18 @@ def _required_markdown_param(request: DesktopRequest) -> str:
     if not isinstance(value, str):
         raise DesktopRequestError(
             "invalid_params", f"{request.method} requires content_markdown as a string."
+        )
+    return value
+
+
+def _optional_stale_after_param(request: DesktopRequest) -> str | None:
+    from openkb.desktop_engine import DesktopRequestError
+
+    value = request.params.get("stale_after")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise DesktopRequestError(
+            "invalid_params", f"{request.method} stale_after must be a string or null."
         )
     return value

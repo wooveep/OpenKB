@@ -156,6 +156,11 @@ def knowledge_source_rows_in(
                 available_evidence_occurrences.text,
                 ({" + ".join(score_parts)}) AS channel_score,
                 pages.page_id, available_evidence_occurrences.ordinal,
+                CASE
+                    WHEN pages.stale_after IS NOT NULL
+                        AND julianday(pages.stale_after) <= julianday('now') THEN 0
+                    ELSE 1
+                END AS lifecycle_tier,
                 CASE WHEN verifications.verification_id IS NULL THEN 0 ELSE 1 END AS trust_tier
             FROM knowledge_pages AS pages
             JOIN knowledge_page_revision_sources AS sources
@@ -166,9 +171,10 @@ def knowledge_source_rows_in(
             JOIN available_evidence_occurrences
                 ON available_evidence_occurrences.evidence_id = sources.evidence_id
             WHERE available_evidence_occurrences.occurrence_rank = 1
+                AND pages.lifecycle_state = 'stable'
         )
         WHERE channel_score > 0
-        ORDER BY channel_score DESC, trust_tier DESC, page_id, ordinal
+        ORDER BY channel_score DESC, lifecycle_tier DESC, trust_tier DESC, page_id, ordinal
         LIMIT ?
         """,
         (*parameters, limit),

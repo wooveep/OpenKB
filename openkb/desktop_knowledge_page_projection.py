@@ -35,6 +35,29 @@ def discard_knowledge_page_projection_staging(staged: Path) -> None:
     staged.unlink(missing_ok=True)
 
 
+def stage_knowledge_page_projection_deletion(kb_dir: Path, relative_path: str) -> Path | None:
+    """Move a disposable projection aside before its authority row is deleted."""
+    target = kb_dir / relative_path
+    if not target.exists():
+        return None
+    staging_root = kb_dir / "knowledge-pages" / ".page-staging"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    staged = staging_root / f"{uuid.uuid4().hex}.deleted"
+    os.replace(target, staged)
+    return staged
+
+
+def restore_knowledge_page_projection_deletion(
+    kb_dir: Path, relative_path: str, staged: Path | None
+) -> None:
+    """Restore a staged projection when its SQLite deletion rolls back."""
+    if staged is None or not staged.exists():
+        return
+    target = kb_dir / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staged, target)
+
+
 def discard_abandoned_knowledge_page_projection_staging(kb_dir: Path) -> None:
     staging_root = kb_dir / "knowledge-pages" / ".page-staging"
     if staging_root.exists():

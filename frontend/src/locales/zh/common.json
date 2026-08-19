@@ -197,6 +197,23 @@
           "unpublished_changes": "有未发布更改",
           "published": "已发布"
         },
+        "lifecycle": {
+          "title": "知识生命周期",
+          "state": {
+            "stable": "稳定",
+            "deprecated": "已弃用"
+          },
+          "stale": "已过期",
+          "staleAfter": "过期时间",
+          "setStaleAfter": "保存时间",
+          "clearStaleAfter": "清除时间",
+          "deprecate": "弃用",
+          "restore": "恢复",
+          "permanentDelete": "永久删除",
+          "deleteTitle": "永久删除 {{title}}？",
+          "deleteDescription": "页面身份、工作草稿、当前发布和修订历史将被删除；已导入文档与原始证据仍然保留。",
+          "confirmDelete": "确认永久删除"
+        },
         "kindLabel": "页面类型",
         "titleLabel": "页面标题",
         "titlePlaceholder": "例如：检索",
@@ -231,7 +248,9 @@
           "not_verified": "当前已发布修订尚未经过人工审核。",
           "revision_changed": "这是新的已发布修订，需要重新人工验证。",
           "publication_gate_blocked": "所有事实声明都解析到可用知识后才能验证。",
-          "legacy_unmapped_not_verifiable": "此旧修订没有 claim 级 Source Map；请先把事实声明绑定到原文证据，再进行验证。"
+          "legacy_unmapped_not_verifiable": "此旧修订没有 claim 级 Source Map；请先把事实声明绑定到原文证据，再进行验证。",
+          "deprecated_not_verifiable": "请先恢复此已弃用页面，再进行验证。",
+          "lifecycle_changed": "上次审核后生命周期发生变化；请重新验证当前稳定修订。"
         },
         "reviewedByLocal": "本地用户 · {{time}}",
         "verify": "验证修订"

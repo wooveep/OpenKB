@@ -1,5 +1,6 @@
 import type {
   DesktopKnowledgePage,
+  DesktopKnowledgePageDeletion,
   DesktopKnowledgePageKind,
   DesktopKnowledgePages,
   DesktopKnowledgeSourceCandidate,
@@ -41,6 +42,32 @@ export abstract class UnavailableKnowledgePageBridge {
 
   verifyKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
     void pageId
+    void requestId
+    return this.unavailable()
+  }
+
+  setKnowledgePageStaleAfter(pageId: string, staleAfter: string | null, requestId: string): Promise<DesktopKnowledgePage> {
+    void pageId
+    void staleAfter
+    void requestId
+    return this.unavailable()
+  }
+
+  deprecateKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
+    void pageId
+    void requestId
+    return this.unavailable()
+  }
+
+  restoreKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
+    void pageId
+    void requestId
+    return this.unavailable()
+  }
+
+  permanentlyDeleteKnowledgePage(pageId: string, confirmationPageId: string, requestId: string): Promise<DesktopKnowledgePageDeletion> {
+    void pageId
+    void confirmationPageId
     void requestId
     return this.unavailable()
   }

@@ -197,6 +197,23 @@
           "unpublished_changes": "Unpublished changes",
           "published": "Published"
         },
+        "lifecycle": {
+          "title": "Knowledge lifecycle",
+          "state": {
+            "stable": "Stable",
+            "deprecated": "Deprecated"
+          },
+          "stale": "Stale",
+          "staleAfter": "Stale after",
+          "setStaleAfter": "Save date",
+          "clearStaleAfter": "Clear date",
+          "deprecate": "Deprecate",
+          "restore": "Restore",
+          "permanentDelete": "Delete permanently",
+          "deleteTitle": "Permanently delete {{title}}?",
+          "deleteDescription": "The page identity, Working Draft, current publication, and revision history will be deleted. Imported documents and original evidence remain available.",
+          "confirmDelete": "Delete permanently"
+        },
         "kindLabel": "Page type",
         "titleLabel": "Page title",
         "titlePlaceholder": "For example, Retrieval",
@@ -231,7 +248,9 @@
           "not_verified": "This published revision has not been reviewed by a person.",
           "revision_changed": "This is a new published revision and needs a new human review.",
           "publication_gate_blocked": "Verification is unavailable until every factual claim resolves to Available Knowledge.",
-          "legacy_unmapped_not_verifiable": "This legacy revision has no claim-level Source Map. Bind its factual claims to original evidence before verification."
+          "legacy_unmapped_not_verifiable": "This legacy revision has no claim-level Source Map. Bind its factual claims to original evidence before verification.",
+          "deprecated_not_verifiable": "Restore this deprecated page before verification.",
+          "lifecycle_changed": "The lifecycle changed after the last review. Verify this stable revision again."
         },
         "reviewedByLocal": "Local user · {{time}}",
         "verify": "Verify revision"

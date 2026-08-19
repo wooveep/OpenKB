@@ -11,8 +11,10 @@ mod external_url;
 mod process_tree;
 
 use desktop_knowledge_page_commands::{
-    desktop_bind_knowledge_page_source, desktop_get_knowledge_page, desktop_knowledge_pages,
-    desktop_publish_knowledge_page, desktop_save_knowledge_page, desktop_search_knowledge_sources,
+    desktop_bind_knowledge_page_source, desktop_deprecate_knowledge_page,
+    desktop_get_knowledge_page, desktop_knowledge_pages, desktop_permanently_delete_knowledge_page,
+    desktop_publish_knowledge_page, desktop_restore_knowledge_page, desktop_save_knowledge_page,
+    desktop_search_knowledge_sources, desktop_set_knowledge_page_stale_after,
     desktop_verify_knowledge_page,
 };
 use desktop_runtime::DesktopRuntimeState;
@@ -718,6 +720,10 @@ fn main() {
             desktop_save_knowledge_page,
             desktop_publish_knowledge_page,
             desktop_verify_knowledge_page,
+            desktop_set_knowledge_page_stale_after,
+            desktop_deprecate_knowledge_page,
+            desktop_restore_knowledge_page,
+            desktop_permanently_delete_knowledge_page,
             desktop_search_knowledge_sources,
             desktop_bind_knowledge_page_source,
             desktop_document_version_candidates,

@@ -19,10 +19,6 @@ import type {
   DesktopConversationList,
   DesktopKnowledgeBase,
   DesktopKnowledgeBaseActivation,
-  DesktopKnowledgePage,
-  DesktopKnowledgePages,
-  DesktopKnowledgePageKind,
-  DesktopKnowledgeSourceCandidate,
   DesktopGlobalSearchResults,
   DesktopModelSettings,
   DesktopModelConnectionTest,
@@ -45,10 +41,10 @@ import {
   sourceName,
   updateImportTasks,
 } from "./memory-bridge-helpers"
-import { MemoryKnowledgePageStore } from "./memory-knowledge-pages"
+import { MemoryKnowledgePageBridge } from "./memory-knowledge-page-bridge"
 
 /** In-memory Bridge for React component tests; it never touches Tauri or Python. */
-export class MemoryDesktopBridge implements DesktopBridge {
+export class MemoryDesktopBridge extends MemoryKnowledgePageBridge implements DesktopBridge {
   private readonly listeners = new Set<(event: DesktopBridgeEvent) => void>()
   private readonly handshakeResult: DesktopBridgeHandshake
   private readonly healthResult: DesktopEngineHealth
@@ -57,7 +53,6 @@ export class MemoryDesktopBridge implements DesktopBridge {
   private groundedAnswerResults: DesktopGroundedAnswer[] = []
   private conversationResults: DesktopConversation[] = []
   private lastConversationId: string | null = null
-  private readonly knowledgePagesStore = new MemoryKnowledgePageStore()
   private documentVersionCandidateResults: DesktopDocumentVersionCandidate[] = []
   private knowledgeReconciliationConflictResults: DesktopKnowledgeReconciliationConflict[] = []
   private modelSettingsResult: DesktopModelSettings = {
@@ -81,6 +76,7 @@ export class MemoryDesktopBridge implements DesktopBridge {
       protocolVersion: 1,
     },
   ) {
+    super()
     this.handshakeResult = handshakeResult
     this.healthResult = healthResult
   }
@@ -556,51 +552,6 @@ export class MemoryDesktopBridge implements DesktopBridge {
     }))
   }
 
-  async knowledgePages(): Promise<DesktopKnowledgePages> {
-    return this.knowledgePagesStore.list()
-  }
-
-  async getKnowledgePage(pageId: string): Promise<DesktopKnowledgePage> {
-    return this.knowledgePagesStore.get(pageId)
-  }
-
-  async saveKnowledgePage(
-    pageId: string | undefined,
-    kind: DesktopKnowledgePageKind,
-    title: string,
-    contentMarkdown: string,
-    requestId: string,
-  ): Promise<DesktopKnowledgePage> {
-    if (this.activeKnowledgeBaseResult === null) {
-      throw new Error("Open a Desktop Knowledge Base before editing knowledge pages.")
-    }
-    return this.knowledgePagesStore.saveDraft(pageId, kind, title, contentMarkdown, requestId)
-  }
-
-  async publishKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
-    void requestId
-    return this.knowledgePagesStore.publish(pageId)
-  }
-
-  async verifyKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
-    void requestId
-    return this.knowledgePagesStore.verify(pageId)
-  }
-
-  async searchKnowledgeSources(query: string): Promise<DesktopKnowledgeSourceCandidate[]> {
-    return this.knowledgePagesStore.searchSources(query)
-  }
-
-  async bindKnowledgePageSource(
-    pageId: string,
-    claimText: string,
-    evidenceId: string,
-    requestId: string,
-  ): Promise<DesktopKnowledgePage> {
-    void requestId
-    return this.knowledgePagesStore.bindSource(pageId, claimText, evidenceId)
-  }
-
   async documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates> {
     return {
       candidates: this.documentVersionCandidateResults.filter((candidate) => candidate.status === "pending"),
@@ -775,14 +726,14 @@ export class MemoryDesktopBridge implements DesktopBridge {
     this.activeKnowledgeBaseResult = {
       kbDir,
       name,
-      schemaVersion: 20,
+      schemaVersion: 23,
       lastCheckpointAt: checkpointed ? new Date().toISOString() : null,
     }
     this.importJobResults = []
     this.groundedAnswerResults = []
     this.conversationResults = []
     this.lastConversationId = null
-    this.knowledgePagesStore.reset()
+    this.resetKnowledgePages()
     return {
       knowledgeBase: this.activeKnowledgeBaseResult,
       events: [
@@ -792,6 +743,10 @@ export class MemoryDesktopBridge implements DesktopBridge {
         },
       ],
     }
+  }
+
+  protected knowledgePagesAvailable(): boolean {
+    return this.activeKnowledgeBaseResult !== null
   }
 
 }

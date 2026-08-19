@@ -27,13 +27,16 @@ export class MemoryKnowledgePageStore {
 
   list(): DesktopKnowledgePages {
     return {
-      pages: this.pages.map(({ pageId, kind, title, publicationState, publishedRevisionNumber, updatedAt }) => ({
+      pages: this.pages.map(({ pageId, kind, title, publicationState, publishedRevisionNumber, updatedAt, lifecycleState, staleAfter, isStale }) => ({
         pageId,
         kind,
         title,
         publicationState,
         publishedRevisionNumber,
         updatedAt,
+        lifecycleState,
+        staleAfter,
+        isStale,
       })),
       selectedPageId: this.selectedPageId,
     }
@@ -66,6 +69,9 @@ export class MemoryKnowledgePageStore {
       publishedRevisionNumber: existing?.publishedRevision?.revisionNumber ?? null,
       materializedPath: existing?.materializedPath ?? `knowledge-pages/${kind}/${resolvedPageId}.md`,
       updatedAt: now,
+      lifecycleState: existing?.lifecycleState ?? "draft",
+      staleAfter: existing?.staleAfter ?? null,
+      isStale: existing?.isStale ?? false,
       publishedRevision: existing?.publishedRevision ?? null,
       verification: existing?.verification
         ? { ...existing.verification, canVerify: false, reason: "working_draft_not_verifiable" }
@@ -97,6 +103,7 @@ export class MemoryKnowledgePageStore {
       publicationState: "published",
       publishedRevisionNumber: (current.publishedRevisionNumber ?? 0) + 1,
       updatedAt: now,
+      lifecycleState: current.lifecycleState === "draft" ? "stable" : current.lifecycleState,
       publishedRevision: {
         revisionNumber: (current.publishedRevisionNumber ?? 0) + 1,
         title: current.workingDraft.title,
@@ -115,7 +122,7 @@ export class MemoryKnowledgePageStore {
 
   verify(pageId: string): DesktopKnowledgePage {
     const current = this.require(pageId)
-    if (!current.publishedRevision || current.workingDraft) {
+    if (!current.publishedRevision || current.workingDraft || current.lifecycleState === "deprecated") {
       throw new Error("Publish the Working Draft before verifying.")
     }
     const verified: DesktopKnowledgePage = {
@@ -131,6 +138,48 @@ export class MemoryKnowledgePageStore {
     }
     this.pages = this.pages.map((page) => page.pageId === pageId ? verified : page)
     return verified
+  }
+
+  setStaleAfter(pageId: string, staleAfter: string | null): DesktopKnowledgePage {
+    const current = this.requirePublished(pageId)
+    const next = this.replace({
+      ...current,
+      staleAfter,
+      isStale: staleAfter !== null && Date.parse(staleAfter) <= Date.now(),
+      updatedAt: new Date().toISOString(),
+      verification: unverified("lifecycle_changed", true),
+    })
+    return next
+  }
+
+  deprecate(pageId: string): DesktopKnowledgePage {
+    const current = this.requirePublished(pageId)
+    return this.replace({
+      ...current,
+      lifecycleState: "deprecated",
+      updatedAt: new Date().toISOString(),
+      verification: unverified("deprecated_not_verifiable", false),
+    })
+  }
+
+  restore(pageId: string): DesktopKnowledgePage {
+    const current = this.requirePublished(pageId)
+    return this.replace({
+      ...current,
+      lifecycleState: "stable",
+      updatedAt: new Date().toISOString(),
+      verification: unverified("lifecycle_changed", true),
+    })
+  }
+
+  permanentDelete(pageId: string, confirmationPageId: string): void {
+    const current = this.require(pageId)
+    if (confirmationPageId !== pageId) throw new Error("Confirm the exact Knowledge Page.")
+    if (current.publishedRevision && current.lifecycleState !== "deprecated") {
+      throw new Error("Deprecate this Knowledge Page before permanent deletion.")
+    }
+    this.pages = this.pages.filter((page) => page.pageId !== pageId)
+    if (this.selectedPageId === pageId) this.selectedPageId = null
   }
 
   searchSources(query: string): DesktopKnowledgeSourceCandidate[] {
@@ -187,6 +236,17 @@ export class MemoryKnowledgePageStore {
     if (!page) throw new Error("The requested knowledge page was not found.")
     return page
   }
+
+  private requirePublished(pageId: string): DesktopKnowledgePage {
+    const page = this.require(pageId)
+    if (!page.publishedRevision) throw new Error("Publish this Knowledge Page first.")
+    return page
+  }
+
+  private replace(page: DesktopKnowledgePage): DesktopKnowledgePage {
+    this.pages = this.pages.map((candidate) => candidate.pageId === page.pageId ? page : candidate)
+    return page
+  }
 }
 
 function diagnostics(content: string, sources: DesktopKnowledgeSourceMapEntry[]) {
@@ -207,7 +267,10 @@ function draftProvenance(
   return sources.length ? "source_backed" as const : "structural" as const
 }
 
-function unverified(reason: "publish_required" | "not_verified" | "revision_changed", canVerify: boolean) {
+function unverified(
+  reason: "publish_required" | "not_verified" | "revision_changed" | "lifecycle_changed" | "deprecated_not_verifiable",
+  canVerify: boolean,
+) {
   return {
     state: "unverified" as const,
     canVerify,

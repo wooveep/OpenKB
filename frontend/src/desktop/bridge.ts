@@ -23,6 +23,7 @@ import {
   type DesktopModelSettings,
   type DesktopModelConnectionTest,
   type DesktopKnowledgePage,
+  type DesktopKnowledgePageDeletion,
   type DesktopKnowledgePages,
   type DesktopKnowledgePageKind,
   type DesktopKnowledgeSourceCandidate,
@@ -339,6 +340,26 @@ export class TauriDesktopBridge implements DesktopBridge {
 
   async verifyKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
     return this.call<DesktopKnowledgePage>("desktop_verify_knowledge_page", { pageId, requestId })
+  }
+
+  async setKnowledgePageStaleAfter(pageId: string, staleAfter: string | null, requestId: string): Promise<DesktopKnowledgePage> {
+    return this.call<DesktopKnowledgePage>("desktop_set_knowledge_page_stale_after", { pageId, staleAfter, requestId })
+  }
+
+  async deprecateKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
+    return this.call<DesktopKnowledgePage>("desktop_deprecate_knowledge_page", { pageId, requestId })
+  }
+
+  async restoreKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
+    return this.call<DesktopKnowledgePage>("desktop_restore_knowledge_page", { pageId, requestId })
+  }
+
+  async permanentlyDeleteKnowledgePage(pageId: string, confirmationPageId: string, requestId: string): Promise<DesktopKnowledgePageDeletion> {
+    return this.call<DesktopKnowledgePageDeletion>("desktop_permanently_delete_knowledge_page", {
+      pageId,
+      confirmationPageId,
+      requestId,
+    })
   }
 
   async searchKnowledgeSources(query: string): Promise<DesktopKnowledgeSourceCandidate[]> {

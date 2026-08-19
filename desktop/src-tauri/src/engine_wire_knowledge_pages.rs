@@ -17,6 +17,12 @@ pub struct KnowledgePageSummary {
     pub published_revision_number: Option<u32>,
     #[serde(alias = "updated_at")]
     pub updated_at: String,
+    #[serde(alias = "lifecycle_state")]
+    pub lifecycle_state: KnowledgeLifecycleState,
+    #[serde(alias = "stale_after")]
+    pub stale_after: Option<String>,
+    #[serde(alias = "is_stale")]
+    pub is_stale: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -25,6 +31,14 @@ pub enum KnowledgePagePublicationState {
     Draft,
     UnpublishedChanges,
     Published,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeLifecycleState {
+    Draft,
+    Stable,
+    Deprecated,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -86,6 +100,8 @@ pub enum KnowledgeVerificationReason {
     RevisionChanged,
     PublicationGateBlocked,
     LegacyUnmappedNotVerifiable,
+    DeprecatedNotVerifiable,
+    LifecycleChanged,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -156,6 +172,12 @@ pub struct KnowledgePage {
     pub materialized_path: String,
     #[serde(alias = "updated_at")]
     pub updated_at: String,
+    #[serde(alias = "lifecycle_state")]
+    pub lifecycle_state: KnowledgeLifecycleState,
+    #[serde(alias = "stale_after")]
+    pub stale_after: Option<String>,
+    #[serde(alias = "is_stale")]
+    pub is_stale: bool,
     #[serde(alias = "published_revision")]
     pub published_revision: Option<KnowledgePublishedRevision>,
     #[serde(alias = "working_draft")]
@@ -177,6 +199,14 @@ pub struct KnowledgePagesResult {
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeSourcesResult {
     pub sources: Vec<KnowledgeSourceCandidate>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgePageDeletionResult {
+    #[serde(alias = "page_id")]
+    pub page_id: String,
+    pub deleted: bool,
 }
 
 #[cfg(test)]

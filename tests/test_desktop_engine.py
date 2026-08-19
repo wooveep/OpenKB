@@ -260,7 +260,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 22,
+            "schema_version": 23,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -790,10 +790,13 @@ def test_engine_autosaves_then_explicitly_publishes_user_knowledge_pages(tmp_pat
             "page_id": saved["page_id"],
             "kind": "concept",
             "title": "Evidence",
-            "publication_state": "unpublished_changes",
-            "published_revision_number": 1,
-            "updated_at": revised["updated_at"],
-        }
+                "publication_state": "unpublished_changes",
+                "published_revision_number": 1,
+                "updated_at": revised["updated_at"],
+                "lifecycle_state": "stable",
+                "stale_after": None,
+                "is_stale": False,
+            }
     ]
     assert listed["selected_page_id"] == saved["page_id"]
     assert read["published_revision"]["content_markdown"] == "# User-owned knowledge"
@@ -821,6 +824,88 @@ def test_engine_autosaves_then_explicitly_publishes_user_knowledge_pages(tmp_pat
         cancel_event=None,
     )
     assert restored["selected_page_id"] == saved["page_id"]
+
+
+def test_engine_exposes_knowledge_lifecycle_and_confirmed_permanent_delete(tmp_path):
+    """Lifecycle mutations stay typed behind the workbench boundary."""
+    kb_dir = tmp_path / "desktop-kb"
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    saved = server._dispatch(
+        DesktopRequest(
+            request_id="save-lifecycle-page",
+            method="workbench.save_knowledge_page",
+            params={
+                "page_id": None,
+                "kind": "concept",
+                "title": "Lifecycle",
+                "content_markdown": "# Lifecycle",
+            },
+        ),
+        cancel_event=None,
+    )
+    server._dispatch(
+        DesktopRequest(
+            request_id="publish-lifecycle-page",
+            method="workbench.publish_knowledge_page",
+            params={"page_id": saved["page_id"]},
+        ),
+        cancel_event=None,
+    )
+
+    stale = server._dispatch(
+        DesktopRequest(
+            request_id="stale-lifecycle-page",
+            method="workbench.set_knowledge_page_stale_after",
+            params={
+                "page_id": saved["page_id"],
+                "stale_after": "2026-01-01T00:00:00+00:00",
+            },
+        ),
+        cancel_event=None,
+    )
+    deprecated = server._dispatch(
+        DesktopRequest(
+            request_id="deprecate-lifecycle-page",
+            method="workbench.deprecate_knowledge_page",
+            params={"page_id": saved["page_id"]},
+        ),
+        cancel_event=None,
+    )
+    restored = server._dispatch(
+        DesktopRequest(
+            request_id="restore-lifecycle-page",
+            method="workbench.restore_knowledge_page",
+            params={"page_id": saved["page_id"]},
+        ),
+        cancel_event=None,
+    )
+    server._dispatch(
+        DesktopRequest(
+            request_id="deprecate-lifecycle-page-again",
+            method="workbench.deprecate_knowledge_page",
+            params={"page_id": saved["page_id"]},
+        ),
+        cancel_event=None,
+    )
+    deleted = server._dispatch(
+        DesktopRequest(
+            request_id="delete-lifecycle-page",
+            method="workbench.permanently_delete_knowledge_page",
+            params={
+                "page_id": saved["page_id"],
+                "confirmation_page_id": saved["page_id"],
+            },
+        ),
+        cancel_event=None,
+    )
+
+    assert stale["is_stale"] is True
+    assert deprecated["lifecycle_state"] == "deprecated"
+    assert restored["lifecycle_state"] == "stable"
+    assert deleted == {"page_id": saved["page_id"], "deleted": True}
 
 
 def test_engine_binds_one_knowledge_claim_to_available_original_evidence(tmp_path):

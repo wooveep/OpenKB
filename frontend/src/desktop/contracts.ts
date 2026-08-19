@@ -329,6 +329,7 @@ export interface DesktopGlobalSearchResults {
 
 export type DesktopKnowledgePageKind = "concept" | "entity"
 export type DesktopKnowledgePagePublicationState = "draft" | "unpublished_changes" | "published"
+export type DesktopKnowledgeLifecycleState = "draft" | "stable" | "deprecated"
 export type DesktopKnowledgeProvenanceState = "source_backed" | "structural" | "legacy_unmapped" | "unsourced" | "invalid"
 export type DesktopKnowledgeVerificationState = "unverified" | "human_reviewed"
 export type DesktopKnowledgeVerificationReason =
@@ -338,6 +339,8 @@ export type DesktopKnowledgeVerificationReason =
   | "revision_changed"
   | "publication_gate_blocked"
   | "legacy_unmapped_not_verifiable"
+  | "deprecated_not_verifiable"
+  | "lifecycle_changed"
 
 export interface DesktopKnowledgeVerificationStatus {
   state: DesktopKnowledgeVerificationState
@@ -355,6 +358,9 @@ export interface DesktopKnowledgePageSummary {
   publicationState: DesktopKnowledgePagePublicationState
   publishedRevisionNumber: number | null
   updatedAt: string
+  lifecycleState: DesktopKnowledgeLifecycleState
+  staleAfter: string | null
+  isStale: boolean
 }
 
 export interface DesktopKnowledgeSourceCandidate {
@@ -406,6 +412,11 @@ export interface DesktopKnowledgePage extends DesktopKnowledgePageSummary {
 export interface DesktopKnowledgePages {
   pages: DesktopKnowledgePageSummary[]
   selectedPageId: string | null
+}
+
+export interface DesktopKnowledgePageDeletion {
+  pageId: string
+  deleted: boolean
 }
 
 export type DesktopDocumentVersionCandidateDecision = "link_to_candidate" | "keep_separate"
@@ -590,6 +601,10 @@ export interface DesktopBridge {
   ): Promise<DesktopKnowledgePage>
   publishKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage>
   verifyKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage>
+  setKnowledgePageStaleAfter(pageId: string, staleAfter: string | null, requestId: string): Promise<DesktopKnowledgePage>
+  deprecateKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage>
+  restoreKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage>
+  permanentlyDeleteKnowledgePage(pageId: string, confirmationPageId: string, requestId: string): Promise<DesktopKnowledgePageDeletion>
   searchKnowledgeSources(query: string): Promise<DesktopKnowledgeSourceCandidate[]>
   bindKnowledgePageSource(
     pageId: string,

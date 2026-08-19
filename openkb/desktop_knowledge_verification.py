@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal
 
+from openkb.desktop_knowledge_page_errors import DesktopKnowledgePageError
 from openkb.desktop_knowledge_sources import (
     DesktopKnowledgeSourceMapEntry,
     publication_diagnostics_in,
@@ -21,6 +22,8 @@ DesktopKnowledgeVerificationReason = Literal[
     "revision_changed",
     "publication_gate_blocked",
     "legacy_unmapped_not_verifiable",
+    "deprecated_not_verifiable",
+    "lifecycle_changed",
 ]
 LOCAL_HUMAN_ACTOR = "local_user"
 
@@ -52,6 +55,7 @@ def verification_status_in(
     revision_id: str | None,
     content_markdown: str,
     provenance_state: str,
+    lifecycle_state: str,
     source_map: tuple[DesktopKnowledgeSourceMapEntry, ...],
     has_working_draft: bool,
 ) -> DesktopKnowledgeVerificationStatus:
@@ -71,6 +75,8 @@ def verification_status_in(
         reason = "working_draft_not_verifiable"
     elif provenance_state == "legacy_unmapped":
         reason = "legacy_unmapped_not_verifiable"
+    elif lifecycle_state == "deprecated":
+        reason = "deprecated_not_verifiable"
     elif diagnostics:
         reason = "publication_gate_blocked"
     if verification is not None:
@@ -86,15 +92,24 @@ def verification_status_in(
         return DesktopKnowledgeVerificationStatus("unverified", False, reason)
     previous = connection.execute(
         """
-        SELECT 1 FROM knowledge_page_verifications AS verifications
+        SELECT verifications.invalidation_reason
+        FROM knowledge_page_verifications AS verifications
         JOIN knowledge_page_revisions AS revisions
             ON revisions.revision_id = verifications.revision_id
-        WHERE revisions.page_id = ? LIMIT 1
+        WHERE revisions.page_id = ?
+        ORDER BY COALESCE(verifications.invalidated_at, verifications.verified_at) DESC
+        LIMIT 1
         """,
         (page_id,),
     ).fetchone()
     return DesktopKnowledgeVerificationStatus(
-        "unverified", True, "revision_changed" if previous is not None else "not_verified"
+        "unverified",
+        True,
+        (
+            "lifecycle_changed"
+            if previous is not None and previous[0] == "lifecycle_changed"
+            else "revision_changed" if previous is not None else "not_verified"
+        ),
     )
 
 
@@ -109,7 +124,7 @@ def verify_current_revision_in(
     row = connection.execute(
         """
         SELECT pages.current_revision_id, revisions.content_markdown,
-            revisions.provenance_state
+            revisions.provenance_state, pages.lifecycle_state
         FROM knowledge_pages AS pages
         JOIN knowledge_page_revisions AS revisions
             ON revisions.revision_id = pages.current_revision_id
@@ -119,9 +134,13 @@ def verify_current_revision_in(
     ).fetchone()
     if row is None:
         raise ValueError("knowledge_verification_requires_current_publication")
-    revision_id, content_markdown, provenance_state = (str(value) for value in row)
+    revision_id, content_markdown, provenance_state, lifecycle_state = (
+        str(value) for value in row
+    )
     if provenance_state == "legacy_unmapped":
         raise ValueError("knowledge_verification_legacy_unmapped")
+    if lifecycle_state == "deprecated":
+        raise ValueError("knowledge_verification_deprecated")
     source_map = revision_source_map_in(connection, revision_id)
     if publication_diagnostics_in(connection, content_markdown, source_map):
         raise ValueError("knowledge_verification_blocked")
@@ -140,4 +159,47 @@ def verify_current_revision_in(
         ) VALUES (?, ?, 'human_reviewed', ?, ?)
         """,
         (uuid.uuid4().hex, revision_id, LOCAL_HUMAN_ACTOR, verified_at),
+    )
+
+
+def invalidate_current_verification_in(
+    connection: sqlite3.Connection,
+    *,
+    page_id: str,
+    invalidated_at: str,
+    reason: str,
+) -> None:
+    """Invalidate only the active review bound to a page's current revision."""
+    connection.execute(
+        """
+        UPDATE knowledge_page_verifications
+        SET invalidated_at = ?, invalidation_reason = ?
+        WHERE invalidated_at IS NULL
+            AND revision_id = (
+                SELECT current_revision_id FROM knowledge_pages WHERE page_id = ?
+            )
+        """,
+        (invalidated_at, reason, page_id),
+    )
+
+
+def verification_error(code: str) -> DesktopKnowledgePageError:
+    """Map internal verification failures to stable workbench errors."""
+    messages = {
+        "knowledge_verification_requires_current_publication": (
+            "Publish the Working Draft before verifying the Current Published Revision."
+        ),
+        "knowledge_verification_blocked": (
+            "All factual claims must pass the Publication Gate before verification."
+        ),
+        "knowledge_verification_legacy_unmapped": (
+            "Bind this legacy revision to original evidence before verification."
+        ),
+        "knowledge_verification_deprecated": (
+            "Restore this deprecated Knowledge Page before verification."
+        ),
+    }
+    return DesktopKnowledgePageError(
+        code if code in messages else "knowledge_verification_failed",
+        messages.get(code, "This knowledge revision could not be verified."),
     )

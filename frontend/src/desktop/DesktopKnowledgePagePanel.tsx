@@ -6,10 +6,12 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { useDesktopBridge } from "./bridge-context"
+import { DesktopKnowledgeLifecycleControls } from "./DesktopKnowledgeLifecycleControls"
 import { nextDesktopRequestId } from "./request-id"
 import type {
   DesktopKnowledgePage,
   DesktopKnowledgePageKind,
+  DesktopKnowledgeLifecycleState,
   DesktopKnowledgePagePublicationState,
   DesktopKnowledgeProvenanceState,
   DesktopKnowledgePageSummary,
@@ -28,6 +30,9 @@ type KnowledgePageEditor = {
   provenanceState: DesktopKnowledgeProvenanceState
   verification: DesktopKnowledgeVerificationStatus
   publishedRevisionNumber: number | null
+  lifecycleState: DesktopKnowledgeLifecycleState
+  staleAfter: string | null
+  isStale: boolean
   sourceMap: DesktopKnowledgeSourceMapEntry[]
   publicationDiagnostics: DesktopKnowledgePublicationDiagnostic[]
 }
@@ -51,6 +56,9 @@ function newEditor(kind: DesktopKnowledgePageKind): KnowledgePageEditor {
       revisionId: null,
     },
     publishedRevisionNumber: null,
+    lifecycleState: "draft",
+    staleAfter: null,
+    isStale: false,
     sourceMap: [],
     publicationDiagnostics: [],
   }
@@ -66,6 +74,7 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
   const [loadingPage, setLoadingPage] = useState(false)
   const [publishing, setPublishing] = useState(false)
   const [verifying, setVerifying] = useState(false)
+  const [mutatingLifecycle, setMutatingLifecycle] = useState(false)
   const [saveState, setSaveState] = useState<DraftSaveState>("unsaved")
   const [error, setError] = useState<string | null>(null)
   const [editTick, setEditTick] = useState(0)
@@ -97,6 +106,9 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
       publicationState: page.publicationState,
       publishedRevisionNumber: page.publishedRevisionNumber,
       updatedAt: page.updatedAt,
+      lifecycleState: page.lifecycleState,
+      staleAfter: page.staleAfter,
+      isStale: page.isStale,
     }
     setPages((current) => [summary, ...current.filter((item) => item.pageId !== page.pageId)])
   }, [])
@@ -345,6 +357,51 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
     }
   }
 
+  const updateLifecycle = async (
+    operation: (pageId: string) => Promise<DesktopKnowledgePage>,
+  ) => {
+    const pageId = pageIdRef.current
+    if (!pageId) return
+    setMutatingLifecycle(true)
+    setError(null)
+    try {
+      await flushDraft()
+      const page = await operation(pageId)
+      applyServerPage(page)
+      updatePageSummary(page)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setMutatingLifecycle(false)
+    }
+  }
+
+  const permanentlyDeletePage = async () => {
+    const pageId = pageIdRef.current
+    if (!pageId) return
+    setMutatingLifecycle(true)
+    setError(null)
+    try {
+      await flushDraft()
+      await bridge.permanentlyDeleteKnowledgePage(
+        pageId,
+        pageId,
+        nextDesktopRequestId("knowledge-page-delete"),
+      )
+      pageRead.current += 1
+      const next = newEditor("concept")
+      editorRef.current = next
+      pageIdRef.current = undefined
+      dirtyRef.current = false
+      setEditor(next)
+      await refreshPages()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setMutatingLifecycle(false)
+    }
+  }
+
   const renderPageList = (kind: DesktopKnowledgePageKind) => {
     const group = pages.filter((page) => page.kind === kind)
     return (
@@ -372,6 +429,10 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
               {page.publishedRevisionNumber
                 ? ` · ${t("desktop.knowledgeBases.knowledgePages.revision", { revision: page.publishedRevisionNumber })}`
                 : ""}
+              {page.lifecycleState !== "draft"
+                ? ` · ${t(`desktop.knowledgeBases.knowledgePages.lifecycle.state.${page.lifecycleState}`)}`
+                : ""}
+              {page.isStale ? ` · ${t("desktop.knowledgeBases.knowledgePages.lifecycle.stale")}` : ""}
             </span>
           </button>
         ))}
@@ -379,7 +440,7 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
     )
   }
 
-  const busy = loadingPage || publishing || verifying || bindingSource || saveState === "saving"
+  const busy = loadingPage || publishing || verifying || bindingSource || mutatingLifecycle || saveState === "saving"
   const canPublish = Boolean(editor.pageId || editor.title.trim())
 
   return (
@@ -460,6 +521,30 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
           </div>
 
           {error ? <p className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">{error}</p> : null}
+
+          <DesktopKnowledgeLifecycleControls
+            key={`${editor.pageId ?? "new"}-${editor.staleAfter ?? "none"}`}
+            pageId={editor.pageId}
+            title={editor.title}
+            lifecycleState={editor.lifecycleState}
+            staleAfter={editor.staleAfter}
+            isStale={editor.isStale}
+            disabled={busy}
+            onSetStaleAfter={(value) => updateLifecycle((pageId) => bridge.setKnowledgePageStaleAfter(
+              pageId,
+              value,
+              nextDesktopRequestId("knowledge-page-stale-after"),
+            ))}
+            onDeprecate={() => updateLifecycle((pageId) => bridge.deprecateKnowledgePage(
+              pageId,
+              nextDesktopRequestId("knowledge-page-deprecate"),
+            ))}
+            onRestore={() => updateLifecycle((pageId) => bridge.restoreKnowledgePage(
+              pageId,
+              nextDesktopRequestId("knowledge-page-restore"),
+            ))}
+            onPermanentDelete={permanentlyDeletePage}
+          />
 
           <div className="mt-6 grid gap-5 xl:grid-cols-2">
             <div className="space-y-4">
@@ -615,6 +700,9 @@ function editorFromPage(page: DesktopKnowledgePage): KnowledgePageEditor {
     provenanceState: editable?.provenanceState ?? "structural",
     verification: page.verification,
     publishedRevisionNumber: page.publishedRevisionNumber,
+    lifecycleState: page.lifecycleState,
+    staleAfter: page.staleAfter,
+    isStale: page.isStale,
     sourceMap: editable?.sourceMap ?? [],
     publicationDiagnostics: page.publicationDiagnostics,
   }
