@@ -44,3 +44,17 @@ This project is indexed by GitNexus as **OpenKB** (5067 symbols, 15885 relations
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues are used for this repository. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Uses the default canonical triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses a single-context layout. See `docs/agents/domain.md`.

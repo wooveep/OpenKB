@@ -6,6 +6,12 @@
 *
 !.gitignore
 !golden-principles.md
+!adr/
+!adr/*.md
+!desgin/
+!desgin/2026-08-08-openkb-local-knowledge-graph-desktop-design.md
+!desgin/2026-08-14-openkb-desktop-core-upgrade-design.md
+!desgin/2026-08-19-openkb-okf-pageindex-knowledge-organization-design.md
 !superpowers/
 !superpowers/specs/
 !superpowers/specs/2026-08-08-openkb-local-knowledge-graph-desktop-design.md
