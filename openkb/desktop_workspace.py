@@ -13,10 +13,12 @@ from openkb.desktop_import_deduplication import (
     deduplication_backfill_needed,
 )
 from openkb.desktop_knowledge_analysis_migrations import (
+    KNOWLEDGE_ANALYSIS_ENTITY_SUBTYPE_MIGRATION_STATEMENT,
     register_knowledge_analysis_migration_functions,
 )
 from openkb.desktop_workspace_feature_migrations import (
     DESKTOP_FEATURE_MIGRATIONS,
+    KNOWLEDGE_ANALYSIS_MIGRATION_VERSION,
 )
 from openkb.locks import kb_ingest_lock
 
@@ -562,8 +564,9 @@ def _apply_migrations(
         if version in applied:
             continue
         now = _timestamp()
+        statements_to_apply = _migration_statements_to_apply(connection, version, statements)
         if in_transaction:
-            for statement in statements:
+            for statement in statements_to_apply:
                 connection.execute(statement)
             connection.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
@@ -571,7 +574,7 @@ def _apply_migrations(
             )
         else:
             with connection:
-                for statement in statements:
+                for statement in statements_to_apply:
                     connection.execute(statement)
                 connection.execute(
                     "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
@@ -590,6 +593,32 @@ def _apply_migrations(
                 "Desktop Knowledge Base has invalid document structure for deduplication."
             ) from error
     return latest
+
+
+def _migration_statements_to_apply(
+    connection: sqlite3.Connection, version: int, statements: tuple[str, ...]
+) -> tuple[str, ...]:
+    if version != KNOWLEDGE_ANALYSIS_MIGRATION_VERSION:
+        return statements
+    if not _table_has_column(connection, "knowledge_reconciliation_candidates", "entity_subtype"):
+        return statements
+    # A pre-release database may expose the v26 column before recording v26.
+    # Keep the remaining migration atomic while accepting that exact shape.
+    return tuple(
+        statement
+        for statement in statements
+        if statement != KNOWLEDGE_ANALYSIS_ENTITY_SUBTYPE_MIGRATION_STATEMENT
+    )
+
+
+def _table_has_column(connection: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+            (table_name, column_name),
+        ).fetchone()
+        is not None
+    )
 
 
 def _recover_interrupted_import_jobs(connection: sqlite3.Connection) -> None:

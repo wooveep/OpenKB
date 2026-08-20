@@ -46,11 +46,15 @@ def _knowledge_content_sha256(value: str) -> str:
     ).casefold()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
-KNOWLEDGE_ANALYSIS_MIGRATION_STATEMENTS: tuple[str, ...] = (
-    """
+
+KNOWLEDGE_ANALYSIS_ENTITY_SUBTYPE_MIGRATION_STATEMENT = """
     ALTER TABLE knowledge_reconciliation_candidates
     ADD COLUMN entity_subtype TEXT
-    """,
+    """
+
+
+KNOWLEDGE_ANALYSIS_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    KNOWLEDGE_ANALYSIS_ENTITY_SUBTYPE_MIGRATION_STATEMENT,
     """
     CREATE TABLE knowledge_reconciliation_candidate_sources (
         candidate_id TEXT NOT NULL
@@ -433,6 +437,6 @@ KNOWLEDGE_ANALYSIS_METADATA_MIGRATION_STATEMENTS: tuple[str, ...] = (
     """,
 )
 
-KNOWLEDGE_ANALYSIS_METADATA_BACKFILL_STATEMENTS = (
-    KNOWLEDGE_ANALYSIS_METADATA_MIGRATION_STATEMENTS[-6:]
-)
+KNOWLEDGE_ANALYSIS_METADATA_BACKFILL_STATEMENTS = KNOWLEDGE_ANALYSIS_METADATA_MIGRATION_STATEMENTS[
+    -6:
+]

@@ -168,6 +168,49 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     assert reopened.knowledge_base.last_checkpoint_at is not None
 
 
+def test_open_accepts_preledger_knowledge_analysis_entity_subtype(tmp_path):
+    """A pre-release v25 database may already contain the first v26 column."""
+    kb_dir = tmp_path / "preledger-knowledge-analysis"
+    state_dir = kb_dir / ".openkb"
+    state_dir.mkdir(parents=True)
+    (kb_dir / "raw").mkdir()
+    database_path = state_dir / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        for version, statements in desktop_workspace._MIGRATIONS:
+            if version > 25:
+                break
+            for statement in statements:
+                connection.execute(statement)
+            connection.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (version, "2026-08-20T00:00:00+00:00"),
+            )
+        connection.executemany(
+            "INSERT INTO metadata (key, value) VALUES (?, ?)",
+            (
+                ("format", "openkb-desktop"),
+                ("knowledge_base_name", "Preledger knowledge analysis"),
+            ),
+        )
+        connection.execute(
+            "ALTER TABLE knowledge_reconciliation_candidates ADD COLUMN entity_subtype TEXT"
+        )
+
+    activation = DesktopKnowledgeBaseRuntime().open(kb_dir)
+
+    assert activation.knowledge_base.schema_version == 37
+    with sqlite3.connect(database_path) as connection:
+        columns = connection.execute(
+            "PRAGMA table_info(knowledge_reconciliation_candidates)"
+        ).fetchall()
+        assert [str(row[1]) for row in columns].count("entity_subtype") == 1
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (37,)
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'knowledge_reconciliation_candidate_sources'"
+        ).fetchone() == (1,)
+
+
 def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
     """An interrupted v2 job restarts at preflight rather than trusting missing evidence."""
     kb_dir = tmp_path / "desktop-kb"
