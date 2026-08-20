@@ -8,6 +8,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "PortableProcessTree.ps1")
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -333,24 +334,6 @@ function Wait-ForWindowHidden {
     throw "OPENKB_WINDOW_NOT_HIDDEN: Closing the main window did not hide it to the tray."
 }
 
-function Get-DescendantProcessIds {
-    param([Parameter(Mandatory = $true)] [int] $RootProcessId)
-
-    $processes = @(Get-CimInstance Win32_Process)
-    $pending = New-Object "System.Collections.Generic.Queue[int]"
-    $descendants = New-Object "System.Collections.Generic.List[int]"
-    $pending.Enqueue($RootProcessId)
-    while ($pending.Count -gt 0) {
-        $parentProcessId = $pending.Dequeue()
-        foreach ($process in @($processes | Where-Object { [int] $_.ParentProcessId -eq $parentProcessId })) {
-            $processId = [int] $process.ProcessId
-            $descendants.Add($processId)
-            $pending.Enqueue($processId)
-        }
-    }
-    return @($descendants)
-}
-
 $ExecutablePath = [System.IO.Path]::GetFullPath($ExecutablePath)
 Assert-That -Condition (Test-Path -LiteralPath $ExecutablePath -PathType Leaf) -Message "OpenKB executable does not exist: $ExecutablePath"
 $currentSessionId = (Get-Process -Id $PID).SessionId
@@ -396,7 +379,10 @@ try {
             continue
         }
 
-        $trackedProcessIds = @($process.Id) + @(Get-DescendantProcessIds -RootProcessId $process.Id)
+        $trackedProcessIds = @($process.Id) + @(
+            Get-DescendantProcesses -RootProcessId $process.Id |
+                ForEach-Object { [int] $_.ProcessId }
+        )
         Send-LeftClick -Element $quitMenuItem
         $deadline = [DateTime]::UtcNow.AddSeconds(15)
         $remainingProcessIds = $trackedProcessIds

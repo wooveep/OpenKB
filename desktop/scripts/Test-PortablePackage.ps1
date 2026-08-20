@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "PortableProcessTree.ps1")
 . (Join-Path $PSScriptRoot "Test-PageIndexPortablePackage.ps1")
 
 function Assert-That {
@@ -422,25 +423,6 @@ function Test-FrozenEngine {
             Stop-Process -Id $engine.Id -Force -ErrorAction SilentlyContinue
         }
         $engine.Dispose()
-    }
-}
-
-function Get-DescendantProcesses {
-    param([Parameter(Mandatory = $true)] [int] $RootProcessId)
-
-    $allProcesses = @(Get-CimInstance Win32_Process)
-    $pendingProcessIds = New-Object "System.Collections.Generic.Queue[int]"
-    $descendants = New-Object "System.Collections.Generic.List[object]"
-    $pendingProcessIds.Enqueue($RootProcessId)
-    while ($pendingProcessIds.Count -gt 0) {
-        $parentProcessId = $pendingProcessIds.Dequeue()
-        foreach ($process in @($allProcesses | Where-Object { [int] $_.ParentProcessId -eq $parentProcessId })) {
-            $descendants.Add($process)
-            $pendingProcessIds.Enqueue([int] $process.ProcessId)
-        }
-    }
-    foreach ($descendant in $descendants) {
-        Write-Output $descendant
     }
 }
 
