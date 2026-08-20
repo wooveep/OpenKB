@@ -74,19 +74,47 @@ def read_desktop_model_settings(kb_dir: Path) -> DesktopModelSettings:
     """Read the KB-local model configuration for direct editing in Desktop."""
     resolved = kb_dir.expanduser().resolve()
     config = _config_mapping(resolved / ".openkb" / "config.yaml")
-    desktop = config.get("desktop")
-    desktop_values = desktop if isinstance(desktop, dict) else {}
-    api_base_url = _default_api_base_url(desktop_values.get("api_base_url"))
-    provider = _default_provider(desktop_values.get("provider"), api_base_url)
+    if "desktop" in config:
+        desktop = config["desktop"]
+        if not isinstance(desktop, dict):
+            raise DesktopModelSettingsError("Desktop model settings must be a mapping.")
+        desktop_values = desktop
+    else:
+        desktop_values = {}
+
+    api_base_url = (
+        DEFAULT_API_BASE_URL
+        if "api_base_url" not in desktop_values
+        else _required_api_base_url(desktop_values["api_base_url"])
+    )
+    provider = (
+        _default_provider(None, api_base_url)
+        if "provider" not in desktop_values
+        else _configured_provider(desktop_values["provider"])
+    )
+    model = (
+        str(DEFAULT_CONFIG["model"]) if "model" not in config else _required_model(config["model"])
+    )
+    api_key = (
+        "" if "api_key" not in desktop_values else _configured_api_key(desktop_values["api_key"])
+    )
+    concurrency = (
+        DEFAULT_MAX_CONCURRENT_MODEL_CALLS
+        if "max_concurrent_model_calls" not in desktop_values
+        else _required_concurrency(desktop_values["max_concurrent_model_calls"])
+    )
+    timeout = (
+        INITIAL_RESPONSE_TIMEOUT_SECONDS
+        if "initial_timeout_seconds" not in desktop_values
+        else _required_timeout(desktop_values["initial_timeout_seconds"])
+    )
     return DesktopModelSettings(
         provider=provider,
-        model=_display_model_for_provider(provider, _default_model(config.get("model"))),
+        model=_display_model_for_provider(provider, model),
         api_base_url=api_base_url,
-        api_key=_default_api_key(desktop_values.get("api_key")),
-        max_concurrent_model_calls=_default_concurrency(
-            desktop_values.get("max_concurrent_model_calls")
-        ),
-        initial_timeout_seconds=_default_timeout(desktop_values.get("initial_timeout_seconds")),
+        api_key=api_key,
+        max_concurrent_model_calls=concurrency,
+        initial_timeout_seconds=timeout,
     )
 
 
@@ -164,12 +192,6 @@ def _config_mapping(path: Path) -> dict[str, Any]:
         raise DesktopModelSettingsError("Desktop model settings could not be read.") from error
 
 
-def _default_model(value: object) -> str:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return str(DEFAULT_CONFIG["model"])
-
-
 def _default_provider(value: object, api_base_url: str) -> str:
     if isinstance(value, str) and value.strip() in _SUPPORTED_MODEL_PROVIDERS:
         return value.strip()
@@ -178,6 +200,12 @@ def _default_provider(value: object, api_base_url: str) -> str:
         if _is_deepseek_api_base_url(api_base_url)
         else MODEL_PROVIDER_CUSTOM
     )
+
+
+def _configured_provider(value: object) -> str:
+    if isinstance(value, str) and value.strip() in _SUPPORTED_MODEL_PROVIDERS:
+        return value.strip()
+    raise DesktopModelSettingsError("Choose a supported model provider.")
 
 
 def _required_provider(value: object, api_base_url: str) -> str:
@@ -228,12 +256,6 @@ def _required_model(value: object) -> str:
     return value.strip()
 
 
-def _default_api_base_url(value: object) -> str:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return DEFAULT_API_BASE_URL
-
-
 def _is_deepseek_api_base_url(api_base_url: str) -> bool:
     return urlsplit(api_base_url).hostname == _DEEPSEEK_API_HOST
 
@@ -241,27 +263,24 @@ def _is_deepseek_api_base_url(api_base_url: str) -> bool:
 def _required_api_base_url(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise DesktopModelSettingsError("Enter a non-empty API Base URL.")
+    normalized = value.strip()
+    try:
+        urlsplit(normalized)
+    except ValueError as error:
+        raise DesktopModelSettingsError("Enter a valid API Base URL.") from error
+    return normalized
+
+
+def _configured_api_key(value: object) -> str:
+    if not isinstance(value, str):
+        raise DesktopModelSettingsError("Desktop API Key must be a string.")
     return value.strip()
-
-
-def _default_api_key(value: object) -> str:
-    return value.strip() if isinstance(value, str) else ""
 
 
 def _required_api_key(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise DesktopModelSettingsError("Enter a non-empty API Key.")
     return value.strip()
-
-
-def _default_concurrency(value: object) -> int:
-    if (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and 0 < value <= _MAX_CONCURRENT_MODEL_CALLS
-    ):
-        return value
-    return DEFAULT_MAX_CONCURRENT_MODEL_CALLS
 
 
 def _required_concurrency(value: object) -> int:
@@ -276,24 +295,14 @@ def _required_concurrency(value: object) -> int:
     return value
 
 
-def _default_timeout(value: object) -> float:
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and _valid_timeout(value):
-        return float(value)
-    return INITIAL_RESPONSE_TIMEOUT_SECONDS
-
-
 def _required_timeout(value: object) -> float:
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or not _valid_timeout(value):
-        raise DesktopModelSettingsError(
-            "Model response timeout must be a number between 1 and 60 seconds."
-        )
-    return float(value)
-
-
-def _valid_timeout(value: object) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-        and 0 < float(value) <= MODEL_CALL_DEADLINE_SECONDS
-    )
+    message = "Model response timeout must be a number between 1 and 60 seconds."
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise DesktopModelSettingsError(message)
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError) as error:
+        raise DesktopModelSettingsError(message) from error
+    if not math.isfinite(normalized) or not 0 < normalized <= MODEL_CALL_DEADLINE_SECONDS:
+        raise DesktopModelSettingsError(message)
+    return normalized

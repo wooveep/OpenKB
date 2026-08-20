@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import BinaryIO
 
 from openkb import __version__
+from openkb import desktop_engine_imports as import_engine
 from openkb import desktop_engine_methods as engine_methods
-from openkb import desktop_engine_page_tree_enrichment as page_tree_enrichment_engine
 from openkb.desktop_answer_types import DesktopAnswerError
 from openkb.desktop_conversations import DesktopConversationError
 from openkb.desktop_grounded_answer import DesktopGroundedAnswerService
@@ -42,6 +42,7 @@ from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
     DesktopKnowledgeBaseRuntime,
 )
+from openkb.desktop_workspace_transition import DesktopWorkspaceTransitionCoordinator
 
 PROTOCOL_VERSION = 1
 MAX_FRAME_BYTES = 16 * 1024 * 1024
@@ -162,6 +163,7 @@ class DesktopEngineServer:
         self._reader = FrameReader(input_stream)
         self._writer = FrameWriter(output_stream)
         self._workspace = workspace or DesktopKnowledgeBaseRuntime()
+        self._workspace_transition = DesktopWorkspaceTransitionCoordinator(self._workspace)
         self._workspace_requests_lock = threading.RLock()
         self._engine_version = engine_version or __version__
         self._model_gateway_factory = model_gateway_factory or desktop_model_gateway_for
@@ -361,9 +363,9 @@ class DesktopEngineServer:
         ):
             raise DesktopRequestError("request_cancelled", "Desktop Bridge request was cancelled.")
         if request.method == "workbench.pause_import_job":
-            return self._pause_import_job(_required_string_param(request, "job_id"))
+            return import_engine.pause_import_job(self, _required_string_param(request, "job_id"))
         if request.method == "workbench.cancel_import_job":
-            return self._cancel_import_job(_required_string_param(request, "job_id"))
+            return import_engine.cancel_import_job(self, _required_string_param(request, "job_id"))
         if request.method in self._WORKSPACE_METHODS:
             return self._dispatch_workspace_request(request, cancel_event)
 
@@ -446,22 +448,21 @@ class DesktopEngineServer:
             "workbench.resume_import_job",
             "workbench.recover_import_job",
         }:
-            return self._dispatch_import_request(request, cancel_event)
+            return import_engine.dispatch_import_request(self, request, cancel_event)
+        if request.method in {
+            "workbench.create_knowledge_base",
+            "workbench.open_knowledge_base",
+        }:
+            from openkb.desktop_engine_workspace_activation import (
+                dispatch_knowledge_base_activation,
+            )
+
+            return dispatch_knowledge_base_activation(self, request, cancel_event)
         with self._workspace_requests_lock:
             if cancel_event is not None and cancel_event.is_set():
                 raise DesktopRequestError(
                     "request_cancelled", "Desktop Bridge request was cancelled."
                 )
-
-            if request.method in {
-                "workbench.create_knowledge_base",
-                "workbench.open_knowledge_base",
-            }:
-                from openkb.desktop_engine_workspace_activation import (
-                    dispatch_knowledge_base_activation,
-                )
-
-                return dispatch_knowledge_base_activation(self, request, cancel_event)
 
             if request.method == "workbench.inspect_import_sources":
                 return inspect_import_sources(
@@ -469,142 +470,6 @@ class DesktopEngineServer:
                 ).as_dict()
             active = self._workspace.active()
             return {"knowledge_base": active.as_dict() if active is not None else None}
-
-    def _dispatch_import_request(
-        self, request: DesktopRequest, cancel_event: threading.Event | None
-    ) -> dict[str, object]:
-        """Run one Import Job without allowing the active KB binding to change."""
-        with self._workspace_requests_lock:
-            if cancel_event is not None and cancel_event.is_set():
-                raise DesktopRequestError(
-                    "request_cancelled", "Desktop Bridge request was cancelled."
-                )
-            active = self._workspace.active()
-            if active is None:
-                raise DesktopRequestError(
-                    "no_active_knowledge_base",
-                    "Open a Desktop Knowledge Base before importing a document.",
-                )
-            self._begin_workspace_mutation(request, cancel_event)
-            kb_dir = Path(active.kb_dir)
-
-            if request.method == "workbench.import_text_document":
-                return self._run_import(
-                    kb_dir,
-                    request_id=str(request.request_id),
-                    source_path=Path(_required_path_param(request, "source_path")),
-                )
-            if request.method == "workbench.resume_import_job":
-                return self._run_import(
-                    kb_dir,
-                    request_id=str(request.request_id),
-                    job_id=_required_string_param(request, "job_id"),
-                )
-            return self._run_import(
-                kb_dir,
-                request_id=str(request.request_id),
-                job_id=_required_string_param(request, "job_id"),
-                recovery_override=_recovery_override_param(request),
-            )
-
-    def _run_import(
-        self,
-        kb_dir: Path,
-        *,
-        request_id: str | None,
-        source_path: Path | None = None,
-        job_id: str | None = None,
-        recovery_override: DesktopRecoveryOverride | None = None,
-    ) -> dict[str, object]:
-        """Run one job while its durable state, not this worker, remains authoritative."""
-        control = DesktopImportControl()
-        model_gateway = self._model_gateway_factory(kb_dir, recovery_override)
-        importer = DesktopTextImportService(
-            kb_dir,
-            control=control,
-            on_stage_progress=lambda data: self._record_import_stage(request_id, control, data),
-            model_gateway=model_gateway,
-            require_model_analysis=True,
-        )
-        try:
-            if source_path is not None:
-                result = importer.import_text(source_path)
-            elif job_id is not None:
-                if recovery_override is not None:
-                    result = importer.recover_text(job_id, recovery_override)
-                else:
-                    result = importer.resume_text(job_id)
-            else:
-                raise DesktopRequestError("invalid_params", "An import source or job is required.")
-            page_tree_enrichment_engine.start_page_tree_enrichments(
-                self, kb_dir, self._model_gateway_factory(kb_dir, None)
-            )
-            return result.as_dict()
-        finally:
-            self._release_import_control(control)
-
-    def _record_import_stage(
-        self,
-        request_id: str | None,
-        control: DesktopImportControl,
-        data: dict[str, object],
-    ) -> None:
-        job_id = data.get("job_id")
-        if isinstance(job_id, str):
-            with self._active_lock:
-                self._import_controls[job_id] = control
-        self._emit_event("import.stage_progress", {"request_id": request_id, **data})
-
-    def _release_import_control(self, control: DesktopImportControl) -> None:
-        with self._active_lock:
-            for job_id, active_control in tuple(self._import_controls.items()):
-                if active_control is control:
-                    del self._import_controls[job_id]
-
-    def _pause_import_job(self, job_id: str) -> dict[str, object]:
-        with self._active_lock:
-            control = self._import_controls.get(job_id)
-        if control is None:
-            raise DesktopRequestError(
-                "import_job_not_running", "Import job is not running in this Desktop Runtime."
-            )
-        control.request_pause()
-        return {"job_id": job_id, "accepted": True}
-
-    def _cancel_import_job(self, job_id: str) -> dict[str, object]:
-        with self._active_lock:
-            control = self._import_controls.get(job_id)
-        if control is not None:
-            control.request_cancel()
-            return {"job_id": job_id, "accepted": True}
-
-        active = self._workspace.active()
-        if active is None:
-            raise DesktopRequestError(
-                "no_active_knowledge_base", "Open a Desktop Knowledge Base before cancelling."
-            )
-        DesktopTextImportService(Path(active.kb_dir)).cancel_paused_job(job_id)
-        return {"job_id": job_id, "accepted": True}
-
-    def _start_recoverable_imports(self, kb_dir: Path) -> None:
-        job_ids = DesktopTextImportService(kb_dir).recoverable_job_ids()
-        if not job_ids:
-            return
-        threading.Thread(
-            target=self._resume_recoverable_imports,
-            args=(kb_dir, job_ids),
-            daemon=True,
-            name="openkb-engine-import-recovery",
-        ).start()
-
-    def _resume_recoverable_imports(self, kb_dir: Path, job_ids: tuple[str, ...]) -> None:
-        for job_id in job_ids:
-            if self._shutdown.is_set():
-                return
-            try:
-                self._run_import(kb_dir, request_id=None, job_id=job_id)
-            except (DesktopImportError, DesktopRequestError) as error:
-                logger.warning("Could not resume Desktop import job %s: %s", job_id, error)
 
     def _begin_workspace_mutation(
         self, request: DesktopRequest, cancel_event: threading.Event | None

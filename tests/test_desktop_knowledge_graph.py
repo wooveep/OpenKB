@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
+import zipfile
+from contextlib import contextmanager
 
 import openkb.desktop_retrieval as retrieval
 from openkb.desktop_answer_types import DesktopEvidenceRef
+from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_graph import (
     DesktopKnowledgeGraphQueryError,
@@ -15,7 +20,8 @@ from openkb.desktop_knowledge_graph import (
 )
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_retrieval import DesktopEvidenceRetriever, _Candidate, _with_graph_budget
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_dir
+from openkb.locks import kb_ingest_lock
 
 
 def test_graph_records_keep_same_named_nodes_separate_and_evidence_bound(tmp_path, monkeypatch):
@@ -170,9 +176,7 @@ def test_graph_failures_keep_baseline_answers_and_only_record_safe_diagnostics(
     assert pack.evidence
     assert "knowledge_graph_query_timeout" not in pack.degradations
     graph_trace = next(
-        channel
-        for channel in pack.retrieval_trace.channels
-        if channel.channel == "knowledge_graph"
+        channel for channel in pack.retrieval_trace.channels if channel.channel == "knowledge_graph"
     )
     assert graph_trace.candidate_count == 0
     assert "knowledge_graph_query_timeout" in graph_trace.degradation_reasons
@@ -186,6 +190,70 @@ def test_graph_failures_keep_baseline_answers_and_only_record_safe_diagnostics(
         ).fetchall()
     assert ("extraction", "model_timeout") in diagnostics
     assert ("query", "knowledge_graph_query_timeout") in diagnostics
+
+
+def test_graph_query_diagnostic_never_waits_for_an_active_kb_mutation(tmp_path, monkeypatch):
+    """Best-effort graph diagnostics cannot wait behind an Import Job."""
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "baseline.txt"
+    source.write_text("The Meridian protocol keeps baseline evidence.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+    graph_query_started = threading.Event()
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+
+    def hold_kb_mutation() -> None:
+        assert graph_query_started.wait(timeout=2)
+        with kb_ingest_lock(desktop_state_dir(kb_dir)):
+            lock_acquired.set()
+            assert release_lock.wait(timeout=2)
+
+    lock_worker = threading.Thread(target=hold_kb_mutation)
+    lock_worker.start()
+
+    @contextmanager
+    def no_catalog_lease(_kb_dir):
+        yield None
+
+    monkeypatch.setattr(retrieval, "lease_current_catalog", no_catalog_lease)
+    monkeypatch.setattr(
+        retrieval,
+        "local_graph_evidence_ids",
+        lambda *_args, **_kwargs: ("missing-graph-evidence",),
+    )
+
+    def fail_graph_query(*_args, **_kwargs):
+        graph_query_started.set()
+        assert lock_acquired.wait(timeout=2)
+        raise DesktopKnowledgeGraphQueryError("knowledge_graph_query_timeout")
+
+    monkeypatch.setattr(retrieval, "bounded_graph_rows", fail_graph_query)
+
+    started_at = time.monotonic()
+    pack = DesktopEvidenceRetriever(kb_dir).retrieve_variant(
+        "What does the Meridian protocol keep?", variant="local_graph"
+    )
+    elapsed = time.monotonic() - started_at
+    release_lock.set()
+    lock_worker.join(timeout=2)
+
+    assert elapsed < 0.5
+    assert pack.evidence
+    graph_trace = next(
+        channel for channel in pack.retrieval_trace.channels if channel.channel == "knowledge_graph"
+    )
+    assert graph_trace.candidate_count == 0
+    assert "knowledge_graph_query_timeout" in graph_trace.degradation_reasons
+    assert "knowledge_graph_query_timeout" not in _graph_diagnostic_codes(kb_dir, tmp_path)
+
+    DesktopEvidenceRetriever(kb_dir).retrieve_variant(
+        "What does the Meridian protocol keep?", variant="local_graph"
+    )
+    assert "knowledge_graph_query_timeout" in _graph_diagnostic_codes(kb_dir, tmp_path)
 
 
 def test_graph_worker_start_failure_keeps_document_available_and_is_diagnostic(
@@ -223,3 +291,11 @@ def _reference(evidence_id: str, *, channels: tuple[str, ...] = ("fts",)) -> Des
         excerpt=evidence_id,
         channels=channels,
     )
+
+
+def _graph_diagnostic_codes(kb_dir, destination_dir) -> set[str]:
+    destination = destination_dir / "diagnostics.zip"
+    DesktopDiagnosticBundleService(kb_dir).export(destination)
+    with zipfile.ZipFile(destination) as archive:
+        payload = json.loads(archive.read("graph-diagnostics.json"))
+    return {diagnostic["error_code"] for diagnostic in payload["diagnostics"]}

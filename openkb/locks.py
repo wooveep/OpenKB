@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import IO, Iterator
 
@@ -78,6 +80,27 @@ class _LocalRwLock:
             with self._condition:
                 self._writer = False
                 self._condition.notify_all()
+
+    @contextlib.contextmanager
+    def try_write(self, *, deadline: float) -> Iterator[bool]:
+        """Try to acquire the local writer slot before ``deadline``."""
+        acquired = False
+        with self._condition:
+            while self._writer or self._readers:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._condition.wait(timeout=remaining)
+            else:
+                self._writer = True
+                acquired = True
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                with self._condition:
+                    self._writer = False
+                    self._condition.notify_all()
 
 
 def _held_locks() -> dict[Path, tuple[int, int]]:
@@ -146,6 +169,51 @@ def kb_ingest_lock(openkb_dir: Path):
     return kb_lock(openkb_dir, exclusive=True)
 
 
+@contextlib.contextmanager
+def try_kb_ingest_lock(openkb_dir: Path, *, timeout_seconds: float) -> Iterator[bool]:
+    """Try to hold the exclusive mutation lock within one bounded wait budget.
+
+    The yielded boolean is false when either the in-process or cross-process
+    lock remains occupied at the deadline.  Existing write owners may re-enter;
+    an existing read owner cannot be upgraded by this best-effort interface.
+    """
+    if not math.isfinite(timeout_seconds) or timeout_seconds < 0:
+        raise ValueError("timeout_seconds must be a finite non-negative number")
+
+    deadline = time.monotonic() + timeout_seconds
+    lock_path = openkb_dir / "ingest.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved = lock_path.resolve()
+    held = _held_locks()
+    exclusive_depth, shared_depth = held.get(resolved, (0, 0))
+    if shared_depth and not exclusive_depth:
+        yield False
+        return
+    if exclusive_depth:
+        held[resolved] = (exclusive_depth + 1, shared_depth)
+        try:
+            yield True
+        finally:
+            current_exclusive, current_shared = held[resolved]
+            held[resolved] = (current_exclusive - 1, current_shared)
+        return
+
+    with _local_lock(lock_path).try_write(deadline=deadline) as local_acquired:
+        if not local_acquired:
+            yield False
+            return
+        with lock_path.open("a+", encoding="utf-8") as fh:
+            if not _try_flock_until(fh, deadline=deadline):
+                yield False
+                return
+            held[resolved] = (1, 0)
+            try:
+                yield True
+            finally:
+                held.pop(resolved, None)
+                funlock(fh)
+
+
 def kb_read_lock(openkb_dir: Path):
     """Hold a shared KB read lock."""
     return kb_lock(openkb_dir, exclusive=False)
@@ -163,6 +231,18 @@ def kb_ingest_lock_held(openkb_dir: Path) -> bool:
     resolved = (openkb_dir / "ingest.lock").resolve()
     exclusive_depth, _ = held.get(resolved, (0, 0))
     return exclusive_depth > 0
+
+
+def _try_flock_until(fh: IO, *, deadline: float) -> bool:
+    while True:
+        try:
+            portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            return True
+        except portalocker.exceptions.LockException:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.01, remaining))
 
 
 def _fsync_directory(path: Path) -> None:

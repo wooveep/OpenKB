@@ -16,10 +16,17 @@ def dispatch_global_search_request(
 ) -> dict[str, object]:
     from openkb.desktop_engine import DesktopRequestError
 
+    raw_query = request.params.get("query")
+    if not isinstance(raw_query, str):
+        raise DesktopRequestError(
+            "invalid_params",
+            "Global Search query must be a string.",
+        )
+    query = raw_query.strip()
     active = server._workspace.active()
     if active is None:
         raise DesktopRequestError(
             "no_active_knowledge_base",
             "Open a Desktop Knowledge Base before searching.",
         )
-    return search_desktop_knowledge_base(Path(active.kb_dir), request.params.get("query"))
+    return search_desktop_knowledge_base(Path(active.kb_dir), query)

@@ -303,10 +303,8 @@ def test_prepared_concurrency_slot_is_released_at_the_logical_deadline():
     gate.release()
 
 
-def test_configured_desktop_gateway_turns_invalid_model_config_into_direct_failure(
-    tmp_path, monkeypatch
-):
-    """Malformed model settings use the same visible quarantine path, not a skip."""
+def test_configured_desktop_gateway_disables_malformed_model_config(tmp_path, monkeypatch):
+    """Malformed settings cannot construct a gateway from guessed defaults."""
     kb_dir = tmp_path / "desktop-kb"
     config_path = kb_dir / ".openkb" / "config.yaml"
     config_path.parent.mkdir(parents=True)
@@ -319,13 +317,7 @@ def test_configured_desktop_gateway_turns_invalid_model_config_into_direct_failu
 
     gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
 
-    assert gateway is not None
-    with pytest.raises(DesktopModelCallError) as error:
-        gateway.analyze(
-            DesktopModelRequest("document_analysis", "guide.txt", "source"),
-            on_event=lambda _event: None,
-        )
-    assert error.value.failure.code == "model_configuration_invalid"
+    assert gateway is None
 
 
 def test_recovery_override_uses_its_model_and_timeout_without_writing_config(tmp_path, monkeypatch):

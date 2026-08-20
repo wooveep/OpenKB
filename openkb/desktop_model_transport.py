@@ -43,13 +43,7 @@ logger = logging.getLogger(__name__)
 def desktop_model_gateway_for(
     kb_dir: Path, override: DesktopRecoveryOverride | None = None
 ) -> DesktopModelGateway | None:
-    """Build the live gateway when this Desktop KB has opted into a model config.
-
-    Fresh Desktop knowledge bases can still establish local retrieval before the
-    settings ticket supplies credentials. Once a config file or credential is
-    present, configuration failures are surfaced through the required Model
-    Gateway path rather than silently skipped.
-    """
+    """Build a live gateway only when this Desktop KB has valid model settings."""
     resolved = kb_dir.expanduser().resolve()
     config_path = resolved / ".openkb" / "config.yaml"
     try:
@@ -59,13 +53,8 @@ def desktop_model_gateway_for(
     try:
         settings = read_desktop_model_settings(resolved)
     except (DesktopModelSettingsError, OSError, TypeError, ValueError, yaml.YAMLError):
-        return _gateway_for(
-            override.model if override is not None else None,
-            bundle,
-            override,
-            kb_dir=resolved,
-            settings=None,
-        )
+        logger.warning("Disabling the model gateway because KB-local settings are invalid.")
+        return None
     model = (
         override.model if override is not None and override.model is not None else settings.model
     )

@@ -19,20 +19,15 @@ from openkb.desktop_page_tree import (
     PageTreeGeneration,
     PageTreeImageBinding,
     PageTreeNode,
-    PageTreeStageOutcome,
     build_deterministic_page_tree,
-    page_tree_checkpoint,
-    page_tree_outcome_from_checkpoint,
 )
 from openkb.desktop_page_tree_validation import validate_current_page_tree
-from openkb.locks import atomic_write_text
 
 PAGEINDEX_PACKAGE_VERSION = "0.2.10"
 PAGEINDEX_SOURCE_COMMIT = "ba0ef02d78034704be049894c463dc606acbd0d7"
 PAGEINDEX_PROVIDER_KIND = "official_pageindex"
 PAGEINDEX_ADAPTER_VERSION = 1
 PAGEINDEX_ADAPTER_SCHEMA = f"openkb.official-pageindex-adapter.v{PAGEINDEX_ADAPTER_VERSION}"
-PAGEINDEX_CACHE_SCHEMA = "openkb.official-pageindex-cache.v1"
 PAGEINDEX_PROVIDER_VERSION = (
     f"{PAGEINDEX_PACKAGE_VERSION}+{PAGEINDEX_SOURCE_COMMIT[:12]}.openkb{PAGEINDEX_ADAPTER_VERSION}"
 )
@@ -77,14 +72,12 @@ def build_official_pageindex_generation(
     evidence: tuple[tuple[str, DocumentIRBlock], ...],
     images: tuple[SourceImage, ...],
     *,
-    cache_dir: Path,
     python_executable: Path | None = None,
     worker_executable: Path | None = None,
     timeout_seconds: float = PAGEINDEX_DEFAULT_TIMEOUT_SECONDS,
     invoke: ProviderInvoker | None = None,
-    allow_cache: bool = True,
 ) -> PageTreeGeneration:
-    """Build/cache one PageIndex tree without giving the provider Raw Asset authority."""
+    """Invoke and normalize PageIndex without reading or writing KB-local state."""
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError("Official PageIndex timeout must be positive.")
     shell = build_deterministic_page_tree(
@@ -95,11 +88,6 @@ def build_official_pageindex_generation(
         provider_kind=PAGEINDEX_PROVIDER_KIND,
         provider_version=PAGEINDEX_PROVIDER_VERSION,
     )
-    cache_file = cache_dir / f"{shell.generation_id}.json"
-    cached = _cached_generation(cache_file, shell) if allow_cache else None
-    if cached is not None:
-        return cached
-
     markdown, rendered_blocks = _render_document_ir(blocks)
     provider_invoke = invoke or _subprocess_invoker(python_executable, worker_executable)
     try:
@@ -135,51 +123,20 @@ def build_official_pageindex_generation(
         raise PageIndexProviderError(
             "pageindex_provider_invalid_tree", "Official PageIndex returned an invalid tree."
         ) from error
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint = page_tree_checkpoint(PageTreeStageOutcome(document_id, generation))
-    atomic_write_text(
-        cache_file,
-        json.dumps(
-            {
-                "schema_version": PAGEINDEX_CACHE_SCHEMA,
-                "checkpoint_sha256": _digest(checkpoint),
-                "checkpoint": checkpoint,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n",
-    )
     return generation
 
 
-def _cached_generation(cache_file: Path, expected: PageTreeGeneration) -> PageTreeGeneration | None:
-    if not cache_file.is_file():
-        return None
-    try:
-        payload = json.loads(cache_file.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or payload.get("schema_version") != PAGEINDEX_CACHE_SCHEMA:
-            raise ValueError("Official PageIndex cache schema changed.")
-        checkpoint = payload.get("checkpoint")
-        checkpoint_sha256 = payload.get("checkpoint_sha256")
-        if not isinstance(checkpoint, dict) or checkpoint_sha256 != _digest(checkpoint):
-            raise ValueError("Official PageIndex cache integrity check failed.")
-        outcome = page_tree_outcome_from_checkpoint(checkpoint)
-        generation = outcome.generation
-        if generation is None:
-            raise ValueError("Official PageIndex cache has no generation.")
-        validate_current_page_tree(generation)
-        if not _same_generation_identity(generation, expected):
-            raise ValueError("Official PageIndex cache identity changed.")
-        if _evidence_identities(generation) != _evidence_identities(expected):
-            raise ValueError("Official PageIndex cache Evidence bindings changed.")
-        if _image_identities(generation) != _image_identities(expected):
-            raise ValueError("Official PageIndex cache Source Image bindings changed.")
-        return generation
-    except (OSError, json.JSONDecodeError, RecursionError, ValueError):
-        logger.warning("Ignoring a corrupt official PageIndex provider cache.", exc_info=True)
-        return None
+def validate_official_pageindex_generation(
+    generation: PageTreeGeneration, expected: PageTreeGeneration
+) -> None:
+    """Validate normalized output against its current authoritative input shell."""
+    validate_current_page_tree(generation)
+    if not _same_generation_identity(generation, expected):
+        raise ValueError("Official PageIndex generation identity changed.")
+    if _evidence_identities(generation) != _evidence_identities(expected):
+        raise ValueError("Official PageIndex Evidence bindings changed.")
+    if _image_identities(generation) != _image_identities(expected):
+        raise ValueError("Official PageIndex Source Image bindings changed.")
 
 
 def _same_generation_identity(generation: PageTreeGeneration, expected: PageTreeGeneration) -> bool:

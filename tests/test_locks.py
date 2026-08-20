@@ -14,6 +14,7 @@ from openkb.locks import (
     kb_ingest_lock,
     kb_ingest_lock_held,
     kb_read_lock,
+    try_kb_ingest_lock,
 )
 
 
@@ -99,6 +100,31 @@ def test_kb_ingest_lock_held_is_exclusive_and_thread_local(tmp_path):
     assert not worker.is_alive()
     assert worker_seen == [False]
     assert not kb_ingest_lock_held(openkb_dir)
+
+
+def test_try_kb_ingest_lock_stops_at_its_deadline(tmp_path):
+    openkb_dir = tmp_path / ".openkb"
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+
+    def hold_write_lock() -> None:
+        with kb_ingest_lock(openkb_dir):
+            lock_acquired.set()
+            assert release_lock.wait(timeout=2)
+
+    worker = threading.Thread(target=hold_write_lock)
+    worker.start()
+    assert lock_acquired.wait(timeout=2)
+
+    with try_kb_ingest_lock(openkb_dir, timeout_seconds=0.01) as acquired:
+        assert not acquired
+
+    release_lock.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    with try_kb_ingest_lock(openkb_dir, timeout_seconds=0.01) as acquired:
+        assert acquired
+        assert kb_ingest_lock_held(openkb_dir)
 
 
 def test_atomic_write_text_replaces_file(tmp_path):

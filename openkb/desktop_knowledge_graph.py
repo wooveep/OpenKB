@@ -26,7 +26,7 @@ from openkb.desktop_model_gateway import (
     DesktopModelRequest,
 )
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
-from openkb.locks import kb_ingest_lock
+from openkb.locks import kb_ingest_lock, try_kb_ingest_lock
 
 _NODE_TYPES = frozenset(("entity", "concept", "claim"))
 _EDGE_TYPES = frozenset(
@@ -45,6 +45,7 @@ _EDGE_TYPES = frozenset(
         "CONTRADICTS",
     )
 )
+_QUERY_DIAGNOSTIC_LOCK_TIMEOUT_SECONDS = 0.05
 _MAX_EXTRACTION_EVIDENCE = 12
 _MAX_MODEL_EVIDENCE_CHARS = 1_200
 _MAX_MODEL_INPUT_CHARS = 12_000
@@ -230,23 +231,61 @@ class DesktopKnowledgeGraphService:
             finally:
                 connection.close()
 
-    def _record_diagnostic(self, phase: str, error_code: str, document_id: str | None) -> None:
-        """Persist an extraction outcome while it is safe for a background worker to wait."""
+    def record_query_diagnostic(self, error_code: str) -> None:
+        """Record a query degradation without waiting behind a KB mutation."""
+        self._record_diagnostic(
+            "query",
+            error_code,
+            None,
+            lock_timeout_seconds=_QUERY_DIAGNOSTIC_LOCK_TIMEOUT_SECONDS,
+        )
+
+    def _record_diagnostic(
+        self,
+        phase: str,
+        error_code: str,
+        document_id: str | None,
+        *,
+        lock_timeout_seconds: float | None = None,
+    ) -> None:
+        """Persist one optional diagnostic under the owning KB mutation lock."""
         try:
-            with kb_ingest_lock(self._state_dir):
-                connection = self._connect()
-                try:
-                    _insert_diagnostic(connection, phase, error_code, document_id)
-                    connection.commit()
-                finally:
-                    connection.close()
+            if lock_timeout_seconds is None:
+                with kb_ingest_lock(self._state_dir):
+                    self._persist_diagnostic(phase, error_code, document_id)
+                return
+            with try_kb_ingest_lock(
+                self._state_dir, timeout_seconds=lock_timeout_seconds
+            ) as acquired:
+                if acquired:
+                    self._persist_diagnostic(
+                        phase,
+                        error_code,
+                        document_id,
+                        database_timeout_seconds=0,
+                    )
         except (OSError, sqlite3.Error):
             # Graph diagnostics are useful but never worth turning an optional
             # capability failure into a document or answer failure.
             return
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._database_path)
+    def _persist_diagnostic(
+        self,
+        phase: str,
+        error_code: str,
+        document_id: str | None,
+        *,
+        database_timeout_seconds: float = 5,
+    ) -> None:
+        connection = self._connect(timeout_seconds=database_timeout_seconds)
+        try:
+            _insert_diagnostic(connection, phase, error_code, document_id)
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _connect(self, *, timeout_seconds: float = 5) -> sqlite3.Connection:
+        connection = sqlite3.connect(self._database_path, timeout=timeout_seconds)
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
@@ -402,20 +441,7 @@ def local_graph_evidence_ids(
 
 def record_query_diagnostic(kb_dir: Path, error_code: str) -> None:
     """Best-effort diagnostic write that cannot make a user wait for a graph failure."""
-    database_path = desktop_state_database_path(kb_dir.expanduser().resolve())
-    try:
-        connection = sqlite3.connect(database_path, timeout=0.05)
-        try:
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA busy_timeout = 50")
-            _insert_diagnostic(connection, "query", error_code, None)
-            connection.commit()
-        finally:
-            connection.close()
-    except (OSError, sqlite3.Error):
-        # A concurrent import may briefly own SQLite.  The answer still uses the
-        # protected baseline; future graph failures will record once writable.
-        return
+    DesktopKnowledgeGraphService(kb_dir).record_query_diagnostic(error_code)
 
 
 def _model_input(evidence: tuple[_EvidenceInput, ...]) -> str:

@@ -11,17 +11,16 @@ import sys
 from pathlib import Path
 
 from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_page_tree_store import published_page_tree_input_in
 from openkb.desktop_pageindex_adapter import (
-    PAGEINDEX_CACHE_SCHEMA,
     PAGEINDEX_PROVIDER_KIND,
     PAGEINDEX_PROVIDER_VERSION,
     PageIndexProviderError,
     ProviderInvoker,
-    build_official_pageindex_generation,
 )
 from openkb.desktop_pageindex_provider import (
+    PAGEINDEX_CACHE_SCHEMA,
     PageIndexEvaluationProvider,
+    detach_official_pageindex_provider_current_for_acceptance,
     materialize_official_pageindex_provider,
 )
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
@@ -39,7 +38,7 @@ from openkb.desktop_workspace import (
     desktop_state_database_path,
     desktop_state_dir,
 )
-from openkb.locks import atomic_write_text, kb_ingest_lock
+from openkb.locks import atomic_write_text
 
 _ACCEPTANCE_SCHEMA = 1
 _CACHE_TAMPER_TITLE = "OpenKB cache corruption acceptance sentinel"
@@ -120,7 +119,6 @@ def run_pageindex_package_acceptance(
         "pageindex_provider_unavailable",
     )
 
-    blocks, evidence, images = _published_input(kb_dir, document_id)
     cache_dir = (
         desktop_state_dir(kb_dir)
         / "provider-cache"
@@ -130,18 +128,19 @@ def run_pageindex_package_acceptance(
     if len(cache_files) != 1:
         raise AssertionError("The packaged adapter did not create one provider cache entry.")
     _tamper_cache(cache_files[0])
-    repaired = build_official_pageindex_generation(
-        document_id,
-        blocks,
-        evidence,
-        images,
-        cache_dir=cache_dir,
+    detach_official_pageindex_provider_current_for_acceptance(kb_dir, document_id)
+    repaired = materialize_official_pageindex_provider(
+        kb_dir,
         worker_executable=worker,
         invoke=valid_invoke,
     )
-    if any(node.title == _CACHE_TAMPER_TITLE for node in repaired.nodes):
-        raise AssertionError("The packaged adapter trusted a corrupt provider cache.")
-    _assert_kb_authority(kb_dir, document_id, generation_id)
+    repaired_generation_id = _require_provider_generation(repaired, kb_dir, document_id)
+    with repaired.lease(kb_dir, document_id) as repaired_tree:
+        if repaired_tree is None or any(
+            node.title == _CACHE_TAMPER_TITLE for node in repaired_tree.nodes
+        ):
+            raise AssertionError("The packaged provider trusted a corrupt cache.")
+    _assert_kb_authority(kb_dir, document_id, repaired_generation_id)
 
     return {
         "schema_version": _ACCEPTANCE_SCHEMA,
@@ -406,13 +405,6 @@ def _assert_kb_authority(kb_dir: Path, document_id: str, generation_id: str) -> 
         raise AssertionError("A PageIndex failure changed authoritative KB state.")
     if not DesktopEvidenceRetriever(kb_dir).retrieve("Portable baseline evidence").evidence:
         raise AssertionError("A PageIndex failure removed deterministic baseline evidence.")
-
-
-def _published_input(kb_dir: Path, document_id: str):
-    state_dir = desktop_state_dir(kb_dir)
-    with kb_ingest_lock(state_dir):
-        with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
-            return published_page_tree_input_in(connection, document_id)
 
 
 def _invalid_tree(input_path: Path, output_path: Path, _timeout: float) -> None:

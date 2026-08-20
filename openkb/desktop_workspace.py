@@ -401,6 +401,11 @@ class DesktopKnowledgeBaseRuntime:
         with self._lock:
             return self._active
 
+    def restore_active(self, previous: DesktopKnowledgeBase | None) -> None:
+        """Restore a binding captured before a failed activation transaction."""
+        with self._lock:
+            self._active = previous
+
     def _activate(self, target: DesktopKnowledgeBase) -> DesktopKnowledgeBaseActivation:
         with self._lock:
             previous = self._active

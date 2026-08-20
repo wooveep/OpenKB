@@ -7,11 +7,13 @@ import json
 import os
 import sqlite3
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import openkb.desktop_pageindex_provider as pageindex_provider
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_import_artifacts import DocumentIRBlock, build_evidence
 from openkb.desktop_page_tree import DETERMINISTIC_PROVIDER_KIND
@@ -27,11 +29,16 @@ from openkb.desktop_pageindex_adapter import (
     _subprocess_invoker,
     build_official_pageindex_generation,
 )
-from openkb.desktop_pageindex_provider import materialize_official_pageindex_provider
+from openkb.desktop_pageindex_provider import (
+    PAGEINDEX_CACHE_SCHEMA,
+    PageIndexEvaluationProvider,
+    materialize_official_pageindex_provider,
+)
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_retrieval_evaluation import DesktopRetrievalEvaluator
 from openkb.desktop_retrieval_evaluation_types import DesktopRetrievalEvaluationSuite
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_dir
+from openkb.locks import kb_ingest_lock, kb_ingest_lock_held
 
 
 def _blocks() -> tuple[DocumentIRBlock, ...]:
@@ -84,13 +91,6 @@ def _package_acceptance_result(input_path: Path, output_path: Path, _timeout: fl
     )
 
 
-def _refresh_cache_digest(payload) -> None:
-    checkpoint_text = json.dumps(
-        payload["checkpoint"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
-    payload["checkpoint_sha256"] = hashlib.sha256(checkpoint_text.encode("utf-8")).hexdigest()
-
-
 def test_subprocess_invoker_preserves_virtual_environment_launcher(tmp_path, monkeypatch) -> None:
     input_path = tmp_path / "document.md"
     output_path = tmp_path / "tree.json"
@@ -138,10 +138,9 @@ def test_subprocess_invoker_rejects_two_runtime_kinds() -> None:
         _subprocess_invoker(Path("python"), Path("OpenKBPageIndex.exe"))
 
 
-def test_adapter_normalizes_pageindex_nodes_to_existing_evidence_and_safe_cache(tmp_path) -> None:
+def test_adapter_normalizes_pageindex_nodes_without_owning_kb_cache(tmp_path) -> None:
     blocks = _blocks()
     evidence = build_evidence(blocks)
-    cache_dir = tmp_path / "cache"
     calls = 0
 
     def invoke(input_path: Path, output_path: Path, timeout: float) -> None:
@@ -150,7 +149,7 @@ def test_adapter_normalizes_pageindex_nodes_to_existing_evidence_and_safe_cache(
         _pageindex_result(input_path, output_path, timeout)
 
     generation = build_official_pageindex_generation(
-        "document-1", blocks, evidence, (), cache_dir=cache_dir, invoke=invoke
+        "document-1", blocks, evidence, (), invoke=invoke
     )
     assert generation.provider_kind == PAGEINDEX_PROVIDER_KIND
     assert generation.provider_version == PAGEINDEX_PROVIDER_VERSION
@@ -159,46 +158,7 @@ def test_adapter_normalizes_pageindex_nodes_to_existing_evidence_and_safe_cache(
         evidence_id for evidence_id, _block in evidence
     }
     assert calls == 1
-
-    cached = build_official_pageindex_generation(
-        "document-1",
-        blocks,
-        evidence,
-        (),
-        cache_dir=cache_dir,
-        invoke=lambda *_args: (_ for _ in ()).throw(AssertionError("cache miss")),
-    )
-    assert cached == generation
-    cache_text = next(cache_dir.glob("*.json")).read_text(encoding="utf-8")
-    assert "Alpha fact." not in cache_text and "Beta fact." not in cache_text
-
-    cache_file = next(cache_dir.glob("*.json"))
-    tampered = json.loads(cache_file.read_text(encoding="utf-8"))
-    tampered["checkpoint"]["generation"]["nodes"][1]["title"] = "Tampered title"
-    _refresh_cache_digest(tampered)
-    cache_file.write_text(json.dumps(tampered), encoding="utf-8")
-    rebuilt = build_official_pageindex_generation(
-        "document-1", blocks, evidence, (), cache_dir=cache_dir, invoke=invoke
-    )
-    assert rebuilt.generation_id == generation.generation_id
-    assert calls == 2
-
-    tampered = json.loads(cache_file.read_text(encoding="utf-8"))
-    for node in tampered["checkpoint"]["generation"]["nodes"]:
-        node["evidence_ids"] = []
-        node["evidence_block_ordinals"] = []
-    _refresh_cache_digest(tampered)
-    cache_file.write_text(json.dumps(tampered), encoding="utf-8")
-    build_official_pageindex_generation(
-        "document-1", blocks, evidence, (), cache_dir=cache_dir, invoke=invoke
-    )
-    assert calls == 3
-
-    cache_file.write_text("not-json", encoding="utf-8")
-    build_official_pageindex_generation(
-        "document-1", blocks, evidence, (), cache_dir=cache_dir, invoke=invoke
-    )
-    assert calls == 4
+    assert tuple(tmp_path.rglob("*.json")) == ()
 
 
 @pytest.mark.parametrize(
@@ -226,7 +186,6 @@ def test_adapter_contains_timeout_and_invalid_tree(tmp_path, invoke, error_code)
             blocks,
             build_evidence(blocks),
             (),
-            cache_dir=tmp_path / "cache",
             invoke=invoke,
         )
     assert captured.value.code == error_code
@@ -261,7 +220,6 @@ def test_adapter_bounds_provider_tree_depth_without_recursion(tmp_path) -> None:
             blocks,
             build_evidence(blocks),
             (),
-            cache_dir=tmp_path / "cache",
             invoke=deeply_nested,
         )
     assert captured.value.code == "pageindex_provider_invalid_tree"
@@ -275,7 +233,6 @@ def test_adapter_rejects_nonfinite_timeout_before_invocation(tmp_path) -> None:
             blocks,
             build_evidence(blocks),
             (),
-            cache_dir=tmp_path / "cache",
             timeout_seconds=float("inf"),
             invoke=lambda *_args: (_ for _ in ()).throw(AssertionError("provider invoked")),
         )
@@ -352,6 +309,168 @@ def test_evaluation_provider_keeps_default_current_and_rebuilds_from_sqlite(tmp_
     assert calls == 2
 
 
+def test_provider_discards_a_result_when_its_document_version_changes(tmp_path) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "guide.md"
+    source.write_text("# Guide\n\nAlpha fact.\n", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    service = DesktopTextImportService(kb_dir)
+    first = service.import_text(source).document
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    completed: list[PageIndexEvaluationProvider] = []
+
+    def blocked_provider(input_path: Path, output_path: Path, timeout: float) -> None:
+        assert not kb_ingest_lock_held(desktop_state_dir(kb_dir))
+        worker_started.set()
+        assert release_worker.wait(timeout=2)
+        _pageindex_result(input_path, output_path, timeout)
+
+    worker = threading.Thread(
+        target=lambda: completed.append(
+            materialize_official_pageindex_provider(kb_dir, invoke=blocked_provider)
+        )
+    )
+    worker.start()
+    assert worker_started.wait(timeout=2)
+
+    source.write_text("# Guide\n\nSecond version evidence.\n", encoding="utf-8")
+    second = service.import_text(source).document
+    with kb_ingest_lock(desktop_state_dir(kb_dir)):
+        with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+            connection.execute(
+                "UPDATE source_documents SET availability = 'failed' WHERE document_id = ?",
+                (first.document_id,),
+            )
+
+    release_worker.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    (provider,) = completed
+    assert provider.degradations == ("pageindex_provider_result_stale",)
+    assert provider.generations[0].base_generation_id is None
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT generation_id FROM document_page_tree_provider_current "
+                "WHERE document_id = ?",
+                (first.document_id,),
+            ).fetchone()
+            is None
+        )
+        default_kind = connection.execute(
+            """
+            SELECT generations.provider_kind
+            FROM document_page_tree_current AS current
+            JOIN document_page_tree_generations AS generations
+                ON generations.generation_id = current.generation_id
+            WHERE current.document_id = ?
+            """,
+            (first.document_id,),
+        ).fetchone()
+    assert default_kind == (DETERMINISTIC_PROVIDER_KIND,)
+    assert (
+        DesktopEvidenceRetriever(kb_dir).retrieve("Second version evidence").evidence[0].document_id
+        == second.document_id
+    )
+
+
+def test_concurrent_materializations_leave_valid_cache_and_current_generation(tmp_path) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "guide.md"
+    source.write_text("# Guide\n\nAlpha fact.\n\n## Detail\n\nBeta fact.\n", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    worker_barrier = threading.Barrier(2)
+    providers: list[PageIndexEvaluationProvider] = []
+
+    def concurrent_provider(input_path: Path, output_path: Path, timeout: float) -> None:
+        assert not kb_ingest_lock_held(desktop_state_dir(kb_dir))
+        worker_barrier.wait(timeout=2)
+        _pageindex_result(input_path, output_path, timeout)
+
+    workers = [
+        threading.Thread(
+            target=lambda: providers.append(
+                materialize_official_pageindex_provider(
+                    kb_dir,
+                    force_rebuild=True,
+                    invoke=concurrent_provider,
+                )
+            )
+        )
+        for _index in range(2)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+
+    assert len(providers) == 2
+    cache_files = tuple((kb_dir / ".openkb" / "provider-cache").rglob("*.json"))
+    assert len(cache_files) == 1
+    cache = json.loads(cache_files[0].read_text(encoding="utf-8"))
+    assert cache["schema_version"] == PAGEINDEX_CACHE_SCHEMA
+    stored_digest = cache["checkpoint_sha256"]
+    assert (
+        stored_digest
+        == hashlib.sha256(
+            json.dumps(
+                cache["checkpoint"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        (current_generation_id,) = connection.execute(
+            "SELECT generation_id FROM document_page_tree_provider_current WHERE document_id = ?",
+            (document.document_id,),
+        ).fetchone()
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    reused = materialize_official_pageindex_provider(
+        kb_dir,
+        invoke=lambda *_args: (_ for _ in ()).throw(AssertionError("provider invoked")),
+    )
+    assert reused.generations[0].base_generation_id == current_generation_id
+
+
+def test_cache_survives_a_database_publication_failure(tmp_path, monkeypatch) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "guide.md"
+    source.write_text("# Guide\n\nAlpha fact.\n", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    original_store = pageindex_provider.store_page_tree_generation_in
+    attempts = 0
+
+    def fail_first_publication(connection, document_id, generation) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("injected publication failure")
+        original_store(connection, document_id, generation)
+
+    monkeypatch.setattr(pageindex_provider, "store_page_tree_generation_in", fail_first_publication)
+    failed = materialize_official_pageindex_provider(kb_dir, invoke=_pageindex_result)
+    assert failed.generations[0].base_generation_id is None
+    assert tuple((kb_dir / ".openkb" / "provider-cache").rglob("*.json"))
+
+    recovered = materialize_official_pageindex_provider(
+        kb_dir,
+        invoke=lambda *_args: (_ for _ in ()).throw(AssertionError("provider invoked")),
+    )
+    assert recovered.generations[0].document_id == document.document_id
+    assert recovered.generations[0].base_generation_id is not None
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def test_provider_uses_published_evidence_ids_for_d1_and_d2_versions(tmp_path) -> None:
     kb_dir = tmp_path / "knowledge"
     first_source = tmp_path / "first.md"
@@ -418,7 +537,9 @@ def test_provider_failure_is_reported_without_changing_available_baseline(tmp_pa
     assert not snapshot.identity_bound
 
 
-def test_packaged_acceptance_contains_provider_failures_without_changing_kb(tmp_path) -> None:
+def test_packaged_acceptance_contains_provider_failures_without_changing_kb(
+    tmp_path, caplog
+) -> None:
     worker = tmp_path / "OpenKBPageIndex.exe"
     worker.write_bytes(b"test placeholder")
 
@@ -445,6 +566,7 @@ def test_packaged_acceptance_contains_provider_failures_without_changing_kb(tmp_
         "baseline_available": True,
         "sqlite_integrity": True,
     }
+    assert "Ignoring a corrupt official PageIndex provider cache." in caplog.messages
 
 
 def test_package_evaluation_validation_binds_suite_provider_and_report(tmp_path) -> None:

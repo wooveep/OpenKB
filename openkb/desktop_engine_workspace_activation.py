@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Event
 from typing import TYPE_CHECKING
 
+from openkb import desktop_engine_imports as import_engine
 from openkb import desktop_engine_knowledge_reanalysis as reanalysis_engine
 from openkb import desktop_engine_page_tree_enrichment as enrichment_engine
 from openkb import desktop_knowledge_reanalysis as reanalysis_runtime
@@ -36,30 +37,47 @@ def dispatch_knowledge_base_activation(
         raise DesktopRequestError(
             "invalid_params", "workbench.create_knowledge_base name must be a string."
         )
-    server._begin_workspace_mutation(request, cancel_event)
-    _interrupt_previous_reanalysis(server)
-    if request.method == "workbench.create_knowledge_base":
-        name = name_value if isinstance(name_value, str) else None
-        activation = server._workspace.create(kb_dir, name=name)
-        materialize_okf_projection(Path(activation.knowledge_base.kb_dir))
-        return activation.as_dict()
+    with server._workspace_transition.activation(kb_dir):
+        with server._workspace_requests_lock:
+            return _activate_knowledge_base(server, request, cancel_event, kb_dir, name_value)
 
-    activation = server._workspace.open(kb_dir)
-    active_kb_dir = Path(activation.knowledge_base.kb_dir)
-    recover_stale_conversation_generations(active_kb_dir)
-    reanalysis_runtime.recover_interrupted_knowledge_reanalysis(active_kb_dir)
-    DesktopRawAssetService(active_kb_dir).verify_available_documents()
-    materialize_okf_projection(active_kb_dir)
-    server._start_recoverable_imports(active_kb_dir)
-    start_page_tree_rebuilds(active_kb_dir)
-    start_catalog_rebuilds(active_kb_dir, recover=True)
-    enrichment_engine.start_page_tree_enrichments(
-        server,
-        active_kb_dir,
-        server._model_gateway_factory(active_kb_dir, None),
-        recover=True,
-    )
-    return activation.as_dict()
+
+def _activate_knowledge_base(
+    server: DesktopEngineServer,
+    request: DesktopRequest,
+    cancel_event: Event | None,
+    kb_dir: Path,
+    name_value: object,
+) -> dict[str, object]:
+    previous = server._workspace.active()
+    try:
+        server._begin_workspace_mutation(request, cancel_event)
+        _interrupt_previous_reanalysis(server)
+        if request.method == "workbench.create_knowledge_base":
+            name = name_value if isinstance(name_value, str) else None
+            activation = server._workspace.create(kb_dir, name=name)
+            materialize_okf_projection(Path(activation.knowledge_base.kb_dir))
+            return activation.as_dict()
+
+        activation = server._workspace.open(kb_dir)
+        active_kb_dir = Path(activation.knowledge_base.kb_dir)
+        recover_stale_conversation_generations(active_kb_dir)
+        reanalysis_runtime.recover_interrupted_knowledge_reanalysis(active_kb_dir)
+        DesktopRawAssetService(active_kb_dir).verify_available_documents()
+        materialize_okf_projection(active_kb_dir)
+        start_page_tree_rebuilds(active_kb_dir)
+        start_catalog_rebuilds(active_kb_dir, recover=True)
+        enrichment_engine.start_page_tree_enrichments(
+            server,
+            active_kb_dir,
+            server._model_gateway_factory(active_kb_dir, None),
+            recover=True,
+        )
+        import_engine.start_recoverable_imports(server, active_kb_dir)
+        return activation.as_dict()
+    except BaseException:
+        server._workspace.restore_active(previous)
+        raise
 
 
 def _interrupt_previous_reanalysis(server: DesktopEngineServer) -> None:

@@ -1,10 +1,64 @@
 """Focused behavior checks for current-KB command-palette search."""
 
+import io
+
+import pytest
+
 from openkb.desktop_conversations import DesktopConversationService
+from openkb.desktop_engine import (
+    DesktopEngineServer,
+    DesktopRequest,
+    DesktopRequestError,
+)
 from openkb.desktop_global_search import search_desktop_knowledge_base
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+
+
+@pytest.mark.parametrize(
+    "params",
+    (
+        {},
+        {"query": None},
+        {"query": False},
+        {"query": 7},
+        {"query": {"text": "provider"}},
+        {"query": ["provider"]},
+    ),
+)
+def test_engine_bridge_rejects_malformed_global_search_before_search(tmp_path, monkeypatch, params):
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(tmp_path / "desktop-kb")
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    monkeypatch.setattr(
+        "openkb.desktop_engine_search.search_desktop_knowledge_base",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("search opened")),
+    )
+
+    with pytest.raises(DesktopRequestError) as captured:
+        server._dispatch(
+            DesktopRequest("global-search", "workbench.global_search", params),
+            cancel_event=None,
+        )
+
+    assert captured.value.code == "invalid_params"
+
+
+@pytest.mark.parametrize("query", ("", " \t\n"))
+def test_engine_bridge_preserves_valid_empty_global_search(tmp_path, query):
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(tmp_path / "desktop-kb")
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    result = server._dispatch(
+        DesktopRequest("global-search", "workbench.global_search", {"query": query}),
+        cancel_event=None,
+    )
+
+    assert result == {"query": "", "results": []}
 
 
 def test_global_search_returns_only_user_facing_workspace_content(tmp_path):

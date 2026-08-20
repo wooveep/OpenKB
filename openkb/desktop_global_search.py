@@ -10,13 +10,12 @@ from openkb.desktop_workspace import desktop_state_database_path
 _PER_KIND_LIMIT = 8
 
 
-def search_desktop_knowledge_base(kb_dir: Path, query: object) -> dict[str, object]:
+def search_desktop_knowledge_base(kb_dir: Path, query: str) -> dict[str, object]:
     """Search user-facing documents, knowledge pages, and conversation content."""
-    text = query.strip() if isinstance(query, str) else ""
-    if not text:
+    if not query:
         return {"query": "", "results": []}
     database_path = desktop_state_database_path(kb_dir.expanduser().resolve())
-    pattern = f"%{_escape_like(text)}%"
+    pattern = f"%{_escape_like(query)}%"
     connection = sqlite3.connect(database_path)
     connection.row_factory = sqlite3.Row
     try:
@@ -28,12 +27,10 @@ def search_desktop_knowledge_base(kb_dir: Path, query: object) -> dict[str, obje
         ]
     finally:
         connection.close()
-    return {"query": text, "results": results}
+    return {"query": query, "results": results}
 
 
-def _document_results(
-    connection: sqlite3.Connection, pattern: str
-) -> list[dict[str, object]]:
+def _document_results(connection: sqlite3.Connection, pattern: str) -> list[dict[str, object]]:
     rows = connection.execute(
         """
         SELECT source_documents.document_id, source_documents.display_name,
@@ -126,9 +123,7 @@ def _knowledge_page_results(
     ]
 
 
-def _conversation_results(
-    connection: sqlite3.Connection, pattern: str
-) -> list[dict[str, object]]:
+def _conversation_results(connection: sqlite3.Connection, pattern: str) -> list[dict[str, object]]:
     rows = connection.execute(
         """
         SELECT conversations.conversation_id, conversations.title,

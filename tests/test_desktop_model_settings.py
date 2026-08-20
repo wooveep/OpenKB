@@ -7,13 +7,18 @@ import json
 import sqlite3
 import zipfile
 
+import pytest
+
 from openkb import desktop_model_transport
+from openkb.config import DEFAULT_API_BASE_URL, DEFAULT_CONFIG, save_config
 from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
 from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelRequest
 from openkb.desktop_model_settings import (
+    DEFAULT_MAX_CONCURRENT_MODEL_CALLS,
+    DesktopModelSettingsError,
     read_desktop_model_settings,
     save_desktop_model_settings,
 )
@@ -23,6 +28,88 @@ from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 def _create_desktop_kb(kb_dir):
     DesktopKnowledgeBaseRuntime().create(kb_dir, name="Desktop KB")
     return kb_dir
+
+
+@pytest.mark.parametrize("config", ({}, {"desktop": {}}, {"desktop": {"api_key": ""}}))
+def test_absent_model_settings_keep_compatibility_defaults(tmp_path, config):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    save_config(kb_dir / ".openkb" / "config.yaml", config)
+
+    settings = read_desktop_model_settings(kb_dir)
+
+    assert settings.provider == "custom"
+    assert settings.model == DEFAULT_CONFIG["model"]
+    assert settings.api_base_url == DEFAULT_API_BASE_URL
+    assert settings.api_key == ""
+    assert settings.max_concurrent_model_calls == DEFAULT_MAX_CONCURRENT_MODEL_CALLS
+
+
+@pytest.mark.parametrize(
+    "config",
+    (
+        {"desktop": None},
+        {"desktop": []},
+        {"model": None},
+        {"model": "  "},
+        {"desktop": {"provider": None}},
+        {"desktop": {"provider": "unsupported"}},
+        {"desktop": {"api_base_url": None}},
+        {"desktop": {"api_base_url": ""}},
+        {"desktop": {"api_base_url": "http://["}},
+        {"desktop": {"api_key": 7}},
+        {"desktop": {"max_concurrent_model_calls": True}},
+        {"desktop": {"max_concurrent_model_calls": 0}},
+        {"desktop": {"max_concurrent_model_calls": 9}},
+        {"desktop": {"initial_timeout_seconds": False}},
+        {"desktop": {"initial_timeout_seconds": 0}},
+        {"desktop": {"initial_timeout_seconds": -1}},
+        {"desktop": {"initial_timeout_seconds": 61}},
+        {"desktop": {"initial_timeout_seconds": 10**400}},
+        {"desktop": {"initial_timeout_seconds": float("nan")}},
+        {"desktop": {"initial_timeout_seconds": float("inf")}},
+    ),
+)
+def test_present_malformed_model_settings_are_never_defaulted(tmp_path, config):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    save_config(kb_dir / ".openkb" / "config.yaml", config)
+
+    with pytest.raises(DesktopModelSettingsError) as captured:
+        read_desktop_model_settings(kb_dir)
+
+    assert captured.value.code == "desktop_model_settings_invalid"
+
+
+def test_invalid_model_settings_are_explicit_but_optional_gateways_stay_disabled(tmp_path):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    save_config(
+        kb_dir / ".openkb" / "config.yaml",
+        {"model": False, "desktop": {"api_key": "plain-key"}},
+    )
+    workspace = DesktopKnowledgeBaseRuntime()
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    opened = server._dispatch(
+        DesktopRequest(
+            request_id="open-invalid-settings",
+            method="workbench.open_knowledge_base",
+            params={"kb_dir": str(kb_dir)},
+        ),
+        cancel_event=None,
+    )
+    assert opened["knowledge_base"]["kb_dir"] == str(kb_dir)
+    assert desktop_model_transport.desktop_model_gateway_for(kb_dir) is None
+
+    with pytest.raises(DesktopModelSettingsError) as captured:
+        server._dispatch(
+            DesktopRequest(
+                request_id="read-invalid-settings",
+                method="workbench.model_settings",
+                params={},
+            ),
+            cancel_event=None,
+        )
+    assert captured.value.code == "desktop_model_settings_invalid"
 
 
 def test_model_defaults_store_a_direct_connection_and_drive_the_gateway(tmp_path, monkeypatch):
