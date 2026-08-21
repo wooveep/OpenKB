@@ -12,8 +12,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { useLanguage } from "@/lib/language"
-import { useTheme } from "@/lib/theme"
+import { useLanguage } from "@/lib/language-context"
+import { useTheme } from "@/lib/theme-context"
 import { useZoom } from "@/lib/zoom"
 import { useDesktopBridge } from "./bridge-context"
 import { nextDesktopRequestId } from "./request-id"

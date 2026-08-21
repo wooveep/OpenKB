@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm"
 import remarkMath from "remark-math"
 import { Check, Copy } from "lucide-react"
 import "katex/dist/katex.min.css"
-import { useTheme } from "@/lib/theme"
+import { useTheme } from "@/lib/theme-context"
 
 type MarkdownNode = {
   type: string

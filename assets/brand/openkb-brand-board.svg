@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" fill="none">
+  <title>OpenKB visual identity board</title>
+  <defs>
+    <linearGradient id="page" x1="75" y1="0" x2="1492" y2="1000" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F9FBFF"/>
+      <stop offset="1" stop-color="#EEF3FB"/>
+    </linearGradient>
+    <linearGradient id="dark-card" x1="858" y1="446" x2="1495" y2="721" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#132D68"/>
+      <stop offset="1" stop-color="#061027"/>
+    </linearGradient>
+    <filter id="card-shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="26" flood-color="#14244A" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="1000" fill="url(#page)"/>
+  <circle cx="1450" cy="40" r="330" fill="#6E8CDA" fill-opacity="0.06"/>
+  <circle cx="1540" cy="-30" r="190" fill="#5FC4CA" fill-opacity="0.07"/>
+
+  <text x="80" y="92" fill="#081226" font-family="Noto Sans, Inter, sans-serif" font-size="48" font-weight="750" letter-spacing="-1.5">OpenKB Visual Identity</text>
+  <text x="82" y="132" fill="#5B6780" font-family="Noto Sans, Inter, sans-serif" font-size="18">The open knowledge portal — local, connected, grounded.</text>
+  <text x="1518" y="94" text-anchor="end" fill="#6E8CDA" font-family="Noto Sans, Inter, sans-serif" font-size="15" font-weight="700" letter-spacing="2">OPEN • LOCAL • GROUNDED</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="80" y="184" width="630" height="630" rx="44" fill="white"/>
+    <image href="openkb-app-icon.svg" x="127" y="231" width="536" height="536"/>
+  </g>
+  <text x="80" y="858" fill="#081226" font-family="Noto Sans, Inter, sans-serif" font-size="22" font-weight="700">Application icon</text>
+  <text x="80" y="889" fill="#6B7488" font-family="Noto Sans, Inter, sans-serif" font-size="16">Open aperture + paired pages + evidence node</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="770" y="184" width="750" height="220" rx="32" fill="white"/>
+    <image href="openkb-logo-horizontal.svg" x="837" y="246" width="616" height="191" transform="translate(0 -15)"/>
+  </g>
+  <text x="794" y="221" fill="#7A8499" font-family="Noto Sans, Inter, sans-serif" font-size="13" font-weight="700" letter-spacing="1.5">PRIMARY LOCKUP</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="770" y="444" width="360" height="258" rx="32" fill="white"/>
+    <image href="openkb-mark-mono-dark.svg" x="855" y="482" width="190" height="190"/>
+    <text x="950" y="682" text-anchor="middle" fill="#7A8499" font-family="Noto Sans, Inter, sans-serif" font-size="13" font-weight="700" letter-spacing="1.2">MONO / LIGHT SURFACE</text>
+  </g>
+  <g filter="url(#card-shadow)">
+    <rect x="1160" y="444" width="360" height="258" rx="32" fill="url(#dark-card)"/>
+    <image href="openkb-mark-mono-light.svg" x="1245" y="482" width="190" height="190"/>
+    <text x="1340" y="682" text-anchor="middle" fill="#B7C6E6" font-family="Noto Sans, Inter, sans-serif" font-size="13" font-weight="700" letter-spacing="1.2">MONO / DARK SURFACE</text>
+  </g>
+
+  <text x="770" y="774" fill="#081226" font-family="Noto Sans, Inter, sans-serif" font-size="22" font-weight="700">Core palette</text>
+  <g transform="translate(770 804)">
+    <rect width="138" height="104" rx="20" fill="#081226"/>
+    <text x="16" y="72" fill="#F7FAFF" font-family="Noto Sans, Inter, sans-serif" font-size="14" font-weight="700">Midnight</text>
+    <text x="16" y="91" fill="#A9B8D6" font-family="JetBrains Mono, monospace" font-size="11">#081226</text>
+  </g>
+  <g transform="translate(923 804)">
+    <rect width="138" height="104" rx="20" fill="#6E8CDA"/>
+    <text x="16" y="72" fill="white" font-family="Noto Sans, Inter, sans-serif" font-size="14" font-weight="700">Periwinkle</text>
+    <text x="16" y="91" fill="#EEF2FF" font-family="JetBrains Mono, monospace" font-size="11">#6E8CDA</text>
+  </g>
+  <g transform="translate(1076 804)">
+    <rect width="138" height="104" rx="20" fill="#5FC4CA"/>
+    <text x="16" y="72" fill="#14383B" font-family="Noto Sans, Inter, sans-serif" font-size="14" font-weight="700">Aqua</text>
+    <text x="16" y="91" fill="#254C50" font-family="JetBrains Mono, monospace" font-size="11">#5FC4CA</text>
+  </g>
+  <g transform="translate(1229 804)">
+    <rect width="138" height="104" rx="20" fill="#F0B654"/>
+    <text x="16" y="72" fill="#3D2700" font-family="Noto Sans, Inter, sans-serif" font-size="14" font-weight="700">Evidence</text>
+    <text x="16" y="91" fill="#563A05" font-family="JetBrains Mono, monospace" font-size="11">#F0B654</text>
+  </g>
+  <g transform="translate(1382 804)">
+    <rect width="138" height="104" rx="20" fill="#F2F6FA" stroke="#DDE4F0"/>
+    <text x="16" y="72" fill="#081226" font-family="Noto Sans, Inter, sans-serif" font-size="14" font-weight="700">Frost</text>
+    <text x="16" y="91" fill="#69758B" font-family="JetBrains Mono, monospace" font-size="11">#F2F6FA</text>
+  </g>
+</svg>
