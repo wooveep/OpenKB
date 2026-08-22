@@ -19,6 +19,7 @@ from openkb.desktop_model_settings import (
     save_desktop_model_settings,
     validate_desktop_model_settings,
 )
+from openkb.desktop_model_terminal import DesktopTerminalModelEvent
 from openkb.desktop_model_transport import desktop_model_gateway_for_settings
 from openkb.desktop_page_tree_enrichment import DesktopPageTreeEnrichmentService
 
@@ -74,14 +75,21 @@ def dispatch_model_settings_request(
                 initial_timeout_seconds=request.params.get("initial_timeout_seconds"),
             )
             started_at = time.monotonic()
+
+            def emit_lifecycle(event: DesktopTerminalModelEvent) -> None:
+                payload = event.as_dict()
+                payload["request_id"] = request.request_id
+                server._emit_event("model.call_lifecycle", payload)
+
             try:
-                result = desktop_model_gateway_for_settings(kb_dir, settings).analyze(
+                result = desktop_model_gateway_for_settings(kb_dir, settings).stream(
                     DesktopModelRequest(
                         operation="connection_test",
                         document_name="OpenKB connection test",
                         content="Reply with the single word OK.",
                     ),
-                    on_event=lambda _event: None,
+                    on_event=emit_lifecycle,
+                    on_delta=lambda _attempt, _delta: None,
                     is_cancelled=cancel_event.is_set if cancel_event is not None else None,
                 )
             except DesktopModelCallError as error:

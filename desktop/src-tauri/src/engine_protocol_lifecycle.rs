@@ -45,11 +45,11 @@ impl EngineSupervisor {
             Err(_) => return,
         };
         if self.transport.connected.load(Ordering::Acquire) {
-            let _ = self.request_started_with_timeout(
+            let _ = self.request_started_with_wait(
                 "engine.shutdown",
                 json!({}),
                 None,
-                SHUTDOWN_TIMEOUT,
+                Some(SHUTDOWN_TIMEOUT),
             );
         }
         mark_transport_failed(

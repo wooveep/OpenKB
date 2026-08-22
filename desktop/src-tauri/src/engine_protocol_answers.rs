@@ -38,11 +38,11 @@ impl EngineSupervisor {
         invalid_shape_message: &str,
     ) -> BridgeResult<GroundedAnswer> {
         self.ensure_started()?;
-        let value = self.request_started_with_timeout(
+        let value = self.request_started_with_wait(
             method,
             params,
             Some(request_id),
-            IMPORT_REQUEST_TIMEOUT,
+            Some(IMPORT_REQUEST_TIMEOUT),
         )?;
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(

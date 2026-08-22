@@ -1,5 +1,5 @@
-import { CheckCircle2, Download, Eye, EyeOff, FolderOpen, KeyRound, Loader2, Save, SlidersHorizontal } from "lucide-react"
-import { useEffect, useState } from "react"
+import { CheckCircle2, Download, Eye, EyeOff, FolderOpen, KeyRound, Loader2, Save, SlidersHorizontal, Square } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -17,7 +17,11 @@ import { useTheme } from "@/lib/theme"
 import { useZoom } from "@/lib/zoom"
 import { useDesktopBridge } from "./bridge-context"
 import { nextDesktopRequestId } from "./request-id"
-import type { DesktopModelSettings } from "./contracts"
+import {
+  DesktopBridgeError,
+  type DesktopModelCallLifecycleStatus,
+  type DesktopModelSettings,
+} from "./contracts"
 
 type ModelSettingsDraft = {
   provider: string
@@ -61,11 +65,13 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [testStatus, setTestStatus] = useState<DesktopModelCallLifecycleStatus | null>(null)
   const [testResult, setTestResult] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
   const [diagnosticReviewOpen, setDiagnosticReviewOpen] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const testRequestIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     let disposed = false
@@ -82,6 +88,26 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
         if (!disposed) setLoading(false)
       })
     return () => { disposed = true }
+  }, [bridge])
+
+  useEffect(() => {
+    let disposed = false
+    let unsubscribe: (() => void) | undefined
+    void bridge.subscribe((event) => {
+      if (
+        event.kind === "model.call_lifecycle"
+        && event.data.requestId === testRequestIdRef.current
+      ) {
+        setTestStatus(event.data.status)
+      }
+    }).then((remove) => {
+      if (disposed) remove()
+      else unsubscribe = remove
+    }).catch(() => undefined)
+    return () => {
+      disposed = true
+      unsubscribe?.()
+    }
   }, [bridge])
 
   const save = async () => {
@@ -133,6 +159,9 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
     setTesting(true)
     setError(null)
     setTestResult(null)
+    setTestStatus("queued")
+    const requestId = nextDesktopRequestId("model-connection-test")
+    testRequestIdRef.current = requestId
     try {
       const result = await bridge.testModelConnection(
         draft.provider,
@@ -141,7 +170,7 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
         draft.apiKey,
         maxConcurrentModelCalls,
         initialTimeoutSeconds,
-        nextDesktopRequestId("model-connection-test"),
+        requestId,
       )
       if (!result.ok) throw new Error(t("desktop.knowledgeBases.modelSettings.testRejected"))
       const message = t("desktop.knowledgeBases.modelSettings.testSucceeded", {
@@ -151,9 +180,28 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
       setTestResult(message)
       toast.success(message)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
+      if (reason instanceof DesktopBridgeError && reason.code === "request_cancelled") {
+        setTestStatus("cancelled")
+        toast.info(t("desktop.knowledgeBases.modelSettings.lifecycle.cancelled"))
+      } else {
+        setError(reason instanceof Error ? reason.message : String(reason))
+      }
     } finally {
+      if (testRequestIdRef.current === requestId) testRequestIdRef.current = null
       setTesting(false)
+    }
+  }
+
+  const stopConnectionTest = async () => {
+    const requestId = testRequestIdRef.current
+    if (!requestId) return
+    try {
+      const result = await bridge.cancel(requestId)
+      if (!result.cancelled) {
+        setError(t("desktop.knowledgeBases.modelSettings.stopRejected"))
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
     }
   }
 
@@ -222,6 +270,7 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
 
         {error ? <p className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">{error}</p> : null}
         {testResult ? <p className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-600/25 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-4" />{testResult}</p> : null}
+        {testing && testStatus ? <p className="mt-4 flex items-center gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-sm text-muted-foreground" role="status"><Loader2 className="size-4 animate-spin" />{t(`desktop.knowledgeBases.modelSettings.lifecycle.${testStatus}`)}</p> : null}
 
         <div className="mt-5 grid gap-4 md:grid-cols-2">
           <label className="block text-sm font-medium">
@@ -277,8 +326,9 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
           <span className="flex items-center gap-2 text-muted-foreground"><KeyRound className="size-4" />{settings.apiKeyConfigured ? t("desktop.knowledgeBases.modelSettings.apiKeyConfigured") : t("desktop.knowledgeBases.modelSettings.apiKeyRequired")}</span>
           <span className="text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.deadline", { seconds: settings.modelCallDeadlineSeconds })}</span>
         </div>
+        <p className="mt-3 text-xs leading-5 text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.testPolicy")}</p>
         <div className="mt-5 flex justify-end gap-2">
-          <Button variant="outline" disabled={saving || testing} onClick={() => void testConnection()}>{testing ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{testing ? t("desktop.knowledgeBases.modelSettings.testing") : t("desktop.knowledgeBases.modelSettings.testConnection")}</Button>
+          <Button variant="outline" disabled={saving} onClick={() => void (testing ? stopConnectionTest() : testConnection())}>{testing ? <Square className="size-4" /> : <CheckCircle2 className="size-4" />}{testing ? t("desktop.knowledgeBases.modelSettings.stopTesting") : t("desktop.knowledgeBases.modelSettings.testConnection")}</Button>
           <Button disabled={saving || testing} onClick={() => void save()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}{saving ? t("desktop.knowledgeBases.modelSettings.saving") : t("desktop.knowledgeBases.modelSettings.save")}</Button>
         </div>
       </section>

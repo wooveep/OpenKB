@@ -209,11 +209,11 @@ impl EngineSupervisor {
         request_id: String,
     ) -> BridgeResult<KnowledgeExportResult> {
         self.ensure_started()?;
-        let value = self.request_started_with_timeout(
+        let value = self.request_started_with_wait(
             "workbench.export_knowledge_bundle",
             json!({ "destination": destination, "mode": mode }),
             Some(request_id),
-            IMPORT_REQUEST_TIMEOUT,
+            Some(IMPORT_REQUEST_TIMEOUT),
         )?;
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(

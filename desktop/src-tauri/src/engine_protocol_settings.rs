@@ -2,7 +2,7 @@
 
 use super::{
     validated_response, BridgeError, BridgeResult, DiagnosticBundleResult, EngineSupervisor,
-    ModelSettings, IMPORT_REQUEST_TIMEOUT,
+    ModelSettings,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -57,7 +57,7 @@ impl EngineSupervisor {
         request_id: String,
     ) -> BridgeResult<Value> {
         self.ensure_started()?;
-        let value = self.request_started_with_timeout(
+        let value = self.request_started_with_wait(
             "workbench.test_model_connection",
             json!({
                 "provider": provider,
@@ -68,7 +68,7 @@ impl EngineSupervisor {
                 "initial_timeout_seconds": initial_timeout_seconds,
             }),
             Some(request_id),
-            IMPORT_REQUEST_TIMEOUT,
+            None,
         )?;
         validated_response::<ModelConnectionTest>(value, "model connection test")
     }

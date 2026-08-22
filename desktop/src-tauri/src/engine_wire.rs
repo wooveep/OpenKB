@@ -27,6 +27,9 @@ mod missing_sources;
 pub use missing_sources::{
     MissingSourceBindingResult, MissingSourceCandidatesResult, MissingSourceDismissalResult,
 };
+#[path = "engine_wire_model_lifecycle.rs"]
+mod model_lifecycle;
+pub use model_lifecycle::ModelCallLifecycleEventData;
 #[path = "engine_wire_page_tree.rs"]
 mod page_tree;
 pub use page_tree::{PageTreeEnrichmentTask, PageTreeRebuildTask};
@@ -201,6 +204,8 @@ pub enum EngineEvent {
     AnswerDelta(AnswerDeltaEventData),
     #[serde(rename = "knowledge_reanalysis.updated")]
     KnowledgeReanalysisUpdated(KnowledgeReanalysisUpdatedEventData),
+    #[serde(rename = "model.call_lifecycle")]
+    ModelCallLifecycle(ModelCallLifecycleEventData),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -704,6 +709,37 @@ mod tests {
             event.event,
             EngineEvent::KnowledgeReanalysisUpdated(data)
                 if data.run_id == "run-1" && data.job_id == "job-1"
+        ));
+    }
+
+    #[test]
+    fn model_lifecycle_event_accepts_python_snake_case_fields() {
+        let event: BridgeEvent = serde_json::from_value(json!({
+            "sequence": 8,
+            "kind": "model.call_lifecycle",
+            "data": {
+                "request_id": "connection-check-1",
+                "call_id": "call-1",
+                "attempt": 1,
+                "status": "awaiting_model_result",
+                "elapsed_seconds": 180.0,
+                "failure_code": null,
+                "reason": null,
+                "retry_after_seconds": null
+            }
+        }))
+        .expect("Model lifecycle event should deserialize");
+
+        assert!(matches!(
+            event.event,
+            EngineEvent::ModelCallLifecycle(data)
+                if data.request_id == "connection-check-1"
+                    && data.call_id == "call-1"
+                    && matches!(
+                        data.status,
+                        super::model_lifecycle::ModelCallLifecycleStatus::AwaitingModelResult
+                    )
+                    && data.elapsed_seconds == 180.0
         ));
     }
 

@@ -6,6 +6,8 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -25,6 +27,7 @@ from openkb.desktop_model_gateway import (
     DesktopModelRequest,
     DesktopModelTransportError,
 )
+from openkb.desktop_model_http_lifecycle import terminal_completion_client
 from openkb.desktop_model_settings import (
     DEFAULT_MAX_CONCURRENT_MODEL_CALLS,
     DesktopModelSettings,
@@ -32,6 +35,7 @@ from openkb.desktop_model_settings import (
     litellm_model_identifier,
     read_desktop_model_settings,
 )
+from openkb.desktop_model_terminal import DesktopTerminalModelGateway
 from openkb.desktop_page_tree_enrichment import PAGE_TREE_ENRICHMENT_SYSTEM_PROMPT
 
 _concurrency_gates: dict[Path, _DesktopModelConcurrencyGate] = {}
@@ -71,9 +75,9 @@ def desktop_model_gateway_for(
 
 def desktop_model_gateway_for_settings(
     kb_dir: Path, settings: DesktopModelSettings
-) -> DesktopModelGateway:
+) -> DesktopTerminalModelGateway:
     """Build a gateway from an unsaved Settings draft for connection testing."""
-    return DesktopModelGateway(
+    return DesktopTerminalModelGateway(
         _ConcurrentDesktopModelTransport(
             DesktopLiteLLMTransport(
                 model=litellm_model_identifier(settings.provider, settings.model),
@@ -83,10 +87,7 @@ def desktop_model_gateway_for_settings(
                 ),
             ),
             _DesktopModelConcurrencyGate(settings.max_concurrent_model_calls),
-        ),
-        initial_timeout_seconds=settings.initial_timeout_seconds,
-        provider_name=settings.provider,
-        model_name=settings.model,
+        )
     )
 
 
@@ -155,6 +156,15 @@ class _DesktopModelConcurrencyGate:
             self._active += 1
             return True
 
+    def acquire_until_cancelled(self, is_cancelled: Callable[[], bool] | None) -> None:
+        """Wait for capacity without converting queue time into a Model Call deadline."""
+        with self._condition:
+            while self._active >= self._maximum:
+                if is_cancelled is not None and is_cancelled():
+                    raise DesktopModelCancelledError()
+                self._condition.wait(0.05)
+            self._active += 1
+
     def release(self) -> None:
         with self._condition:
             self._active -= 1
@@ -170,6 +180,22 @@ def _concurrency_gate_for(kb_dir: Path, maximum: int) -> _DesktopModelConcurrenc
         else:
             gate.configure(maximum)
         return gate
+
+
+def _once(call: Callable[[], None]) -> Callable[[], None]:
+    """Return a thread-safe idempotent release callback for one acquired slot."""
+    lock = threading.Lock()
+    called = False
+
+    def invoke() -> None:
+        nonlocal called
+        with lock:
+            if called:
+                return
+            called = True
+        call()
+
+    return invoke
 
 
 class _ConcurrentDesktopModelTransport:
@@ -194,23 +220,95 @@ class _ConcurrentDesktopModelTransport:
     def release_prepared_model_attempt(self) -> None:
         self._gate.release()
 
+    def prepare_terminal_model_attempt(
+        self, is_cancelled: Callable[[], bool] | None
+    ) -> Callable[[], None]:
+        self._gate.acquire_until_cancelled(is_cancelled)
+        return _once(self._gate.release)
+
+    def call_until_terminal(
+        self, request: DesktopModelRequest, connect_timeout_seconds: float
+    ) -> object:
+        return self._delegate_call("call_until_terminal", request, connect_timeout_seconds)
+
+    def call_until_terminal_with_lifecycle(
+        self,
+        request: DesktopModelRequest,
+        connect_timeout_seconds: float,
+        on_request_sent: Callable[[], None],
+    ) -> object:
+        call = getattr(self._transport, "call_until_terminal_with_lifecycle", None)
+        if callable(call):
+            return call(request, connect_timeout_seconds, on_request_sent)
+        response = self._delegate_call("call_until_terminal", request, connect_timeout_seconds)
+        on_request_sent()
+        return response
+
     def stream(
         self,
         request: DesktopModelRequest,
         timeout_seconds: float,
         on_delta: Callable[[str], None],
     ) -> object:
-        stream = getattr(self._transport, "stream", None)
+        return self._run(
+            lambda: self._delegate_stream("stream", request, timeout_seconds, on_delta)
+        )
+
+    def stream_until_terminal(
+        self,
+        request: DesktopModelRequest,
+        connect_timeout_seconds: float,
+        on_delta: Callable[[str], None],
+    ) -> object:
+        return self._delegate_stream(
+            "stream_until_terminal", request, connect_timeout_seconds, on_delta
+        )
+
+    def stream_until_terminal_with_lifecycle(
+        self,
+        request: DesktopModelRequest,
+        connect_timeout_seconds: float,
+        on_delta: Callable[[str], None],
+        on_request_sent: Callable[[], None],
+    ) -> object:
+        stream = getattr(self._transport, "stream_until_terminal_with_lifecycle", None)
         if callable(stream):
-            return self._run(lambda: stream(request, timeout_seconds, on_delta))
+            return stream(
+                request,
+                connect_timeout_seconds,
+                on_delta,
+                on_request_sent,
+            )
+        on_request_sent()
+        return self._delegate_stream(
+            "stream_until_terminal", request, connect_timeout_seconds, on_delta
+        )
 
-        def call() -> object:
-            response = self._transport(request, timeout_seconds)
-            if isinstance(response, str):
-                on_delta(response)
-            return response
+    def _delegate_call(
+        self,
+        method_name: str,
+        request: DesktopModelRequest,
+        timeout_seconds: float,
+    ) -> object:
+        call = getattr(self._transport, method_name, None)
+        if callable(call):
+            return call(request, timeout_seconds)
+        return self._transport(request, timeout_seconds)
 
-        return self._run(call)
+    def _delegate_stream(
+        self,
+        method_name: str,
+        request: DesktopModelRequest,
+        timeout_seconds: float,
+        on_delta: Callable[[str], None],
+    ) -> object:
+        stream = getattr(self._transport, method_name, None)
+        if callable(stream):
+            return stream(request, timeout_seconds, on_delta)
+        response = self._transport(request, timeout_seconds)
+        if isinstance(response, str):
+            on_delta(response)
+        return response
 
     def _run(self, call: Callable[[], object]) -> object:
         try:
@@ -237,32 +335,175 @@ class DesktopLiteLLMTransport:
     ) -> object:
         """Consume LiteLLM's iterator and forward only textual answer deltas."""
         response = self._completion(request, timeout_seconds, stream=True)
+        return self._consume_stream(
+            request,
+            response,
+            on_delta,
+            terminal_policy=False,
+        )
+
+    def call_until_terminal(
+        self, request: DesktopModelRequest, connect_timeout_seconds: float
+    ) -> object:
+        """Call LiteLLM with a bound connect phase and unbounded response phases."""
+        return self.call_until_terminal_with_lifecycle(
+            request,
+            connect_timeout_seconds,
+            lambda: None,
+        )
+
+    def call_until_terminal_with_lifecycle(
+        self,
+        request: DesktopModelRequest,
+        connect_timeout_seconds: float,
+        on_request_sent: Callable[[], None],
+    ) -> object:
+        response, close = self._terminal_completion(
+            request,
+            connect_timeout_seconds,
+            stream=False,
+            on_request_sent=on_request_sent,
+        )
+        try:
+            return _response_content(response)
+        finally:
+            close()
+
+    def stream_until_terminal(
+        self,
+        request: DesktopModelRequest,
+        connect_timeout_seconds: float,
+        on_delta: Callable[[str], None],
+    ) -> object:
+        """Stream with no first-byte, read, reasoning, generation, or total deadline."""
+        return self.stream_until_terminal_with_lifecycle(
+            request,
+            connect_timeout_seconds,
+            on_delta,
+            lambda: None,
+        )
+
+    def stream_until_terminal_with_lifecycle(
+        self,
+        request: DesktopModelRequest,
+        connect_timeout_seconds: float,
+        on_delta: Callable[[str], None],
+        on_request_sent: Callable[[], None],
+    ) -> object:
+        response, close = self._terminal_completion(
+            request,
+            connect_timeout_seconds,
+            stream=True,
+            on_request_sent=on_request_sent,
+        )
+        try:
+            return self._consume_stream(
+                request,
+                response,
+                on_delta,
+                terminal_policy=True,
+            )
+        finally:
+            close()
+
+    def _consume_stream(
+        self,
+        request: DesktopModelRequest,
+        response: object,
+        on_delta: Callable[[str], None],
+        *,
+        terminal_policy: bool,
+    ) -> str:
         if not hasattr(response, "__iter__"):
             raise DesktopModelTransportError("response_format")
         parts: list[str] = []
-        for chunk in response:
-            delta = _stream_delta(chunk)
-            if delta:
-                parts.append(delta)
-                on_delta(delta)
+        try:
+            for chunk in response:
+                delta = _stream_delta(chunk)
+                if delta:
+                    parts.append(delta)
+                    on_delta(delta)
+        except DesktopModelTransportError:
+            raise
+        except Exception as error:
+            translated = self._provider_transport_error(
+                error,
+                request,
+                terminal_policy=terminal_policy,
+            )
+            if translated is not None:
+                raise translated from error
+            raise
         return "".join(parts)
 
     def _completion(
         self, request: DesktopModelRequest, timeout_seconds: float, *, stream: bool
     ) -> object:
-        if not isinstance(self._model, str) or not self._model.strip():
-            raise DesktopModelTransportError("configuration")
-        if not self._bundle.api_key:
-            raise DesktopModelTransportError("configuration")
+        return self._request_completion(
+            request,
+            timeout_seconds,
+            timeout_description=f"{timeout_seconds:.1f}s response",
+            stream=stream,
+            terminal_policy=False,
+        )
+
+    def _terminal_completion(
+        self,
+        request: DesktopModelRequest,
+        connect_timeout_seconds: float,
+        *,
+        stream: bool,
+        on_request_sent: Callable[[], None],
+    ) -> tuple[object, Callable[[], None]]:
+        from openai import Timeout
+
+        model = self._validated_model()
+        timeout = Timeout(
+            connect=connect_timeout_seconds,
+            read=None,
+            write=None,
+            pool=None,
+        )
+        completion_client, close = terminal_completion_client(
+            model=model,
+            bundle=self._bundle,
+            timeout=timeout,
+            on_request_sent=on_request_sent,
+        )
+        try:
+            response = self._request_completion(
+                request,
+                timeout,
+                timeout_description=f"{connect_timeout_seconds:.1f}s connect-only",
+                stream=stream,
+                terminal_policy=True,
+                completion_client=completion_client,
+            )
+        except BaseException:
+            close()
+            raise
+        return response, close
+
+    def _request_completion(
+        self,
+        request: DesktopModelRequest,
+        timeout: object,
+        *,
+        timeout_description: str,
+        stream: bool,
+        terminal_policy: bool,
+        completion_client: object | None = None,
+    ) -> object:
+        self._validated_model()
 
         logger.info(
             "model_provider_request operation=%s document=%r model=%r endpoint=%r "
-            "timeout_seconds=%.1f stream=%s",
+            "timeout=%r stream=%s",
             request.operation,
             request.document_name,
             self._model,
             _diagnostic_endpoint(self._bundle.base_url),
-            timeout_seconds,
+            timeout_description,
             stream,
         )
         try:
@@ -271,10 +512,12 @@ class DesktopLiteLLMTransport:
             response = completion(
                 model=self._model,
                 messages=_messages_for(request),
-                timeout=timeout_seconds,
+                timeout=timeout,
                 api_key=self._bundle.api_key,
                 base_url=self._bundle.base_url,
                 **({"stream": True} if stream else {}),
+                **({"max_retries": 0} if terminal_policy else {}),
+                **({"client": completion_client} if completion_client is not None else {}),
                 **(
                     {"extra_headers": self._bundle.extra_headers}
                     if self._bundle.extra_headers
@@ -282,27 +525,55 @@ class DesktopLiteLLMTransport:
                 ),
             )
         except Exception as error:
-            category = _provider_error_category(error)
-            if category is not None:
-                diagnostic_detail = _provider_error_detail(error, self._bundle.api_key)
-                logger.warning(
-                    "model_provider_request_failed operation=%s document=%r model=%r "
-                    "endpoint=%r category=%s exception_type=%s detail=%r",
-                    request.operation,
-                    request.document_name,
-                    self._model,
-                    _diagnostic_endpoint(self._bundle.base_url),
-                    category,
-                    type(error).__name__,
-                    diagnostic_detail,
-                )
-                raise DesktopModelTransportError(
-                    category,
-                    diagnostic_type=type(error).__name__,
-                    diagnostic_detail=diagnostic_detail,
-                ) from error
+            translated = self._provider_transport_error(
+                error,
+                request,
+                terminal_policy=terminal_policy,
+            )
+            if translated is not None:
+                raise translated from error
             raise
         return response
+
+    def _validated_model(self) -> str:
+        if not isinstance(self._model, str) or not self._model.strip():
+            raise DesktopModelTransportError("configuration")
+        if not self._bundle.api_key:
+            raise DesktopModelTransportError("configuration")
+        return self._model
+
+    def _provider_transport_error(
+        self,
+        error: Exception,
+        request: DesktopModelRequest,
+        *,
+        terminal_policy: bool,
+    ) -> DesktopModelTransportError | None:
+        category = (
+            _terminal_provider_error_category(error)
+            if terminal_policy
+            else _provider_error_category(error)
+        )
+        if category is None:
+            return None
+        diagnostic_detail = _provider_error_detail(error, self._bundle.api_key)
+        logger.warning(
+            "model_provider_request_failed operation=%s document=%r model=%r "
+            "endpoint=%r category=%s exception_type=%s detail=%r",
+            request.operation,
+            request.document_name,
+            self._model,
+            _diagnostic_endpoint(self._bundle.base_url),
+            category,
+            type(error).__name__,
+            diagnostic_detail,
+        )
+        return DesktopModelTransportError(
+            category,
+            retry_after_seconds=_provider_retry_after_seconds(error),
+            diagnostic_type=type(error).__name__,
+            diagnostic_detail=diagnostic_detail,
+        )
 
 
 def _messages_for(request: DesktopModelRequest) -> list[dict[str, str]]:
@@ -404,6 +675,28 @@ def _stream_delta(chunk: object) -> str:
 
 
 def _provider_error_category(error: Exception) -> str | None:
+    return _provider_error_category_for_policy(
+        error,
+        http_timeout_category="timeout",
+        client_timeout_category="timeout",
+    )
+
+
+def _terminal_provider_error_category(error: Exception) -> str | None:
+    """Preserve explicit terminal causes; elapsed model work is never a timeout."""
+    return _provider_error_category_for_policy(
+        error,
+        http_timeout_category="provider_timeout",
+        client_timeout_category="network_timeout",
+    )
+
+
+def _provider_error_category_for_policy(
+    error: Exception,
+    *,
+    http_timeout_category: str,
+    client_timeout_category: str,
+) -> str | None:
     status_code = _value(error, "status_code")
     if not isinstance(status_code, int):
         status_code = _value(_value(error, "response"), "status_code")
@@ -411,7 +704,7 @@ def _provider_error_category(error: Exception) -> str | None:
         if status_code in {401, 403}:
             return "authentication"
         if status_code == 408:
-            return "timeout"
+            return http_timeout_category
         if status_code == 429:
             return "rate_limited"
         if 500 <= status_code <= 599:
@@ -421,12 +714,22 @@ def _provider_error_category(error: Exception) -> str | None:
 
     name = type(error).__name__.lower()
     if "timeout" in name:
-        return "timeout"
+        return client_timeout_category
     if "rate" in name and "limit" in name:
         return "rate_limited"
     if any(fragment in name for fragment in ("authentication", "permission", "unauthorized")):
         return "authentication"
-    if any(fragment in name for fragment in ("connection", "network")):
+    if isinstance(error, (ConnectionError, OSError)) or any(
+        fragment in name
+        for fragment in (
+            "connection",
+            "network",
+            "protocol",
+            "disconnect",
+            "readerror",
+            "writeerror",
+        )
+    ):
         return "network"
     if any(fragment in name for fragment in ("internalserver", "serviceunavailable")):
         return "server"
@@ -449,6 +752,33 @@ def _provider_error_detail(error: Exception, api_key: str | None) -> str:
     if api_key:
         detail = detail.replace(api_key, "<REDACTED>")
     return detail[:500]
+
+
+def _provider_retry_after_seconds(error: Exception) -> float | None:
+    response = _value(error, "response")
+    headers = _value(response, "headers")
+    raw_value: object = None
+    if isinstance(headers, dict):
+        raw_value = headers.get("retry-after", headers.get("Retry-After"))
+    else:
+        get = getattr(headers, "get", None)
+        if callable(get):
+            raw_value = get("retry-after") or get("Retry-After")
+    if isinstance(raw_value, (int, float)):
+        return float(raw_value) if raw_value > 0 else None
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        return None
+    try:
+        seconds = float(raw_value)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+    return seconds if seconds > 0 else None
 
 
 def _value(value: object, key: str) -> object:

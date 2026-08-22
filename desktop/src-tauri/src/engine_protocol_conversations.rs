@@ -210,11 +210,11 @@ impl EngineSupervisor {
         request_id: String,
     ) -> BridgeResult<Value> {
         self.ensure_started()?;
-        conversation(self.request_started_with_timeout(
+        conversation(self.request_started_with_wait(
             "workbench.ask_conversation",
             json!({ "conversation_id": conversation_id, "question": question }),
             Some(request_id),
-            IMPORT_REQUEST_TIMEOUT,
+            Some(IMPORT_REQUEST_TIMEOUT),
         )?)
     }
 
@@ -225,14 +225,14 @@ impl EngineSupervisor {
         request_id: String,
     ) -> BridgeResult<Value> {
         self.ensure_started()?;
-        conversation(self.request_started_with_timeout(
+        conversation(self.request_started_with_wait(
             "workbench.regenerate_conversation_answer",
             json!({
                 "conversation_id": conversation_id,
                 "assistant_message_id": assistant_message_id,
             }),
             Some(request_id),
-            IMPORT_REQUEST_TIMEOUT,
+            Some(IMPORT_REQUEST_TIMEOUT),
         )?)
     }
 

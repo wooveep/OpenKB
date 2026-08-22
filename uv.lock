@@ -1078,7 +1078,9 @@ wheels = [
 name = "openkb"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "litellm" },
+    { name = "openai" },
     { name = "openpyxl" },
     { name = "portalocker" },
     { name = "pymupdf" },
@@ -1104,8 +1106,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "litellm", specifier = "==1.87.2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==1.15.0" },
+    { name = "openai", specifier = "==2.44.0" },
     { name = "openpyxl", specifier = "==3.1.5" },
     { name = "portalocker", specifier = "==3.2.0" },
     { name = "pyinstaller", marker = "extra == 'desktop-build'", specifier = "==6.22.0" },

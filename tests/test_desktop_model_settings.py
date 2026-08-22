@@ -6,22 +6,28 @@ import io
 import json
 import sqlite3
 import zipfile
+from threading import Event
 
 import pytest
 
-from openkb import desktop_model_transport
+from openkb import desktop_engine_model_settings, desktop_model_transport
 from openkb.config import DEFAULT_API_BASE_URL, DEFAULT_CONFIG, save_config
 from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
 from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
-from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelRequest
+from openkb.desktop_model_gateway import (
+    DesktopModelGateway,
+    DesktopModelRequest,
+    DesktopModelResult,
+)
 from openkb.desktop_model_settings import (
     DEFAULT_MAX_CONCURRENT_MODEL_CALLS,
     DesktopModelSettingsError,
     read_desktop_model_settings,
     save_desktop_model_settings,
 )
+from openkb.desktop_model_terminal import DesktopTerminalModelEvent
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
@@ -278,3 +284,71 @@ def test_engine_settings_routes_accept_a_direct_api_key_without_persisting_it_in
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         values = connection.execute("SELECT value FROM metadata").fetchall()
     assert all("engine-settings-key" not in value[0] for value in values)
+
+
+def test_engine_connection_check_streams_terminal_lifecycle_events(tmp_path, monkeypatch):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    emitted: list[tuple[str, dict[str, object]]] = []
+
+    class FakeTerminalGateway:
+        def stream(self, _request, *, on_event, on_delta, is_cancelled):
+            assert is_cancelled is not None
+            on_event(
+                DesktopTerminalModelEvent(
+                    call_id="call-1",
+                    attempt=1,
+                    status="awaiting_model_result",
+                    elapsed_seconds=180,
+                )
+            )
+            on_delta(1, "private provider output")
+            return DesktopModelResult("call-1", "private provider output", 1)
+
+    monkeypatch.setattr(
+        desktop_engine_model_settings,
+        "desktop_model_gateway_for_settings",
+        lambda _kb_dir, _settings: FakeTerminalGateway(),
+    )
+    monkeypatch.setattr(
+        server,
+        "_emit_event",
+        lambda kind, data: emitted.append((kind, data)),
+    )
+
+    result = server._dispatch(
+        DesktopRequest(
+            request_id="connection-check-1",
+            method="workbench.test_model_connection",
+            params={
+                "provider": "custom",
+                "model": "test/model",
+                "api_base_url": "https://model.test/v1",
+                "api_key": "test-key",
+                "max_concurrent_model_calls": 1,
+                "initial_timeout_seconds": 1,
+            },
+        ),
+        cancel_event=Event(),
+    )
+
+    assert result["ok"] is True
+    assert emitted == [
+        (
+            "model.call_lifecycle",
+            {
+                "call_id": "call-1",
+                "attempt": 1,
+                "status": "awaiting_model_result",
+                "elapsed_seconds": 180,
+                "failure_code": None,
+                "reason": None,
+                "retry_after_seconds": None,
+                "request_id": "connection-check-1",
+            },
+        )
+    ]
+    assert "private provider output" not in repr(emitted)

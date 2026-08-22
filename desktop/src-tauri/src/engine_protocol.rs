@@ -21,6 +21,7 @@ pub use crate::engine_wire_knowledge_pages::{
     KnowledgeExportMode, KnowledgeExportResult, KnowledgePage, KnowledgePageDeletionResult,
     KnowledgePagesResult, KnowledgeSourcesResult,
 };
+use engine_response_wait::{receive_response, ResponseWaitError};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::{
@@ -43,6 +44,8 @@ mod answers;
 mod conversations;
 #[path = "engine_protocol_document_versions.rs"]
 mod document_versions;
+#[path = "engine_response_wait.rs"]
+mod engine_response_wait;
 #[path = "engine_protocol_knowledge_pages.rs"]
 mod knowledge_pages;
 #[path = "engine_protocol_knowledge_reanalysis.rs"]
@@ -218,11 +221,11 @@ impl EngineSupervisor {
         request_id: String,
     ) -> BridgeResult<TextDocumentImportResult> {
         self.ensure_started()?;
-        let value = self.request_started_with_timeout(
+        let value = self.request_started_with_wait(
             "workbench.import_text_document",
             json!({ "source_path": source_path }),
             Some(request_id),
-            IMPORT_REQUEST_TIMEOUT,
+            Some(IMPORT_REQUEST_TIMEOUT),
         )?;
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(
@@ -289,11 +292,11 @@ impl EngineSupervisor {
         request_id: String,
     ) -> BridgeResult<TextDocumentImportResult> {
         self.ensure_started()?;
-        let value = self.request_started_with_timeout(
+        let value = self.request_started_with_wait(
             "workbench.resume_import_job",
             json!({ "job_id": job_id }),
             Some(request_id),
-            IMPORT_REQUEST_TIMEOUT,
+            Some(IMPORT_REQUEST_TIMEOUT),
         )?;
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(
@@ -310,11 +313,11 @@ impl EngineSupervisor {
         request_id: String,
     ) -> BridgeResult<TextDocumentImportResult> {
         self.ensure_started()?;
-        let value = self.request_started_with_timeout(
+        let value = self.request_started_with_wait(
             "workbench.recover_import_job",
             json!({ "job_id": job_id, "recovery_override": recovery_override }),
             Some(request_id),
-            IMPORT_REQUEST_TIMEOUT,
+            Some(IMPORT_REQUEST_TIMEOUT),
         )?;
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(
@@ -571,15 +574,15 @@ impl EngineSupervisor {
         params: Value,
         caller_request_id: Option<String>,
     ) -> BridgeResult<Value> {
-        self.request_started_with_timeout(method, params, caller_request_id, REQUEST_TIMEOUT)
+        self.request_started_with_wait(method, params, caller_request_id, Some(REQUEST_TIMEOUT))
     }
 
-    fn request_started_with_timeout(
+    fn request_started_with_wait(
         &self,
         method: &str,
         params: Value,
         caller_request_id: Option<String>,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> BridgeResult<Value> {
         let request_id = caller_request_id.unwrap_or_else(|| self.next_request_id());
         if request_id.trim().is_empty() {
@@ -622,9 +625,9 @@ impl EngineSupervisor {
             return Err(error);
         }
 
-        match receiver.recv_timeout(timeout) {
+        match receive_response(receiver, timeout) {
             Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(ResponseWaitError::Timeout) => {
                 if let Ok(mut pending) = self.transport.pending.lock() {
                     pending.remove(&request_id);
                 }
@@ -634,7 +637,7 @@ impl EngineSupervisor {
                     format!("Python Engine did not answer {method} in time."),
                 ))
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(BridgeError::new(
+            Err(ResponseWaitError::Disconnected) => Err(BridgeError::new(
                 "engine_unavailable",
                 "Python Engine stopped before responding.",
             )),

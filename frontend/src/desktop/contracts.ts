@@ -4,6 +4,7 @@ import type {
   DesktopKnowledgeReanalysisOverview,
   DesktopKnowledgeReanalysisRun,
 } from "./knowledge-reanalysis-contracts"
+import type { DesktopModelCallLifecycleEvent } from "./model-call-lifecycle-contracts"
 import type {
   DesktopAnswerSourceImage,
   DesktopEvidenceRef,
@@ -13,6 +14,7 @@ import type {
   DesktopRetrievalTrace,
 } from "./contracts-retrieval"
 export type * from "./knowledge-reanalysis-contracts"
+export type * from "./model-call-lifecycle-contracts"
 export type * from "./contracts-retrieval"
 
 export const DESKTOP_BRIDGE_PROTOCOL_VERSION = 1
@@ -32,6 +34,7 @@ export type DesktopBridgeEvent =
   | DesktopImportStageProgressEvent
   | DesktopGroundedAnswerDeltaEvent
   | DesktopKnowledgeReanalysisUpdatedEvent
+  | DesktopModelCallLifecycleEvent
 
 export interface DesktopEngineBridgeEvent {
   sequence: number
