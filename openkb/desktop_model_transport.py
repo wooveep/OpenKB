@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -15,19 +15,18 @@ import yaml
 
 from openkb.config import LlmCredentialBundle, resolve_credential_bundle
 from openkb.desktop_import_types import DesktopRecoveryOverride
-from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SYSTEM_PROMPT
-from openkb.desktop_knowledge_analysis_batches import (
-    KNOWLEDGE_ANALYSIS_BATCH_SYSTEM_PROMPT,
-    KNOWLEDGE_ANALYSIS_MERGE_SYSTEM_PROMPT,
-)
+from openkb.desktop_model_active_streams import DesktopActiveModelStreams
+from openkb.desktop_model_active_streams import once as _once
 from openkb.desktop_model_gateway import (
-    INITIAL_RESPONSE_TIMEOUT_SECONDS,
     DesktopModelCancelledError,
     DesktopModelGateway,
+    DesktopModelProviderResponse,
     DesktopModelRequest,
     DesktopModelTransportError,
+    DesktopProviderTokenUsage,
 )
 from openkb.desktop_model_http_lifecycle import terminal_completion_client
+from openkb.desktop_model_roles import DesktopRoleModelGateway
 from openkb.desktop_model_settings import (
     DEFAULT_MAX_CONCURRENT_MODEL_CALLS,
     DesktopModelSettings,
@@ -36,9 +35,10 @@ from openkb.desktop_model_settings import (
     read_desktop_model_settings,
 )
 from openkb.desktop_model_terminal import DesktopTerminalModelGateway
-from openkb.desktop_page_tree_enrichment import PAGE_TREE_ENRICHMENT_SYSTEM_PROMPT
+from openkb.desktop_model_usage import DesktopModelUsageStore
+from openkb.desktop_prompt_contracts import prompt_contract_for
 
-_concurrency_gates: dict[Path, _DesktopModelConcurrencyGate] = {}
+_concurrency_gates: dict[tuple[Path, str], _DesktopModelConcurrencyGate] = {}
 _concurrency_gates_lock = threading.Lock()
 
 logger = logging.getLogger(__name__)
@@ -99,34 +99,82 @@ def _gateway_for(
     kb_dir: Path,
     settings: DesktopModelSettings | None,
 ) -> DesktopModelGateway:
-    timeout = (
-        override.initial_timeout_seconds
-        if override is not None and override.initial_timeout_seconds is not None
-        else (
-            settings.initial_timeout_seconds
-            if settings is not None
-            else INITIAL_RESPONSE_TIMEOUT_SECONDS
-        )
-    )
     concurrency = (
         settings.max_concurrent_model_calls
         if settings is not None
         else DEFAULT_MAX_CONCURRENT_MODEL_CALLS
     )
-    return DesktopModelGateway(
-        _ConcurrentDesktopModelTransport(
-            DesktopLiteLLMTransport(model=model, bundle=bundle),
-            _concurrency_gate_for(kb_dir, concurrency),
-        ),
-        initial_timeout_seconds=timeout,
-        provider_name=settings.provider if settings is not None else "custom",
-        model_name=(
-            override.model
-            if override is not None and override.model is not None
-            else settings.model
-            if settings is not None
-            else str(model or "")
-        ),
+
+    def lane_gate(lane: str) -> _DesktopModelConcurrencyGate:
+        maximum = 1 if lane == "interactive" else concurrency
+        return _concurrency_gate_for(kb_dir, maximum, lane=lane)
+
+    provider = settings.provider if settings is not None else "custom"
+    default_model = settings.model if settings is not None else str(model or "")
+    analysis_model = (
+        override.model
+        if override is not None and override.model is not None
+        else settings.analysis_model_name
+        if settings is not None
+        else default_model
+    )
+    answer_model = settings.answer_model_name if settings is not None else default_model
+    if settings is None:
+        settings = DesktopModelSettings(
+            provider=provider,
+            model=default_model,
+            api_base_url=bundle.base_url or "",
+            api_key=bundle.api_key or "",
+            max_concurrent_model_calls=concurrency,
+            analysis_model=analysis_model if analysis_model != default_model else None,
+            answer_model=answer_model if answer_model != default_model else None,
+        )
+    elif (
+        analysis_model != settings.analysis_model_name
+        or override is not None
+        and override.context_capacity is not None
+    ):
+        from dataclasses import replace
+
+        settings = replace(
+            settings,
+            analysis_model=analysis_model,
+            analysis_context_capacity=(
+                override.context_capacity
+                if override is not None and override.context_capacity is not None
+                else settings.analysis_context_capacity
+            ),
+        )
+
+    gateways: dict[str, DesktopTerminalModelGateway] = {}
+
+    def terminal_gateway(selected_model: str) -> DesktopTerminalModelGateway:
+        existing = gateways.get(selected_model)
+        if existing is not None:
+            return existing
+        transport = DesktopLiteLLMTransport(
+            model=litellm_model_identifier(provider, selected_model),
+            bundle=bundle,
+        )
+        gateway = DesktopTerminalModelGateway(
+            _ConcurrentDesktopModelTransport(
+                transport,
+                lane_gate("background"),
+                lane_factory=lane_gate,
+            ),
+            provider_name=provider,
+            model_name=selected_model,
+        )
+        gateways[selected_model] = gateway
+        return gateway
+
+    return DesktopRoleModelGateway(
+        settings=settings,
+        default_gateway=terminal_gateway(default_model),
+        analysis_gateway=terminal_gateway(analysis_model),
+        answer_gateway=terminal_gateway(answer_model),
+        gateway_factory=terminal_gateway,
+        usage_store=DesktopModelUsageStore(kb_dir),
     )
 
 
@@ -137,65 +185,51 @@ class _DesktopModelConcurrencyGate:
         self._maximum = maximum
         self._active = 0
         self._condition = threading.Condition()
+        self._waiters: deque[object] = deque()
 
     def configure(self, maximum: int) -> None:
         with self._condition:
             self._maximum = maximum
             self._condition.notify_all()
 
-    def acquire(self, is_cancelled: Callable[[], bool] | None, remaining_seconds: float) -> bool:
-        deadline = time.monotonic() + remaining_seconds
-        with self._condition:
-            while self._active >= self._maximum:
-                if is_cancelled is not None and is_cancelled():
-                    raise DesktopModelCancelledError()
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._condition.wait(min(0.05, remaining))
-            self._active += 1
-            return True
-
     def acquire_until_cancelled(self, is_cancelled: Callable[[], bool] | None) -> None:
         """Wait for capacity without converting queue time into a Model Call deadline."""
+        ticket = object()
         with self._condition:
-            while self._active >= self._maximum:
+            self._waiters.append(ticket)
+            while self._active >= self._maximum or self._waiters[0] is not ticket:
                 if is_cancelled is not None and is_cancelled():
+                    self._remove_waiter(ticket)
                     raise DesktopModelCancelledError()
                 self._condition.wait(0.05)
+            self._waiters.popleft()
             self._active += 1
 
     def release(self) -> None:
         with self._condition:
             self._active -= 1
-            self._condition.notify()
+            self._condition.notify_all()
+
+    def _remove_waiter(self, ticket: object) -> None:
+        self._waiters.remove(ticket)
+        self._condition.notify_all()
 
 
-def _concurrency_gate_for(kb_dir: Path, maximum: int) -> _DesktopModelConcurrencyGate:
+def _concurrency_gate_for(
+    kb_dir: Path,
+    maximum: int,
+    *,
+    lane: str = "background",
+) -> _DesktopModelConcurrencyGate:
+    key = (kb_dir, lane)
     with _concurrency_gates_lock:
-        gate = _concurrency_gates.get(kb_dir)
+        gate = _concurrency_gates.get(key)
         if gate is None:
             gate = _DesktopModelConcurrencyGate(maximum)
-            _concurrency_gates[kb_dir] = gate
+            _concurrency_gates[key] = gate
         else:
             gate.configure(maximum)
         return gate
-
-
-def _once(call: Callable[[], None]) -> Callable[[], None]:
-    """Return a thread-safe idempotent release callback for one acquired slot."""
-    lock = threading.Lock()
-    called = False
-
-    def invoke() -> None:
-        nonlocal called
-        with lock:
-            if called:
-                return
-            called = True
-        call()
-
-    return invoke
 
 
 class _ConcurrentDesktopModelTransport:
@@ -205,20 +239,39 @@ class _ConcurrentDesktopModelTransport:
         self,
         transport: Callable[[DesktopModelRequest, float], object],
         gate: _DesktopModelConcurrencyGate,
+        *,
+        lane_factory: Callable[[str], _DesktopModelConcurrencyGate] | None = None,
     ) -> None:
         self._transport = transport
         self._gate = gate
+        self._lane_factory = lane_factory
 
-    def __call__(self, request: DesktopModelRequest, timeout_seconds: float) -> object:
-        return self._run(lambda: self._transport(request, timeout_seconds))
+    def for_lane(self, lane: str) -> _ConcurrentDesktopModelTransport:
+        """Share one provider transport while selecting an independently limited lane."""
+        if lane not in {"background", "interactive"}:
+            raise ValueError(f"Unknown model execution lane: {lane}")
+        if self._lane_factory is None:
+            return self
+        return _ConcurrentDesktopModelTransport(
+            self._transport,
+            self._lane_factory(lane),
+            lane_factory=self._lane_factory,
+        )
 
-    def prepare_model_attempt(
-        self, is_cancelled: Callable[[], bool] | None, remaining_seconds: float
-    ) -> bool:
-        return self._gate.acquire(is_cancelled, remaining_seconds)
+    def __call__(self, request: DesktopModelRequest, connect_timeout_seconds: float) -> object:
+        return self._delegate_call("call_until_terminal", request, connect_timeout_seconds)
 
     def release_prepared_model_attempt(self) -> None:
         self._gate.release()
+
+    def cancel_active_stream(self, request: DesktopModelRequest) -> bool:
+        cancel = getattr(self._transport, "cancel_active_stream", None)
+        return bool(cancel(request)) if callable(cancel) else False
+
+    def prepare_active_stream(self, request: DesktopModelRequest) -> None:
+        prepare = getattr(self._transport, "prepare_active_stream", None)
+        if callable(prepare):
+            prepare(request)
 
     def prepare_terminal_model_attempt(
         self, is_cancelled: Callable[[], bool] | None
@@ -243,16 +296,6 @@ class _ConcurrentDesktopModelTransport:
         response = self._delegate_call("call_until_terminal", request, connect_timeout_seconds)
         on_request_sent()
         return response
-
-    def stream(
-        self,
-        request: DesktopModelRequest,
-        timeout_seconds: float,
-        on_delta: Callable[[str], None],
-    ) -> object:
-        return self._run(
-            lambda: self._delegate_stream("stream", request, timeout_seconds, on_delta)
-        )
 
     def stream_until_terminal(
         self,
@@ -288,33 +331,27 @@ class _ConcurrentDesktopModelTransport:
         self,
         method_name: str,
         request: DesktopModelRequest,
-        timeout_seconds: float,
+        connect_timeout_seconds: float,
     ) -> object:
         call = getattr(self._transport, method_name, None)
         if callable(call):
-            return call(request, timeout_seconds)
-        return self._transport(request, timeout_seconds)
+            return call(request, connect_timeout_seconds)
+        return self._transport(request, connect_timeout_seconds)
 
     def _delegate_stream(
         self,
         method_name: str,
         request: DesktopModelRequest,
-        timeout_seconds: float,
+        connect_timeout_seconds: float,
         on_delta: Callable[[str], None],
     ) -> object:
         stream = getattr(self._transport, method_name, None)
         if callable(stream):
-            return stream(request, timeout_seconds, on_delta)
-        response = self._transport(request, timeout_seconds)
+            return stream(request, connect_timeout_seconds, on_delta)
+        response = self._transport(request, connect_timeout_seconds)
         if isinstance(response, str):
             on_delta(response)
         return response
-
-    def _run(self, call: Callable[[], object]) -> object:
-        try:
-            return call()
-        finally:
-            self._gate.release()
 
 
 class DesktopLiteLLMTransport:
@@ -323,24 +360,10 @@ class DesktopLiteLLMTransport:
     def __init__(self, *, model: object, bundle: LlmCredentialBundle) -> None:
         self._model = model
         self._bundle = bundle
+        self._active_streams = DesktopActiveModelStreams()
 
-    def __call__(self, request: DesktopModelRequest, timeout_seconds: float) -> object:
-        return _response_content(self._completion(request, timeout_seconds, stream=False))
-
-    def stream(
-        self,
-        request: DesktopModelRequest,
-        timeout_seconds: float,
-        on_delta: Callable[[str], None],
-    ) -> object:
-        """Consume LiteLLM's iterator and forward only textual answer deltas."""
-        response = self._completion(request, timeout_seconds, stream=True)
-        return self._consume_stream(
-            request,
-            response,
-            on_delta,
-            terminal_policy=False,
-        )
+    def __call__(self, request: DesktopModelRequest, connect_timeout_seconds: float) -> object:
+        return self.call_until_terminal(request, connect_timeout_seconds)
 
     def call_until_terminal(
         self, request: DesktopModelRequest, connect_timeout_seconds: float
@@ -383,6 +406,9 @@ class DesktopLiteLLMTransport:
             lambda: None,
         )
 
+    def prepare_active_stream(self, request: DesktopModelRequest) -> None:
+        self._active_streams.prepare(id(request))
+
     def stream_until_terminal_with_lifecycle(
         self,
         request: DesktopModelRequest,
@@ -401,24 +427,36 @@ class DesktopLiteLLMTransport:
                 request,
                 response,
                 on_delta,
-                terminal_policy=True,
             )
         finally:
             close()
+
+    def cancel_active_stream(self, request: DesktopModelRequest) -> bool:
+        """Close this request's live HTTP resources when cancellation races the stream."""
+        try:
+            return self._active_streams.close(id(request))
+        except Exception:
+            logger.warning(
+                "Could not close the active model stream for operation=%s.",
+                request.operation,
+            )
+            return False
 
     def _consume_stream(
         self,
         request: DesktopModelRequest,
         response: object,
         on_delta: Callable[[str], None],
-        *,
-        terminal_policy: bool,
     ) -> str:
         if not hasattr(response, "__iter__"):
             raise DesktopModelTransportError("response_format")
         parts: list[str] = []
+        usage: DesktopProviderTokenUsage | None = None
+        provider_request_id: str | None = None
         try:
             for chunk in response:
+                usage = _provider_token_usage(chunk) or usage
+                provider_request_id = _provider_request_id(chunk) or provider_request_id
                 delta = _stream_delta(chunk)
                 if delta:
                     parts.append(delta)
@@ -429,22 +467,14 @@ class DesktopLiteLLMTransport:
             translated = self._provider_transport_error(
                 error,
                 request,
-                terminal_policy=terminal_policy,
             )
             if translated is not None:
                 raise translated from error
             raise
-        return "".join(parts)
-
-    def _completion(
-        self, request: DesktopModelRequest, timeout_seconds: float, *, stream: bool
-    ) -> object:
-        return self._request_completion(
-            request,
-            timeout_seconds,
-            timeout_description=f"{timeout_seconds:.1f}s response",
-            stream=stream,
-            terminal_policy=False,
+        return DesktopModelProviderResponse(
+            "".join(parts),
+            usage=usage,
+            provider_request_id=provider_request_id,
         )
 
     def _terminal_completion(
@@ -457,32 +487,39 @@ class DesktopLiteLLMTransport:
     ) -> tuple[object, Callable[[], None]]:
         from openai import Timeout
 
-        model = self._validated_model()
-        timeout = Timeout(
-            connect=connect_timeout_seconds,
-            read=None,
-            write=None,
-            pool=None,
-        )
-        completion_client, close = terminal_completion_client(
-            model=model,
-            bundle=self._bundle,
-            timeout=timeout,
-            on_request_sent=on_request_sent,
-        )
+        try:
+            model = self._validated_model()
+            timeout = Timeout(
+                connect=connect_timeout_seconds,
+                read=None,
+                write=None,
+                pool=None,
+            )
+            completion_client, raw_close = terminal_completion_client(
+                model=model,
+                bundle=self._bundle,
+                timeout=timeout,
+                on_request_sent=on_request_sent,
+            )
+            close = _once(raw_close)
+            release = self._active_streams.register(id(request), close) if stream else close
+        except BaseException:
+            if stream:
+                self._active_streams.abandon(id(request))
+            raise
+
         try:
             response = self._request_completion(
                 request,
                 timeout,
                 timeout_description=f"{connect_timeout_seconds:.1f}s connect-only",
                 stream=stream,
-                terminal_policy=True,
                 completion_client=completion_client,
             )
         except BaseException:
-            close()
+            release()
             raise
-        return response, close
+        return response, release
 
     def _request_completion(
         self,
@@ -491,7 +528,6 @@ class DesktopLiteLLMTransport:
         *,
         timeout_description: str,
         stream: bool,
-        terminal_policy: bool,
         completion_client: object | None = None,
     ) -> object:
         self._validated_model()
@@ -515,8 +551,29 @@ class DesktopLiteLLMTransport:
                 timeout=timeout,
                 api_key=self._bundle.api_key,
                 base_url=self._bundle.base_url,
+                **(request.generation_parameters or {}),
                 **({"stream": True} if stream else {}),
-                **({"max_retries": 0} if terminal_policy else {}),
+                **({"stream_options": {"include_usage": True}} if stream else {}),
+                max_retries=0,
+                **(
+                    {"reasoning_effort": request.reasoning_effort}
+                    if request.reasoning_effort is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": request.response_schema_name or "openkb_structured_output",
+                                "strict": True,
+                                "schema": request.response_schema,
+                            },
+                        }
+                    }
+                    if request.response_schema is not None
+                    else {}
+                ),
                 **({"client": completion_client} if completion_client is not None else {}),
                 **(
                     {"extra_headers": self._bundle.extra_headers}
@@ -528,7 +585,6 @@ class DesktopLiteLLMTransport:
             translated = self._provider_transport_error(
                 error,
                 request,
-                terminal_policy=terminal_policy,
             )
             if translated is not None:
                 raise translated from error
@@ -546,14 +602,8 @@ class DesktopLiteLLMTransport:
         self,
         error: Exception,
         request: DesktopModelRequest,
-        *,
-        terminal_policy: bool,
     ) -> DesktopModelTransportError | None:
-        category = (
-            _terminal_provider_error_category(error)
-            if terminal_policy
-            else _provider_error_category(error)
-        )
+        category = _terminal_provider_error_category(error)
         if category is None:
             return None
         diagnostic_detail = _provider_error_detail(error, self._bundle.api_key)
@@ -577,82 +627,22 @@ class DesktopLiteLLMTransport:
 
 
 def _messages_for(request: DesktopModelRequest) -> list[dict[str, str]]:
-    if request.operation == "page_tree_enrichment":
-        return [
-            {"role": "system", "content": PAGE_TREE_ENRICHMENT_SYSTEM_PROMPT},
-            {"role": "user", "content": request.content},
-        ]
-    if request.operation == "knowledge_analysis":
-        return [
-            {"role": "system", "content": KNOWLEDGE_ANALYSIS_SYSTEM_PROMPT},
-            {"role": "user", "content": request.content},
-        ]
-    if request.operation == "knowledge_analysis_batch":
-        return [
-            {"role": "system", "content": KNOWLEDGE_ANALYSIS_BATCH_SYSTEM_PROMPT},
-            {"role": "user", "content": request.content},
-        ]
-    if request.operation == "knowledge_analysis_merge":
-        return [
-            {"role": "system", "content": KNOWLEDGE_ANALYSIS_MERGE_SYSTEM_PROMPT},
-            {"role": "user", "content": request.content},
-        ]
-    if request.operation == "retrieval_plan":
-        return [
-            {
-                "role": "system",
-                "content": (
-                    "Build a bounded retrieval plan for a local knowledge base. "
-                    "Return exactly one JSON object with a single `terms` array of at most 8 "
-                    "short search terms. Do not write SQL, tool calls, or an answer."
-                ),
-            },
-            {"role": "user", "content": request.content},
-        ]
-    if request.operation == "grounded_answer":
-        return [
-            {
-                "role": "system",
-                "content": (
-                    "Answer only from the supplied source evidence. Be concise, state when "
-                    "the evidence is insufficient, and cite supporting evidence numbers "
-                    "such as [1]."
-                ),
-            },
-            {"role": "user", "content": request.content},
-        ]
-    if request.operation == "knowledge_graph_extraction":
-        return [
-            {
-                "role": "system",
-                "content": (
-                    "Extract a small evidence-bound local knowledge graph. Return exactly one "
-                    "JSON object with `nodes` and `edges` arrays. Each node must have `id`, "
-                    "`evidence_id`, `type` (`entity`, `concept`, or `claim`), and `label`. "
-                    "Each edge must have `evidence_id`, `source_id`, `target_id`, and `type` "
-                    "from IS_A, PART_OF, RELATED_TO, DEPENDS_ON, USES, PRODUCES, LOCATED_IN, "
-                    "CREATED_BY, PRECEDES, REPLACES, SUPPORTS, or CONTRADICTS. Use only the "
-                    "provided evidence IDs; both endpoints and every edge must cite the same "
-                    "evidence ID. Do not merge same-named entities or invent facts."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Document: {request.document_name}\n\n{request.content}",
-            },
-        ]
+    contract = prompt_contract_for(request.operation)
+    snapshot_instructions = (
+        request.prompt_contract_snapshot.get("instructions")
+        if request.prompt_contract_snapshot is not None
+        else None
+    )
     return [
         {
             "role": "system",
             "content": (
-                "Analyze the document for local knowledge-base indexing. "
-                "Return a concise factual summary of its main topics."
+                snapshot_instructions
+                if isinstance(snapshot_instructions, str)
+                else contract.instructions
             ),
         },
-        {
-            "role": "user",
-            "content": f"Document: {request.document_name}\n\n{request.content}",
-        },
+        {"role": "user", "content": request.content},
     ]
 
 
@@ -663,7 +653,42 @@ def _response_content(response: object) -> str:
     content = _value(_value(choices[0], "message"), "content")
     if not isinstance(content, str) or not content.strip():
         raise DesktopModelTransportError("response_format")
-    return content
+    return DesktopModelProviderResponse(
+        content,
+        usage=_provider_token_usage(response),
+        provider_request_id=_provider_request_id(response),
+    )
+
+
+def _provider_token_usage(response: object) -> DesktopProviderTokenUsage | None:
+    usage = _value(response, "usage")
+    if usage is None:
+        return None
+    input_tokens = _non_negative_int(
+        _value(usage, "prompt_tokens") or _value(usage, "input_tokens")
+    )
+    output_tokens = _non_negative_int(
+        _value(usage, "completion_tokens") or _value(usage, "output_tokens")
+    )
+    total_tokens = _non_negative_int(_value(usage, "total_tokens"))
+    if input_tokens is None or output_tokens is None:
+        return None
+    return DesktopProviderTokenUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens if total_tokens is not None else input_tokens + output_tokens,
+    )
+
+
+def _provider_request_id(response: object) -> str | None:
+    value = _value(response, "id") or _value(response, "request_id")
+    return value if isinstance(value, str) and value else None
+
+
+def _non_negative_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def _stream_delta(chunk: object) -> str:
@@ -674,28 +699,13 @@ def _stream_delta(chunk: object) -> str:
     return content if isinstance(content, str) else ""
 
 
-def _provider_error_category(error: Exception) -> str | None:
-    return _provider_error_category_for_policy(
-        error,
-        http_timeout_category="timeout",
-        client_timeout_category="timeout",
-    )
-
-
 def _terminal_provider_error_category(error: Exception) -> str | None:
     """Preserve explicit terminal causes; elapsed model work is never a timeout."""
-    return _provider_error_category_for_policy(
-        error,
-        http_timeout_category="provider_timeout",
-        client_timeout_category="network_timeout",
-    )
+    return _provider_error_category_for_policy(error)
 
 
 def _provider_error_category_for_policy(
     error: Exception,
-    *,
-    http_timeout_category: str,
-    client_timeout_category: str,
 ) -> str | None:
     status_code = _value(error, "status_code")
     if not isinstance(status_code, int):
@@ -704,7 +714,7 @@ def _provider_error_category_for_policy(
         if status_code in {401, 403}:
             return "authentication"
         if status_code == 408:
-            return http_timeout_category
+            return "provider_timeout"
         if status_code == 429:
             return "rate_limited"
         if 500 <= status_code <= 599:
@@ -714,7 +724,7 @@ def _provider_error_category_for_policy(
 
     name = type(error).__name__.lower()
     if "timeout" in name:
-        return client_timeout_category
+        return "network_timeout"
     if "rate" in name and "limit" in name:
         return "rate_limited"
     if any(fragment in name for fragment in ("authentication", "permission", "unauthorized")):

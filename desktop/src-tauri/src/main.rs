@@ -33,9 +33,10 @@ use engine_protocol::{
     DiagnosticBundleResult, DocumentVersionCandidate, DocumentVersionCandidateDecision,
     DocumentVersionCandidatesResult, EngineHealth, EngineSupervisor, GroundedAnswer,
     GroundedAnswersResult, ImportControlResult, ImportJobsResult, ImportSourceInspection,
-    KnowledgeBaseActivationResult, KnowledgeReconciliationCommit,
-    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision, ModelSettings,
-    RawDocument, RecoveryOverride, TextDocumentImportResult,
+    KnowledgeBaseActivationResult, KnowledgeGraphExtractionControlResult,
+    KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
+    KnowledgeReconciliationDecision, ModelSettings, ModelSettingsDraft,
+    PageTreeEnrichmentControlResult, RawDocument, RecoveryOverride, TextDocumentImportResult,
 };
 use process_tree::ProcessTreeJob;
 use std::{path::Path, sync::Arc};
@@ -408,59 +409,28 @@ async fn desktop_model_settings(
 #[tauri::command(rename_all = "camelCase")]
 async fn desktop_save_model_settings(
     state: State<'_, DesktopState>,
-    provider: String,
-    model: String,
-    api_base_url: String,
-    api_key: String,
-    max_concurrent_model_calls: u32,
-    initial_timeout_seconds: f64,
+    settings: ModelSettingsDraft,
     request_id: String,
 ) -> Result<ModelSettings, BridgeError> {
     let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.save_model_settings(
-            provider,
-            model,
-            api_base_url,
-            api_key,
-            max_concurrent_model_calls,
-            initial_timeout_seconds,
-            request_id,
-        )
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop model-settings save stopped unexpectedly: {error}"),
-    })?
+    tauri::async_runtime::spawn_blocking(move || engine.save_model_settings(settings, request_id))
+        .await
+        .map_err(|error| BridgeError {
+            code: "desktop_command_failed".to_owned(),
+            message: format!("Desktop model-settings save stopped unexpectedly: {error}"),
+        })?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-#[allow(clippy::too_many_arguments)]
 async fn desktop_test_model_connection(
     state: State<'_, DesktopState>,
-    provider: String,
-    model: String,
-    api_base_url: String,
-    api_key: String,
-    max_concurrent_model_calls: u32,
-    initial_timeout_seconds: f64,
+    settings: ModelSettingsDraft,
     request_id: String,
 ) -> Result<serde_json::Value, BridgeError> {
     let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.test_model_connection(
-            provider,
-            model,
-            api_base_url,
-            api_key,
-            max_concurrent_model_calls,
-            initial_timeout_seconds,
-            request_id,
-        )
-    })
-    .await
-    .map_err(desktop_join_error!("model connection test"))?
+    tauri::async_runtime::spawn_blocking(move || engine.test_model_connection(settings, request_id))
+        .await
+        .map_err(desktop_join_error!("model connection test"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -635,6 +605,38 @@ fn desktop_cancel_import_job(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+fn desktop_cancel_page_tree_enrichment(
+    state: State<'_, DesktopState>,
+    document_id: String,
+) -> Result<PageTreeEnrichmentControlResult, BridgeError> {
+    state.engine.cancel_page_tree_enrichment(document_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn desktop_retry_page_tree_enrichment(
+    state: State<'_, DesktopState>,
+    document_id: String,
+) -> Result<PageTreeEnrichmentControlResult, BridgeError> {
+    state.engine.retry_page_tree_enrichment(document_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn desktop_cancel_knowledge_graph_extraction(
+    state: State<'_, DesktopState>,
+    document_id: String,
+) -> Result<KnowledgeGraphExtractionControlResult, BridgeError> {
+    state.engine.cancel_knowledge_graph_extraction(document_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn desktop_retry_knowledge_graph_extraction(
+    state: State<'_, DesktopState>,
+    document_id: String,
+) -> Result<KnowledgeGraphExtractionControlResult, BridgeError> {
+    state.engine.retry_knowledge_graph_extraction(document_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 fn desktop_cancel(
     state: State<'_, DesktopState>,
     target_request_id: String,
@@ -760,6 +762,10 @@ fn main() {
             desktop_resume_import_job,
             desktop_recover_import_job,
             desktop_cancel_import_job,
+            desktop_cancel_page_tree_enrichment,
+            desktop_retry_page_tree_enrichment,
+            desktop_cancel_knowledge_graph_extraction,
+            desktop_retry_knowledge_graph_extraction,
             desktop_cancel,
             desktop_subscribe,
             desktop_unsubscribe,

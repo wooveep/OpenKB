@@ -24,7 +24,10 @@ import type {
   DesktopKnowledgeReanalysisRun,
   DesktopGlobalSearchResults,
   DesktopModelSettings,
+  DesktopModelSettingsDraft,
   DesktopModelConnectionTest,
+  DesktopPageTreeEnrichmentControlResult,
+  DesktopKnowledgeGraphExtractionControlResult,
   DesktopDocumentVersionCandidate,
   DesktopDocumentVersionCandidates,
   DesktopDocumentVersionCandidateDecision,
@@ -55,6 +58,16 @@ function emptyRetrievalTrace(canonicalEvidenceIds: string[] = []) {
   }
 }
 
+function emptyImportTelemetry() {
+  return {
+    importProgress: [],
+    modelUsage: [],
+    modelUsageAggregate: null,
+    modelActivity: null,
+    legacyModelRecovery: null,
+  }
+}
+
 /** In-memory Bridge for React component tests; it never touches Tauri or Python. */
 export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements DesktopBridge {
   private readonly listeners = new Set<(event: DesktopBridgeEvent) => void>()
@@ -73,8 +86,31 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
     apiKey: "",
     apiKeyConfigured: false,
     maxConcurrentModelCalls: 1,
-    initialTimeoutSeconds: 20,
-    modelCallDeadlineSeconds: 60,
+    analysisModel: null,
+    answerModel: null,
+    defaultContextCapacity: null,
+    analysisContextCapacity: null,
+    answerContextCapacity: null,
+    defaultReasoning: null,
+    analysisReasoning: null,
+    answerReasoning: null,
+    defaultInputPricePerMillion: null,
+    defaultOutputPricePerMillion: null,
+    analysisInputPricePerMillion: null,
+    analysisOutputPricePerMillion: null,
+    answerInputPricePerMillion: null,
+    answerOutputPricePerMillion: null,
+    analysisConcurrency: 1,
+    usageAggregate: {
+      callCount: 0,
+      attemptCount: 0,
+      failureCount: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      totalCost: null,
+      tokenUsageSource: null,
+    },
   }
 
   constructor(
@@ -138,44 +174,25 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
   }
 
   async saveModelSettings(
-    provider: string,
-    model: string,
-    apiBaseUrl: string,
-    apiKey: string,
-    maxConcurrentModelCalls: number,
-    initialTimeoutSeconds: number,
+    settings: DesktopModelSettingsDraft,
     requestId: string,
   ): Promise<DesktopModelSettings> {
     void requestId
     this.modelSettingsResult = {
       ...this.modelSettingsResult,
-      provider,
-      model,
-      apiBaseUrl,
-      apiKey,
-      apiKeyConfigured: Boolean(apiKey),
-      maxConcurrentModelCalls,
-      initialTimeoutSeconds,
+      ...settings,
+      apiKeyConfigured: Boolean(settings.apiKey),
+      analysisConcurrency: settings.maxConcurrentModelCalls,
     }
     return this.modelSettingsResult
   }
 
   async testModelConnection(
-    provider: string,
-    model: string,
-    apiBaseUrl: string,
-    apiKey: string,
-    maxConcurrentModelCalls: number,
-    initialTimeoutSeconds: number,
+    settings: DesktopModelSettingsDraft,
     requestId: string,
   ): Promise<DesktopModelConnectionTest> {
-    void provider
-    void apiBaseUrl
-    void apiKey
-    void maxConcurrentModelCalls
-    void initialTimeoutSeconds
     void requestId
-    return { ok: true, model, latencyMs: 42, attemptCount: 1 }
+    return { ok: true, model: settings.model, latencyMs: 42, attemptCount: 1 }
   }
 
   async exportDiagnosticBundle(
@@ -185,7 +202,7 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
     void requestId
     return {
       path: destination,
-      files: ["manifest.json", "model-settings.json", "import-jobs.json", "model-calls.json"],
+      files: ["manifest.json", "model-settings.json", "import-jobs.json", "model-calls.json", "model-usage.json"],
     }
   }
 
@@ -315,6 +332,7 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
       })),
       modelCalls: [],
       quarantine: null,
+      ...emptyImportTelemetry(),
     }
     this.importJobResults = [result, ...this.importJobResults]
     return result
@@ -325,6 +343,7 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
       jobs: this.importJobResults,
       pageTreeRebuilds: [],
       pageTreeEnrichments: [],
+      knowledgeGraphExtractions: [],
       catalogRebuild: null,
     }
   }
@@ -640,6 +659,11 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
         })),
         modelCalls: task.modelCalls,
         quarantine: task.quarantine,
+        importProgress: task.importProgress,
+        modelUsage: task.modelUsage,
+        modelUsageAggregate: task.modelUsageAggregate,
+        modelActivity: task.modelActivity,
+        legacyModelRecovery: task.legacyModelRecovery,
       }
       this.importJobResults = [
         result,
@@ -678,6 +702,11 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
       })),
       modelCalls: task.modelCalls,
       quarantine: null,
+      importProgress: task.importProgress,
+      modelUsage: task.modelUsage,
+      modelUsageAggregate: task.modelUsageAggregate,
+      modelActivity: task.modelActivity,
+      legacyModelRecovery: task.legacyModelRecovery,
     }
     this.importJobResults = [result, ...this.importJobResults.filter((item) => item.job.jobId !== jobId)]
     return result
@@ -686,6 +715,20 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
   async cancelImportJob(jobId: string): Promise<DesktopImportControlResult> {
     this.importJobResults = updateImportTasks(this.importJobResults, jobId, "cancelled")
     return { jobId, accepted: true }
+  }
+
+  async cancelPageTreeEnrichment(documentId: string): Promise<DesktopPageTreeEnrichmentControlResult> {
+    return { documentId, accepted: false }
+  }
+  async retryPageTreeEnrichment(documentId: string): Promise<DesktopPageTreeEnrichmentControlResult> {
+    return { documentId, accepted: false }
+  }
+  async cancelKnowledgeGraphExtraction(documentId: string): Promise<DesktopKnowledgeGraphExtractionControlResult> {
+    return { documentId, accepted: false }
+  }
+
+  async retryKnowledgeGraphExtraction(documentId: string): Promise<DesktopKnowledgeGraphExtractionControlResult> {
+    return { documentId, accepted: false }
   }
 
   async cancel(targetRequestId: string): Promise<DesktopCancelResult> {

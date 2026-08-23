@@ -29,6 +29,10 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
 import { useDesktopBridge } from "./bridge-context"
+import {
+  DesktopLiveModelActivityDetails,
+  type DesktopLiveModelActivity,
+} from "./DesktopModelActivityDetails"
 import type {
   DesktopAnswerVersion,
   DesktopConversation,
@@ -44,6 +48,7 @@ type StreamState = {
   question: string | null
   content: string
   attempt: number
+  activity: DesktopLiveModelActivity | null
 }
 
 /** Codex-style multi-conversation workspace backed by SQLite Conversation objects. */
@@ -66,6 +71,7 @@ export function DesktopConversationPanel({
   const [listCollapsed, setListCollapsed] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [streams, setStreams] = useState<Record<string, StreamState>>({})
   const [evidence, setEvidence] = useState<DesktopAnswerVersion | null>(null)
   const [evidenceTab, setEvidenceTab] = useState<"sources" | "images">("sources")
@@ -175,7 +181,23 @@ export function DesktopConversationPanel({
     let disposed = false
     let unsubscribe: (() => void) | undefined
     void bridge.subscribe((event) => {
-      if (disposed || event.kind !== "answer.delta") return
+      if (disposed) return
+      if (event.kind === "model.call_lifecycle") {
+        setStreams((current) => {
+          const stream = Object.values(current).find(
+            (item) => item.requestId === event.data.requestId,
+          )
+          return stream ? {
+            ...current,
+            [stream.conversationId]: {
+              ...stream,
+              activity: { ...event.data, observedAtMs: Date.now() },
+            },
+          } : current
+        })
+        return
+      }
+      if (event.kind !== "answer.delta") return
       setStreams((current) => {
         const stream = Object.values(current).find((item) => item.requestId === event.data.requestId)
         if (!stream || event.data.attempt < stream.attempt) return current
@@ -187,6 +209,7 @@ export function DesktopConversationPanel({
             messageId: event.data.answerId,
             attempt: event.data.attempt,
             content: replace ? event.data.delta : stream.content + event.data.delta,
+            activity: stream.activity,
           },
         }
       })
@@ -294,10 +317,19 @@ export function DesktopConversationPanel({
     setConversation(cleared)
     setStreams((current) => ({
       ...current,
-      [conversationId]: { requestId, conversationId, messageId: null, question, content: "", attempt: 0 },
+      [conversationId]: {
+        requestId,
+        conversationId,
+        messageId: null,
+        question,
+        content: "",
+        attempt: 0,
+        activity: null,
+      },
     }))
     setSummaries((current) => current.map((item) => item.conversationId === conversationId ? { ...item, generating: true } : item))
     setError(null)
+    setNotice(null)
     try {
       const updated = await bridge.askConversation(conversationId, question, requestId)
       if (selectedConversationId.current === conversationId) {
@@ -332,9 +364,19 @@ export function DesktopConversationPanel({
     if (!conversation || streams[conversation.conversationId]) return
     const conversationId = conversation.conversationId
     const requestId = nextDesktopRequestId("conversation-regenerate")
+    setError(null)
+    setNotice(null)
     setStreams((current) => ({
       ...current,
-      [conversationId]: { requestId, conversationId, messageId, question: null, content: "", attempt: 0 },
+      [conversationId]: {
+        requestId,
+        conversationId,
+        messageId,
+        question: null,
+        content: "",
+        attempt: 0,
+        activity: null,
+      },
     }))
     try {
       const updated = await bridge.regenerateConversationAnswer(conversationId, messageId, requestId)
@@ -371,6 +413,19 @@ export function DesktopConversationPanel({
   }
 
   const currentStream = conversation ? streams[conversation.conversationId] : undefined
+
+  const stopCurrentStream = async () => {
+    if (!currentStream) return
+    try {
+      const result = await bridge.cancel(currentStream.requestId)
+      if (result.cancelled) {
+        setNotice(t("desktop.knowledgeBases.answerCancellationWarning"))
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
   return (
     <div className="-m-4 flex h-[calc(100vh-3.5rem)] min-h-[34rem] md:-m-6" data-testid="desktop-conversations">
       <aside className={cn("shrink-0 border-r border-border/70 bg-muted/15 transition-[width] duration-150 motion-reduce:transition-none", listCollapsed ? "w-12" : "w-64")}>
@@ -419,11 +474,12 @@ export function DesktopConversationPanel({
               generating={Boolean(currentStream)}
               onChange={updateDraft}
               onSend={() => void ask()}
-              onStop={() => { if (currentStream) void bridge.cancel(currentStream.requestId) }}
+              onStop={() => void stopCurrentStream()}
             />
           </>
         ) : null}
         {error ? <p className="absolute bottom-28 left-1/2 z-10 w-[min(42rem,calc(100%-2rem))] -translate-x-1/2 rounded-lg border border-destructive/30 bg-background px-3 py-2 text-sm text-destructive shadow-lg" role="alert">{error}</p> : null}
+        {notice ? <p className="absolute bottom-28 left-1/2 z-10 w-[min(42rem,calc(100%-2rem))] -translate-x-1/2 rounded-lg border border-amber-500/40 bg-background px-3 py-2 text-sm text-amber-800 shadow-lg dark:text-amber-200" role="status">{notice}</p> : null}
       </main>
         <EvidenceDrawer version={evidence} tab={evidenceTab} focusIndex={evidenceFocusIndex} onTabChange={setEvidenceTab} onClose={() => { setEvidence(null); setEvidenceFocusIndex(null) }} onOpenOriginal={onOpenOriginal} />
     </div>
@@ -449,12 +505,12 @@ function AssistantMessage({ message, stream, onRegenerate, onSelectVersion, onOp
       console.warn("answer_evidence_marker_invalid", { messageId: message.messageId, ordinal, evidenceCount: selected.citations.length })
     }
   }, [message.messageId, selected, stream, text])
-  return <article className="w-full"><div className="text-sm leading-7"><MarkdownView source={text} finalized={!stream} evidenceCount={evidenceCount} onEvidenceRef={stream ? undefined : (ordinal) => { if (selected) onOpenEvidence(selected, "sources", ordinal - 1) }} /></div>{message.status === "interrupted" ? <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">{selected?.interruptionReason ?? t("desktop.conversations.interrupted")}</p> : null}{inlineImages.length ? <div className="mt-4 grid grid-cols-3 gap-2">{inlineImages.map((image) => <button key={image.sourceImageId} type="button" onClick={() => onOpenEvidence(selected!, "images")} className="overflow-hidden rounded-lg border border-border/70 bg-muted/20"><img src={convertFileSrc(image.filePath)} alt={image.altText ?? image.name} className="h-28 w-full object-contain" /></button>)}</div> : null}<div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">{selected && !stream ? <Button size="sm" variant="outline" className="h-7" onClick={() => onOpenEvidence(selected, "sources")}>{t("desktop.conversations.evidence", { citations: selected.citations.length, images: selected.sourceImages.length })}</Button> : null}<Button size="icon" variant="ghost" className="size-7" disabled={Boolean(stream)} onClick={onRegenerate} aria-label={t("desktop.conversations.regenerate")}>{stream ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}</Button>{message.answerVersions.length > 1 && selected && !stream ? <div className="flex items-center gap-1"><Button size="icon" variant="ghost" className="size-7" disabled={selected.versionNumber <= 1} onClick={() => onSelectVersion(message.answerVersions[selected.versionNumber - 2].answerVersionId)}><ChevronLeft className="size-3.5" /></Button><span>{selected.versionNumber}/{message.answerVersions.length}</span><Button size="icon" variant="ghost" className="size-7" disabled={selected.versionNumber >= message.answerVersions.length} onClick={() => onSelectVersion(message.answerVersions[selected.versionNumber].answerVersionId)}><ChevronRight className="size-3.5" /></Button></div> : null}</div></article>
+  return <article className="w-full"><div className="text-sm leading-7"><MarkdownView source={text} finalized={!stream} evidenceCount={evidenceCount} onEvidenceRef={stream ? undefined : (ordinal) => { if (selected) onOpenEvidence(selected, "sources", ordinal - 1) }} /></div>{stream?.activity ? <div className="mt-3 text-xs"><DesktopLiveModelActivityDetails activity={stream.activity} /></div> : null}{message.status === "interrupted" ? <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">{selected?.interruptionReason ?? t("desktop.conversations.interrupted")}</p> : null}{inlineImages.length ? <div className="mt-4 grid grid-cols-3 gap-2">{inlineImages.map((image) => <button key={image.sourceImageId} type="button" onClick={() => onOpenEvidence(selected!, "images")} className="overflow-hidden rounded-lg border border-border/70 bg-muted/20"><img src={convertFileSrc(image.filePath)} alt={image.altText ?? image.name} className="h-28 w-full object-contain" /></button>)}</div> : null}<div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">{selected && !stream ? <Button size="sm" variant="outline" className="h-7" onClick={() => onOpenEvidence(selected, "sources")}>{t("desktop.conversations.evidence", { citations: selected.citations.length, images: selected.sourceImages.length })}</Button> : null}<Button size="icon" variant="ghost" className="size-7" disabled={Boolean(stream)} onClick={onRegenerate} aria-label={t("desktop.conversations.regenerate")}>{stream ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}</Button>{message.answerVersions.length > 1 && selected && !stream ? <div className="flex items-center gap-1"><Button size="icon" variant="ghost" className="size-7" disabled={selected.versionNumber <= 1} onClick={() => onSelectVersion(message.answerVersions[selected.versionNumber - 2].answerVersionId)}><ChevronLeft className="size-3.5" /></Button><span>{selected.versionNumber}/{message.answerVersions.length}</span><Button size="icon" variant="ghost" className="size-7" disabled={selected.versionNumber >= message.answerVersions.length} onClick={() => onSelectVersion(message.answerVersions[selected.versionNumber].answerVersionId)}><ChevronRight className="size-3.5" /></Button></div> : null}</div></article>
 }
 
 function PendingTurn({ stream }: { stream: StreamState }) {
   const { t } = useTranslation("common")
-  return <><div className="flex justify-end"><div className="max-w-[78%] rounded-2xl rounded-br-md bg-muted px-4 py-2.5 text-sm leading-6">{stream.question}</div></div><article><p className="mb-2 flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="size-3 animate-spin" />{t("desktop.conversations.generating")}</p><MarkdownView source={stream.content} finalized={false} /></article></>
+  return <><div className="flex justify-end"><div className="max-w-[78%] rounded-2xl rounded-br-md bg-muted px-4 py-2.5 text-sm leading-6">{stream.question}</div></div><article><p className="mb-2 flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="size-3 animate-spin" />{t("desktop.conversations.generating")}</p>{stream.activity ? <div className="mb-3 text-xs"><DesktopLiveModelActivityDetails activity={stream.activity} /></div> : null}<MarkdownView source={stream.content} finalized={false} /></article></>
 }
 
 function Composer({ value, generating, onChange, onSend, onStop }: { value: string; generating: boolean; onChange: (value: string) => void; onSend: () => void; onStop: () => void }) {

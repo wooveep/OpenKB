@@ -12,19 +12,30 @@ import datetime as dt
 import json
 import re
 import sqlite3
-import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from openkb.desktop_knowledge_graph_store import (
+    GraphEdge as _GraphEdge,
+)
+from openkb.desktop_knowledge_graph_store import (
+    GraphNode as _GraphNode,
+)
+from openkb.desktop_knowledge_graph_store import (
+    GraphPayload as _GraphPayload,
+)
+from openkb.desktop_knowledge_graph_store import (
+    persist_graph_payload_in,
+)
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
     DesktopModelGateway,
-    DesktopModelRequest,
 )
+from openkb.desktop_structured_output import run_structured_output
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock, try_kb_ingest_lock
 
@@ -61,9 +72,11 @@ _GRAPH_QUERY_BUDGET_SECONDS = 0.075
 _ENTITY_PATTERN = re.compile(r"\b[A-Z][A-Za-z0-9_-]*(?:\s+[A-Z][A-Za-z0-9_-]*){0,2}\b")
 _WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u3400-\u9fff]{2,}")
 _NON_ENTITY_WORDS = frozenset(("The", "This", "That", "These", "Those", "Document"))
-_EXTRACTION_WORKER_LOCK = threading.Lock()
-
 CancellationCallback = Callable[[], bool]
+ModelEventCallback = Callable[[object], None]
+FailureCallback = Callable[[str, str], None]
+PublishOperation = Callable[[sqlite3.Connection], bool]
+PublishTransaction = Callable[[PublishOperation], bool]
 
 
 class DesktopKnowledgeGraphQueryError(RuntimeError):
@@ -82,31 +95,6 @@ class _EvidenceInput:
     section: str
 
 
-@dataclass(frozen=True)
-class _GraphNode:
-    local_id: str
-    evidence_id: str
-    node_type: str
-    label: str
-    extraction_method: str
-
-
-@dataclass(frozen=True)
-class _GraphEdge:
-    evidence_id: str
-    source_local_id: str
-    target_local_id: str
-    edge_type: str
-    support_score: float
-    extraction_method: str
-
-
-@dataclass(frozen=True)
-class _GraphPayload:
-    nodes: tuple[_GraphNode, ...]
-    edges: tuple[_GraphEdge, ...]
-
-
 class DesktopKnowledgeGraphService:
     """Extract evidence-bound local graph records after a document is published."""
 
@@ -117,12 +105,19 @@ class DesktopKnowledgeGraphService:
         self._model_gateway = model_gateway
 
     def extract_document(
-        self, document_id: str, *, is_cancelled: CancellationCallback | None = None
+        self,
+        document_id: str,
+        *,
+        is_cancelled: CancellationCallback | None = None,
+        on_model_event: ModelEventCallback | None = None,
+        on_failure: FailureCallback | None = None,
+        publish_transaction: PublishTransaction | None = None,
     ) -> bool:
         """Best-effort extraction; a failure never changes the document's availability."""
         try:
             evidence = self._unextracted_evidence(document_id)
         except (OSError, sqlite3.Error):
+            _report_failure(on_failure, "knowledge_graph_extraction_failed")
             self._record_diagnostic("extraction", "knowledge_graph_extraction_failed", document_id)
             return False
         if not evidence or _is_cancelled(is_cancelled):
@@ -130,24 +125,31 @@ class DesktopKnowledgeGraphService:
 
         try:
             payload = (
-                self._model_payload(evidence, is_cancelled=is_cancelled)
+                self._model_payload(
+                    evidence,
+                    is_cancelled=is_cancelled,
+                    on_model_event=on_model_event,
+                )
                 if self._model_gateway is not None
                 else _deterministic_payload(evidence)
             )
         except DesktopModelCancelledError:
             return False
         except DesktopModelCallError as error:
+            _report_failure(on_failure, error.failure.code, error.failure.reason)
             self._record_diagnostic("extraction", error.failure.code, document_id)
             return False
         except (ValueError, json.JSONDecodeError):
+            _report_failure(on_failure, "knowledge_graph_response_invalid")
             self._record_diagnostic("extraction", "knowledge_graph_response_invalid", document_id)
             return False
 
         if _is_cancelled(is_cancelled):
             return False
         try:
-            return self._persist(payload)
+            return self._persist(payload, publish_transaction=publish_transaction)
         except (OSError, sqlite3.Error):
+            _report_failure(on_failure, "knowledge_graph_extraction_failed")
             self._record_diagnostic("extraction", "knowledge_graph_extraction_failed", document_id)
             return False
 
@@ -191,38 +193,47 @@ class DesktopKnowledgeGraphService:
         )
 
     def _model_payload(
-        self, evidence: tuple[_EvidenceInput, ...], *, is_cancelled: CancellationCallback | None
+        self,
+        evidence: tuple[_EvidenceInput, ...],
+        *,
+        is_cancelled: CancellationCallback | None,
+        on_model_event: ModelEventCallback | None,
     ) -> _GraphPayload:
         if self._model_gateway is None:
             raise ValueError("Knowledge graph model is unavailable.")
-        request = DesktopModelRequest(
-            "knowledge_graph_extraction",
-            evidence[0].document_name,
-            _model_input(evidence),
+        gateway = self._model_gateway
+        source_material = _model_input(evidence)
+        output = run_structured_output(
+            operation="knowledge_graph_extraction",
+            document_name=evidence[0].document_name,
+            source_material=source_material,
+            invoke=lambda request: gateway.analyze(
+                request,
+                on_event=on_model_event or (lambda _event: None),
+                is_cancelled=is_cancelled,
+            ),
+            validate=lambda content: _model_payload_from_text(content, evidence),
         )
-        result = self._model_gateway.analyze(
-            request,
-            on_event=lambda _event: None,
-            is_cancelled=is_cancelled,
-        )
-        parsed = _model_payload_from_text(result.content, evidence)
-        return _fill_missing_evidence(parsed, evidence)
+        return _fill_missing_evidence(output.value, evidence)
 
-    def _persist(self, payload: _GraphPayload) -> bool:
-        if not payload.nodes:
-            return False
+    def _persist(
+        self,
+        payload: _GraphPayload,
+        *,
+        publish_transaction: PublishTransaction | None = None,
+    ) -> bool:
+        if publish_transaction is not None:
+            return publish_transaction(
+                lambda connection: persist_graph_payload_in(connection, payload)
+            )
         with kb_ingest_lock(self._state_dir):
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                evidence_ids = tuple(dict.fromkeys(node.evidence_id for node in payload.nodes))
-                existing = _existing_evidence_ids(connection, evidence_ids)
-                nodes = tuple(node for node in payload.nodes if node.evidence_id not in existing)
-                if not nodes:
+                changed = persist_graph_payload_in(connection, payload)
+                if not changed:
                     connection.rollback()
                     return False
-                local_to_persisted = _insert_nodes(connection, nodes)
-                _insert_edges(connection, payload.edges, local_to_persisted)
                 connection.commit()
                 return True
             except BaseException:
@@ -293,26 +304,12 @@ class DesktopKnowledgeGraphService:
 def start_graph_extraction(
     kb_dir: Path, document_id: str, *, model_gateway: DesktopModelGateway | None
 ) -> None:
-    """Queue optional graph extraction without delaying a completed import result."""
+    """Durably queue optional graph work; the Engine owns execution and cancellation."""
+    if model_gateway is None:
+        return
+    from openkb.desktop_knowledge_graph_tasks import DesktopKnowledgeGraphExtractionTasks
 
-    def run() -> None:
-        # Import jobs already serialize source publication.  Keeping graph model
-        # calls serial prevents a large batch from turning this enhancement into
-        # an unbounded burst of provider requests.
-        with _EXTRACTION_WORKER_LOCK:
-            service = DesktopKnowledgeGraphService(kb_dir, model_gateway=model_gateway)
-            try:
-                service.extract_document(document_id)
-            except Exception:  # A background enhancement must not leak a worker traceback.
-                service._record_diagnostic(
-                    "extraction", "knowledge_graph_extraction_failed", document_id
-                )
-
-    threading.Thread(
-        target=run,
-        daemon=True,
-        name=f"openkb-graph-{document_id[:8]}",
-    ).start()
+    DesktopKnowledgeGraphExtractionTasks(kb_dir).queue(document_id, model_gateway)
 
 
 def record_graph_extraction_diagnostic(kb_dir: Path, document_id: str) -> None:
@@ -604,78 +601,6 @@ def _deterministic_payload(evidence: tuple[_EvidenceInput, ...]) -> _GraphPayloa
     return _GraphPayload(nodes=tuple(nodes), edges=tuple(edges))
 
 
-def _existing_evidence_ids(
-    connection: sqlite3.Connection, evidence_ids: tuple[str, ...]
-) -> set[str]:
-    if not evidence_ids:
-        return set()
-    rows = connection.execute(
-        f"""
-        SELECT DISTINCT evidence_id
-        FROM knowledge_graph_nodes
-        WHERE evidence_id IN ({_placeholders(evidence_ids)})
-        """,
-        evidence_ids,
-    ).fetchall()
-    return {str(row[0]) for row in rows}
-
-
-def _insert_nodes(connection: sqlite3.Connection, nodes: tuple[_GraphNode, ...]) -> dict[str, str]:
-    created_at = _timestamp()
-    persisted = {node.local_id: uuid.uuid4().hex for node in nodes}
-    connection.executemany(
-        """
-        INSERT INTO knowledge_graph_nodes (
-            node_id, evidence_id, node_type, label, normalized_label, extraction_method, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                persisted[node.local_id],
-                node.evidence_id,
-                node.node_type,
-                node.label,
-                _normalized_label(node.label),
-                node.extraction_method,
-                created_at,
-            )
-            for node in nodes
-        ],
-    )
-    return persisted
-
-
-def _insert_edges(
-    connection: sqlite3.Connection,
-    edges: tuple[_GraphEdge, ...],
-    local_to_persisted: dict[str, str],
-) -> None:
-    values = [
-        (
-            uuid.uuid4().hex,
-            edge.evidence_id,
-            local_to_persisted[edge.source_local_id],
-            local_to_persisted[edge.target_local_id],
-            edge.edge_type,
-            edge.support_score,
-            edge.extraction_method,
-            _timestamp(),
-        )
-        for edge in edges
-        if edge.source_local_id in local_to_persisted and edge.target_local_id in local_to_persisted
-    ]
-    if values:
-        connection.executemany(
-            """
-            INSERT INTO knowledge_graph_edges (
-                edge_id, evidence_id, source_node_id, target_node_id, edge_type, support_score,
-                extraction_method, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            values,
-        )
-
-
 def bounded_graph_rows(
     connection: sqlite3.Connection,
     statement: str,
@@ -790,3 +715,8 @@ def _timestamp() -> str:
 
 def _is_cancelled(callback: CancellationCallback | None) -> bool:
     return callback is not None and callback()
+
+
+def _report_failure(callback: FailureCallback | None, code: str, reason: str | None = None) -> None:
+    if callback is not None:
+        callback(code, reason or code.replace("_", " ").capitalize() + ".")

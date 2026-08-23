@@ -6,6 +6,17 @@ import type {
 } from "./knowledge-reanalysis-contracts"
 import type { DesktopModelCallLifecycleEvent } from "./model-call-lifecycle-contracts"
 import type {
+  DesktopImportProgressStep,
+  DesktopKnowledgeAnalysisProgress,
+  DesktopLegacyModelRecovery,
+  DesktopModelActivity,
+  DesktopModelCall,
+  DesktopModelUsageAggregate,
+  DesktopModelUsageRecord,
+  DesktopRecoveryOverride,
+} from "./contracts-import-observability"
+import type { DesktopModelSettings, DesktopModelSettingsDraft } from "./model-settings-contracts"
+import type {
   DesktopAnswerSourceImage,
   DesktopEvidenceRef,
   DesktopGroundedAnswer,
@@ -15,6 +26,8 @@ import type {
 } from "./contracts-retrieval"
 export type * from "./knowledge-reanalysis-contracts"
 export type * from "./model-call-lifecycle-contracts"
+export type * from "./contracts-import-observability"
+export type * from "./model-settings-contracts"
 export type * from "./contracts-retrieval"
 
 export const DESKTOP_BRIDGE_PROTOCOL_VERSION = 1
@@ -110,7 +123,7 @@ export interface DesktopImportedDocument {
 export interface DesktopImportJob {
   jobId: string
   sourceName: string
-  status: "running" | "paused" | "cancelled" | "recoverable" | "quarantined" | "completed" | "failed"
+  status: "running" | "paused" | "cancelled" | "recoverable" | "quarantined" | "completed" | "failed" | "awaiting_model_configuration"
   progress: number
   documentId: string | null
   deduplicated: boolean
@@ -134,30 +147,6 @@ export interface DesktopImportStageRun {
   errorCode: string | null
 }
 
-export interface DesktopModelAttempt {
-  attempt: number
-  status: "running" | "retry_wait" | "completed" | "failed"
-  timeoutSeconds: number
-  remainingSeconds: number
-  errorCode: string | null
-  reason: string | null
-}
-
-export interface DesktopModelCall {
-  callId: string
-  stageRunId: string
-  operation: string
-  status: DesktopModelAttempt["status"]
-  attemptCount: number
-  timeoutSeconds: number
-  nextTimeoutSeconds: number | null
-  remainingSeconds: number
-  errorCode: string | null
-  reason: string | null
-  suggestedAction: string | null
-  attempts: DesktopModelAttempt[]
-}
-
 export interface DesktopQuarantinedDocument {
   stageRunId: string
   stage: DesktopImportStageRun["stage"]
@@ -167,22 +156,6 @@ export interface DesktopQuarantinedDocument {
   attemptCount: number
 }
 
-export interface DesktopKnowledgeAnalysisProgress {
-  total: number
-  completed: number
-  active: number
-  failed: number
-  currentBatch: number | null
-  phase: "batches" | "merge" | "completed"
-  currentTimeoutSeconds: number | null
-  remainingSeconds: number | null
-}
-
-/** Optional settings used only by one manual recovery run. */
-export interface DesktopRecoveryOverride {
-  model?: string
-  initialTimeoutSeconds?: number
-}
 
 export interface DesktopImportSource {
   path: string
@@ -245,6 +218,11 @@ export interface DesktopTextDocumentImport {
   modelCalls: DesktopModelCall[]
   quarantine: DesktopQuarantinedDocument | null
   knowledgeAnalysis?: DesktopKnowledgeAnalysisProgress | null
+  importProgress: DesktopImportProgressStep[]
+  modelUsage: DesktopModelUsageRecord[]
+  modelUsageAggregate: DesktopModelUsageAggregate | null
+  modelActivity: DesktopModelActivity | null
+  legacyModelRecovery: DesktopLegacyModelRecovery | null
 }
 
 export interface DesktopImportTask {
@@ -254,13 +232,19 @@ export interface DesktopImportTask {
   modelCalls: DesktopModelCall[]
   quarantine: DesktopQuarantinedDocument | null
   knowledgeAnalysis?: DesktopKnowledgeAnalysisProgress | null
+  importProgress: DesktopImportProgressStep[]
+  modelUsage: DesktopModelUsageRecord[]
+  modelUsageAggregate: DesktopModelUsageAggregate | null
+  modelActivity: DesktopModelActivity | null
+  legacyModelRecovery: DesktopLegacyModelRecovery | null
 }
 
 export interface DesktopImportJobs {
-  jobs: DesktopImportTask[]
-  pageTreeRebuilds: DesktopPageTreeRebuildTask[]
-  pageTreeEnrichments: DesktopPageTreeEnrichmentTask[]
-  catalogRebuild: DesktopCatalogRebuildTask | null
+    jobs: DesktopImportTask[]
+    pageTreeRebuilds: DesktopPageTreeRebuildTask[]
+    pageTreeEnrichments: DesktopPageTreeEnrichmentTask[]
+    knowledgeGraphExtractions: DesktopKnowledgeGraphExtractionTask[]
+    catalogRebuild: DesktopCatalogRebuildTask | null
 }
 
 export interface DesktopCatalogRebuildTask {
@@ -302,14 +286,40 @@ export interface DesktopPageTreeEnrichmentTask {
   attemptCount: number
   modelAttempt: number
   callId: string | null
-  timeoutSeconds: number | null
-  remainingSeconds: number | null
   errorCode: string | null
   errorReason: string | null
   updatedAt: string
   completedAt: string | null
   baseGenerationId: string
   currentEnrichmentGenerationId: string | null
+  modelActivity: DesktopModelActivity | null
+}
+
+export interface DesktopPageTreeEnrichmentControlResult {
+  documentId: string
+  accepted: boolean
+}
+
+export interface DesktopKnowledgeGraphExtractionTask {
+  documentId: string
+  documentName: string
+  status: "pending" | "running" | "failed" | "completed"
+  reason: string
+  provider: string
+  model: string
+  attemptCount: number
+  modelAttempt: number
+  callId: string | null
+  errorCode: string | null
+  errorReason: string | null
+  updatedAt: string
+  completedAt: string | null
+  modelActivity: DesktopModelActivity | null
+}
+
+export interface DesktopKnowledgeGraphExtractionControlResult {
+  documentId: string
+  accepted: boolean
 }
 
 export interface DesktopConversationSummary {
@@ -617,18 +627,6 @@ export class DesktopBridgeError extends Error {
   }
 }
 
-/** KB-local model connection values passed only through the private Desktop Bridge. */
-export interface DesktopModelSettings {
-  provider: string
-  model: string
-  apiBaseUrl: string
-  apiKey: string
-  apiKeyConfigured: boolean
-  maxConcurrentModelCalls: number
-  initialTimeoutSeconds: number
-  modelCallDeadlineSeconds: number
-}
-
 export interface DesktopModelConnectionTest {
   ok: boolean
   model: string
@@ -666,21 +664,11 @@ export interface DesktopBridge {
   revealApplicationLogDirectory(): Promise<void>
   modelSettings(): Promise<DesktopModelSettings>
   saveModelSettings(
-    provider: string,
-    model: string,
-    apiBaseUrl: string,
-    apiKey: string,
-    maxConcurrentModelCalls: number,
-    initialTimeoutSeconds: number,
+    settings: DesktopModelSettingsDraft,
     requestId: string,
   ): Promise<DesktopModelSettings>
   testModelConnection(
-    provider: string,
-    model: string,
-    apiBaseUrl: string,
-    apiKey: string,
-    maxConcurrentModelCalls: number,
-    initialTimeoutSeconds: number,
+    settings: DesktopModelSettingsDraft,
     requestId: string,
   ): Promise<DesktopModelConnectionTest>
   exportDiagnosticBundle(destination: string, requestId: string): Promise<DesktopDiagnosticBundle>
@@ -782,6 +770,18 @@ export interface DesktopBridge {
     requestId: string,
   ): Promise<DesktopTextDocumentImport>
   cancelImportJob(jobId: string): Promise<DesktopImportControlResult>
+  cancelPageTreeEnrichment(
+    documentId: string,
+  ): Promise<DesktopPageTreeEnrichmentControlResult>
+  retryPageTreeEnrichment(
+    documentId: string,
+  ): Promise<DesktopPageTreeEnrichmentControlResult>
+  cancelKnowledgeGraphExtraction(
+    documentId: string,
+  ): Promise<DesktopKnowledgeGraphExtractionControlResult>
+  retryKnowledgeGraphExtraction(
+    documentId: string,
+  ): Promise<DesktopKnowledgeGraphExtractionControlResult>
   cancel(targetRequestId: string): Promise<DesktopCancelResult>
   subscribe(listener: (event: DesktopBridgeEvent) => void): Promise<() => void>
 }

@@ -55,6 +55,10 @@ WORKSPACE_METHODS = frozenset(
         "workbench.knowledge_reanalysis",
         "workbench.start_knowledge_reanalysis",
         "workbench.retry_knowledge_reanalysis",
+        "workbench.cancel_page_tree_enrichment",
+        "workbench.retry_page_tree_enrichment",
+        "workbench.cancel_knowledge_graph_extraction",
+        "workbench.retry_knowledge_graph_extraction",
     }
 )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import threading
@@ -10,15 +11,23 @@ import zipfile
 from contextlib import contextmanager
 
 import openkb.desktop_retrieval as retrieval
+from openkb import desktop_engine_knowledge_graph as graph_engine
 from openkb.desktop_answer_types import DesktopEvidenceRef
 from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
+from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_graph import (
     DesktopKnowledgeGraphQueryError,
     DesktopKnowledgeGraphService,
     local_graph_evidence_ids,
 )
-from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_knowledge_graph_tasks import DesktopKnowledgeGraphExtractionTasks
+from openkb.desktop_model_gateway import (
+    DesktopModelCancelledError,
+    DesktopModelGateway,
+    DesktopModelResult,
+)
+from openkb.desktop_model_terminal import DesktopTerminalModelEvent
 from openkb.desktop_retrieval import DesktopEvidenceRetriever, _Candidate, _with_graph_budget
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_dir
 from openkb.locks import kb_ingest_lock
@@ -188,7 +197,7 @@ def test_graph_failures_keep_baseline_answers_and_only_record_safe_diagnostics(
         diagnostics = connection.execute(
             "SELECT phase, error_code FROM knowledge_graph_diagnostics ORDER BY created_at"
         ).fetchall()
-    assert ("extraction", "model_timeout") in diagnostics
+    assert ("extraction", "model_network_transient") in diagnostics
     assert ("query", "knowledge_graph_query_timeout") in diagnostics
 
 
@@ -281,6 +290,264 @@ def test_graph_worker_start_failure_keeps_document_available_and_is_diagnostic(
         ).fetchall() == [("extraction", "knowledge_graph_extraction_failed", document.document_id)]
 
 
+def test_graph_task_is_cancelled_durably_and_retried_explicitly(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "graph-task.txt"
+    source.write_text("Atlas depends on the local gateway.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    started = threading.Event()
+    allow_cancel_poll = threading.Event()
+    old_attempt_observed_cancel = threading.Event()
+    gateways: list[object] = []
+
+    class BlockingGateway:
+        provider_name = "provider-a"
+        model_name = "model-a"
+
+        def analyze(self, _request, *, on_event, is_cancelled):
+            on_event(DesktopTerminalModelEvent("graph-call-1", 1, "connecting", 0))
+            started.set()
+            assert allow_cancel_poll.wait(timeout=2)
+            if is_cancelled():
+                old_attempt_observed_cancel.set()
+            raise DesktopModelCancelledError()
+
+    class SuccessfulGateway:
+        provider_name = "provider-a"
+        model_name = "model-a"
+
+        def analyze(self, request, *, on_event, is_cancelled):
+            assert not is_cancelled()
+            evidence = json.loads(request.content)["evidence"]
+            on_event(DesktopTerminalModelEvent("graph-call-2", 1, "completed", 1))
+            return DesktopModelResult(
+                "graph-call-2",
+                json.dumps(
+                    {
+                        "nodes": [
+                            {
+                                "id": "atlas",
+                                "evidence_id": evidence[0]["evidence_id"],
+                                "type": "entity",
+                                "label": "Atlas",
+                            }
+                        ],
+                        "edges": [],
+                    }
+                ),
+                1,
+            )
+
+    blocking = BlockingGateway()
+    gateways.append(blocking)
+    tasks = DesktopKnowledgeGraphExtractionTasks(kb_dir)
+    assert tasks.queue(document.document_id, blocking)
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir, _override: gateways[-1],
+    )
+    server._handshake_complete = True
+    graph_engine.start_knowledge_graph_extractions(server, kb_dir, blocking)
+    assert started.wait(timeout=2)
+
+    cancelled = server._dispatch(
+        DesktopRequest(
+            request_id="cancel-graph",
+            method="workbench.cancel_knowledge_graph_extraction",
+            params={"document_id": document.document_id},
+        ),
+        cancel_event=None,
+    )
+    assert cancelled == {"document_id": document.document_id, "accepted": True}
+    assert _wait_for_graph_task(kb_dir, "pending") == (
+        "pending",
+        "knowledge_graph_extraction_interrupted",
+        "graph-call-1",
+    )
+
+    gateways.append(SuccessfulGateway())
+    retried = server._dispatch(
+        DesktopRequest(
+            request_id="retry-graph",
+            method="workbench.retry_knowledge_graph_extraction",
+            params={"document_id": document.document_id},
+        ),
+        cancel_event=None,
+    )
+    assert retried == {"document_id": document.document_id, "accepted": True}
+    allow_cancel_poll.set()
+    assert old_attempt_observed_cancel.wait(timeout=2)
+    assert _wait_for_graph_task(kb_dir, "completed")[0] == "completed"
+    projection = DesktopTextImportService(kb_dir).list_import_jobs()["knowledge_graph_extractions"][
+        0
+    ]
+    assert projection["call_id"] == "graph-call-2"
+    assert projection["attempt_count"] == 2
+    server._shutdown.set()
+    server._join_workers()
+
+
+def test_cancel_at_publish_barrier_cannot_publish_a_stale_graph_claim(tmp_path, monkeypatch):
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "publish-race.txt"
+    source.write_text("Atlas depends on the local gateway.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    publish_reached = threading.Event()
+    release_publish = threading.Event()
+    cancelled = threading.Event()
+    outcomes: list[bool] = []
+
+    class SuccessfulGateway:
+        provider_name = "provider-a"
+        model_name = "model-a"
+
+        def analyze(self, request, *, on_event, is_cancelled):
+            evidence = json.loads(request.content)["evidence"]
+            return DesktopModelResult(
+                "stale-graph-call",
+                json.dumps(
+                    {
+                        "nodes": [
+                            {
+                                "id": "atlas",
+                                "evidence_id": evidence[0]["evidence_id"],
+                                "type": "entity",
+                                "label": "Atlas",
+                            }
+                        ],
+                        "edges": [],
+                    }
+                ),
+                1,
+            )
+
+    original_persist = DesktopKnowledgeGraphService._persist
+
+    def persist_after_barrier(service, payload, *args, **kwargs):
+        publish_reached.set()
+        assert release_publish.wait(timeout=2)
+        return original_persist(service, payload, *args, **kwargs)
+
+    monkeypatch.setattr(DesktopKnowledgeGraphService, "_persist", persist_after_barrier)
+    gateway = SuccessfulGateway()
+    tasks = DesktopKnowledgeGraphExtractionTasks(kb_dir)
+    assert tasks.queue(document.document_id, gateway)
+    worker = threading.Thread(
+        target=lambda: outcomes.append(
+            tasks.run_document(
+                document.document_id,
+                gateway,
+                should_stop=cancelled.is_set,
+            )
+        )
+    )
+    worker.start()
+    assert publish_reached.wait(timeout=2)
+
+    assert tasks.request_cancel(document.document_id)
+    cancelled.set()
+    release_publish.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert outcomes == [False]
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM knowledge_graph_nodes").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT status, execution_token, error_code "
+            "FROM knowledge_graph_extraction_tasks WHERE document_id = ?",
+            (document.document_id,),
+        ).fetchone() == (
+            "pending",
+            None,
+            "knowledge_graph_extraction_interrupted",
+        )
+
+
+def test_recovery_makes_every_queued_graph_task_explicitly_resumable(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    old_gateway = DesktopModelGateway(
+        lambda _request, _timeout: "{}",
+        provider_name="provider-a",
+        model_name="model-a",
+    )
+    new_gateway = DesktopModelGateway(
+        lambda _request, _timeout: "{}",
+        provider_name="provider-b",
+        model_name="model-b",
+    )
+    tasks = DesktopKnowledgeGraphExtractionTasks(kb_dir)
+    document_ids: list[str] = []
+    for ordinal in range(2):
+        source = tmp_path / f"queued-{ordinal}.txt"
+        source.write_text(f"Queued graph document {ordinal}.", encoding="utf-8")
+        document = DesktopTextImportService(kb_dir).import_text(source).document
+        document_ids.append(document.document_id)
+        assert tasks.queue(document.document_id, old_gateway)
+
+    assert tasks.recover_interrupted() == 2
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT status, execution_token, error_code "
+            "FROM knowledge_graph_extraction_tasks ORDER BY document_id"
+        ).fetchall() == [
+            ("pending", None, "knowledge_graph_extraction_interrupted"),
+            ("pending", None, "knowledge_graph_extraction_interrupted"),
+        ]
+
+    assert tasks.pending_document_ids(old_gateway) == ()
+    assert tasks.retry(document_ids[0], new_gateway)
+    assert tasks.pending_document_ids(new_gateway) == (document_ids[0],)
+
+
+def test_open_recovers_graph_task_without_starting_model_work(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "recover-graph.txt"
+    source.write_text("Graph work must wait for the user.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    gateway = DesktopModelGateway(lambda _request, _timeout: "{}")
+    tasks = DesktopKnowledgeGraphExtractionTasks(kb_dir)
+    assert tasks.queue(document.document_id, gateway)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        connection.execute(
+            "UPDATE knowledge_graph_extraction_tasks SET status = 'running', "
+            "execution_token = 'crashed-owner'"
+        )
+    model_called = threading.Event()
+
+    def unexpected_gateway(_kb_dir, _override):
+        model_called.set()
+        return gateway
+
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        model_gateway_factory=unexpected_gateway,
+    )
+    server._handshake_complete = True
+    server._dispatch(
+        DesktopRequest(
+            request_id="open-graph-kb",
+            method="workbench.open_knowledge_base",
+            params={"kb_dir": str(kb_dir)},
+        ),
+        cancel_event=None,
+    )
+
+    assert not model_called.wait(timeout=0.1)
+    assert _wait_for_graph_task(kb_dir, "pending")[:2] == (
+        "pending",
+        "knowledge_graph_extraction_interrupted",
+    )
+
+
 def _reference(evidence_id: str, *, channels: tuple[str, ...] = ("fts",)) -> DesktopEvidenceRef:
     return DesktopEvidenceRef(
         evidence_id=evidence_id,
@@ -291,6 +558,21 @@ def _reference(evidence_id: str, *, channels: tuple[str, ...] = ("fts",)) -> Des
         excerpt=evidence_id,
         channels=channels,
     )
+
+
+def _wait_for_graph_task(kb_dir, expected: str, *, timeout: float = 2) -> tuple:
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    deadline = time.monotonic() + timeout
+    row = None
+    while time.monotonic() < deadline:
+        with sqlite3.connect(database_path) as connection:
+            row = connection.execute(
+                "SELECT status, error_code, call_id FROM knowledge_graph_extraction_tasks"
+            ).fetchone()
+        if row is not None and row[0] == expected:
+            return row
+        time.sleep(0.01)
+    raise AssertionError(f"Knowledge Graph task did not reach {expected}: {row!r}")
 
 
 def _graph_diagnostic_codes(kb_dir, destination_dir) -> set[str]:

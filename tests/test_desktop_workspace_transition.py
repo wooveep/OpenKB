@@ -158,10 +158,10 @@ def test_switch_pauses_an_explicit_import_at_its_next_stage_checkpoint(
     } == completed_checkpoint_ids
 
 
-def test_switch_pauses_a_runtime_restoration_import_before_activation(
+def test_switch_pauses_an_explicit_recovery_import_before_activation(
     tmp_path, monkeypatch
 ) -> None:
-    """Runtime Restoration workers drain through the same transition seam."""
+    """An explicitly resumed recovery drains through the same transition seam."""
     first_kb = tmp_path / "first-kb"
     second_kb = tmp_path / "second-kb"
     source = tmp_path / "recoverable.md"
@@ -189,6 +189,25 @@ def test_switch_pauses_a_runtime_restoration_import_before_activation(
         _request("open-first", "workbench.open_knowledge_base", kb_dir=str(first_kb)),
         cancel_event=None,
     )
+    assert not analysis_started.wait(timeout=0.05)
+
+    recovery_errors: list[DesktopImportError] = []
+
+    def resume_import() -> None:
+        try:
+            server._dispatch(
+                _request(
+                    "resume",
+                    "workbench.resume_import_job",
+                    job_id=state.job_id,
+                ),
+                cancel_event=None,
+            )
+        except DesktopImportError as error:
+            recovery_errors.append(error)
+
+    recovery_worker = threading.Thread(target=resume_import)
+    recovery_worker.start()
     assert analysis_started.wait(timeout=2)
 
     switch_done = threading.Event()
@@ -205,9 +224,12 @@ def test_switch_pauses_a_runtime_restoration_import_before_activation(
     assert pause_requested.wait(timeout=2)
     assert not switch_done.is_set()
     release_analysis.set()
+    recovery_worker.join(timeout=2)
     switch_worker.join(timeout=2)
 
+    assert not recovery_worker.is_alive()
     assert not switch_worker.is_alive()
+    assert [error.code for error in recovery_errors] == ["import_paused"]
     assert DesktopImportStore(first_kb).task(state.job_id).job.status == "paused"
     active = server._dispatch(
         _request("active", "workbench.active_knowledge_base"),
@@ -508,8 +530,8 @@ def test_user_cancel_wins_when_it_races_with_switch_pause(tmp_path, monkeypatch)
     import_worker.join(timeout=2)
     switch_worker.join(timeout=2)
     assert not import_worker.is_alive() and not switch_worker.is_alive()
-    assert [error.code for error in import_errors] == ["import_cancelled"]
-    assert DesktopImportStore(first_kb).task(job_id).job.status == "cancelled"
+    assert [error.code for error in import_errors] == ["import_interrupted"]
+    assert DesktopImportStore(first_kb).task(job_id).job.status == "paused"
 
 
 def test_reopening_the_same_kb_does_not_pause_its_import(tmp_path, monkeypatch) -> None:

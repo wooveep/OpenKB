@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -17,28 +16,15 @@ from openkb.desktop_knowledge_generations import (
 from openkb.desktop_knowledge_reconciliation_changes import IncomingKnowledgeChange
 from openkb.desktop_knowledge_sources import stable_source_id
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
+from openkb.desktop_prompt_contracts import prompt_contract_for
 
 KNOWLEDGE_ANALYSIS_SCHEMA_VERSION = "openkb.knowledge-analysis.v1"
 KNOWLEDGE_ANALYSIS_SCOPE: Literal["document"] = "document"
 KNOWLEDGE_ANALYSIS_BATCH_SCOPE: Literal["batch"] = "batch"
 KnowledgeAnalysisScope = Literal["document", "batch"]
-KNOWLEDGE_ANALYSIS_SYSTEM_PROMPT = """Analyze one document into evidence-bound knowledge.
-Return exactly one JSON object and no prose or Markdown fence. The object must contain:
-- schema_version: "openkb.knowledge-analysis.v1"
-- analysis_scope: "document"
-- document_description: a concise string
-- concepts: an array of Concept candidates
-- entities: an array of Entity candidates
-Each candidate must contain title, aliases (string array), tags (string array), and claims.
-Entity candidates may additionally contain subtype. Each claim must contain text and a
-source_evidence_ids string array. Use only evidence IDs supplied by the user. Prefer using
-an evidence ID only once within a candidate. Do not return graph edges, PageTree nodes,
-retrieval plans, answer text, confidence scores, or facts not supported by the evidence.
-Return empty concepts/entities arrays when the document has no durable knowledge candidates.
-"""
-KNOWLEDGE_ANALYSIS_PROMPT_DIGEST = hashlib.sha256(
-    KNOWLEDGE_ANALYSIS_SYSTEM_PROMPT.encode("utf-8")
-).hexdigest()
+_KNOWLEDGE_ANALYSIS_CONTRACT = prompt_contract_for("knowledge_analysis")
+KNOWLEDGE_ANALYSIS_SYSTEM_PROMPT = _KNOWLEDGE_ANALYSIS_CONTRACT.instructions
+KNOWLEDGE_ANALYSIS_PROMPT_DIGEST = _KNOWLEDGE_ANALYSIS_CONTRACT.digest
 
 _MAX_DESCRIPTION_CHARACTERS = 4_000
 _MAX_CANDIDATES_PER_KIND = 32

@@ -22,6 +22,7 @@ from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
 def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
+    _drop_current_model_schema(connection)
     connection.execute("DROP TABLE grounded_answer_retrieval_traces")
     connection.execute("DROP TABLE conversation_answer_retrieval_traces")
     _drop_catalog_schema(connection)
@@ -41,6 +42,23 @@ def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
         connection.execute(f"DROP TABLE IF EXISTS {table}")
     connection.execute("DROP INDEX import_jobs_document_completed_idx")
     connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35, 36, 37)")
+
+
+def _drop_current_model_schema(connection: sqlite3.Connection) -> None:
+    for table in (
+        "knowledge_graph_extraction_tasks",
+        "legacy_model_recovery_audit",
+        "model_usage_records",
+        "knowledge_reanalysis_merge_nodes",
+        "knowledge_analysis_merge_nodes",
+        "knowledge_reanalysis_plans",
+        "knowledge_analysis_plans",
+    ):
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
+    for table in ("model_calls", "model_attempts"):
+        for column in ("lifecycle_status", "elapsed_seconds", "retry_after_seconds"):
+            connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    connection.execute("DELETE FROM schema_migrations WHERE version IN (38, 39, 40, 41, 42)")
 
 
 def _drop_catalog_schema(connection: sqlite3.Connection) -> None:

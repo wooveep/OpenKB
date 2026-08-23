@@ -28,14 +28,6 @@ export function DesktopKnowledgeAnalysisProgress({ progress }: { progress: Progr
           })}
         </p>
       ) : null}
-      {progress.currentTimeoutSeconds !== null && progress.remainingSeconds !== null ? (
-        <p className="mt-1 text-muted-foreground">
-          {t("desktop.tasks.knowledgeAnalysisBudget", {
-            timeout: Math.ceil(progress.currentTimeoutSeconds),
-            remaining: Math.ceil(progress.remainingSeconds),
-          })}
-        </p>
-      ) : null}
     </div>
   )
 }

@@ -21,7 +21,10 @@ import {
   type DesktopKnowledgeBaseActivation,
   type DesktopGlobalSearchResults,
   type DesktopModelSettings,
+  type DesktopModelSettingsDraft,
   type DesktopModelConnectionTest,
+  type DesktopPageTreeEnrichmentControlResult,
+  type DesktopKnowledgeGraphExtractionControlResult,
   type DesktopKnowledgePage,
   type DesktopKnowledgePageDeletion,
   type DesktopKnowledgeExport,
@@ -103,46 +106,26 @@ export class TauriDesktopBridge extends TauriKnowledgeReanalysisBridge implement
   }
 
   async saveModelSettings(
-    provider: string,
-    model: string,
-    apiBaseUrl: string,
-    apiKey: string,
-    maxConcurrentModelCalls: number,
-    initialTimeoutSeconds: number,
+    settings: DesktopModelSettingsDraft,
     requestId: string,
   ): Promise<DesktopModelSettings> {
     return this.call<DesktopModelSettings>("desktop_save_model_settings", {
-      provider,
-      model,
-      apiBaseUrl,
-      apiKey,
-      maxConcurrentModelCalls,
-      initialTimeoutSeconds,
+      settings,
       requestId,
     })
   }
 
   async testModelConnection(
-    provider: string,
-    model: string,
-    apiBaseUrl: string,
-    apiKey: string,
-    maxConcurrentModelCalls: number,
-    initialTimeoutSeconds: number,
+    settings: DesktopModelSettingsDraft,
     requestId: string,
   ): Promise<DesktopModelConnectionTest> {
     const result = await this.call<Record<string, unknown>>("desktop_test_model_connection", {
-      provider,
-      model,
-      apiBaseUrl,
-      apiKey,
-      maxConcurrentModelCalls,
-      initialTimeoutSeconds,
+      settings,
       requestId,
     })
     return {
       ok: Boolean(result.ok),
-      model: typeof result.model === "string" ? result.model : model,
+      model: typeof result.model === "string" ? result.model : settings.model,
       latencyMs: typeof result.latency_ms === "number" ? result.latency_ms : 0,
       attemptCount: typeof result.attempt_count === "number" ? result.attempt_count : 0,
     }
@@ -422,6 +405,32 @@ export class TauriDesktopBridge extends TauriKnowledgeReanalysisBridge implement
     return this.call<DesktopImportControlResult>("desktop_cancel_import_job", { jobId })
   }
 
+  async cancelPageTreeEnrichment(
+    documentId: string,
+  ): Promise<DesktopPageTreeEnrichmentControlResult> {
+    return this.call<DesktopPageTreeEnrichmentControlResult>(
+      "desktop_cancel_page_tree_enrichment",
+      { documentId },
+    )
+  }
+
+  async retryPageTreeEnrichment(
+    documentId: string,
+  ): Promise<DesktopPageTreeEnrichmentControlResult> {
+    return this.call<DesktopPageTreeEnrichmentControlResult>(
+      "desktop_retry_page_tree_enrichment",
+      { documentId },
+    )
+  }
+
+  async cancelKnowledgeGraphExtraction(documentId: string): Promise<DesktopKnowledgeGraphExtractionControlResult> {
+    return this.call("desktop_cancel_knowledge_graph_extraction", { documentId })
+  }
+
+  async retryKnowledgeGraphExtraction(documentId: string): Promise<DesktopKnowledgeGraphExtractionControlResult> {
+    return this.call("desktop_retry_knowledge_graph_extraction", { documentId })
+  }
+
   async cancel(targetRequestId: string): Promise<DesktopCancelResult> {
     return this.call<DesktopCancelResult>("desktop_cancel", { targetRequestId })
   }
@@ -505,39 +514,19 @@ class UnavailableDesktopBridge extends UnavailableKnowledgeReanalysisBridge impl
   }
 
   saveModelSettings(
-    provider: string,
-    model: string,
-    apiBaseUrl: string,
-    apiKey: string,
-    maxConcurrentModelCalls: number,
-    initialTimeoutSeconds: number,
+    settings: DesktopModelSettingsDraft,
     requestId: string,
   ): Promise<DesktopModelSettings> {
-    void provider
-    void model
-    void apiBaseUrl
-    void apiKey
-    void maxConcurrentModelCalls
-    void initialTimeoutSeconds
+    void settings
     void requestId
     return this.unavailable()
   }
 
   testModelConnection(
-    provider: string,
-    model: string,
-    apiBaseUrl: string,
-    apiKey: string,
-    maxConcurrentModelCalls: number,
-    initialTimeoutSeconds: number,
+    settings: DesktopModelSettingsDraft,
     requestId: string,
   ): Promise<DesktopModelConnectionTest> {
-    void provider
-    void model
-    void apiBaseUrl
-    void apiKey
-    void maxConcurrentModelCalls
-    void initialTimeoutSeconds
+    void settings
     void requestId
     return this.unavailable()
   }
@@ -749,6 +738,30 @@ class UnavailableDesktopBridge extends UnavailableKnowledgeReanalysisBridge impl
 
   cancelImportJob(jobId: string): Promise<DesktopImportControlResult> {
     void jobId
+    return this.unavailable()
+  }
+
+  cancelPageTreeEnrichment(
+    documentId: string,
+  ): Promise<DesktopPageTreeEnrichmentControlResult> {
+    void documentId
+    return this.unavailable()
+  }
+
+  retryPageTreeEnrichment(
+    documentId: string,
+  ): Promise<DesktopPageTreeEnrichmentControlResult> {
+    void documentId
+    return this.unavailable()
+  }
+
+  cancelKnowledgeGraphExtraction(documentId: string): Promise<DesktopKnowledgeGraphExtractionControlResult> {
+    void documentId
+    return this.unavailable()
+  }
+
+  retryKnowledgeGraphExtraction(documentId: string): Promise<DesktopKnowledgeGraphExtractionControlResult> {
+    void documentId
     return this.unavailable()
   }
 

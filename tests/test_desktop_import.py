@@ -335,16 +335,16 @@ def test_model_failure_is_quarantined_with_safe_attempt_history(tmp_path):
     assert task["quarantine"] == {
         "stage_run_id": task["stages"][5]["stage_run_id"],
         "stage": "model_analysis",
-        "error_code": "model_timeout",
-        "reason": "The model did not respond before the response timeout.",
-        "suggested_action": "Retry the document or increase its response timeout.",
-        "attempt_count": 4,
+        "error_code": "model_network_transient",
+        "reason": "The connection to the model provider failed or was interrupted.",
+        "suggested_action": "Check the network connection, then retry.",
+        "attempt_count": 3,
     }
     assert len(task["model_calls"]) == 1
     model_call = task["model_calls"][0]
-    assert model_call["status"] == "failed"
-    assert model_call["attempt_count"] == 4
-    assert [attempt["timeout_seconds"] for attempt in model_call["attempts"]] == [20, 30, 40, 50]
+    assert model_call["status"] == "network_failure"
+    assert model_call["attempt_count"] == 3
+    assert all("timeout_seconds" not in attempt for attempt in model_call["attempts"])
     assert "api_key" not in str(task)
 
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
@@ -362,7 +362,7 @@ def test_manual_recovery_reuses_verified_stages_and_records_its_override(tmp_pat
     def timeout(*_args, **_kwargs):
         raise TimeoutError()
 
-    with pytest.raises(DesktopImportError, match="response timeout"):
+    with pytest.raises(DesktopImportError, match="connection"):
         DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(timeout)).import_text(
             source
         )
@@ -373,7 +373,7 @@ def test_manual_recovery_reuses_verified_stages_and_records_its_override(tmp_pat
     assert persisted["job"]["status"] == "quarantined"
     assert persisted["job"]["source_name"] == "recover.txt"
     assert persisted["quarantine"]["stage"] == "model_analysis"
-    assert len(persisted["model_calls"][0]["attempts"]) == 4
+    assert len(persisted["model_calls"][0]["attempts"]) == 3
 
     source.unlink()
     monkeypatch.setattr(
@@ -388,24 +388,25 @@ def test_manual_recovery_reuses_verified_stages_and_records_its_override(tmp_pat
     )
     recovered = DesktopTextImportService(
         kb_dir,
-        model_gateway=DesktopModelGateway(
-            lambda *_args: _empty_analysis(), initial_timeout_seconds=30
-        ),
+        model_gateway=DesktopModelGateway(lambda *_args: _empty_analysis()),
     ).recover_text(
         job_id,
-        DesktopRecoveryOverride(model="test/recovery-model", initial_timeout_seconds=30),
+        DesktopRecoveryOverride(model="test/recovery-model"),
     )
 
     assert recovered.job.status == "completed"
     assert recovered.quarantine is None
     assert recovered.document.availability == "available"
-    assert [call.status for call in recovered.model_calls] == ["failed", "completed"]
-    assert recovered.model_calls[-1].attempts[0].timeout_seconds == 30
+    assert [call.status for call in recovered.model_calls] == [
+        "network_failure",
+        "completed",
+    ]
+    assert recovered.model_calls[-1].attempts[0].status == "completed"
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM quarantined_documents").fetchone() == (0,)
         assert connection.execute(
             "SELECT model_override, initial_timeout_seconds, status FROM recovery_runs"
-        ).fetchone() == ("test/recovery-model", 30.0, "completed")
+        ).fetchone() == ("test/recovery-model", None, "completed")
         assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (1,)
 
 

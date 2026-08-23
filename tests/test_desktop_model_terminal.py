@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import http.server
 import threading
+from dataclasses import replace
 
 import pytest
 
 from openkb import desktop_model_transport
 from openkb.config import LlmCredentialBundle
+from openkb.desktop_model_active_streams import DesktopActiveModelStreams
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -23,6 +25,8 @@ from openkb.desktop_model_terminal import (
     DesktopTerminalModelGateway,
     TerminalModelCallStatus,
 )
+from openkb.desktop_retrieval_plan import model_plan
+from openkb.desktop_structured_output import run_structured_output
 
 
 class FakeClock:
@@ -73,9 +77,10 @@ def test_terminal_gateway_accepts_a_result_after_180_seconds_of_virtual_silence(
         "queued",
         "connecting",
         "awaiting_model_result",
+        "validating",
         "completed",
     ]
-    assert [event.elapsed_seconds for event in events] == [0, 0, 1, 181]
+    assert [event.elapsed_seconds for event in events] == [0, 0, 1, 181, 181]
 
 
 @pytest.mark.parametrize("model", ("openai/test-model", "deepseek/test-model"))
@@ -447,6 +452,218 @@ def test_terminal_gateway_reports_stream_activity_without_putting_output_in_even
     assert all("private provider output" not in repr(event.as_dict()) for event in events)
 
 
+def test_structured_analyze_prefers_streaming_and_keeps_chunks_private() -> None:
+    events: list[DesktopTerminalModelEvent] = []
+
+    class StreamingProvider:
+        def __call__(self, _request: DesktopModelRequest, _connect_timeout_seconds: float) -> str:
+            raise AssertionError("Structured analysis should prefer the streaming seam.")
+
+        def stream_until_terminal_with_lifecycle(
+            self,
+            _request: DesktopModelRequest,
+            _connect_timeout_seconds: float,
+            on_delta,
+            on_request_sent,
+        ) -> str:
+            on_request_sent()
+            on_delta('{"terms":')
+            on_delta('["OpenKB"]}')
+            return '{"terms":["OpenKB"]}'
+
+    result = DesktopTerminalModelGateway(StreamingProvider()).analyze(
+        DesktopModelRequest("retrieval_plan", "Question", "Build a plan."),
+        on_event=events.append,
+    )
+
+    assert result.content == '{"terms":["OpenKB"]}'
+    assert "model_output_activity" in [event.status for event in events]
+    assert all("OpenKB" not in repr(event.as_dict()) for event in events)
+
+
+def test_structured_analyze_uses_equivalent_non_streaming_fallback_when_required() -> None:
+    events: list[DesktopTerminalModelEvent] = []
+    calls: list[str] = []
+
+    class CompatibilityProvider:
+        def __call__(self, _request, _connect_timeout_seconds):
+            calls.append("non_stream")
+            return '{"terms":["OpenKB"]}'
+
+        def stream_until_terminal(self, _request, _connect_timeout_seconds, _on_delta):
+            calls.append("stream")
+            raise AssertionError("An incompatible provider must use the non-stream path.")
+
+    result = DesktopTerminalModelGateway(CompatibilityProvider()).analyze(
+        DesktopModelRequest(
+            "retrieval_plan",
+            "Question",
+            "Build a plan.",
+            supports_streaming=False,
+        ),
+        on_event=events.append,
+    )
+
+    assert result.content == '{"terms":["OpenKB"]}'
+    assert calls == ["non_stream"]
+    assert "model_output_activity" not in [event.status for event in events]
+
+
+def test_streaming_and_non_streaming_structured_analysis_validate_to_same_domain_state() -> None:
+    content = '{"terms":["OpenKB","evidence"]}'
+
+    class StreamingProvider:
+        def stream_until_terminal_with_lifecycle(
+            self, _request, _connect_timeout_seconds, on_delta, on_request_sent
+        ):
+            on_request_sent()
+            on_delta('{"terms":["OpenKB",')
+            on_delta('"evidence"]}')
+            return content
+
+    class CompatibilityProvider:
+        def __call__(self, _request, _connect_timeout_seconds):
+            return content
+
+    def execute(provider, *, supports_streaming: bool):
+        events: list[DesktopTerminalModelEvent] = []
+        output = run_structured_output(
+            operation="retrieval_plan",
+            document_name="Grounded answer question",
+            source_material="How does OpenKB preserve evidence?",
+            invoke=lambda request: DesktopTerminalModelGateway(provider).analyze(
+                replace(request, supports_streaming=supports_streaming),
+                on_event=events.append,
+            ),
+            validate=lambda value: model_plan(
+                "How does OpenKB preserve evidence?",
+                value,
+            ),
+        )
+        lifecycle = [event.status for event in events if event.status != "model_output_activity"]
+        return output.value, lifecycle, events
+
+    streamed, streamed_lifecycle, streamed_events = execute(
+        StreamingProvider(), supports_streaming=True
+    )
+    compatible, compatible_lifecycle, compatible_events = execute(
+        CompatibilityProvider(), supports_streaming=False
+    )
+
+    assert streamed == compatible
+    assert streamed.terms == ("openkb", "evidence")
+    assert (
+        streamed_lifecycle
+        == compatible_lifecycle
+        == [
+            "queued",
+            "connecting",
+            "awaiting_model_result",
+            "validating",
+            "completed",
+        ]
+    )
+    assert "model_output_activity" in [event.status for event in streamed_events]
+    assert "model_output_activity" not in [event.status for event in compatible_events]
+
+
+def test_terminal_gateway_closes_an_active_stream_on_user_cancel() -> None:
+    stream_started = threading.Event()
+    stream_closed = threading.Event()
+    cancel = threading.Event()
+    finished = threading.Event()
+    errors: list[Exception] = []
+
+    class ClosableStreamProvider:
+        def stream_until_terminal(self, _request, _connect_timeout_seconds, _on_delta):
+            stream_started.set()
+            stream_closed.wait(timeout=2)
+            return "late"
+
+        def cancel_active_stream(self, _request):
+            stream_closed.set()
+            return True
+
+    def run() -> None:
+        try:
+            DesktopTerminalModelGateway(ClosableStreamProvider()).stream(
+                DesktopModelRequest("grounded_answer", "Question", "Evidence"),
+                on_event=lambda _event: None,
+                on_delta=lambda _attempt, _delta: None,
+                is_cancelled=cancel.is_set,
+            )
+        except Exception as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert stream_started.wait(timeout=1)
+    cancel.set()
+    assert finished.wait(timeout=1)
+    worker.join(timeout=1)
+
+    assert stream_closed.is_set()
+    assert len(errors) == 1
+    assert isinstance(errors[0], DesktopModelCancelledError)
+
+
+def test_terminal_gateway_closes_a_stream_that_registers_after_cancel() -> None:
+    registry = DesktopActiveModelStreams()
+    stream_entered = threading.Event()
+    allow_registration = threading.Event()
+    close_called = threading.Event()
+    stream_finished = threading.Event()
+    cancel = threading.Event()
+    finished = threading.Event()
+    errors: list[Exception] = []
+
+    class LateRegistrationProvider:
+        def prepare_active_stream(self, request):
+            registry.prepare(id(request))
+
+        def stream_until_terminal(self, request, _connect_timeout_seconds, _on_delta):
+            stream_entered.set()
+            assert allow_registration.wait(timeout=2)
+            release = registry.register(id(request), close_called.set)
+            try:
+                assert close_called.wait(timeout=1)
+                return "late"
+            finally:
+                release()
+                stream_finished.set()
+
+        def cancel_active_stream(self, request):
+            return registry.close(id(request))
+
+    def run() -> None:
+        try:
+            DesktopTerminalModelGateway(LateRegistrationProvider()).stream(
+                DesktopModelRequest("grounded_answer", "Question", "Evidence"),
+                on_event=lambda _event: None,
+                on_delta=lambda _attempt, _delta: None,
+                is_cancelled=cancel.is_set,
+            )
+        except Exception as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert stream_entered.wait(timeout=1)
+    cancel.set()
+    assert finished.wait(timeout=1)
+    allow_registration.set()
+    assert close_called.wait(timeout=1)
+    assert stream_finished.wait(timeout=1)
+    worker.join(timeout=1)
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], DesktopModelCancelledError)
+
+
 def test_terminal_gateway_cancel_ends_retry_after_wait() -> None:
     cancel = threading.Event()
     events: list[DesktopTerminalModelEvent] = []
@@ -524,9 +741,46 @@ def test_litellm_terminal_transport_preserves_retry_after(monkeypatch) -> None:
     assert captured.value.retry_after_seconds == 2.5
 
 
+def test_litellm_sends_supported_reasoning_and_native_schema_as_parameters(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    def completion(**kwargs):
+        captured.append(kwargs)
+        return {"choices": [{"message": {"content": '{"ok": true}'}}]}
+
+    monkeypatch.setattr("litellm.completion", completion)
+    transport = desktop_model_transport.DesktopLiteLLMTransport(
+        model="openai/gpt-5-test",
+        bundle=LlmCredentialBundle(api_key="test-key", base_url="https://model.test/v1"),
+    )
+
+    result = transport(
+        DesktopModelRequest(
+            "model_capability_analysis",
+            "settings",
+            "content",
+            reasoning_effort="low",
+            response_schema={"type": "object", "required": ["ok"]},
+            response_schema_name="openkb_capability_check",
+        ),
+        30,
+    )
+
+    assert result == '{"ok": true}'
+    assert captured[0]["reasoning_effort"] == "low"
+    assert captured[0]["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "openkb_capability_check",
+            "strict": True,
+            "schema": {"type": "object", "required": ["ok"]},
+        },
+    }
+
+
 def test_terminal_gateway_queue_wait_has_no_elapsed_deadline() -> None:
     gate = desktop_model_transport._DesktopModelConcurrencyGate(1)
-    assert gate.acquire(None, remaining_seconds=1)
+    gate.acquire_until_cancelled(None)
     provider_called = threading.Event()
     queued = threading.Event()
     finished = threading.Event()
@@ -575,7 +829,6 @@ def test_settings_connection_factory_selects_the_terminal_policy(monkeypatch, tm
         api_base_url="https://model.test/v1",
         api_key="test-key",
         max_concurrent_model_calls=1,
-        initial_timeout_seconds=1,
     )
 
     gateway = desktop_model_transport.desktop_model_gateway_for_settings(tmp_path, settings)

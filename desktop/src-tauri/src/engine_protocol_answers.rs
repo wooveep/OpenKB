@@ -1,6 +1,6 @@
 //! Grounded-answer request methods for the private Engine transport.
 
-use super::{BridgeError, BridgeResult, EngineSupervisor, GroundedAnswer, IMPORT_REQUEST_TIMEOUT};
+use super::{BridgeError, BridgeResult, EngineSupervisor, GroundedAnswer};
 use serde_json::json;
 
 impl EngineSupervisor {
@@ -38,12 +38,7 @@ impl EngineSupervisor {
         invalid_shape_message: &str,
     ) -> BridgeResult<GroundedAnswer> {
         self.ensure_started()?;
-        let value = self.request_started_with_wait(
-            method,
-            params,
-            Some(request_id),
-            Some(IMPORT_REQUEST_TIMEOUT),
-        )?;
+        let value = self.request_started_with_wait(method, params, Some(request_id), None)?;
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(
                 "invalid_engine_response",

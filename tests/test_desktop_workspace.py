@@ -16,6 +16,33 @@ from openkb.desktop_workspace import (
     LegacyKnowledgeBaseUnsupportedError,
 )
 
+LATEST_SCHEMA_VERSION = desktop_workspace._MIGRATIONS[-1][0]
+
+
+def _drop_post_v37_schema(connection: sqlite3.Connection) -> None:
+    """Return a fixture to the schema before explicit-terminal model migrations."""
+    for table in (
+        "knowledge_graph_extraction_tasks",
+        "legacy_model_recovery_audit",
+        "model_usage_records",
+        "knowledge_analysis_merge_nodes",
+        "knowledge_reanalysis_merge_nodes",
+        "knowledge_analysis_plans",
+        "knowledge_reanalysis_plans",
+    ):
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
+    for table, columns in (
+        ("model_calls", ("lifecycle_status", "elapsed_seconds", "retry_after_seconds")),
+        ("model_attempts", ("lifecycle_status", "elapsed_seconds", "retry_after_seconds")),
+    ):
+        existing = {
+            str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for column in columns:
+            if column in existing:
+                connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    connection.execute("DELETE FROM schema_migrations WHERE version >= 38")
+
 
 def _drop_retrieval_corpus_revision_schema(connection: sqlite3.Connection) -> None:
     """Return a test fixture to the state before migration 17."""
@@ -73,6 +100,7 @@ def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
     ):
         connection.execute(f"DROP TABLE IF EXISTS {table}")
     connection.execute("DROP INDEX import_jobs_document_completed_idx")
+    _drop_post_v37_schema(connection)
     connection.execute("DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35, 36, 37)")
 
 
@@ -99,50 +127,14 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
     first = runtime.create(first_dir, name="First knowledge base")
 
     assert first.knowledge_base.name == "First knowledge base"
-    assert first.knowledge_base.schema_version == 37
+    assert first.knowledge_base.schema_version == LATEST_SCHEMA_VERSION
     assert first.knowledge_base.last_checkpoint_at is None
     assert (first_dir / "raw").is_dir()
     database_path = first_dir / ".openkb" / "state.sqlite3"
     assert database_path.is_file()
     with sqlite3.connect(database_path) as connection:
         assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [
-            (1,),
-            (2,),
-            (3,),
-            (4,),
-            (5,),
-            (6,),
-            (7,),
-            (8,),
-            (9,),
-            (10,),
-            (11,),
-            (12,),
-            (13,),
-            (14,),
-            (15,),
-            (16,),
-            (17,),
-            (18,),
-            (19,),
-            (20,),
-            (21,),
-            (22,),
-            (23,),
-            (24,),
-            (25,),
-            (26,),
-            (27,),
-            (28,),
-            (29,),
-            (30,),
-            (31,),
-            (32,),
-            (33,),
-            (34,),
-            (35,),
-            (36,),
-            (37,),
+            (version,) for version in range(1, LATEST_SCHEMA_VERSION + 1)
         ]
         assert connection.execute("SELECT value FROM metadata WHERE key = 'format'").fetchone() == (
             "openkb-desktop",
@@ -198,13 +190,15 @@ def test_open_accepts_preledger_knowledge_analysis_entity_subtype(tmp_path):
 
     activation = DesktopKnowledgeBaseRuntime().open(kb_dir)
 
-    assert activation.knowledge_base.schema_version == 37
+    assert activation.knowledge_base.schema_version == LATEST_SCHEMA_VERSION
     with sqlite3.connect(database_path) as connection:
         columns = connection.execute(
             "PRAGMA table_info(knowledge_reconciliation_candidates)"
         ).fetchall()
         assert [str(row[1]) for row in columns].count("entity_subtype") == 1
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (37,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (
+            LATEST_SCHEMA_VERSION,
+        )
         assert connection.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type = 'table' AND name = 'knowledge_reconciliation_candidate_sources'"
@@ -322,43 +316,7 @@ def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
 
     with sqlite3.connect(database_path) as connection:
         assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [
-            (1,),
-            (2,),
-            (3,),
-            (4,),
-            (5,),
-            (6,),
-            (7,),
-            (8,),
-            (9,),
-            (10,),
-            (11,),
-            (12,),
-            (13,),
-            (14,),
-            (15,),
-            (16,),
-            (17,),
-            (18,),
-            (19,),
-            (20,),
-            (21,),
-            (22,),
-            (23,),
-            (24,),
-            (25,),
-            (26,),
-            (27,),
-            (28,),
-            (29,),
-            (30,),
-            (31,),
-            (32,),
-            (33,),
-            (34,),
-            (35,),
-            (36,),
-            (37,),
+            (version,) for version in range(1, LATEST_SCHEMA_VERSION + 1)
         ]
         assert connection.execute(
             "SELECT status FROM import_job_runtime WHERE job_id = 'legacy-job'"

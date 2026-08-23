@@ -27,6 +27,7 @@ import type {
 } from "./contracts"
 import { currentDocumentTasks, taskIsFailed } from "./desktop-document-tasks"
 import { DesktopKnowledgeAnalysisProgress } from "./DesktopKnowledgeAnalysisProgress"
+import { DesktopImportProgress } from "./DesktopImportProgress"
 import type { KnowledgeReanalysisController } from "./useKnowledgeReanalysis"
 
 export interface DesktopImportBatchSummary {
@@ -453,6 +454,7 @@ function ImportTaskCard({
   onOpenOriginal: (documentId: string) => void
 }) {
   const { t } = useTranslation("common")
+  const [cancellationWarning, setCancellationWarning] = useState(false)
   const stage = task.stages.find((item) => ["failed", "paused", "cancelled"].includes(item.status))
     ?? task.stages.find((item) => item.status === "running")
     ?? task.stages.at(-1)
@@ -492,6 +494,7 @@ function ImportTaskCard({
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${task.job.progress}%` }} />
       </div>
+      <DesktopImportProgress steps={task.importProgress} activity={task.modelActivity} usage={task.modelUsageAggregate} records={task.modelUsage} />
       {task.knowledgeAnalysis ? (
         <DesktopKnowledgeAnalysisProgress progress={task.knowledgeAnalysis} />
       ) : null}
@@ -512,22 +515,20 @@ function ImportTaskCard({
             {t("desktop.knowledgeBases.modelCallStatus", {
               status: t(`desktop.knowledgeBases.modelCallStates.${modelCall.status}`),
               attempt: modelCall.attemptCount,
-              maximum: 4,
+              maximum: 3,
             })}
           </p>
           {modelCallIsWaiting ? (
             <p className="mt-1 text-muted-foreground">
-              {t("desktop.knowledgeBases.modelCallBudget", {
-                timeout: Math.ceil(modelCall.timeoutSeconds),
-                remaining: Math.ceil(modelCall.remainingSeconds),
+              {t("desktop.knowledgeBases.modelCallElapsed", {
+                elapsed: Math.floor(modelCall.elapsedSeconds),
               })}
             </p>
           ) : null}
-          {modelCall.status === "retry_wait" && modelCall.nextTimeoutSeconds !== null ? (
+          {modelCall.status === "retry_wait" ? (
             <p className="mt-1 text-muted-foreground">
               {t("desktop.knowledgeBases.modelRetrying", {
                 reason: modelCall.reason,
-                timeout: Math.ceil(modelCall.nextTimeoutSeconds),
               })}
             </p>
           ) : null}
@@ -556,11 +557,19 @@ function ImportTaskCard({
           </Button>
         ) : null}
         {task.job.status === "running" || task.job.status === "paused" || task.job.status === "recoverable" ? (
-          <Button size="sm" variant="ghost" disabled={controlling} onClick={() => onControl(task.job.jobId, "cancel")}>
+          <Button size="sm" variant="ghost" disabled={controlling} onClick={() => {
+            setCancellationWarning(true)
+            onControl(task.job.jobId, "cancel")
+          }}>
             {t("desktop.knowledgeBases.cancelImport")}
           </Button>
         ) : null}
       </div>
+      {cancellationWarning ? (
+        <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">
+          {t("desktop.knowledgeBases.importCancellationWarning")}
+        </p>
+      ) : null}
       {task.document?.availability === "available" ? (
         <div className="mt-4 border-t border-border/70 pt-4 text-sm">
           <p className="font-medium text-emerald-700 dark:text-emerald-300">

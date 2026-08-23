@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
+from openkb.desktop_knowledge_analysis_plan import KnowledgeAnalysisPlan
 from openkb.desktop_workspace import desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -46,6 +47,12 @@ class DesktopKnowledgeAnalysisBatchStore:
         self._merge_table = (
             "knowledge_reanalysis_merges" if reanalysis else "knowledge_analysis_merges"
         )
+        self._plan_table = (
+            "knowledge_reanalysis_plans" if reanalysis else "knowledge_analysis_plans"
+        )
+        self._merge_node_table = (
+            "knowledge_reanalysis_merge_nodes" if reanalysis else "knowledge_analysis_merge_nodes"
+        )
         self._execution_token = execution_token
 
     def load_or_create(
@@ -54,26 +61,51 @@ class DesktopKnowledgeAnalysisBatchStore:
         job_id: str,
         stage_run_id: str,
         evidence: tuple[tuple[str, DocumentIRBlock], ...],
-        planned_batches: tuple[tuple[tuple[str, DocumentIRBlock], ...], ...] | None = None,
-    ) -> tuple[KnowledgeAnalysisBatch, ...]:
-        from openkb.desktop_knowledge_analysis_batches import (
-            plan_knowledge_analysis_batches,
-        )
-
+        planned_batches: tuple[tuple[tuple[str, DocumentIRBlock], ...], ...],
+        proposed_plan: KnowledgeAnalysisPlan,
+    ) -> tuple[KnowledgeAnalysisPlan, tuple[KnowledgeAnalysisBatch, ...]]:
         with kb_ingest_lock(self._state_dir):
             connection = _connect(self._database_path)
             try:
                 self._require_active_job_in(connection, job_id)
+                persisted_plan = self._plan_in(connection, job_id)
                 rows = _batch_rows(connection, job_id, self._batch_table)
-                if rows:
-                    return _hydrate_batches(rows, evidence)
-                planned = planned_batches or plan_knowledge_analysis_batches(evidence)
-                if len(planned) <= 1:
-                    return ()
+                if persisted_plan is not None:
+                    if persisted_plan.document_ir_digest != proposed_plan.document_ir_digest:
+                        raise _state_error(
+                            "Knowledge Analysis Plan no longer matches the pinned DocumentIR."
+                        )
+                    if len(persisted_plan.batches) <= 1:
+                        if rows:
+                            raise _state_error("Short Knowledge Analysis Plan has batch rows.")
+                        return persisted_plan, ()
+                    if not rows:
+                        raise _state_error("Knowledge Analysis Plan is missing its batch rows.")
+                    return persisted_plan, _hydrate_batches(rows, evidence)
                 now = _timestamp()
                 connection.execute("BEGIN IMMEDIATE")
                 self._require_active_job_in(connection, job_id)
-                for ordinal, batch_evidence in enumerate(planned):
+                connection.execute(
+                    f"""
+                    INSERT INTO {self._plan_table} (
+                        job_id, stage_run_id, document_ir_digest, analysis_model,
+                        prompt_contract_digest, plan_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        stage_run_id,
+                        proposed_plan.document_ir_digest,
+                        proposed_plan.analysis_model,
+                        proposed_plan.prompt_contract_digest,
+                        _json(proposed_plan.as_dict()),
+                        now,
+                    ),
+                )
+                if len(planned_batches) <= 1:
+                    connection.commit()
+                    return proposed_plan, ()
+                for ordinal, batch_evidence in enumerate(planned_batches):
                     section_paths = _section_paths(batch_evidence)
                     connection.execute(
                         f"""
@@ -103,9 +135,28 @@ class DesktopKnowledgeAnalysisBatchStore:
                     """,
                     (job_id, stage_run_id, now, now),
                 )
+                for node in proposed_plan.merge_topology:
+                    connection.execute(
+                        f"""
+                        INSERT INTO {self._merge_node_table} (
+                            node_id, job_id, level, node_ordinal, child_ids_json,
+                            status, checkpoint_json, error_code, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)
+                        """,
+                        (
+                            node.node_id,
+                            job_id,
+                            node.level,
+                            node.ordinal,
+                            _json(node.child_ids),
+                            now,
+                            now,
+                        ),
+                    )
                 connection.commit()
-                return _hydrate_batches(
-                    _batch_rows(connection, job_id, self._batch_table), evidence
+                return (
+                    proposed_plan,
+                    _hydrate_batches(_batch_rows(connection, job_id, self._batch_table), evidence),
                 )
             except BaseException:
                 connection.rollback()
@@ -148,6 +199,58 @@ class DesktopKnowledgeAnalysisBatchStore:
                 return _checkpoint(row[1])
             finally:
                 connection.close()
+
+    def merge_node_checkpoint(
+        self,
+        job_id: str,
+        node_id: str,
+    ) -> dict[str, object] | None:
+        with kb_ingest_lock(self._state_dir):
+            connection = _connect(self._database_path)
+            try:
+                self._require_active_job_in(connection, job_id)
+                row = connection.execute(
+                    f"""
+                    SELECT status, checkpoint_json FROM {self._merge_node_table}
+                    WHERE job_id = ? AND node_id = ?
+                    """,
+                    (job_id, node_id),
+                ).fetchone()
+                if row is None or str(row[0]) != "completed":
+                    return None
+                return _checkpoint(row[1])
+            finally:
+                connection.close()
+
+    def start_merge_node(self, job_id: str, node_id: str) -> None:
+        self._transition_merge_node(job_id, node_id, "running", None, None)
+
+    def complete_merge_node(
+        self,
+        job_id: str,
+        node_id: str,
+        checkpoint: dict[str, object],
+    ) -> None:
+        self._transition_merge_node(job_id, node_id, "completed", checkpoint, None)
+
+    def fail_merge_node(self, job_id: str, node_id: str, error_code: str) -> None:
+        self._transition_merge_node(job_id, node_id, "failed", None, error_code)
+
+    def _plan_in(
+        self,
+        connection: sqlite3.Connection,
+        job_id: str,
+    ) -> KnowledgeAnalysisPlan | None:
+        row = connection.execute(
+            f"SELECT plan_json FROM {self._plan_table} WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return KnowledgeAnalysisPlan.from_dict(json.loads(str(row[0])))
+        except (json.JSONDecodeError, ValueError) as error:
+            raise _state_error("Knowledge Analysis Plan is invalid.") from error
 
     def _transition_batch(
         self,
@@ -211,6 +314,41 @@ class DesktopKnowledgeAnalysisBatchStore:
                     )
                     if cursor.rowcount != 1:
                         raise _state_error("Knowledge Analysis merge state changed unexpectedly.")
+            finally:
+                connection.close()
+
+    def _transition_merge_node(
+        self,
+        job_id: str,
+        node_id: str,
+        status: str,
+        checkpoint: dict[str, object] | None,
+        error_code: str | None,
+    ) -> None:
+        with kb_ingest_lock(self._state_dir):
+            connection = _connect(self._database_path)
+            try:
+                with connection:
+                    self._require_active_job_in(connection, job_id)
+                    cursor = connection.execute(
+                        f"""
+                        UPDATE {self._merge_node_table}
+                        SET status = ?, checkpoint_json = ?, error_code = ?, updated_at = ?
+                        WHERE job_id = ? AND node_id = ? AND status != 'completed'
+                        """,
+                        (
+                            status,
+                            _json(checkpoint) if checkpoint is not None else None,
+                            error_code,
+                            _timestamp(),
+                            job_id,
+                            node_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise _state_error(
+                            "Knowledge Analysis merge node state changed unexpectedly."
+                        )
             finally:
                 connection.close()
 

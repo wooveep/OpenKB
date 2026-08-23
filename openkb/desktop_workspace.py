@@ -16,9 +16,11 @@ from openkb.desktop_knowledge_analysis_migrations import (
     KNOWLEDGE_ANALYSIS_ENTITY_SUBTYPE_MIGRATION_STATEMENT,
     register_knowledge_analysis_migration_functions,
 )
+from openkb.desktop_model_observability_migrations import MODEL_LIFECYCLE_COLUMNS
 from openkb.desktop_workspace_feature_migrations import (
     DESKTOP_FEATURE_MIGRATIONS,
     KNOWLEDGE_ANALYSIS_MIGRATION_VERSION,
+    MODEL_LIFECYCLE_MIGRATION_VERSION,
 )
 from openkb.locks import kb_ingest_lock
 
@@ -598,6 +600,21 @@ def _apply_migrations(
 def _migration_statements_to_apply(
     connection: sqlite3.Connection, version: int, statements: tuple[str, ...]
 ) -> tuple[str, ...]:
+    if version == MODEL_LIFECYCLE_MIGRATION_VERSION:
+        existing = {
+            (table_name, column_name)
+            for table_name, column_name, _definition in MODEL_LIFECYCLE_COLUMNS
+            if _table_has_column(connection, table_name, column_name)
+        }
+        return tuple(
+            statement
+            for statement, (table_name, column_name, _definition) in zip(
+                statements,
+                MODEL_LIFECYCLE_COLUMNS,
+                strict=True,
+            )
+            if (table_name, column_name) not in existing
+        )
     if version != KNOWLEDGE_ANALYSIS_MIGRATION_VERSION:
         return statements
     if not _table_has_column(connection, "knowledge_reconciliation_candidates", "entity_subtype"):

@@ -2,8 +2,7 @@
 
 use super::{
     BridgeError, BridgeResult, EngineSupervisor, KnowledgeReconciliationCommit,
-    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision,
-    IMPORT_REQUEST_TIMEOUT,
+    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision, LONG_REQUEST_TIMEOUT,
 };
 use serde_json::json;
 
@@ -59,7 +58,7 @@ impl EngineSupervisor {
             "workbench.commit_knowledge_reconciliation_decisions",
             json!({}),
             Some(request_id),
-            Some(IMPORT_REQUEST_TIMEOUT),
+            Some(LONG_REQUEST_TIMEOUT),
         )?;
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(

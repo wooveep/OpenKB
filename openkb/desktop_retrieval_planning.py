@@ -14,6 +14,10 @@ from openkb.desktop_model_gateway import (
     DesktopModelRequest,
 )
 from openkb.desktop_retrieval_plan import deterministic_plan, model_plan, with_baseline_terms
+from openkb.desktop_structured_output import (
+    DesktopStructuredOutputInvalidError,
+    run_structured_output,
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,7 @@ def build_retrieval_plan(
     model_gateway: DesktopModelGateway | None,
     *,
     is_cancelled: Callable[[], bool] | None = None,
+    on_model_event: Callable[[object], None] | None = None,
 ) -> DesktopRetrievalPlanningResult:
     """Build one plan while retaining every physical retry in its cost."""
     fallback = deterministic_plan(question)
@@ -38,22 +43,46 @@ def build_retrieval_plan(
     attempts = 0
     response = ""
 
-    def observe(event) -> None:
-        nonlocal attempts
-        if event.status == "running":
-            attempts = max(attempts, event.attempt)
-
     try:
-        result = model_gateway.analyze(
-            DesktopModelRequest("retrieval_plan", "Grounded answer question", question),
-            on_event=observe,
-            is_cancelled=is_cancelled,
+
+        def invoke(request: DesktopModelRequest):
+            nonlocal attempts, response
+            call_attempts = 0
+
+            def observe(event) -> None:
+                nonlocal call_attempts
+                if event.status in {
+                    "connecting",
+                    "awaiting_model_result",
+                    "model_output_activity",
+                    "validating",
+                }:
+                    call_attempts = max(call_attempts, event.attempt)
+                if on_model_event is not None:
+                    on_model_event(event)
+
+            try:
+                result = model_gateway.analyze(
+                    request,
+                    on_event=observe,
+                    is_cancelled=is_cancelled,
+                )
+            except BaseException:
+                attempts += call_attempts
+                raise
+            attempts += max(call_attempts, result.attempt_count)
+            response = result.content
+            return result
+
+        output = run_structured_output(
+            operation="retrieval_plan",
+            document_name="Grounded answer question",
+            source_material=question,
+            invoke=invoke,
+            validate=lambda content: model_plan(question, content),
         )
-        attempts = max(attempts, result.attempt_count)
-        response = result.content
-        planned = model_plan(question, response)
         return DesktopRetrievalPlanningResult(
-            with_baseline_terms(fallback, planned),
+            with_baseline_terms(fallback, output.value),
             (),
             _planning_cost(question, response, attempts),
         )
@@ -69,7 +98,7 @@ def build_retrieval_plan(
             ("retrieval_plan_fallback",),
             _planning_cost(question, response, attempts),
         )
-    except (ValueError, json.JSONDecodeError):
+    except (DesktopStructuredOutputInvalidError, ValueError, json.JSONDecodeError):
         return DesktopRetrievalPlanningResult(
             fallback,
             ("retrieval_plan_fallback",),

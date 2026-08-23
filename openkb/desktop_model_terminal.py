@@ -8,12 +8,14 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from queue import Empty, SimpleQueue
 from typing import Literal
 
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
     DesktopModelFailure,
+    DesktopModelGateway,
     DesktopModelRequest,
     DesktopModelResult,
     DesktopModelTransportError,
@@ -29,6 +31,7 @@ TerminalModelCallStatus = Literal[
     "connecting",
     "awaiting_model_result",
     "model_output_activity",
+    "validating",
     "completed",
     "retrying",
     "cancelled",
@@ -65,6 +68,11 @@ class DesktopTerminalModelEvent:
     failure_code: str | None = None
     reason: str | None = None
     retry_after_seconds: float | None = None
+    operation: str = "unknown"
+    model_role: str = "default"
+    provider_name: str = "scripted"
+    model_name: str = "unknown"
+    execution_lane: str = "background"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -75,6 +83,12 @@ class DesktopTerminalModelEvent:
             "failure_code": self.failure_code,
             "reason": self.reason,
             "retry_after_seconds": self.retry_after_seconds,
+            "operation": self.operation,
+            "model_role": self.model_role,
+            "provider": self.provider_name,
+            "model_name": self.model_name,
+            "execution_lane": self.execution_lane,
+            "attempt_id": f"{self.call_id}:{self.attempt}",
         }
 
 
@@ -84,9 +98,14 @@ class _TerminalAttemptContext:
     attempt: int
     started_at: float
     on_event: Callable[[DesktopTerminalModelEvent], None]
+    operation: str
+    model_role: str
+    provider_name: str
+    model_name: str
+    execution_lane: str
 
 
-class DesktopTerminalModelGateway:
+class DesktopTerminalModelGateway(DesktopModelGateway):
     """Run a Model Call without a first-byte, read, reasoning, or total deadline."""
 
     def __init__(
@@ -95,10 +114,35 @@ class DesktopTerminalModelGateway:
         *,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        provider_name: str = "scripted",
+        model_name: str = "scripted",
     ) -> None:
         self._transport = transport
         self._clock = clock
         self._sleep = sleep
+        self._provider_name = provider_name
+        self._model_name = model_name
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider_name
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    def for_lane(self, lane: str) -> DesktopTerminalModelGateway:
+        """Return a gateway bound to a named transport lane when supported."""
+        select_lane = getattr(self._transport, "for_lane", None)
+        if not callable(select_lane):
+            return self
+        return DesktopTerminalModelGateway(
+            select_lane(lane),
+            clock=self._clock,
+            sleep=self._sleep,
+            provider_name=self._provider_name,
+            model_name=self._model_name,
+        )
 
     def analyze(
         self,
@@ -107,16 +151,33 @@ class DesktopTerminalModelGateway:
         on_event: Callable[[DesktopTerminalModelEvent], None],
         is_cancelled: CancellationCallback | None = None,
     ) -> DesktopModelResult:
-        return self._run(
+        """Prefer a provider stream so structured work exposes real output activity."""
+        if request.supports_streaming is not False and self._streaming_transport_available():
+            return self.stream(
+                request,
+                on_event=on_event,
+                on_delta=lambda _attempt, _delta: None,
+                is_cancelled=is_cancelled,
+            )
+        return self._analyze_non_streaming(
             request,
             on_event=on_event,
-            attempt_call=lambda _context, on_request_sent: (
-                self._call_without_response_deadline(
-                    lambda: self._call_terminal_transport(request, on_request_sent),
-                    is_cancelled=is_cancelled,
-                )
-            ),
             is_cancelled=is_cancelled,
+        )
+
+    def analyze_once(
+        self,
+        request: DesktopModelRequest,
+        *,
+        on_event: Callable[[DesktopTerminalModelEvent], None],
+        is_cancelled: CancellationCallback | None = None,
+    ) -> DesktopModelResult:
+        """Execute one physical attempt without imposing a response deadline."""
+        return self._analyze_non_streaming(
+            request,
+            on_event=on_event,
+            is_cancelled=is_cancelled,
+            max_attempts=1,
         )
 
     def stream(
@@ -125,6 +186,7 @@ class DesktopTerminalModelGateway:
         *,
         on_event: Callable[[DesktopTerminalModelEvent], None],
         on_delta: Callable[[int, str], None],
+        on_reset: Callable[[int], None] | None = None,
         is_cancelled: CancellationCallback | None = None,
     ) -> DesktopModelResult:
         """Stream provider output while lifecycle events retain no output content."""
@@ -133,33 +195,53 @@ class DesktopTerminalModelGateway:
         )
         stream_transport = getattr(self._transport, "stream_until_terminal", None)
         if not callable(lifecycle_stream_transport) and not callable(stream_transport):
-            result = self.analyze(request, on_event=on_event, is_cancelled=is_cancelled)
+            result = self._analyze_non_streaming(
+                request,
+                on_event=on_event,
+                is_cancelled=is_cancelled,
+            )
             on_delta(result.attempt_count, result.content)
             return result
 
         def call_stream(
             context: _TerminalAttemptContext,
             on_request_sent: RequestSentCallback,
+            flush_request_sent: RequestSentCallback,
         ) -> object:
             active = threading.Event()
             active.set()
+            pending_deltas: SimpleQueue[str] = SimpleQueue()
 
-            def emit(delta: str) -> None:
+            def queue_delta(delta: str) -> None:
                 if not active.is_set() or not delta or _is_cancelled(is_cancelled):
                     return
-                on_delta(context.attempt, delta)
-                self._emit(context, "model_output_activity")
+                pending_deltas.put(delta)
+
+            def flush_stream_activity() -> None:
+                flush_request_sent()
+                while True:
+                    try:
+                        delta = pending_deltas.get_nowait()
+                    except Empty:
+                        return
+                    if not active.is_set():
+                        continue
+                    on_delta(context.attempt, delta)
+                    self._emit(context, "model_output_activity")
 
             try:
+                self._prepare_active_stream(request)
                 return self._call_without_response_deadline(
                     lambda: self._call_terminal_stream_transport(
                         request,
-                        emit,
+                        queue_delta,
                         on_request_sent,
                         lifecycle_stream_transport=lifecycle_stream_transport,
                         stream_transport=stream_transport,
                     ),
                     is_cancelled=is_cancelled,
+                    on_wait=flush_stream_activity,
+                    on_cancel=lambda: self._cancel_active_stream(request),
                 )
             finally:
                 active.clear()
@@ -169,6 +251,35 @@ class DesktopTerminalModelGateway:
             on_event=on_event,
             attempt_call=call_stream,
             is_cancelled=is_cancelled,
+            on_retry=on_reset,
+        )
+
+    def _streaming_transport_available(self) -> bool:
+        return callable(
+            getattr(self._transport, "stream_until_terminal_with_lifecycle", None)
+        ) or callable(getattr(self._transport, "stream_until_terminal", None))
+
+    def _analyze_non_streaming(
+        self,
+        request: DesktopModelRequest,
+        *,
+        on_event: Callable[[DesktopTerminalModelEvent], None],
+        is_cancelled: CancellationCallback | None,
+        max_attempts: int = MAX_TERMINAL_MODEL_ATTEMPTS,
+    ) -> DesktopModelResult:
+        return self._run(
+            request,
+            on_event=on_event,
+            attempt_call=lambda _context, on_request_sent, flush_request_sent: (
+                self._call_without_response_deadline(
+                    lambda: self._call_terminal_transport(request, on_request_sent),
+                    is_cancelled=is_cancelled,
+                    on_wait=flush_request_sent,
+                )
+            ),
+            is_cancelled=is_cancelled,
+            on_retry=None,
+            max_attempts=max_attempts,
         )
 
     def _run(
@@ -176,13 +287,27 @@ class DesktopTerminalModelGateway:
         request: DesktopModelRequest,
         *,
         on_event: Callable[[DesktopTerminalModelEvent], None],
-        attempt_call: Callable[[_TerminalAttemptContext, RequestSentCallback], object],
+        attempt_call: Callable[
+            [_TerminalAttemptContext, RequestSentCallback, RequestSentCallback], object
+        ],
         is_cancelled: CancellationCallback | None,
+        on_retry: Callable[[int], None] | None,
+        max_attempts: int = MAX_TERMINAL_MODEL_ATTEMPTS,
     ) -> DesktopModelResult:
         call_id = uuid.uuid4().hex
         started_at = self._clock()
-        for attempt in range(1, MAX_TERMINAL_MODEL_ATTEMPTS + 1):
-            context = _TerminalAttemptContext(call_id, attempt, started_at, on_event)
+        for attempt in range(1, max_attempts + 1):
+            context = _TerminalAttemptContext(
+                call_id,
+                attempt,
+                started_at,
+                on_event,
+                request.operation,
+                request.model_role,
+                self._provider_name,
+                request.model_name or self._model_name,
+                request.execution_lane,
+            )
             self._raise_if_cancelled(is_cancelled, context)
             self._emit(context, "queued")
             try:
@@ -199,19 +324,36 @@ class DesktopTerminalModelGateway:
             attempt_active = threading.Event()
             attempt_active.set()
             request_sent = threading.Event()
+            request_sent_emitted = threading.Event()
             request_sent_lock = threading.Lock()
+            request_sent_elapsed: list[float | None] = [None]
 
             def on_request_sent() -> None:
                 with request_sent_lock:
-                    if request_sent.is_set() or not attempt_active.is_set():
+                    if not request_sent.is_set():
+                        request_sent_elapsed[0] = max(0.0, self._clock() - context.started_at)
+                        request_sent.set()
+
+            def flush_request_sent() -> None:
+                with request_sent_lock:
+                    if (
+                        not request_sent.is_set()
+                        or request_sent_emitted.is_set()
+                        or not attempt_active.is_set()
+                    ):
                         return
-                    request_sent.set()
-                    self._emit(context, "awaiting_model_result")
+                    request_sent_emitted.set()
+                    self._emit(
+                        context,
+                        "awaiting_model_result",
+                        elapsed_seconds=request_sent_elapsed[0],
+                    )
 
             try:
                 try:
-                    response = attempt_call(context, on_request_sent)
+                    response = attempt_call(context, on_request_sent, flush_request_sent)
                     on_request_sent()
+                    flush_request_sent()
                     if not isinstance(response, str) or not response.strip():
                         raise ValueError("The model response must contain text.")
                 finally:
@@ -229,7 +371,7 @@ class DesktopTerminalModelGateway:
                     failure,
                     retry_after_seconds=retry_after,
                 )
-                if failure.retryable and attempt < MAX_TERMINAL_MODEL_ATTEMPTS:
+                if failure.retryable and attempt < max_attempts:
                     self._emit(
                         context,
                         "retrying",
@@ -237,6 +379,8 @@ class DesktopTerminalModelGateway:
                         reason=failure.reason,
                         retry_after_seconds=retry_after,
                     )
+                    if on_retry is not None:
+                        on_retry(attempt + 1)
                     try:
                         self._wait_for_retry(
                             retry_after,
@@ -249,8 +393,15 @@ class DesktopTerminalModelGateway:
                     continue
                 raise DesktopModelCallError(call_id, failure, attempt) from error
             self._raise_if_cancelled(is_cancelled, context)
+            self._emit(context, "validating")
             self._emit(context, "completed")
-            return DesktopModelResult(call_id=call_id, content=response, attempt_count=attempt)
+            return DesktopModelResult(
+                call_id=call_id,
+                content=response,
+                attempt_count=attempt,
+                usage=getattr(response, "usage", None),
+                provider_request_id=getattr(response, "provider_request_id", None),
+            )
         raise AssertionError("Terminal Model Call exhausted attempts without a result.")
 
     def _call_without_response_deadline(
@@ -258,6 +409,8 @@ class DesktopTerminalModelGateway:
         call: Callable[[], object],
         *,
         is_cancelled: CancellationCallback | None,
+        on_wait: Callable[[], None] | None = None,
+        on_cancel: Callable[[], None] | None = None,
     ) -> object:
         completed = threading.Event()
         outcome: dict[str, object] = {}
@@ -276,14 +429,30 @@ class DesktopTerminalModelGateway:
             name="openkb-terminal-model-attempt",
         ).start()
         while not completed.wait(0.05):
+            if on_wait is not None:
+                on_wait()
             if _is_cancelled(is_cancelled):
+                if on_cancel is not None:
+                    on_cancel()
                 raise DesktopModelCancelledError()
+        if on_wait is not None:
+            on_wait()
         if _is_cancelled(is_cancelled):
             raise DesktopModelCancelledError()
         error = outcome.get("error")
         if isinstance(error, Exception):
             raise error
         return outcome.get("response")
+
+    def _cancel_active_stream(self, request: DesktopModelRequest) -> None:
+        cancel = getattr(self._transport, "cancel_active_stream", None)
+        if callable(cancel):
+            cancel(request)
+
+    def _prepare_active_stream(self, request: DesktopModelRequest) -> None:
+        prepare = getattr(self._transport, "prepare_active_stream", None)
+        if callable(prepare):
+            prepare(request)
 
     def _call_terminal_transport(
         self,
@@ -361,16 +530,26 @@ class DesktopTerminalModelGateway:
         failure_code: str | None = None,
         reason: str | None = None,
         retry_after_seconds: float | None = None,
+        elapsed_seconds: float | None = None,
     ) -> None:
         context.on_event(
             DesktopTerminalModelEvent(
                 call_id=context.call_id,
                 attempt=context.attempt,
                 status=status,
-                elapsed_seconds=max(0.0, self._clock() - context.started_at),
+                elapsed_seconds=(
+                    max(0.0, self._clock() - context.started_at)
+                    if elapsed_seconds is None
+                    else elapsed_seconds
+                ),
                 failure_code=failure_code,
                 reason=reason,
                 retry_after_seconds=retry_after_seconds,
+                operation=context.operation,
+                model_role=context.model_role,
+                provider_name=context.provider_name,
+                model_name=context.model_name,
+                execution_lane=context.execution_lane,
             )
         )
 

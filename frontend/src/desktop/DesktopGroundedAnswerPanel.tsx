@@ -6,6 +6,10 @@ import { Button } from "@/components/ui/button"
 import MarkdownView from "@/components/MarkdownView"
 import { useDesktopBridge } from "./bridge-context"
 import type { DesktopAnswerSourceImage, DesktopGroundedAnswer } from "./contracts"
+import {
+  DesktopLiveModelActivityDetails,
+  type DesktopLiveModelActivity,
+} from "./DesktopModelActivityDetails"
 import { nextDesktopRequestId } from "./request-id"
 import { formatSourceLocator } from "./source-locator"
 
@@ -15,6 +19,7 @@ type StreamingAnswer = {
   attempt: number
   content: string
   retrying: boolean
+  activity: DesktopLiveModelActivity | null
 }
 
 /** Ask over the persisted Available Knowledge evidence pack, never browser state. */
@@ -29,6 +34,7 @@ export function DesktopGroundedAnswerPanel({
   const [answers, setAnswers] = useState<DesktopGroundedAnswer[]>([])
   const [streaming, setStreaming] = useState<StreamingAnswer | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [answering, setAnswering] = useState(false)
 
   const refreshAnswers = useCallback(async () => {
@@ -45,7 +51,14 @@ export function DesktopGroundedAnswerPanel({
     let unsubscribe: (() => void) | undefined
     void Promise.resolve().then(refreshAnswers)
     void bridge.subscribe((event) => {
-      if (event.kind !== "answer.delta" || disposed) return
+      if (disposed) return
+      if (event.kind === "model.call_lifecycle") {
+        setStreaming((current) => current?.requestId === event.data.requestId
+          ? { ...current, activity: { ...event.data, observedAtMs: Date.now() } }
+          : current)
+        return
+      }
+      if (event.kind !== "answer.delta") return
       setStreaming((current) => {
         if (current?.requestId !== event.data.requestId) return current
         if (event.data.attempt < current.attempt) return current
@@ -56,6 +69,7 @@ export function DesktopGroundedAnswerPanel({
           attempt: event.data.attempt,
           content: replace ? event.data.delta : current.content + event.data.delta,
           retrying: current.retrying,
+          activity: current.activity,
         }
       })
     }).then((remove) => {
@@ -74,7 +88,15 @@ export function DesktopGroundedAnswerPanel({
     const requestId = nextDesktopRequestId("answer")
     setAnswering(true)
     setError(null)
-    setStreaming({ requestId, answerId: null, attempt: 0, content: "", retrying: false })
+    setNotice(null)
+    setStreaming({
+      requestId,
+      answerId: null,
+      attempt: 0,
+      content: "",
+      retrying: false,
+      activity: null,
+    })
     try {
       const answer = await bridge.askGrounded(normalized, requestId)
       setAnswers((current) => [
@@ -95,7 +117,15 @@ export function DesktopGroundedAnswerPanel({
     const requestId = nextDesktopRequestId("answer")
     setAnswering(true)
     setError(null)
-    setStreaming({ requestId, answerId: answer.answerId, attempt: 0, content: "", retrying: true })
+    setNotice(null)
+    setStreaming({
+      requestId,
+      answerId: answer.answerId,
+      attempt: 0,
+      content: "",
+      retrying: true,
+      activity: null,
+    })
     try {
       const replacement = await bridge.retryInterruptedAnswer(answer.answerId, requestId)
       setAnswers((current) => current.map((item) => (
@@ -112,7 +142,10 @@ export function DesktopGroundedAnswerPanel({
   const stopAnswer = async () => {
     if (!streaming) return
     try {
-      await bridge.cancel(streaming.requestId)
+      const result = await bridge.cancel(streaming.requestId)
+      if (result.cancelled) {
+        setNotice(t("desktop.knowledgeBases.answerCancellationWarning"))
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
@@ -158,18 +191,30 @@ export function DesktopGroundedAnswerPanel({
           </Button>
         </div>
         {error ? <p className="mt-3 text-sm text-destructive" role="alert">{error}</p> : null}
+        {notice ? (
+          <p className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200" role="status">
+            {notice}
+          </p>
+        ) : null}
       </section>
 
       {streaming ? (
-        <AnswerCard
-          answerText={streaming.content}
-          finalized={false}
-          title={t(
-            streaming.retrying
-              ? "desktop.knowledgeBases.answerRetrying"
-              : "desktop.knowledgeBases.answerStreaming",
-          )}
-        />
+        <div className="space-y-2">
+          {streaming.activity ? (
+            <div className="text-xs">
+              <DesktopLiveModelActivityDetails activity={streaming.activity} />
+            </div>
+          ) : null}
+          <AnswerCard
+            answerText={streaming.content}
+            finalized={false}
+            title={t(
+              streaming.retrying
+                ? "desktop.knowledgeBases.answerRetrying"
+                : "desktop.knowledgeBases.answerStreaming",
+            )}
+          />
+        </div>
       ) : null}
       {answers.length ? answers.map((answer) => (
         <CompletedAnswerCard

@@ -36,8 +36,9 @@ from openkb.desktop_import_artifacts import (
     source_media_type,
     validate_text_source,
 )
-from openkb.desktop_import_deduplication import normalized_body_sha256
+from openkb.desktop_import_deduplication import DuplicateImportSignal, normalized_body_sha256
 from openkb.desktop_import_failures import DIRECT_IMPORT_QUARANTINE_CODES
+from openkb.desktop_import_model_call import run_import_model_call
 from openkb.desktop_import_model_ledger import DesktopImportModelLedger
 from openkb.desktop_import_quarantine import DesktopImportQuarantineStore
 from openkb.desktop_import_recovery import DesktopImportRecoveryStore
@@ -70,13 +71,12 @@ from openkb.desktop_knowledge_graph import (
     start_graph_extraction,
 )
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
+from openkb.desktop_legacy_model_recovery import DesktopLegacyModelRecoveryService
 from openkb.desktop_missing_sources import record_missing_source_candidates_in
 from openkb.desktop_model_gateway import (
-    DesktopModelAttemptEvent,
     DesktopModelCallError,
+    DesktopModelCancelledError,
     DesktopModelGateway,
-    DesktopModelRequest,
-    DesktopModelResult,
 )
 from openkb.desktop_okf_projection import (
     activate_okf_projection,
@@ -87,7 +87,7 @@ from openkb.desktop_parser_runtime import begin_parser_warmup, require_parser_mo
 from openkb.locks import kb_ingest_lock
 
 StageProgressCallback = Callable[[dict[str, object]], None]
-_CONTROL_CODES = {"import_paused", "import_cancelled"}
+_CONTROL_CODES = {"import_paused", "import_cancelled", "awaiting_model_configuration"}
 logger = logging.getLogger(__name__)
 
 
@@ -173,6 +173,21 @@ class DesktopTextImportService:
         self, job_id: str, override: DesktopRecoveryOverride
     ) -> DesktopTextImportResult:
         """Resume a quarantined document at its failed stage using one run-only override."""
+        legacy_recovery = DesktopLegacyModelRecoveryService(self._store.kb_dir)
+        assessment = legacy_recovery.assessment(job_id)
+        selected_legacy_recovery = assessment is not None
+        if assessment is not None:
+            if override.legacy_recovery_choice is None:
+                raise DesktopImportError(
+                    "legacy_model_recovery_choice_required",
+                    "Choose a legacy Knowledge Analysis recovery path before continuing.",
+                )
+            legacy_recovery.select(
+                job_id,
+                override.legacy_recovery_choice,
+                model_override=override.model,
+                context_capacity=override.context_capacity,
+            )
         try:
             with kb_ingest_lock(self._store.state_dir):
                 result = self._run(self._recovery.begin(job_id, override))
@@ -182,6 +197,9 @@ class DesktopTextImportService:
             raise DesktopImportError(
                 "desktop_import_failed", f"Could not recover import {job_id}: {error}"
             ) from error
+        finally:
+            if selected_legacy_recovery:
+                legacy_recovery.record_resulting_plan(job_id)
         self._start_graph_extraction(result)
         return result
 
@@ -356,12 +374,12 @@ class DesktopTextImportService:
                             "A configured model is required to resume model analysis.",
                         )
                     if self._require_model_analysis:
+                        self._store.await_model_configuration(state, active_stage)
                         raise DesktopImportError(
-                            "model_configuration_invalid",
-                            "Configure a model before importing new documents.",
+                            "awaiting_model_configuration",
+                            "The parsed document is waiting for a usable Analysis Model.",
                             suggested_action=(
-                                "Configure the provider, API URL, API key, and model, "
-                                "then recover this document."
+                                "Correct Model Configuration, then explicitly continue this import."
                             ),
                         )
                     self._store.set_stage(
@@ -372,6 +390,7 @@ class DesktopTextImportService:
                         error_code="model_analysis_not_configured",
                     )
                 else:
+                    gateway = self._model_gateway
                     run = run_knowledge_analysis(
                         store=self._knowledge_analysis_batches,
                         job_id=state.job_id,
@@ -382,8 +401,14 @@ class DesktopTextImportService:
                         provider=self._model_gateway.provider_name,
                         model=self._model_gateway.model_name,
                         engine_version=__version__,
-                        analyze=lambda operation, prompt: self._analyze_document(
-                            state, active_stage, operation, prompt
+                        analyze=lambda request: run_import_model_call(
+                            gateway=gateway,
+                            ledger=self._model_ledger,
+                            store=self._store,
+                            state=state,
+                            stage=active_stage,
+                            request=request,
+                            is_cancelled=lambda: self._control.action is not None,
                         ),
                         honor_control=lambda: self._honor_control(state, active_stage),
                         on_batch_completed=lambda completed, total: self._store.emit_stage(
@@ -391,6 +416,17 @@ class DesktopTextImportService:
                             active_stage,
                             "running",
                             80 + min(4, round((completed / total) * 4)),
+                        ),
+                        capability_profile=(
+                            capability("knowledge_analysis")
+                            if callable(
+                                capability := getattr(
+                                    gateway,
+                                    "capability_for_operation",
+                                    None,
+                                )
+                            )
+                            else None
                         ),
                     )
                     knowledge_analysis = run.analysis
@@ -473,9 +509,19 @@ class DesktopTextImportService:
             if knowledge_analysis is None:
                 self._record_knowledge_reconciliation(document.document_id, blocks)
             return self._result(state.job_id, document.document_id, deduplicated=deduplicated)
-        except _DuplicateImport as duplicate:
+        except DuplicateImportSignal as duplicate:
             self._record_existing_knowledge_reconciliation(duplicate.document_id)
             return self._result(state.job_id, duplicate.document_id, deduplicated=True)
+        except DesktopModelCancelledError as error:
+            if self._control.action == "paused":
+                self._honor_control(state, active_stage)
+            self._store.pause_job(state, active_stage)
+            self._recovery.mark_finished(state, "cancelled")
+            raise DesktopImportError(
+                "import_interrupted",
+                "Import was interrupted while waiting for the model.",
+                suggested_action="Continue the import to reuse completed checkpoints.",
+            ) from error
         except DesktopModelCallError as error:
             logger.warning(
                 "import_model_analysis_quarantined job_id=%s document=%r stage=%s "
@@ -539,49 +585,6 @@ class DesktopTextImportService:
                 self._store.fail_job(state, active_stage, wrapped.code)
                 self._recovery.mark_failed(state, active_stage, wrapped.code)
             raise wrapped from error
-
-    def _analyze_document(
-        self, state: ImportJobState, stage: str, operation: str, text: str
-    ) -> DesktopModelResult:
-        if self._model_gateway is None:
-            raise DesktopImportError(
-                "desktop_import_state_invalid", "Model Gateway is unavailable."
-            )
-
-        def record_attempt(event: DesktopModelAttemptEvent) -> None:
-            logger.info(
-                "import_model_attempt job_id=%s document=%r stage=%s call_id=%s "
-                "attempt=%s status=%s timeout_seconds=%.1f remaining_seconds=%.1f "
-                "error_code=%s next_timeout_seconds=%s",
-                state.job_id,
-                state.source.name,
-                stage,
-                event.call_id,
-                event.attempt,
-                event.status,
-                event.timeout_seconds,
-                event.remaining_seconds,
-                event.error_code,
-                event.next_timeout_seconds,
-            )
-            self._model_ledger.record_attempt(
-                job_id=state.job_id,
-                stage_run_id=state.stage_ids[stage],
-                operation=operation,
-                event=event,
-            )
-            self._store.emit_stage(
-                state,
-                stage,
-                "running",
-                80,
-                error_code=event.error_code,
-            )
-
-        return self._model_gateway.analyze(
-            DesktopModelRequest(operation, state.source.name, text),
-            on_event=record_attempt,
-        )
 
     def _raw_input(
         self, state: ImportJobState, stages: Mapping[str, DesktopStageRun]
@@ -652,7 +655,7 @@ class DesktopTextImportService:
         if duplicate is not None:
             self._store.set_stage(state, active_stage, "completed", 35)
             self._store.complete_duplicate_job(state, duplicate.document_id)
-            raise _DuplicateImport(duplicate.document_id)
+            raise DuplicateImportSignal(duplicate.document_id)
         raw_path = self._store.write_raw_asset(asset_sha256, raw_bytes, raw_suffix)
         self._store.set_stage(
             state,
@@ -682,6 +685,11 @@ class DesktopTextImportService:
             model_calls=task.model_calls,
             quarantine=task.quarantine,
             knowledge_analysis=task.knowledge_analysis,
+            import_progress=task.import_progress,
+            model_usage=task.model_usage,
+            model_usage_aggregate=task.model_usage_aggregate,
+            model_activity=task.model_activity,
+            legacy_model_recovery=task.legacy_model_recovery,
         )
 
     def _record_document_version_candidates(
@@ -785,10 +793,3 @@ class DesktopTextImportService:
             and type(checkpoint.get("raw_size")) is int
             and checkpoint["raw_size"] == raw_size
         )
-
-
-class _DuplicateImport(Exception):
-    """Internal signal used to reuse the existing document without more stages."""
-
-    def __init__(self, document_id: str) -> None:
-        self.document_id = document_id

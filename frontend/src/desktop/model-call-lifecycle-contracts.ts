@@ -5,6 +5,7 @@ export type DesktopModelCallLifecycleStatus =
   | "connecting"
   | "awaiting_model_result"
   | "model_output_activity"
+  | "validating"
   | "completed"
   | "retrying"
   | "cancelled"
@@ -23,5 +24,12 @@ export interface DesktopModelCallLifecycleEvent {
     failureCode: string | null
     reason: string | null
     retryAfterSeconds: number | null
+    operation: string
+    modelRole: "default" | "analysis" | "answer"
+    provider: string
+    modelName: string
+    executionLane: "background" | "interactive"
+    attemptId: string
+    longWaitThresholdSeconds: number
   }
 }

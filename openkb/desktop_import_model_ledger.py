@@ -12,7 +12,8 @@ from openkb.desktop_import_types import (
     DesktopModelCall,
     DesktopQuarantinedDocument,
 )
-from openkb.desktop_model_gateway import DesktopModelAttemptEvent, DesktopModelFailure
+from openkb.desktop_model_event import normalize_model_event
+from openkb.desktop_model_gateway import DesktopModelFailure
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -30,10 +31,11 @@ class DesktopImportModelLedger:
         job_id: str,
         stage_run_id: str,
         operation: str,
-        event: DesktopModelAttemptEvent,
+        event: object,
     ) -> None:
+        normalized = normalize_model_event(event)
         now = _timestamp()
-        completed_at = now if event.status in {"completed", "failed"} else None
+        completed_at = now if normalized.lifecycle_status in {"completed", "cancelled"} else None
         with kb_ingest_lock(self._state_dir):
             connection = _connect(self._database_path)
             try:
@@ -43,8 +45,9 @@ class DesktopImportModelLedger:
                         INSERT INTO model_calls (
                             call_id, job_id, stage_run_id, operation, status, attempt_count,
                             timeout_seconds, next_timeout_seconds, remaining_seconds,
-                            error_code, reason, suggested_action, created_at, completed_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                            error_code, reason, suggested_action, created_at, completed_at,
+                            lifecycle_status, elapsed_seconds, retry_after_seconds
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
                         ON CONFLICT(call_id) DO UPDATE SET
                             status = excluded.status,
                             attempt_count = excluded.attempt_count,
@@ -53,48 +56,61 @@ class DesktopImportModelLedger:
                             remaining_seconds = excluded.remaining_seconds,
                             error_code = excluded.error_code,
                             reason = excluded.reason,
-                            completed_at = excluded.completed_at
+                            completed_at = excluded.completed_at,
+                            lifecycle_status = excluded.lifecycle_status,
+                            elapsed_seconds = excluded.elapsed_seconds,
+                            retry_after_seconds = excluded.retry_after_seconds
                         """,
                         (
-                            event.call_id,
+                            normalized.call_id,
                             job_id,
                             stage_run_id,
                             operation,
-                            event.status,
-                            event.attempt,
-                            event.timeout_seconds,
-                            event.next_timeout_seconds,
-                            event.remaining_seconds,
-                            event.error_code,
-                            event.reason,
+                            normalized.storage_status,
+                            normalized.attempt,
+                            0.0,
+                            None,
+                            0.0,
+                            normalized.error_code,
+                            normalized.reason,
                             now,
                             completed_at,
+                            normalized.lifecycle_status,
+                            normalized.elapsed_seconds,
+                            normalized.retry_after_seconds,
                         ),
                     )
                     connection.execute(
                         """
                         INSERT INTO model_attempts (
                             call_id, attempt, status, timeout_seconds, remaining_seconds,
-                            error_code, reason, created_at, completed_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            error_code, reason, created_at, completed_at, lifecycle_status,
+                            elapsed_seconds, retry_after_seconds
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(call_id, attempt) DO UPDATE SET
                             status = excluded.status,
                             timeout_seconds = excluded.timeout_seconds,
                             remaining_seconds = excluded.remaining_seconds,
                             error_code = excluded.error_code,
                             reason = excluded.reason,
-                            completed_at = excluded.completed_at
+                            completed_at = excluded.completed_at,
+                            lifecycle_status = excluded.lifecycle_status,
+                            elapsed_seconds = excluded.elapsed_seconds,
+                            retry_after_seconds = excluded.retry_after_seconds
                         """,
                         (
-                            event.call_id,
-                            event.attempt,
-                            event.status,
-                            event.timeout_seconds,
-                            event.remaining_seconds,
-                            event.error_code,
-                            event.reason,
+                            normalized.call_id,
+                            normalized.attempt,
+                            normalized.storage_status,
+                            0.0,
+                            0.0,
+                            normalized.error_code,
+                            normalized.reason,
                             now,
                             completed_at,
+                            normalized.lifecycle_status,
+                            normalized.elapsed_seconds,
+                            normalized.retry_after_seconds,
                         ),
                     )
             finally:
@@ -150,8 +166,8 @@ def model_details_for_job(
     """Project the safe ledger entries used by task cards and failure menus."""
     rows = connection.execute(
         """
-        SELECT call_id, stage_run_id, operation, status, attempt_count, timeout_seconds,
-            next_timeout_seconds, remaining_seconds, error_code, reason, suggested_action
+        SELECT call_id, stage_run_id, operation, COALESCE(lifecycle_status, status),
+            attempt_count, error_code, reason, suggested_action, elapsed_seconds
         FROM model_calls
         WHERE job_id = ?
         ORDER BY created_at, rowid
@@ -165,12 +181,10 @@ def model_details_for_job(
             operation=str(row[2]),
             status=str(row[3]),
             attempt_count=int(row[4]),
-            timeout_seconds=float(row[5]),
-            next_timeout_seconds=float(row[6]) if row[6] is not None else None,
-            remaining_seconds=float(row[7]),
-            error_code=str(row[8]) if row[8] is not None else None,
-            reason=str(row[9]) if row[9] is not None else None,
-            suggested_action=str(row[10]) if row[10] is not None else None,
+            elapsed_seconds=float(row[8]),
+            error_code=str(row[5]) if row[5] is not None else None,
+            reason=str(row[6]) if row[6] is not None else None,
+            suggested_action=str(row[7]) if row[7] is not None else None,
             attempts=_attempts_for_call(connection, str(row[0])),
         )
         for row in rows
@@ -203,7 +217,8 @@ def _attempts_for_call(
 ) -> tuple[DesktopModelAttempt, ...]:
     rows = connection.execute(
         """
-        SELECT attempt, status, timeout_seconds, remaining_seconds, error_code, reason
+        SELECT attempt, COALESCE(lifecycle_status, status),
+            error_code, reason, elapsed_seconds
         FROM model_attempts
         WHERE call_id = ?
         ORDER BY attempt
@@ -214,10 +229,9 @@ def _attempts_for_call(
         DesktopModelAttempt(
             attempt=int(row[0]),
             status=str(row[1]),
-            timeout_seconds=float(row[2]),
-            remaining_seconds=float(row[3]),
-            error_code=str(row[4]) if row[4] is not None else None,
-            reason=str(row[5]) if row[5] is not None else None,
+            elapsed_seconds=float(row[4]),
+            error_code=str(row[2]) if row[2] is not None else None,
+            reason=str(row[3]) if row[3] is not None else None,
         )
         for row in rows
     )

@@ -9,7 +9,9 @@
     "build": "npm run i18n:check && tsc -b && vite build",
     "build:desktop": "npm run build",
     "lint": "eslint .",
+    "test:ui": "node scripts/test-model-task-ui.mjs",
     "preview": "vite preview",
+    "test": "npm run test:ui",
     "tauri": "tauri --config ../desktop/src-tauri/tauri.conf.json"
   },
   "dependencies": {

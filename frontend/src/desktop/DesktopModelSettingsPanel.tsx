@@ -20,7 +20,9 @@ import { nextDesktopRequestId } from "./request-id"
 import {
   DesktopBridgeError,
   type DesktopModelCallLifecycleStatus,
+  type DesktopModelSettingsDraft as SettingsDraft,
   type DesktopModelSettings,
+  type DesktopReasoningEffort,
 } from "./contracts"
 
 type ModelSettingsDraft = {
@@ -29,7 +31,20 @@ type ModelSettingsDraft = {
   apiBaseUrl: string
   apiKey: string
   maxConcurrentModelCalls: string
-  initialTimeoutSeconds: string
+  analysisModel: string
+  answerModel: string
+  defaultContextCapacity: string
+  analysisContextCapacity: string
+  answerContextCapacity: string
+  defaultReasoning: "" | DesktopReasoningEffort
+  analysisReasoning: "" | DesktopReasoningEffort
+  answerReasoning: "" | DesktopReasoningEffort
+  defaultInputPricePerMillion: string
+  defaultOutputPricePerMillion: string
+  analysisInputPricePerMillion: string
+  analysisOutputPricePerMillion: string
+  answerInputPricePerMillion: string
+  answerOutputPricePerMillion: string
 }
 
 const diagnosticFiles = [
@@ -37,10 +52,19 @@ const diagnosticFiles = [
   "model-settings.json",
   "import-jobs.json",
   "model-calls.json",
+  "model-usage.json",
   "graph-diagnostics.json",
   "page-tree-enrichment.json",
   "integrity.json",
 ]
+
+const roleFields = [
+  { role: "default", model: "model", context: "defaultContextCapacity", reasoning: "defaultReasoning", inputPrice: "defaultInputPricePerMillion", outputPrice: "defaultOutputPricePerMillion" },
+  { role: "analysis", model: "analysisModel", context: "analysisContextCapacity", reasoning: "analysisReasoning", inputPrice: "analysisInputPricePerMillion", outputPrice: "analysisOutputPricePerMillion" },
+  { role: "answer", model: "answerModel", context: "answerContextCapacity", reasoning: "answerReasoning", inputPrice: "answerInputPricePerMillion", outputPrice: "answerOutputPricePerMillion" },
+] as const
+
+const reasoningOptions = ["", "off", "low", "medium", "high"] as const
 
 function draftFrom(settings: DesktopModelSettings): ModelSettingsDraft {
   return {
@@ -49,7 +73,76 @@ function draftFrom(settings: DesktopModelSettings): ModelSettingsDraft {
     apiBaseUrl: settings.apiBaseUrl,
     apiKey: settings.apiKey,
     maxConcurrentModelCalls: String(settings.maxConcurrentModelCalls),
-    initialTimeoutSeconds: String(settings.initialTimeoutSeconds),
+    analysisModel: settings.analysisModel ?? "",
+    answerModel: settings.answerModel ?? "",
+    defaultContextCapacity: settings.defaultContextCapacity?.toString() ?? "",
+    analysisContextCapacity: settings.analysisContextCapacity?.toString() ?? "",
+    answerContextCapacity: settings.answerContextCapacity?.toString() ?? "",
+    defaultReasoning: settings.defaultReasoning ?? "",
+    analysisReasoning: settings.analysisReasoning ?? "",
+    answerReasoning: settings.answerReasoning ?? "",
+    defaultInputPricePerMillion: settings.defaultInputPricePerMillion?.toString() ?? "",
+    defaultOutputPricePerMillion: settings.defaultOutputPricePerMillion?.toString() ?? "",
+    analysisInputPricePerMillion: settings.analysisInputPricePerMillion?.toString() ?? "",
+    analysisOutputPricePerMillion: settings.analysisOutputPricePerMillion?.toString() ?? "",
+    answerInputPricePerMillion: settings.answerInputPricePerMillion?.toString() ?? "",
+    answerOutputPricePerMillion: settings.answerOutputPricePerMillion?.toString() ?? "",
+  }
+}
+
+type DraftValidation =
+  | { settings: SettingsDraft; error: null }
+  | { settings: null; error: "invalidConcurrency" | "invalidContextCapacity" | "invalidPrice" }
+
+function validatedDraft(draft: ModelSettingsDraft): DraftValidation {
+  const maxConcurrentModelCalls = Number(draft.maxConcurrentModelCalls)
+  if (!Number.isInteger(maxConcurrentModelCalls) || maxConcurrentModelCalls < 1 || maxConcurrentModelCalls > 4) {
+    return { settings: null, error: "invalidConcurrency" }
+  }
+  const capacityValues = [
+    draft.defaultContextCapacity,
+    draft.analysisContextCapacity,
+    draft.answerContextCapacity,
+  ]
+  const capacities = capacityValues.map((value) => value.trim() ? Number(value) : null)
+  if (capacities.some((value) => value !== null && (!Number.isInteger(value) || value < 4096))) {
+    return { settings: null, error: "invalidContextCapacity" }
+  }
+  const priceValues = [
+    draft.defaultInputPricePerMillion,
+    draft.defaultOutputPricePerMillion,
+    draft.analysisInputPricePerMillion,
+    draft.analysisOutputPricePerMillion,
+    draft.answerInputPricePerMillion,
+    draft.answerOutputPricePerMillion,
+  ]
+  const prices = priceValues.map((value) => value.trim() ? Number(value) : null)
+  if (prices.some((value) => value !== null && (!Number.isFinite(value) || value < 0))) {
+    return { settings: null, error: "invalidPrice" }
+  }
+  return {
+    error: null,
+    settings: {
+      provider: draft.provider,
+      model: draft.model.trim(),
+      apiBaseUrl: draft.apiBaseUrl.trim(),
+      apiKey: draft.apiKey.trim(),
+      maxConcurrentModelCalls,
+      analysisModel: draft.analysisModel.trim() || null,
+      answerModel: draft.answerModel.trim() || null,
+      defaultContextCapacity: capacities[0],
+      analysisContextCapacity: capacities[1],
+      answerContextCapacity: capacities[2],
+      defaultReasoning: draft.defaultReasoning || null,
+      analysisReasoning: draft.analysisReasoning || null,
+      answerReasoning: draft.answerReasoning || null,
+      defaultInputPricePerMillion: prices[0],
+      defaultOutputPricePerMillion: prices[1],
+      analysisInputPricePerMillion: prices[2],
+      analysisOutputPricePerMillion: prices[3],
+      answerInputPricePerMillion: prices[4],
+      answerOutputPricePerMillion: prices[5],
+    },
   }
 }
 
@@ -112,26 +205,16 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
 
   const save = async () => {
     if (!draft || saving) return
-    const maxConcurrentModelCalls = Number(draft.maxConcurrentModelCalls)
-    const initialTimeoutSeconds = Number(draft.initialTimeoutSeconds)
-    if (!Number.isInteger(maxConcurrentModelCalls) || maxConcurrentModelCalls < 1 || maxConcurrentModelCalls > 8) {
-      setError(t("desktop.knowledgeBases.modelSettings.invalidConcurrency"))
-      return
-    }
-    if (!Number.isFinite(initialTimeoutSeconds) || initialTimeoutSeconds <= 0 || initialTimeoutSeconds > 60) {
-      setError(t("desktop.knowledgeBases.modelSettings.invalidTimeout"))
+    const validation = validatedDraft(draft)
+    if (validation.error) {
+      setError(t(`desktop.knowledgeBases.modelSettings.${validation.error}`))
       return
     }
     setSaving(true)
     setError(null)
     try {
       const result = await bridge.saveModelSettings(
-        draft.provider,
-        draft.model,
-        draft.apiBaseUrl,
-        draft.apiKey,
-        maxConcurrentModelCalls,
-        initialTimeoutSeconds,
+        validation.settings,
         nextDesktopRequestId("model-settings"),
       )
       setSettings(result)
@@ -146,14 +229,9 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
 
   const testConnection = async () => {
     if (!draft || testing) return
-    const maxConcurrentModelCalls = Number(draft.maxConcurrentModelCalls)
-    const initialTimeoutSeconds = Number(draft.initialTimeoutSeconds)
-    if (!Number.isInteger(maxConcurrentModelCalls) || maxConcurrentModelCalls < 1 || maxConcurrentModelCalls > 8) {
-      setError(t("desktop.knowledgeBases.modelSettings.invalidConcurrency"))
-      return
-    }
-    if (!Number.isFinite(initialTimeoutSeconds) || initialTimeoutSeconds <= 0 || initialTimeoutSeconds > 60) {
-      setError(t("desktop.knowledgeBases.modelSettings.invalidTimeout"))
+    const validation = validatedDraft(draft)
+    if (validation.error) {
+      setError(t(`desktop.knowledgeBases.modelSettings.${validation.error}`))
       return
     }
     setTesting(true)
@@ -164,12 +242,7 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
     testRequestIdRef.current = requestId
     try {
       const result = await bridge.testModelConnection(
-        draft.provider,
-        draft.model,
-        draft.apiBaseUrl,
-        draft.apiKey,
-        maxConcurrentModelCalls,
-        initialTimeoutSeconds,
+        validation.settings,
         requestId,
       )
       if (!result.ok) throw new Error(t("desktop.knowledgeBases.modelSettings.testRejected"))
@@ -297,10 +370,6 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
             </span>
           </label>
           <label className="block text-sm font-medium">
-            {t("desktop.knowledgeBases.modelSettings.model")}
-            <Input className="mt-1.5" value={draft.model} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, model: event.target.value } : current)} />
-          </label>
-          <label className="block text-sm font-medium">
             {t("desktop.knowledgeBases.modelSettings.apiBaseUrl")}
             <Input className="mt-1.5 font-mono2" value={draft.apiBaseUrl} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, apiBaseUrl: event.target.value } : current)} />
           </label>
@@ -315,16 +384,100 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
           </label>
           <label className="block text-sm font-medium">
             {t("desktop.knowledgeBases.modelSettings.concurrency")}
-            <Input className="mt-1.5" type="number" min="1" max="8" value={draft.maxConcurrentModelCalls} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, maxConcurrentModelCalls: event.target.value } : current)} />
-          </label>
-          <label className="block text-sm font-medium">
-            {t("desktop.knowledgeBases.modelSettings.timeout")}
-            <Input className="mt-1.5" type="number" min="1" max="60" value={draft.initialTimeoutSeconds} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, initialTimeoutSeconds: event.target.value } : current)} />
+            <Input className="mt-1.5" type="number" min="1" max="4" value={draft.maxConcurrentModelCalls} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, maxConcurrentModelCalls: event.target.value } : current)} />
           </label>
         </div>
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/20 px-4 py-3 text-sm">
           <span className="flex items-center gap-2 text-muted-foreground"><KeyRound className="size-4" />{settings.apiKeyConfigured ? t("desktop.knowledgeBases.modelSettings.apiKeyConfigured") : t("desktop.knowledgeBases.modelSettings.apiKeyRequired")}</span>
-          <span className="text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.deadline", { seconds: settings.modelCallDeadlineSeconds })}</span>
+          <span className="text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.noResponseDeadline")}</span>
+        </div>
+
+        <div className="mt-6 border-t border-border/70 pt-5">
+          <h3 className="font-semibold">{t("desktop.knowledgeBases.modelSettings.rolesTitle")}</h3>
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.rolesDescription")}</p>
+          <div className="mt-4 grid gap-4 md:grid-cols-3">
+            {roleFields.map((field) => (
+              <label key={field.role} className="block text-sm font-medium">
+                {t(`desktop.knowledgeBases.modelSettings.roles.${field.role}.model`)}
+                <Input
+                  className="mt-1.5"
+                  value={draft[field.model]}
+                  disabled={saving}
+                  placeholder={field.role === "default" ? undefined : t("desktop.knowledgeBases.modelSettings.inheritDefaultModel")}
+                  onChange={(event) => setDraft((current) => current ? { ...current, [field.model]: event.target.value } : current)}
+                />
+              </label>
+            ))}
+          </div>
+          <div className="mt-4 grid gap-4 md:grid-cols-3">
+            {roleFields.map((field) => (
+              <label key={field.role} className="block text-sm font-medium">
+                {t(`desktop.knowledgeBases.modelSettings.roles.${field.role}.context`)}
+                <Input
+                  className="mt-1.5"
+                  type="number"
+                  min="4096"
+                  step="1024"
+                  value={draft[field.context]}
+                  disabled={saving}
+                  placeholder={t("desktop.knowledgeBases.modelSettings.autoCapability")}
+                  onChange={(event) => setDraft((current) => current ? { ...current, [field.context]: event.target.value } : current)}
+                />
+              </label>
+            ))}
+          </div>
+          <div className="mt-4 grid gap-4 md:grid-cols-3">
+            {roleFields.map((field) => (
+              <label key={field.role} className="block text-sm font-medium">
+                {t(`desktop.knowledgeBases.modelSettings.roles.${field.role}.reasoning`)}
+                <select
+                  className="mt-1.5 flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+                  value={draft[field.reasoning]}
+                  disabled={saving}
+                  onChange={(event) => setDraft((current) => current ? {
+                    ...current,
+                    [field.reasoning]: event.target.value as "" | DesktopReasoningEffort,
+                  } : current)}
+                >
+                  {reasoningOptions.map((option) => (
+                    <option key={option || "provider"} value={option}>
+                      {t(`desktop.knowledgeBases.modelSettings.reasoning.${option || "provider"}`)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-6 border-t border-border/70 pt-5">
+          <h3 className="font-semibold">{t("desktop.knowledgeBases.modelSettings.pricingTitle")}</h3>
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.pricingDescription")}</p>
+          <div className="mt-4 space-y-3">
+            {roleFields.map((field) => (
+              <div key={field.role} className="grid gap-3 rounded-lg border border-border/70 p-3 sm:grid-cols-[8rem_1fr_1fr]">
+                <span className="self-center text-sm font-medium">{t(`desktop.knowledgeBases.modelSettings.roles.${field.role}.name`)}</span>
+                <label className="text-xs text-muted-foreground">
+                  {t("desktop.knowledgeBases.modelSettings.inputPrice")}
+                  <Input type="number" min="0" step="0.000001" className="mt-1" value={draft[field.inputPrice]} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, [field.inputPrice]: event.target.value } : current)} />
+                </label>
+                <label className="text-xs text-muted-foreground">
+                  {t("desktop.knowledgeBases.modelSettings.outputPrice")}
+                  <Input type="number" min="0" step="0.000001" className="mt-1" value={draft[field.outputPrice]} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, [field.outputPrice]: event.target.value } : current)} />
+                </label>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-6 border-t border-border/70 pt-5">
+          <h3 className="font-semibold">{t("desktop.knowledgeBases.modelSettings.usageTitle")}</h3>
+          <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-4">
+            <div className="rounded-lg bg-muted/30 p-3"><dt className="text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.usageCalls")}</dt><dd className="mt-1 text-lg font-semibold">{settings.usageAggregate.callCount}</dd></div>
+            <div className="rounded-lg bg-muted/30 p-3"><dt className="text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.usageAttempts")}</dt><dd className="mt-1 text-lg font-semibold">{settings.usageAggregate.attemptCount}</dd></div>
+            <div className="rounded-lg bg-muted/30 p-3"><dt className="text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.usageTokens")}</dt><dd className="mt-1 text-lg font-semibold">{settings.usageAggregate.totalTokens.toLocaleString()}</dd><span className="text-xs text-muted-foreground">{settings.usageAggregate.tokenUsageSource ? t(`desktop.tasks.tokenSources.${settings.usageAggregate.tokenUsageSource}`) : t("desktop.tasks.tokenSources.unavailable")}</span></div>
+            <div className="rounded-lg bg-muted/30 p-3"><dt className="text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.usageCost")}</dt><dd className="mt-1 text-lg font-semibold">{settings.usageAggregate.totalCost === null ? "—" : settings.usageAggregate.totalCost.toFixed(4)}</dd></div>
+          </dl>
         </div>
         <p className="mt-3 text-xs leading-5 text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.testPolicy")}</p>
         <div className="mt-5 flex justify-end gap-2">

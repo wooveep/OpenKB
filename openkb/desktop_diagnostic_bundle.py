@@ -134,7 +134,6 @@ class DesktopDiagnosticBundleService:
                             connection,
                             """
                             SELECT call_id, job_id, stage_run_id, operation, status, attempt_count,
-                                timeout_seconds, next_timeout_seconds, remaining_seconds,
                                 error_code,
                                 reason, suggested_action, created_at, completed_at
                             FROM model_calls ORDER BY created_at DESC
@@ -143,9 +142,40 @@ class DesktopDiagnosticBundleService:
                         "attempts": _rows(
                             connection,
                             """
-                            SELECT call_id, attempt, status, timeout_seconds, remaining_seconds,
-                                error_code, reason, created_at, completed_at
+                            SELECT call_id, attempt, status, error_code, reason,
+                                created_at, completed_at
                             FROM model_attempts ORDER BY call_id, attempt
+                            """,
+                        ),
+                    },
+                    "model-usage.json": {
+                        "records": _rows(
+                            connection,
+                            """
+                            SELECT call_id, attempt, attempt_id, operation, model_role,
+                                provider, model, job_id, stage_run_id, batch_id,
+                                execution_lane, lifecycle_status, failure_code, queue_seconds,
+                                connect_seconds, first_output_seconds, total_seconds,
+                                input_tokens, output_tokens, total_tokens,
+                                token_usage_source, input_cost, output_cost, total_cost,
+                                provider_request_id, created_at, updated_at
+                            FROM model_usage_records
+                            ORDER BY created_at DESC, call_id, attempt
+                            """,
+                        ),
+                        "aggregate": _row(
+                            connection,
+                            """
+                            SELECT COUNT(DISTINCT call_id) AS call_count,
+                                COUNT(*) AS attempt_count,
+                                COUNT(DISTINCT CASE WHEN failure_code IS NOT NULL
+                                    THEN call_id || ':' || attempt END) AS failure_count,
+                                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                                COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                                CASE WHEN COUNT(total_cost) = 0
+                                    THEN NULL ELSE SUM(total_cost) END AS total_cost
+                            FROM model_usage_records
                             """,
                         ),
                     },
@@ -171,8 +201,7 @@ class DesktopDiagnosticBundleService:
                             """
                             SELECT document_id, base_generation_id, status, reason,
                                 provider, model, attempt_count, model_attempt, call_id,
-                                timeout_seconds, remaining_seconds, error_code, error_reason,
-                                created_at, updated_at, completed_at
+                                error_code, error_reason, created_at, updated_at, completed_at
                             FROM document_page_tree_enrichment_tasks
                             ORDER BY updated_at DESC
                             """,
@@ -224,3 +253,8 @@ def _rows(connection: sqlite3.Connection, query: str) -> list[dict[str, object]]
 def _scalar(connection: sqlite3.Connection, query: str) -> object:
     row = connection.execute(query).fetchone()
     return row[0] if row is not None else None
+
+
+def _row(connection: sqlite3.Connection, query: str) -> dict[str, object]:
+    rows = _rows(connection, query)
+    return rows[0] if rows else {}

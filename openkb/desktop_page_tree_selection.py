@@ -1,4 +1,4 @@
-"""Bounded model-assisted routing over immutable Document PageTrees."""
+"""Model-assisted routing over immutable Document PageTrees."""
 
 from __future__ import annotations
 
@@ -24,9 +24,12 @@ from openkb.desktop_model_gateway import (
 )
 from openkb.desktop_page_tree import PageTreeGeneration
 from openkb.desktop_page_tree_store import lease_current_page_tree
+from openkb.desktop_structured_output import (
+    DesktopStructuredOutputInvalidError,
+    run_structured_output,
+)
 from openkb.desktop_workspace import desktop_state_database_path
 
-PAGE_TREE_SELECTION_TIMEOUT_SECONDS = 20.0
 _MAX_TREES = 3
 _MAX_NODES_PER_TREE = 96
 _MAX_SELECTED_NODES = 12
@@ -67,6 +70,7 @@ def select_page_tree_evidence(
     model_gateway: DesktopModelGateway | None,
     *,
     is_cancelled: Callable[[], bool] | None = None,
+    on_model_event: Callable[[object], None] | None = None,
     lease_tree: PageTreeLeaseFactory = lease_current_page_tree,
 ) -> PageTreeSelectionResult:
     """Call PageTree Selection at most once, then return only bound Evidence identities."""
@@ -96,25 +100,50 @@ def select_page_tree_evidence(
             attempts = 0
             response_characters = 0
 
-            def observe(event) -> None:
-                nonlocal attempts
-                if event.status == "running":
-                    attempts = max(attempts, event.attempt)
-
             try:
-                result = model_gateway.analyze_once(
-                    DesktopModelRequest(
-                        "page_tree_selection",
-                        "Current Knowledge Base",
-                        prompt,
-                    ),
-                    on_event=observe,
-                    timeout_seconds=PAGE_TREE_SELECTION_TIMEOUT_SECONDS,
-                    is_cancelled=is_cancelled,
+
+                def invoke(request: DesktopModelRequest):
+                    nonlocal attempts, response_characters
+                    call_attempts = 0
+
+                    def observe(event) -> None:
+                        nonlocal call_attempts
+                        if event.status in {
+                            "connecting",
+                            "awaiting_model_result",
+                            "model_output_activity",
+                            "validating",
+                        }:
+                            call_attempts = max(call_attempts, event.attempt)
+                        if on_model_event is not None:
+                            on_model_event(event)
+
+                    call = (
+                        model_gateway.analyze_once
+                        if request.operation == "page_tree_selection"
+                        else model_gateway.analyze
+                    )
+                    try:
+                        result = call(
+                            request,
+                            on_event=observe,
+                            is_cancelled=is_cancelled,
+                        )
+                    except BaseException:
+                        attempts += call_attempts
+                        raise
+                    attempts += max(call_attempts, result.attempt_count)
+                    response_characters += len(result.content)
+                    return result
+
+                output = run_structured_output(
+                    operation="page_tree_selection",
+                    document_name="Current Knowledge Base",
+                    source_material=prompt,
+                    invoke=invoke,
+                    validate=lambda content: _selected_nodes(content, trees),
                 )
-                attempts = max(attempts, result.attempt_count)
-                response_characters = len(result.content)
-                selected = _selected_nodes(result.content, trees)
+                selected = output.value
             except DesktopModelCancelledError:
                 return PageTreeSelectionResult(
                     generation_ids=generation_ids,
@@ -129,7 +158,7 @@ def select_page_tree_evidence(
                     degradation_reasons=("page_tree_selection_failed",),
                     model_cost=_selection_cost(prompt, attempts),
                 )
-            except (ValueError, json.JSONDecodeError):
+            except (DesktopStructuredOutputInvalidError, ValueError, json.JSONDecodeError):
                 return PageTreeSelectionResult(
                     generation_ids=generation_ids,
                     trigger_reasons=triggers,

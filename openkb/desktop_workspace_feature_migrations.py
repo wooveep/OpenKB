@@ -14,6 +14,12 @@ from openkb.desktop_knowledge_analysis_migrations import (
     KNOWLEDGE_ANALYSIS_MIGRATION_STATEMENTS,
     KNOWLEDGE_ANALYSIS_PROVENANCE_MIGRATION_STATEMENTS,
 )
+from openkb.desktop_knowledge_analysis_plan_migrations import (
+    KNOWLEDGE_ANALYSIS_PLAN_MIGRATION_STATEMENTS,
+)
+from openkb.desktop_knowledge_graph_task_migrations import (
+    KNOWLEDGE_GRAPH_TASK_MIGRATION_STATEMENTS,
+)
 from openkb.desktop_knowledge_provenance_migrations import (
     KNOWLEDGE_PROVENANCE_MIGRATION_STATEMENTS,
 )
@@ -21,7 +27,12 @@ from openkb.desktop_knowledge_reconciliation_migrations import (
     THREE_WAY_KNOWLEDGE_RECONCILIATION_MIGRATION_STATEMENTS,
 )
 from openkb.desktop_knowledge_source_migrations import KNOWLEDGE_SOURCE_MIGRATION_STATEMENTS
+from openkb.desktop_legacy_model_recovery_migrations import (
+    LEGACY_MODEL_RECOVERY_MIGRATION_STATEMENTS,
+)
 from openkb.desktop_missing_source_migrations import MISSING_SOURCE_MIGRATION_STATEMENTS
+from openkb.desktop_model_observability_migrations import MODEL_LIFECYCLE_MIGRATION_STATEMENTS
+from openkb.desktop_model_usage_migrations import MODEL_USAGE_MIGRATION_STATEMENTS
 from openkb.desktop_okf_projection_migrations import OKF_PROJECTION_MIGRATION_STATEMENTS
 from openkb.desktop_page_tree_enrichment_migrations import (
     PAGE_TREE_ENRICHMENT_MIGRATION_STATEMENTS,
@@ -46,6 +57,11 @@ from openkb.desktop_workspace_migrations import (
 )
 
 KNOWLEDGE_ANALYSIS_MIGRATION_VERSION = 26
+MODEL_LIFECYCLE_MIGRATION_VERSION = 38
+KNOWLEDGE_ANALYSIS_PLAN_MIGRATION_VERSION = 39
+MODEL_USAGE_MIGRATION_VERSION = 40
+LEGACY_MODEL_RECOVERY_MIGRATION_VERSION = 41
+KNOWLEDGE_GRAPH_TASK_MIGRATION_VERSION = 42
 
 
 DESKTOP_FEATURE_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
@@ -83,4 +99,9 @@ DESKTOP_FEATURE_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (35, CATALOG_MIGRATION_STATEMENTS),
     (36, RETRIEVAL_TRACE_MIGRATION_STATEMENTS),
     (37, page_tree_migrations.PAGE_TREE_PROVIDER_EVALUATION_MIGRATION_STATEMENTS),
+    (MODEL_LIFECYCLE_MIGRATION_VERSION, MODEL_LIFECYCLE_MIGRATION_STATEMENTS),
+    (KNOWLEDGE_ANALYSIS_PLAN_MIGRATION_VERSION, KNOWLEDGE_ANALYSIS_PLAN_MIGRATION_STATEMENTS),
+    (MODEL_USAGE_MIGRATION_VERSION, MODEL_USAGE_MIGRATION_STATEMENTS),
+    (LEGACY_MODEL_RECOVERY_MIGRATION_VERSION, LEGACY_MODEL_RECOVERY_MIGRATION_STATEMENTS),
+    (KNOWLEDGE_GRAPH_TASK_MIGRATION_VERSION, KNOWLEDGE_GRAPH_TASK_MIGRATION_STATEMENTS),
 )

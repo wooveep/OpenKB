@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import sqlite3
@@ -12,34 +11,38 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from openkb.desktop_model_event import normalize_model_event
 from openkb.desktop_model_gateway import (
-    DesktopModelAttemptEvent,
     DesktopModelCallError,
     DesktopModelCancelledError,
     DesktopModelGateway,
-    DesktopModelRequest,
 )
+from openkb.desktop_page_tree_enrichment_control import (
+    INTERRUPTED_CODE as _INTERRUPTED_CODE,
+)
+from openkb.desktop_page_tree_enrichment_control import (
+    INTERRUPTED_REASON as _INTERRUPTED_REASON,
+)
+from openkb.desktop_page_tree_enrichment_control import (
+    recover_interrupted_in,
+    request_cancel_in,
+    retry_document_in,
+)
+from openkb.desktop_prompt_contracts import prompt_contract_for
+from openkb.desktop_structured_output import run_structured_output
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
 PAGE_TREE_ENRICHMENT_SCHEMA = "openkb.page-tree-enrichment.v1"
-PAGE_TREE_ENRICHMENT_SYSTEM_PROMPT = (
-    "Add concise routing summaries to an existing document PageTree. Return exactly one JSON "
-    "object with schema_version 'openkb.page-tree-enrichment.v1' and a summaries array. Each "
-    "summary item must contain only node_id and summary. Use only supplied node IDs and evidence. "
-    "Summaries help route retrieval; they are not evidence and must not add unsupported facts. "
-    "Omit nodes that do not benefit from a summary."
-)
-PAGE_TREE_ENRICHMENT_PROMPT_DIGEST = hashlib.sha256(
-    PAGE_TREE_ENRICHMENT_SYSTEM_PROMPT.encode("utf-8")
-).hexdigest()
+_PAGE_TREE_ENRICHMENT_CONTRACT = prompt_contract_for("page_tree_enrichment")
+PAGE_TREE_ENRICHMENT_SYSTEM_PROMPT = _PAGE_TREE_ENRICHMENT_CONTRACT.instructions
+PAGE_TREE_ENRICHMENT_PROMPT_DIGEST = _PAGE_TREE_ENRICHMENT_CONTRACT.digest
 
 _MAX_INPUT_NODES = 96
 _MAX_INPUT_CHARS = 24_000
 _MAX_EVIDENCE_PER_NODE = 2
 _MAX_EVIDENCE_CHARS = 320
 _MAX_SUMMARY_CHARS = 600
-_INTERRUPTED_CODE = "page_tree_enrichment_interrupted"
 _FAILED_CODE = "page_tree_enrichment_failed"
 _UNAVAILABLE_CODE = "source_document_unavailable"
 _UNAVAILABLE_REASON = "The source document is no longer Available."
@@ -134,26 +137,22 @@ class DesktopPageTreeEnrichmentService:
 
     def recover_interrupted(self) -> int:
         """Return process-owned running work to its durable pending state."""
-        with kb_ingest_lock(self.state_dir):
-            connection = self._connect()
-            try:
-                with connection:
-                    cursor = connection.execute(
-                        """
-                        UPDATE document_page_tree_enrichment_tasks
-                        SET status = 'pending', execution_token = NULL,
-                            error_code = ?, error_reason = ?, updated_at = ?, completed_at = NULL
-                        WHERE status = 'running'
-                        """,
-                        (
-                            _INTERRUPTED_CODE,
-                            "PageTree enrichment was interrupted and can resume.",
-                            _timestamp(),
-                        ),
-                    )
-                    return cursor.rowcount
-            finally:
-                connection.close()
+        return recover_interrupted_in(self.state_dir, self.database_path)
+
+    def request_cancel(self, document_id: str) -> bool:
+        """Mark pending work interrupted; a running worker observes Engine cancellation."""
+        return request_cancel_in(self.state_dir, self.database_path, document_id)
+
+    def retry_document(self, document_id: str, gateway: DesktopModelGateway) -> bool:
+        """Make one interrupted or failed optional task runnable after explicit user action."""
+        return retry_document_in(
+            self.state_dir,
+            self.database_path,
+            document_id,
+            provider=gateway.provider_name,
+            model=gateway.model_name,
+            prompt_digest=PAGE_TREE_ENRICHMENT_PROMPT_DIGEST,
+        )
 
     def pending_document_ids(self, gateway: DesktopModelGateway) -> tuple[str, ...]:
         with kb_ingest_lock(self.state_dir):
@@ -182,6 +181,7 @@ class DesktopPageTreeEnrichmentService:
                             ON documents.document_id = tasks.document_id
                         WHERE tasks.status = 'pending' AND tasks.provider = ?
                             AND tasks.model = ? AND tasks.prompt_digest = ?
+                            AND tasks.error_code IS NULL
                             AND documents.availability = 'available'
                         ORDER BY tasks.updated_at, tasks.document_id LIMIT 50
                         """,
@@ -223,16 +223,19 @@ class DesktopPageTreeEnrichmentService:
             self._interrupt(claim)
             return False
         try:
-            result = gateway.analyze(
-                DesktopModelRequest(
-                    operation="page_tree_enrichment",
-                    document_name=claim.document_name,
-                    content=claim.request_content,
+            output = run_structured_output(
+                operation="page_tree_enrichment",
+                document_name=claim.document_name,
+                source_material=claim.request_content,
+                invoke=lambda request: gateway.analyze(
+                    request,
+                    on_event=lambda event: self._record_attempt(claim, event),
+                    is_cancelled=should_stop,
                 ),
-                on_event=lambda event: self._record_attempt(claim, event),
-                is_cancelled=should_stop,
+                validate=lambda content: _parse_summaries(content, claim.node_ids),
             )
-            summaries = _parse_summaries(result.content, claim.node_ids)
+            result = output.result
+            summaries = output.value
             if should_stop():
                 self._interrupt(claim)
                 return False
@@ -272,6 +275,7 @@ class DesktopPageTreeEnrichmentService:
                         ON current.document_id = tasks.document_id
                         AND current.generation_id = tasks.base_generation_id
                     WHERE tasks.document_id = ? AND tasks.status = 'pending'
+                        AND tasks.error_code IS NULL
                         AND tasks.provider = ? AND tasks.model = ?
                         AND tasks.prompt_digest = ?
                         AND documents.availability = 'available'
@@ -303,6 +307,7 @@ class DesktopPageTreeEnrichmentService:
                         remaining_seconds = NULL, error_code = NULL, error_reason = NULL,
                         updated_at = ?, completed_at = NULL
                     WHERE document_id = ? AND status = 'pending'
+                        AND error_code IS NULL
                         AND base_generation_id = ? AND provider = ? AND model = ?
                         AND prompt_digest = ?
                     """,
@@ -337,7 +342,8 @@ class DesktopPageTreeEnrichmentService:
             finally:
                 connection.close()
 
-    def _record_attempt(self, claim: _EnrichmentClaim, event: DesktopModelAttemptEvent) -> None:
+    def _record_attempt(self, claim: _EnrichmentClaim, event: object) -> None:
+        lifecycle = normalize_model_event(event)
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             try:
@@ -350,12 +356,12 @@ class DesktopPageTreeEnrichmentService:
                         WHERE document_id = ? AND status = 'running' AND execution_token = ?
                         """,
                         (
-                            event.attempt,
-                            event.call_id,
-                            event.timeout_seconds,
-                            event.remaining_seconds,
-                            event.error_code,
-                            event.reason,
+                            lifecycle.attempt,
+                            lifecycle.call_id,
+                            None,
+                            None,
+                            lifecycle.error_code,
+                            lifecycle.reason,
                             _timestamp(),
                             claim.document_id,
                             claim.execution_token,
@@ -495,7 +501,7 @@ class DesktopPageTreeEnrichmentService:
             claim,
             status="pending",
             error_code=_INTERRUPTED_CODE,
-            error_reason="PageTree enrichment was interrupted and can resume.",
+            error_reason=_INTERRUPTED_REASON,
         )
 
     def _fail(self, claim: _EnrichmentClaim, error_code: str, error_reason: str) -> None:

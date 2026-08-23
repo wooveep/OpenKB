@@ -3,7 +3,7 @@
 use super::{
     BridgeError, BridgeResult, EngineSupervisor, KnowledgeExportMode, KnowledgeExportResult,
     KnowledgePage, KnowledgePageDeletionResult, KnowledgePageKind, KnowledgePagesResult,
-    KnowledgeSourcesResult, IMPORT_REQUEST_TIMEOUT,
+    KnowledgeSourcesResult, LONG_REQUEST_TIMEOUT,
 };
 use serde_json::json;
 
@@ -213,7 +213,7 @@ impl EngineSupervisor {
             "workbench.export_knowledge_bundle",
             json!({ "destination": destination, "mode": mode }),
             Some(request_id),
-            Some(IMPORT_REQUEST_TIMEOUT),
+            Some(LONG_REQUEST_TIMEOUT),
         )?;
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(

@@ -1,6 +1,6 @@
 //! Conversation request methods for the private Engine transport.
 
-use super::{validated_response, BridgeResult, EngineSupervisor, IMPORT_REQUEST_TIMEOUT};
+use super::{validated_response, BridgeResult, EngineSupervisor};
 use crate::engine_wire::RetrievalTrace;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -214,7 +214,7 @@ impl EngineSupervisor {
             "workbench.ask_conversation",
             json!({ "conversation_id": conversation_id, "question": question }),
             Some(request_id),
-            Some(IMPORT_REQUEST_TIMEOUT),
+            None,
         )?)
     }
 
@@ -232,7 +232,7 @@ impl EngineSupervisor {
                 "assistant_message_id": assistant_message_id,
             }),
             Some(request_id),
-            Some(IMPORT_REQUEST_TIMEOUT),
+            None,
         )?)
     }
 

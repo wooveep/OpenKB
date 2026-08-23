@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
+from typing import cast
 
 from openkb.desktop_answer_store import DesktopGroundedAnswerStore, new_answer
 from openkb.desktop_answer_types import (
@@ -24,6 +25,7 @@ from openkb.desktop_retrieval import DesktopEvidenceRetriever
 
 AnswerDeltaCallback = Callable[[str, str, bool, int], None]
 AnswerCancellationCallback = Callable[[], bool]
+AnswerModelEventCallback = Callable[[object], None]
 _MAX_CONTEXT_CHARS = 12_000
 _STREAM_CHUNK_CHARS = 96
 
@@ -45,9 +47,13 @@ class DesktopGroundedAnswerService:
     """Answer from cited Available Knowledge and retain incomplete model attempts."""
 
     def __init__(self, kb_dir: Path, *, model_gateway: DesktopModelGateway | None = None) -> None:
-        self._retriever = DesktopEvidenceRetriever(kb_dir, model_gateway=model_gateway)
+        interactive_gateway = _interactive_gateway(model_gateway)
+        self._retriever = DesktopEvidenceRetriever(
+            kb_dir,
+            model_gateway=interactive_gateway,
+        )
         self._store = DesktopGroundedAnswerStore(kb_dir)
-        self._model_gateway = model_gateway
+        self._model_gateway = interactive_gateway
 
     def answer(
         self,
@@ -55,6 +61,7 @@ class DesktopGroundedAnswerService:
         *,
         on_delta: AnswerDeltaCallback | None = None,
         is_cancelled: AnswerCancellationCallback | None = None,
+        on_model_event: AnswerModelEventCallback | None = None,
     ) -> DesktopGroundedAnswer:
         """Stream and persist a completed answer or the text reached before interruption."""
         answer = self._attempt(
@@ -62,6 +69,7 @@ class DesktopGroundedAnswerService:
             answer_id=uuid.uuid4().hex,
             on_delta=on_delta,
             is_cancelled=is_cancelled,
+            on_model_event=on_model_event,
             conversation_context=(),
         )
         return self._store.save(answer)
@@ -72,6 +80,7 @@ class DesktopGroundedAnswerService:
         *,
         on_delta: AnswerDeltaCallback | None = None,
         is_cancelled: AnswerCancellationCallback | None = None,
+        on_model_event: AnswerModelEventCallback | None = None,
     ) -> DesktopGroundedAnswer:
         """Retry from an interrupted card without replacing it until a full answer succeeds."""
         interrupted = self._store.interrupted(answer_id)
@@ -81,6 +90,7 @@ class DesktopGroundedAnswerService:
             created_at=interrupted.created_at,
             on_delta=on_delta,
             is_cancelled=is_cancelled,
+            on_model_event=on_model_event,
             conversation_context=(),
         )
         if replacement.status == "interrupted":
@@ -94,6 +104,7 @@ class DesktopGroundedAnswerService:
         conversation_context: tuple[tuple[str, str], ...] = (),
         on_delta: AnswerDeltaCallback | None = None,
         is_cancelled: AnswerCancellationCallback | None = None,
+        on_model_event: AnswerModelEventCallback | None = None,
     ) -> DesktopGroundedAnswer:
         """Generate an auditable answer without writing the legacy flat-answer tables."""
         return self._attempt(
@@ -101,6 +112,7 @@ class DesktopGroundedAnswerService:
             answer_id=uuid.uuid4().hex,
             on_delta=on_delta,
             is_cancelled=is_cancelled,
+            on_model_event=on_model_event,
             conversation_context=conversation_context,
         )
 
@@ -112,10 +124,15 @@ class DesktopGroundedAnswerService:
         created_at: str | None = None,
         on_delta: AnswerDeltaCallback | None,
         is_cancelled: AnswerCancellationCallback | None,
+        on_model_event: AnswerModelEventCallback | None,
         conversation_context: tuple[tuple[str, str], ...],
     ) -> DesktopGroundedAnswer:
         pack = prepare_grounded_evidence_pack(
-            self._retriever.retrieve(question, is_cancelled=is_cancelled)
+            self._retriever.retrieve(
+                question,
+                is_cancelled=is_cancelled,
+                on_model_event=on_model_event,
+            )
         )
         emitted = False
         visible_attempt = 0
@@ -181,6 +198,7 @@ class DesktopGroundedAnswerService:
             on_reset=reset,
             is_cancelled=is_cancelled,
             conversation_context=conversation_context,
+            on_model_event=on_model_event,
         )
         if generation.answer_text is None:
             return interrupted_answer(
@@ -222,6 +240,17 @@ class DesktopGroundedAnswerService:
         return self._store.list()
 
 
+def _interactive_gateway(
+    gateway: DesktopModelGateway | None,
+) -> DesktopModelGateway | None:
+    if gateway is None:
+        return None
+    select_lane = getattr(gateway, "for_lane", None)
+    if not callable(select_lane):
+        return gateway
+    return cast(DesktopModelGateway, select_lane("interactive"))
+
+
 def prepare_grounded_evidence_pack(pack: DesktopEvidencePack) -> DesktopEvidencePack:
     """Apply the exact production context bound before generation and scoring."""
     sent_evidence = _evidence_for_prompt(pack.evidence)
@@ -249,6 +278,7 @@ def generate_grounded_answer(
     on_reset: Callable[[int], None] | None = None,
     is_cancelled: AnswerCancellationCallback | None = None,
     conversation_context: tuple[tuple[str, str], ...] = (),
+    on_model_event: AnswerModelEventCallback | None = None,
 ) -> DesktopGroundedAnswerGeneration:
     """Generate from an already-retrieved pack without saving an answer record.
 
@@ -268,8 +298,15 @@ def generate_grounded_answer(
 
     def observe(event) -> None:
         nonlocal attempts
-        if event.status == "running":
+        if event.status in {
+            "connecting",
+            "awaiting_model_result",
+            "model_output_activity",
+            "validating",
+        }:
             attempts = max(attempts, event.attempt)
+        if on_model_event is not None:
+            on_model_event(event)
 
     try:
         result = model_gateway.stream(

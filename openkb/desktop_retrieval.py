@@ -6,8 +6,7 @@ import json
 import logging
 import sqlite3
 from collections import defaultdict
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +36,9 @@ from openkb.desktop_page_tree_selection import (
     select_page_tree_evidence,
 )
 from openkb.desktop_page_tree_store import lease_current_page_tree
+from openkb.desktop_retrieval_catalog_lease import (
+    best_effort_catalog_lease as _best_effort_catalog_lease,
+)
 from openkb.desktop_retrieval_channels import (
     CATALOG_RETRIEVAL_VARIANTS,
     DESKTOP_EVALUATION_VARIANTS,
@@ -103,7 +105,11 @@ class DesktopEvidenceRetriever:
         self._page_tree_lease = page_tree_lease
 
     def retrieve(
-        self, question: str, *, is_cancelled: Callable[[], bool] | None = None
+        self,
+        question: str,
+        *,
+        is_cancelled: Callable[[], bool] | None = None,
+        on_model_event: Callable[[object], None] | None = None,
     ) -> DesktopEvidencePack:
         """Plan and retrieve without ever allowing optional model work to block a reply."""
         variant: DesktopEvaluationVariant = (
@@ -113,6 +119,7 @@ class DesktopEvidenceRetriever:
             question,
             variant=variant,
             is_cancelled=is_cancelled,
+            on_model_event=on_model_event,
             _enable_page_tree_selection=True,
         )
 
@@ -124,11 +131,18 @@ class DesktopEvidenceRetriever:
         return result.plan, result.degradations
 
     def build_plan_with_cost(
-        self, question: str, *, is_cancelled: Callable[[], bool] | None = None
+        self,
+        question: str,
+        *,
+        is_cancelled: Callable[[], bool] | None = None,
+        on_model_event: Callable[[object], None] | None = None,
     ) -> DesktopRetrievalPlanningResult:
         """Build one plan and retain the physical Model Attempt cost."""
         return build_retrieval_plan(
-            validate_question(question), self._model_gateway, is_cancelled=is_cancelled
+            validate_question(question),
+            self._model_gateway,
+            is_cancelled=is_cancelled,
+            on_model_event=on_model_event,
         )
 
     def retrieve_variant(
@@ -139,6 +153,7 @@ class DesktopEvidenceRetriever:
         retrieval_plan: DesktopRetrievalPlan | None = None,
         degradations: tuple[str, ...] = (),
         is_cancelled: Callable[[], bool] | None = None,
+        on_model_event: Callable[[object], None] | None = None,
         _enable_page_tree_selection: bool = False,
     ) -> DesktopEvidencePack:
         """Retrieve one named vectorless channel for a fixed evaluation plan."""
@@ -147,7 +162,10 @@ class DesktopEvidenceRetriever:
         normalized_question = validate_question(question)
         if retrieval_plan is None:
             planning = build_retrieval_plan(
-                normalized_question, self._model_gateway, is_cancelled=is_cancelled
+                normalized_question,
+                self._model_gateway,
+                is_cancelled=is_cancelled,
+                on_model_event=on_model_event,
             )
             plan = planning.plan
             planning_cost = planning.model_cost
@@ -164,7 +182,9 @@ class DesktopEvidenceRetriever:
         graph_error_code: str | None = None
         selection = PageTreeSelectionResult()
         with _best_effort_catalog_lease(
-            self._kb_dir, enabled=variant in CATALOG_RETRIEVAL_VARIANTS
+            self._kb_dir,
+            enabled=variant in CATALOG_RETRIEVAL_VARIANTS,
+            lease_factory=lease_current_catalog,
         ) as (
             catalog,
             lease_degradations,
@@ -198,6 +218,7 @@ class DesktopEvidenceRetriever:
                     variant_evidence.evidence,
                     self._model_gateway,
                     is_cancelled=is_cancelled,
+                    on_model_event=on_model_event,
                     lease_tree=self._page_tree_lease,
                 )
             connection = _connect(self._database_path)
@@ -278,30 +299,6 @@ class DesktopEvidenceRetriever:
                 ),
             ),
         )
-
-
-@contextmanager
-def _best_effort_catalog_lease(
-    kb_dir: Path, *, enabled: bool
-) -> Iterator[tuple[CatalogGenerationLease | None, tuple[str, ...]]]:
-    """Acquire an optional Catalog lease without making baseline retrieval depend on it."""
-    if not enabled:
-        yield None, ()
-        return
-    lease_manager = lease_current_catalog(kb_dir)
-    try:
-        catalog = lease_manager.__enter__()
-    except Exception:
-        logger.warning("Knowledge Catalog lease failed; using baseline retrieval.", exc_info=True)
-        yield None, ("catalog_query_failed",)
-        return
-    try:
-        yield catalog, ()
-    finally:
-        try:
-            lease_manager.__exit__(None, None, None)
-        except Exception:
-            logger.warning("Knowledge Catalog lease cleanup failed.", exc_info=True)
 
 
 def _connect(database_path: Path) -> sqlite3.Connection:

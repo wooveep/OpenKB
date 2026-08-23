@@ -49,7 +49,7 @@ impl EngineSupervisor {
         request_id: String,
     ) -> BridgeResult<KnowledgeReanalysisRun> {
         self.ensure_started()?;
-        let value = self.request_started(method, params, Some(request_id))?;
+        let value = self.request_started_with_wait(method, params, Some(request_id), None)?;
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(
                 "invalid_engine_response",

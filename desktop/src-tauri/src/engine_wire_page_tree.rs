@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::import_observability::ModelActivity;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PageTreeRebuildStatus {
@@ -62,10 +64,6 @@ pub struct PageTreeEnrichmentTask {
     pub model_attempt: u32,
     #[serde(alias = "call_id")]
     pub call_id: Option<String>,
-    #[serde(alias = "timeout_seconds")]
-    pub timeout_seconds: Option<f64>,
-    #[serde(alias = "remaining_seconds")]
-    pub remaining_seconds: Option<f64>,
     #[serde(alias = "error_code")]
     pub error_code: Option<String>,
     #[serde(alias = "error_reason")]
@@ -78,6 +76,16 @@ pub struct PageTreeEnrichmentTask {
     pub base_generation_id: String,
     #[serde(alias = "current_enrichment_generation_id")]
     pub current_enrichment_generation_id: Option<String>,
+    #[serde(alias = "model_activity")]
+    pub model_activity: Option<ModelActivity>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageTreeEnrichmentControlResult {
+    #[serde(alias = "document_id")]
+    pub document_id: String,
+    pub accepted: bool,
 }
 
 #[cfg(test)]
@@ -116,17 +124,30 @@ mod tests {
             "attempt_count": 2,
             "model_attempt": 1,
             "call_id": "call-1",
-            "timeout_seconds": 20.0,
-            "remaining_seconds": 55.0,
             "error_code": null,
             "error_reason": null,
             "updated_at": "2026-08-20T00:00:00Z",
             "completed_at": null,
             "base_generation_id": "base-1",
-            "current_enrichment_generation_id": null
+            "current_enrichment_generation_id": null,
+            "model_activity": null
         }))
         .expect("valid enrichment task");
         assert_eq!(task.status, PageTreeEnrichmentStatus::Running);
         assert_eq!(task.model_attempt, 1);
+        let encoded = serde_json::to_value(task).expect("task should serialize");
+        assert!(encoded.get("timeoutSeconds").is_none());
+        assert!(encoded.get("remainingSeconds").is_none());
+    }
+
+    #[test]
+    fn enrichment_control_accepts_python_snake_case_fields() {
+        let result: PageTreeEnrichmentControlResult = serde_json::from_value(serde_json::json!({
+            "document_id": "document-1",
+            "accepted": true
+        }))
+        .expect("valid control result");
+        assert_eq!(result.document_id, "document-1");
+        assert!(result.accepted);
     }
 }

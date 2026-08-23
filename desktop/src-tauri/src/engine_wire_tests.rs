@@ -1,0 +1,120 @@
+use super::{
+    BridgeEvent, EngineEvent, GroundedAnswer, KnowledgeAnalysisPhase, KnowledgeAnalysisProgress,
+};
+use serde_json::json;
+
+#[test]
+fn knowledge_analysis_progress_accepts_python_snake_case_fields() {
+    let progress: KnowledgeAnalysisProgress = serde_json::from_value(json!({
+        "total": 3,
+        "completed": 1,
+        "active": 1,
+        "failed": 0,
+        "current_batch": 2,
+        "phase": "batches"
+    }))
+    .expect("Knowledge Analysis progress should deserialize");
+
+    assert_eq!(progress.current_batch, Some(2));
+    assert!(matches!(progress.phase, KnowledgeAnalysisPhase::Batches));
+}
+
+#[test]
+fn knowledge_reanalysis_event_accepts_python_snake_case_fields() {
+    let event: BridgeEvent = serde_json::from_value(json!({
+        "sequence": 7,
+        "kind": "knowledge_reanalysis.updated",
+        "data": {"run_id": "run-1", "job_id": "job-1"}
+    }))
+    .expect("Knowledge Reanalysis event should deserialize");
+
+    assert!(matches!(
+        event.event,
+        EngineEvent::KnowledgeReanalysisUpdated(data)
+            if data.run_id == "run-1" && data.job_id == "job-1"
+    ));
+}
+
+#[test]
+fn model_lifecycle_event_accepts_python_snake_case_fields() {
+    let event: BridgeEvent = serde_json::from_value(json!({
+        "sequence": 8,
+        "kind": "model.call_lifecycle",
+        "data": {
+            "request_id": "connection-check-1",
+            "call_id": "call-1",
+            "attempt": 1,
+            "status": "awaiting_model_result",
+            "elapsed_seconds": 180.0,
+            "failure_code": null,
+            "reason": null,
+            "retry_after_seconds": null,
+            "operation": "grounded_answer",
+            "model_role": "answer",
+            "provider": "custom",
+            "model_name": "answer-model",
+            "execution_lane": "interactive",
+            "attempt_id": "call-1:1",
+            "long_wait_threshold_seconds": 300.0
+        }
+    }))
+    .expect("Model lifecycle event should deserialize");
+
+    assert!(matches!(
+        event.event,
+        EngineEvent::ModelCallLifecycle(data)
+            if data.request_id == "connection-check-1"
+                && data.call_id == "call-1"
+                && data.operation == "grounded_answer"
+                && data.attempt_id == "call-1:1"
+                && matches!(
+                    data.status,
+                    super::model_lifecycle::ModelCallLifecycleStatus::AwaitingModelResult
+                )
+                && data.elapsed_seconds == 180.0
+    ));
+}
+
+#[test]
+fn model_lifecycle_accepts_validating_state() {
+    let status: super::model_lifecycle::ModelCallLifecycleStatus =
+        serde_json::from_value(json!("validating")).expect("validating should deserialize");
+
+    assert!(matches!(
+        status,
+        super::model_lifecycle::ModelCallLifecycleStatus::Validating
+    ));
+}
+
+#[test]
+fn grounded_answer_accepts_python_retrieval_trace_fields() {
+    let answer: GroundedAnswer = serde_json::from_value(json!({
+        "answer_id": "answer-1",
+        "question": "Compare Alpha and Beta",
+        "answer_text": "They are related. [1]",
+        "retrieval_plan": {"query": "Compare Alpha and Beta", "terms": ["alpha", "beta"], "source": "model"},
+        "citations": [],
+        "degradations": [],
+        "status": "completed",
+        "created_at": "2026-08-20T00:00:00+00:00",
+        "retrieval_trace": {
+            "catalog_generation_ids": ["catalog-1"],
+            "page_tree_generation_ids": ["tree-1"],
+            "channels": [{
+                "channel": "document_page_tree",
+                "candidate_count": 2,
+                "trigger_reasons": ["multi_hop"],
+                "degradation_reasons": []
+            }],
+            "trigger_reasons": ["multi_hop"],
+            "degradation_reasons": [],
+            "selected_node_ids": ["node-1"],
+            "canonical_evidence_ids": ["evidence-1"],
+            "fusion_policy_version": "openkb.rrf-protected-baseline.v1"
+        }
+    }))
+    .expect("Retrieval Trace should deserialize");
+
+    assert_eq!(answer.retrieval_trace.page_tree_generation_ids, ["tree-1"]);
+    assert_eq!(answer.retrieval_trace.channels[0].candidate_count, 2);
+}

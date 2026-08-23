@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -170,6 +171,7 @@ class DesktopConversationService:
         *,
         on_delta: AnswerDeltaCallback | None = None,
         is_cancelled: AnswerCancellationCallback | None = None,
+        on_model_event: Callable[[object], None] | None = None,
     ) -> dict[str, object]:
         normalized = question.strip()
         if not normalized:
@@ -188,6 +190,7 @@ class DesktopConversationService:
                 conversation_context=context,
                 on_delta=emit,
                 is_cancelled=is_cancelled,
+                on_model_event=on_model_event,
             )
         except BaseException:
             self._mark_generation_failed(assistant_message_id)
@@ -202,6 +205,7 @@ class DesktopConversationService:
         *,
         on_delta: AnswerDeltaCallback | None = None,
         is_cancelled: AnswerCancellationCallback | None = None,
+        on_model_event: Callable[[object], None] | None = None,
     ) -> dict[str, object]:
         question, context = self._begin_regeneration(conversation_id, assistant_message_id)
 
@@ -215,6 +219,7 @@ class DesktopConversationService:
                 conversation_context=context,
                 on_delta=emit,
                 is_cancelled=is_cancelled,
+                on_model_event=on_model_event,
             )
         except BaseException:
             self._restore_selected_answer_status(assistant_message_id)

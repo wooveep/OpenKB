@@ -34,7 +34,7 @@ class FakeClock:
 def _long_source(path: Path) -> None:
     path.write_text(
         "\n\n".join(
-            f"# Section {ordinal}\n\nDurable fact for natural section {ordinal}."
+            f"# Section {ordinal}\n\n" + (f"Durable fact for natural section {ordinal}. " * 150)
             for ordinal in range(7)
         ),
         encoding="utf-8",
@@ -115,8 +115,6 @@ def test_failed_batch_recovery_reuses_completed_batch_and_runs_one_merge(tmp_pat
         "failed": 1,
         "current_batch": 2,
         "phase": "batches",
-        "current_timeout_seconds": None,
-        "remaining_seconds": None,
     }
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         checkpoint = json.loads(
@@ -182,7 +180,7 @@ def test_merge_recovery_does_not_repeat_completed_batches(tmp_path: Path) -> Non
     assert operations == ["batch:0", "batch:1", "merge", "merge"]
 
 
-def test_each_batch_model_call_starts_with_its_own_retry_budget(tmp_path: Path) -> None:
+def test_each_batch_model_call_uses_only_the_fixed_connect_bound(tmp_path: Path) -> None:
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "long.md"
     _long_source(source)
@@ -212,9 +210,9 @@ def test_each_batch_model_call_starts_with_its_own_retry_budget(tmp_path: Path) 
 
     assert imported.document.availability == "available"
     assert timeouts == {
-        "batch:0": [20.0, 30.0],
-        "batch:1": [20.0, 30.0],
-        "knowledge_analysis_merge": [20.0],
+        "batch:0": [30.0, 30.0],
+        "batch:1": [30.0, 30.0],
+        "knowledge_analysis_merge": [30.0],
     }
 
 
@@ -252,20 +250,8 @@ def test_completed_merge_recovery_keeps_the_persisted_provider(
                     "entities": [],
                 }
             )
-        concepts = [
-            candidate
-            for batch in payload["batch_results"]
-            for candidate in batch["concepts"]
-        ]
-        return json.dumps(
-            {
-                "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
-                "analysis_scope": "document",
-                "document_description": "Old provider merge.",
-                "concepts": concepts,
-                "entities": [],
-            }
-        )
+        assert "batch_results" not in payload
+        return json.dumps({"document_description": "Old provider merge."})
 
     importer = DesktopTextImportService(
         kb_dir,
@@ -323,6 +309,8 @@ def test_batch_cannot_bind_evidence_from_another_batch(tmp_path: Path) -> None:
         nonlocal first_evidence_id
         payload = json.loads(request.content)
         operations.append(request.operation)
+        if request.operation == "structured_output_repair":
+            return str(payload["invalid_result"])
         if request.operation == "knowledge_analysis_batch":
             ordinal = int(payload["batch_ordinal"])
             if ordinal == 0:
@@ -351,12 +339,16 @@ def test_batch_cannot_bind_evidence_from_another_batch(tmp_path: Path) -> None:
         raise AssertionError("Invalid batch must stop before merge.")
 
     with pytest.raises(DesktopImportError) as captured:
-        DesktopTextImportService(
-            kb_dir, model_gateway=DesktopModelGateway(transport)
-        ).import_text(source)
+        DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(transport)).import_text(
+            source
+        )
 
     assert captured.value.code == "model_response_invalid"
-    assert operations == ["knowledge_analysis_batch", "knowledge_analysis_batch"]
+    assert operations == [
+        "knowledge_analysis_batch",
+        "knowledge_analysis_batch",
+        "structured_output_repair",
+    ]
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)
 
@@ -393,28 +385,35 @@ def test_merge_cannot_invent_a_claim_even_with_valid_document_evidence(tmp_path:
                     "entities": [],
                 }
             )
-        first = payload["batch_results"][0]["concepts"][0]
-        invented = dict(first)
-        invented["claims"] = [
-            {
-                "text": "Invented during merge.",
-                "source_evidence_ids": first["claims"][0]["source_evidence_ids"],
-            }
-        ]
+        if request.operation == "structured_output_repair":
+            return str(payload["invalid_result"])
+        assert "batch_results" not in payload
         return json.dumps(
             {
                 "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                 "analysis_scope": "document",
                 "document_description": "Invalid merge.",
-                "concepts": [invented],
+                "concepts": [
+                    {
+                        "title": "Invented",
+                        "aliases": [],
+                        "tags": [],
+                        "claims": [
+                            {
+                                "text": "Invented during merge.",
+                                "source_evidence_ids": ["invented-evidence"],
+                            }
+                        ],
+                    }
+                ],
                 "entities": [],
             }
         )
 
     with pytest.raises(DesktopImportError) as captured:
-        DesktopTextImportService(
-            kb_dir, model_gateway=DesktopModelGateway(transport)
-        ).import_text(source)
+        DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(transport)).import_text(
+            source
+        )
     assert captured.value.code == "model_response_invalid"
 
 
@@ -453,18 +452,9 @@ def test_merge_cannot_drop_a_validated_claim_or_its_sources(
                     "entities": [],
                 }
             )
-        concepts = (
-            []
-            if drop_claim
-            else [
-                dict(candidate)
-                for batch in payload["batch_results"]
-                for candidate in batch["concepts"]
-            ]
-        )
-        if not drop_claim:
-            concepts[0]["claims"] = [dict(concepts[0]["claims"][0])]
-            concepts[0]["claims"][0]["source_evidence_ids"] = []
+        if request.operation == "structured_output_repair":
+            return str(payload["invalid_result"])
+        concepts = [] if drop_claim else [{"unexpected": "model-owned knowledge"}]
         return json.dumps(
             {
                 "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
@@ -475,15 +465,32 @@ def test_merge_cannot_drop_a_validated_claim_or_its_sources(
             }
         )
 
-    with pytest.raises(DesktopImportError) as captured:
-        DesktopTextImportService(
-            kb_dir, model_gateway=DesktopModelGateway(transport)
-        ).import_text(source)
+    importer = DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(transport))
+    if drop_claim:
+        imported = importer.import_text(source)
+        assert imported.document.availability == "available"
+        with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+            generated_content = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT content_markdown FROM knowledge_generation_items"
+                ).fetchall()
+            ]
+            batch_count = connection.execute(
+                "SELECT COUNT(*) FROM knowledge_analysis_batches"
+            ).fetchone()[0]
+        assert batch_count > 0
+        assert all(
+            any(f"Validated claim {ordinal}." in content for content in generated_content)
+            for ordinal in range(batch_count)
+        )
+    else:
+        with pytest.raises(DesktopImportError) as captured:
+            importer.import_text(source)
+        assert captured.value.code == "model_response_invalid"
 
-    assert captured.value.code == "model_response_invalid"
 
-
-def test_merge_bound_rejects_instead_of_dropping_validated_claims() -> None:
+def test_merge_prompt_stays_bounded_without_sending_validated_claims() -> None:
     candidates = [
         {
             "title": f"Concept {ordinal}",
@@ -511,10 +518,11 @@ def test_merge_bound_rejects_instead_of_dropping_validated_claims() -> None:
         expected_scope="batch",
     )
 
-    with pytest.raises(DesktopImportError) as captured:
-        knowledge_analysis_merge_prompt("large.md", (analysis,))
+    payload = json.loads(knowledge_analysis_merge_prompt("large.md", (analysis,)))
 
-    assert captured.value.code == "model_response_invalid"
+    assert payload["descriptions"] == ["Large but individually valid batch result."]
+    assert "batch_results" not in payload
+    assert "concepts" not in payload
 
 
 def test_document_merge_scope_can_represent_the_full_batch_union() -> None:

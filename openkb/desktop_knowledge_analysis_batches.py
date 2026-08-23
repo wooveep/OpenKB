@@ -6,8 +6,7 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, replace
 
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
 from openkb.desktop_import_types import (
@@ -19,61 +18,59 @@ from openkb.desktop_knowledge_analysis import (
     KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
     KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
     DesktopKnowledgeAnalysis,
-    KnowledgeAnalysisScope,
+    KnowledgeAnalysisCandidate,
+    KnowledgeAnalysisClaim,
     knowledge_analysis_prompt,
     knowledge_analysis_provenance_from_checkpoint,
     knowledge_analysis_provenance_json,
     parse_knowledge_analysis,
 )
+from openkb.desktop_knowledge_analysis_batch_planning import (
+    estimate_knowledge_analysis_batch_tokens,
+    knowledge_analysis_batch_prompt,
+    knowledge_analysis_merge_prompt,
+    plan_knowledge_analysis_batches,
+)
 from openkb.desktop_knowledge_analysis_batch_store import (
     DesktopKnowledgeAnalysisBatchStore,
     KnowledgeAnalysisBatch,
 )
+from openkb.desktop_knowledge_analysis_plan import (
+    KnowledgeAnalysisMergeNodePlan,
+    KnowledgeAnalysisPlan,
+    build_knowledge_analysis_plan,
+    prompt_snapshot_for_operation,
+)
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
-from openkb.desktop_model_gateway import DesktopModelCallError, DesktopModelResult
+from openkb.desktop_model_capabilities import (
+    DesktopModelCapabilityProfile,
+    model_capability_profile,
+)
+from openkb.desktop_model_gateway import (
+    DesktopModelCallError,
+    DesktopModelRequest,
+    DesktopModelResult,
+)
 from openkb.desktop_page_tree import PageTreeGeneration, page_tree_analysis_sections
+from openkb.desktop_prompt_contracts import prompt_contract_for
+from openkb.desktop_structured_output import (
+    DesktopStructuredOutputInvalidError,
+    run_structured_output,
+)
 
 __all__ = ["DesktopKnowledgeAnalysisBatchStore"]
 
-KNOWLEDGE_ANALYSIS_BATCH_SYSTEM_PROMPT = """Analyze one ordered natural document section batch.
-Return exactly one JSON object and no prose or Markdown fence. The object must contain:
-- schema_version: "openkb.knowledge-analysis.v1"
-- analysis_scope: "batch"
-- document_description: a concise description of this batch
-- concepts: an array of Concept candidates
-- entities: an array of Entity candidates
-Each candidate must contain title, aliases, tags, and claims. Entity candidates may include
-subtype. Each claim must contain text and source_evidence_ids. Use only supplied Evidence IDs.
-Do not invent facts, graph edges, PageTree nodes, retrieval plans, or answer text.
-"""
-KNOWLEDGE_ANALYSIS_MERGE_SYSTEM_PROMPT = """Merge validated Knowledge Analysis batches
-into one document result.
-Return exactly one JSON object and no prose or Markdown fence. The object must contain:
-- schema_version: "openkb.knowledge-analysis.v1"
-- analysis_scope: "document"
-- document_description: a concise document-level description
-- concepts: the merged Concept candidates
-- entities: the merged Entity candidates
-Preserve supplied Evidence IDs, merge duplicate identities and claims, and do not invent facts.
-Each candidate must retain title, aliases, tags, and claims; Entity candidates may include subtype.
-"""
-KNOWLEDGE_ANALYSIS_BATCH_PROMPT_DIGEST = hashlib.sha256(
-    KNOWLEDGE_ANALYSIS_BATCH_SYSTEM_PROMPT.encode("utf-8")
-).hexdigest()
-KNOWLEDGE_ANALYSIS_MERGE_PROMPT_DIGEST = hashlib.sha256(
-    KNOWLEDGE_ANALYSIS_MERGE_SYSTEM_PROMPT.encode("utf-8")
-).hexdigest()
+_BATCH_CONTRACT = prompt_contract_for("knowledge_analysis_batch")
+_MERGE_CONTRACT = prompt_contract_for("knowledge_analysis_merge")
+KNOWLEDGE_ANALYSIS_BATCH_SYSTEM_PROMPT = _BATCH_CONTRACT.instructions
+KNOWLEDGE_ANALYSIS_MERGE_SYSTEM_PROMPT = _MERGE_CONTRACT.instructions
+KNOWLEDGE_ANALYSIS_BATCH_PROMPT_DIGEST = _BATCH_CONTRACT.digest
+KNOWLEDGE_ANALYSIS_MERGE_PROMPT_DIGEST = _MERGE_CONTRACT.digest
 KNOWLEDGE_ANALYSIS_BATCH_PIPELINE_DIGEST = hashlib.sha256(
     (KNOWLEDGE_ANALYSIS_BATCH_PROMPT_DIGEST + ":" + KNOWLEDGE_ANALYSIS_MERGE_PROMPT_DIGEST).encode(
         "utf-8"
     )
 ).hexdigest()
-
-MAX_BATCH_EVIDENCE = 12
-MAX_BATCH_PROMPT_CHARACTERS = 48_000
-MAX_MERGE_PROMPT_CHARACTERS = 120_000
-_MAX_EVIDENCE_TEXT_CHARACTERS = 12_000
-_BATCH_PROMPT_RESERVED_CHARACTERS = 4_096
 
 
 @dataclass(frozen=True)
@@ -96,32 +93,81 @@ def run_knowledge_analysis(
     provider: str,
     model: str,
     engine_version: str,
-    analyze: Callable[[str, str], DesktopModelResult],
+    analyze: Callable[[DesktopModelRequest], DesktopModelResult],
     honor_control: Callable[[], None],
     on_batch_completed: Callable[[int, int], None],
+    capability_profile: DesktopModelCapabilityProfile | None = None,
 ) -> KnowledgeAnalysisRun:
     """Execute a direct analysis or resume a persisted long-document batch plan."""
     natural_sections = (
         page_tree_analysis_sections(page_tree, evidence) if page_tree is not None else ()
     )
-    planned_batches = plan_knowledge_analysis_batches(
-        evidence, natural_sections=natural_sections or None
+    capability = capability_profile or model_capability_profile(model)
+    contract = prompt_contract_for("knowledge_analysis_batch")
+    reserve_output_tokens = contract.token_budget_policy.get("reserve_output_tokens")
+    if (
+        isinstance(reserve_output_tokens, bool)
+        or not isinstance(reserve_output_tokens, int)
+        or reserve_output_tokens <= 0
+    ):
+        reserve_output_tokens = 4_096
+    input_budget_tokens = min(
+        capability.document_input_capacity,
+        max(
+            1,
+            capability.context_capacity - reserve_output_tokens,
+        ),
     )
-    batches = store.load_or_create(
+    planned_batches = plan_knowledge_analysis_batches(
+        evidence,
+        natural_sections=natural_sections or None,
+        document_name=document_name,
+        input_budget_tokens=input_budget_tokens,
+    )
+    estimated_batch_tokens = tuple(
+        estimate_knowledge_analysis_batch_tokens(
+            document_name,
+            batch,
+            batch_ordinal=ordinal,
+            batch_total=len(planned_batches),
+        )
+        for ordinal, batch in enumerate(planned_batches)
+    )
+    proposed_plan = build_knowledge_analysis_plan(
+        evidence=evidence,
+        planned_batches=planned_batches,
+        provider=provider,
+        model=model,
+        capability=capability,
+        contract=contract,
+        estimated_batch_tokens=estimated_batch_tokens,
+    )
+    plan, batches = store.load_or_create(
         job_id=job_id,
         stage_run_id=stage_run_id,
         evidence=evidence,
         planned_batches=planned_batches,
+        proposed_plan=proposed_plan,
     )
     if not batches:
-        result = analyze("knowledge_analysis", knowledge_analysis_prompt(document_name, evidence))
-        analysis = _parse_result(result)
+        prompt = knowledge_analysis_prompt(document_name, evidence)
+        validated = _validated_analysis_call(
+            operation="knowledge_analysis",
+            document_name=document_name,
+            prompt=prompt,
+            analyze=analyze,
+            validate=lambda content: _validated_document_analysis(content, evidence),
+            plan=plan,
+            batch_id="document",
+        )
+        result, analysis = validated
         checkpoint = _result_checkpoint(
             analysis,
             result,
             provider=provider,
             model=model,
             prompt_digest=KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
+            prompt_operation="knowledge_analysis",
             engine_version=engine_version,
         )
         return KnowledgeAnalysisRun(
@@ -148,12 +194,21 @@ def run_knowledge_analysis(
         honor_control()
         store.start_batch(batch.batch_id)
         try:
-            result = analyze(
-                "knowledge_analysis_batch",
-                knowledge_analysis_batch_prompt(document_name, batch, batch_total=len(batches)),
+            prompt = knowledge_analysis_batch_prompt(
+                document_name,
+                batch,
+                batch_total=len(batches),
+                input_budget_tokens=plan.input_budget_tokens,
             )
-            analysis = _parse_result(result, scope=KNOWLEDGE_ANALYSIS_BATCH_SCOPE)
-            _validate_batch_sources(analysis, batch, result=result)
+            result, analysis = _validated_analysis_call(
+                operation="knowledge_analysis_batch",
+                document_name=document_name,
+                prompt=prompt,
+                analyze=analyze,
+                validate=lambda content: _validated_batch_analysis(content, batch),
+                plan=plan,
+                batch_id=batch.batch_id,
+            )
         except DesktopModelCallError as error:
             store.fail_batch(batch.batch_id, error.failure.code)
             raise
@@ -166,6 +221,7 @@ def run_knowledge_analysis(
             provider=provider,
             model=model,
             prompt_digest=KNOWLEDGE_ANALYSIS_BATCH_PROMPT_DIGEST,
+            prompt_operation="knowledge_analysis_batch",
             engine_version=engine_version,
             extra={
                 "batch_id": batch.batch_id,
@@ -187,13 +243,23 @@ def run_knowledge_analysis(
     else:
         honor_control()
         store.start_merge(job_id)
+        deterministic = deterministic_merge_knowledge(tuple(analyses))
         try:
-            result = analyze(
-                "knowledge_analysis_merge",
-                knowledge_analysis_merge_prompt(document_name, tuple(analyses)),
+            description, result, merge_node_checkpoints = _run_hierarchical_description_merge(
+                store=store,
+                plan=plan,
+                job_id=job_id,
+                document_name=document_name,
+                analyze=analyze,
+                analyses=tuple(analyses),
+                honor_control=honor_control,
             )
-            merged = _parse_result(result, aggregate=True)
-            _validate_merge_sources(merged, tuple(analyses), result=result)
+            merged = DesktopKnowledgeAnalysis(
+                description,
+                deterministic.concepts,
+                deterministic.entities,
+            )
+            _validate_merge_sources(merged, tuple(analyses))
         except DesktopModelCallError as error:
             store.fail_merge(job_id, error.failure.code)
             raise
@@ -206,6 +272,7 @@ def run_knowledge_analysis(
             provider=provider,
             model=model,
             prompt_digest=KNOWLEDGE_ANALYSIS_MERGE_PROMPT_DIGEST,
+            prompt_operation="knowledge_analysis_merge",
             engine_version=engine_version,
             extra={
                 "batch_count": len(batches),
@@ -213,6 +280,10 @@ def run_knowledge_analysis(
                 "batch_checkpoint_sha256s": [
                     hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
                     for value in batch_checkpoints
+                ],
+                "merge_node_checkpoint_sha256s": [
+                    hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+                    for value in merge_node_checkpoints
                 ],
             },
         )
@@ -223,103 +294,6 @@ def run_knowledge_analysis(
         knowledge_analysis_provenance_from_checkpoint(merged_checkpoint),
         merged_checkpoint,
     )
-
-
-def plan_knowledge_analysis_batches(
-    evidence: tuple[tuple[str, DocumentIRBlock], ...],
-    *,
-    natural_sections: tuple[tuple[tuple[str, DocumentIRBlock], ...], ...] | None = None,
-    max_evidence: int = MAX_BATCH_EVIDENCE,
-    max_prompt_characters: int = MAX_BATCH_PROMPT_CHARACTERS,
-) -> tuple[tuple[tuple[str, DocumentIRBlock], ...], ...]:
-    """Pack ordered natural sections, splitting an oversized section only at IR blocks."""
-    if not evidence or max_evidence < 1 or max_prompt_characters < 1:
-        raise _state_error("Knowledge Analysis batch input is invalid.")
-    sections = (
-        natural_sections
-        if natural_sections is not None and _sections_cover_evidence(natural_sections, evidence)
-        else _natural_sections(evidence)
-    )
-    batches: list[tuple[tuple[str, DocumentIRBlock], ...]] = []
-    current: list[tuple[str, DocumentIRBlock]] = []
-    for section in sections:
-        if current and _batch_fits(
-            (*current, *section), max_evidence=max_evidence, maximum=max_prompt_characters
-        ):
-            current.extend(section)
-            continue
-        if current:
-            batches.append(tuple(current))
-            current = []
-        if _batch_fits(section, max_evidence=max_evidence, maximum=max_prompt_characters):
-            current.extend(section)
-            continue
-        for item in section:
-            if current and not _batch_fits(
-                (*current, item), max_evidence=max_evidence, maximum=max_prompt_characters
-            ):
-                batches.append(tuple(current))
-                current = []
-            current.append(item)
-    if current:
-        batches.append(tuple(current))
-    return tuple(batches)
-
-
-def _sections_cover_evidence(
-    sections: tuple[tuple[tuple[str, DocumentIRBlock], ...], ...],
-    evidence: tuple[tuple[str, DocumentIRBlock], ...],
-) -> bool:
-    return (
-        bool(sections)
-        and all(sections)
-        and tuple(item for section in sections for item in section) == evidence
-    )
-
-
-def knowledge_analysis_batch_prompt(
-    document_name: str,
-    batch: KnowledgeAnalysisBatch,
-    *,
-    batch_total: int,
-) -> str:
-    payload = {
-        "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
-        "analysis_scope": KNOWLEDGE_ANALYSIS_BATCH_SCOPE,
-        "document_name": Path(document_name).name,
-        "batch_ordinal": batch.ordinal,
-        "batch_total": batch_total,
-        "section_paths": [list(path) for path in batch.section_paths],
-        "evidence": [_evidence_payload(item) for item in batch.evidence],
-    }
-    content = _json(payload)
-    if len(content) > MAX_BATCH_PROMPT_CHARACTERS:
-        raise _state_error("Knowledge Analysis batch exceeds its prompt bound.")
-    return content
-
-
-def knowledge_analysis_merge_prompt(
-    document_name: str,
-    analyses: tuple[DesktopKnowledgeAnalysis, ...],
-) -> str:
-    """Build one bounded merge input that either includes every batch or fails."""
-    payload: dict[str, object] = {
-        "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
-        "analysis_scope": "document_merge",
-        "document_name": Path(document_name).name,
-        "batch_count": len(analyses),
-        "batch_results": [analysis.as_dict() for analysis in analyses],
-    }
-    content = _json(payload)
-    if len(content) > MAX_MERGE_PROMPT_CHARACTERS:
-        raise DesktopImportError(
-            "model_response_invalid",
-            "Validated Knowledge Analysis batches exceed the document merge bound.",
-            suggested_action=(
-                "Import a smaller document or use a model that returns more concise claims."
-            ),
-        )
-    return content
 
 
 def parse_batch_checkpoint(checkpoint: object) -> DesktopKnowledgeAnalysis:
@@ -340,17 +314,326 @@ def _analysis_from_document_checkpoint(checkpoint: object) -> DesktopKnowledgeAn
     return parse_knowledge_analysis(_json(checkpoint["normalized_result"]), aggregate=True)
 
 
-def _parse_result(
-    result: DesktopModelResult,
+def _validated_analysis_call(
     *,
-    scope: KnowledgeAnalysisScope = "document",
-    aggregate: bool = False,
-) -> DesktopKnowledgeAnalysis:
+    operation: str,
+    document_name: str,
+    prompt: str,
+    analyze: Callable[[DesktopModelRequest], DesktopModelResult],
+    validate: Callable[[str], DesktopKnowledgeAnalysis],
+    plan: KnowledgeAnalysisPlan,
+    batch_id: str,
+) -> tuple[DesktopModelResult, DesktopKnowledgeAnalysis]:
     try:
-        return parse_knowledge_analysis(result.content, expected_scope=scope, aggregate=aggregate)
-    except DesktopImportError as error:
-        error.attempt_count = result.attempt_count
-        raise
+        output = run_structured_output(
+            operation=operation,
+            document_name=document_name,
+            source_material=prompt,
+            invoke=lambda request: analyze(
+                _request_pinned_to_plan(request, plan, batch_id=batch_id)
+            ),
+            validate=validate,
+            contract_snapshot=prompt_snapshot_for_operation(plan, operation),
+            repair_contract_snapshot=prompt_snapshot_for_operation(
+                plan,
+                "structured_output_repair",
+            ),
+        )
+    except DesktopStructuredOutputInvalidError as error:
+        invalid = _invalid_model_result(str(error), None)
+        invalid.attempt_count = error.attempt_count
+        raise invalid from error
+    return output.result, output.value
+
+
+def _validated_document_analysis(
+    content: str,
+    evidence: tuple[tuple[str, DocumentIRBlock], ...],
+) -> DesktopKnowledgeAnalysis:
+    # Unresolved source IDs become Missing Source review work; they must not
+    # discard valid sibling claims or make the parsed document unavailable.
+    del evidence
+    return parse_knowledge_analysis(content)
+
+
+def _validated_batch_analysis(
+    content: str,
+    batch: KnowledgeAnalysisBatch,
+) -> DesktopKnowledgeAnalysis:
+    analysis = parse_knowledge_analysis(
+        content,
+        expected_scope=KNOWLEDGE_ANALYSIS_BATCH_SCOPE,
+    )
+    _validate_batch_sources(analysis, batch)
+    return analysis
+
+
+def _run_hierarchical_description_merge(
+    *,
+    store: DesktopKnowledgeAnalysisBatchStore,
+    plan: KnowledgeAnalysisPlan,
+    job_id: str,
+    document_name: str,
+    analyze: Callable[[DesktopModelRequest], DesktopModelResult],
+    analyses: tuple[DesktopKnowledgeAnalysis, ...],
+    honor_control: Callable[[], None],
+) -> tuple[str, DesktopModelResult, tuple[dict[str, object], ...]]:
+    descriptions = {
+        f"batch:{ordinal}": analysis.document_description
+        for ordinal, analysis in enumerate(analyses)
+    }
+    checkpoints: list[dict[str, object]] = []
+    root_result: DesktopModelResult | None = None
+    for node in plan.merge_topology:
+        checkpoint = store.merge_node_checkpoint(job_id, node.node_id)
+        if checkpoint is not None:
+            description = checkpoint.get("document_description")
+            if not isinstance(description, str):
+                raise _state_error("Knowledge Analysis merge-node checkpoint is invalid.")
+            descriptions[node.node_id] = description
+            checkpoints.append(checkpoint)
+            if node == plan.merge_topology[-1]:
+                root_result = _result_from_merge_node_checkpoint(checkpoint, description)
+            continue
+        child_descriptions = tuple(descriptions[child_id] for child_id in node.child_ids)
+        prompt = knowledge_analysis_merge_prompt(
+            document_name,
+            child_descriptions,
+            node_id=node.node_id,
+            input_budget_tokens=plan.input_budget_tokens,
+        )
+        honor_control()
+        store.start_merge_node(job_id, node.node_id)
+        try:
+            result, description = _validated_description_merge_call(
+                document_name=document_name,
+                prompt=prompt,
+                analyze=analyze,
+                plan=plan,
+                batch_id=node.node_id,
+            )
+        except DesktopModelCallError as error:
+            store.fail_merge_node(job_id, node.node_id, error.failure.code)
+            raise
+        except DesktopImportError as error:
+            store.fail_merge_node(job_id, node.node_id, error.code)
+            raise
+        checkpoint = _merge_node_checkpoint(node, result, description)
+        store.complete_merge_node(job_id, node.node_id, checkpoint)
+        descriptions[node.node_id] = description
+        checkpoints.append(checkpoint)
+        if node == plan.merge_topology[-1]:
+            root_result = result
+    if not plan.merge_topology:
+        description = _deterministic_description(analyses)
+        deterministic_result = DesktopModelResult(
+            "deterministic",
+            _json({"document_description": description}),
+            0,
+        )
+        return description, deterministic_result, ()
+    root = plan.merge_topology[-1].node_id
+    if root_result is None:
+        raise _state_error("Knowledge Analysis merge topology has no completed root.")
+    return descriptions[root], root_result, tuple(checkpoints)
+
+
+def _validated_description_merge_call(
+    *,
+    document_name: str,
+    prompt: str,
+    analyze: Callable[[DesktopModelRequest], DesktopModelResult],
+    plan: KnowledgeAnalysisPlan,
+    batch_id: str,
+) -> tuple[DesktopModelResult, str]:
+    try:
+        output = run_structured_output(
+            operation="knowledge_analysis_merge",
+            document_name=document_name,
+            source_material=prompt,
+            invoke=lambda request: analyze(
+                _request_pinned_to_plan(request, plan, batch_id=batch_id)
+            ),
+            validate=_parse_merged_description,
+            contract_snapshot=prompt_snapshot_for_operation(
+                plan,
+                "knowledge_analysis_merge",
+            ),
+            repair_contract_snapshot=prompt_snapshot_for_operation(
+                plan,
+                "structured_output_repair",
+            ),
+        )
+    except DesktopStructuredOutputInvalidError as error:
+        invalid = _invalid_model_result(str(error), None)
+        invalid.attempt_count = error.attempt_count
+        raise invalid from error
+    return output.result, output.value
+
+
+def _request_pinned_to_plan(
+    request: DesktopModelRequest,
+    plan: KnowledgeAnalysisPlan,
+    *,
+    batch_id: str,
+) -> DesktopModelRequest:
+    return replace(
+        request,
+        model_name=plan.analysis_model,
+        context_capacity=plan.capability_profile.context_capacity,
+        document_input_capacity=plan.capability_profile.document_input_capacity,
+        batch_id=batch_id,
+    )
+
+
+def _parse_merged_description(content: str) -> str:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise _invalid_model_result(
+            "Knowledge Analysis merge returned invalid JSON.", None
+        ) from error
+    if not isinstance(payload, dict):
+        raise _invalid_model_result("Knowledge Analysis merge must return one object.", None)
+    if set(payload) == {"document_description"}:
+        description = payload.get("document_description")
+    elif (
+        set(payload)
+        == {
+            "schema_version",
+            "analysis_scope",
+            "document_description",
+            "concepts",
+            "entities",
+        }
+        and payload.get("concepts") == []
+        and payload.get("entities") == []
+    ):
+        # Pre-plan fixtures remain readable, but model-produced knowledge fields stay forbidden.
+        description = payload.get("document_description")
+    else:
+        raise _invalid_model_result(
+            "Knowledge Analysis merge may return only document_description.",
+            None,
+        )
+    if not isinstance(description, str) or len(description) > 4_000:
+        raise _invalid_model_result("Knowledge Analysis merge description is invalid.", None)
+    return description.strip()
+
+
+def deterministic_merge_knowledge(
+    analyses: tuple[DesktopKnowledgeAnalysis, ...],
+) -> DesktopKnowledgeAnalysis:
+    """Normalize and deduplicate exact knowledge without asking a model to reproduce it."""
+    accumulators: dict[
+        tuple[str, str, str | None],
+        dict[str, object],
+    ] = {}
+    for analysis in analyses:
+        for candidate in (*analysis.concepts, *analysis.entities):
+            normalized_title = normalize_knowledge_title(candidate.title)[1]
+            subtype = _normalized_text(candidate.subtype) if candidate.subtype else None
+            key = (candidate.kind, normalized_title, subtype)
+            current = accumulators.setdefault(
+                key,
+                {
+                    "candidate": candidate,
+                    "aliases": [],
+                    "tags": [],
+                    "claims": {},
+                },
+            )
+            _extend_unique(current["aliases"], candidate.aliases)
+            _extend_unique(current["tags"], candidate.tags)
+            claims = current["claims"]
+            assert isinstance(claims, dict)
+            for claim in candidate.claims:
+                text = _normalized_text(claim.text)
+                claim_state = claims.setdefault(text, [claim.text.strip(), []])
+                _extend_unique(claim_state[1], claim.source_evidence_ids)
+    concepts: list[KnowledgeAnalysisCandidate] = []
+    entities: list[KnowledgeAnalysisCandidate] = []
+    for (kind, _title, subtype), current in accumulators.items():
+        original = current["candidate"]
+        assert isinstance(original, KnowledgeAnalysisCandidate)
+        claims = current["claims"]
+        assert isinstance(claims, dict)
+        merged = KnowledgeAnalysisCandidate(
+            kind=kind,  # type: ignore[arg-type]
+            title=original.title.strip(),
+            aliases=tuple(current["aliases"]),  # type: ignore[arg-type]
+            tags=tuple(current["tags"]),  # type: ignore[arg-type]
+            claims=tuple(
+                KnowledgeAnalysisClaim(str(value[0]), tuple(value[1])) for value in claims.values()
+            ),
+            subtype=subtype,
+        )
+        (concepts if kind == "concept" else entities).append(merged)
+    return DesktopKnowledgeAnalysis(
+        _deterministic_description(analyses),
+        tuple(concepts),
+        tuple(entities),
+    )
+
+
+def _deterministic_description(analyses: tuple[DesktopKnowledgeAnalysis, ...]) -> str:
+    values: list[str] = []
+    _extend_unique(values, (analysis.document_description for analysis in analyses))
+    return " ".join(values)[:4_000]
+
+
+def _extend_unique(target: object, values) -> None:
+    assert isinstance(target, list)
+    seen = {_normalized_text(str(value)) for value in target}
+    for value in values:
+        normalized = _normalized_text(str(value))
+        if normalized and normalized not in seen:
+            target.append(str(value).strip())
+            seen.add(normalized)
+
+
+def _normalized_text(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def _merge_node_checkpoint(
+    node: KnowledgeAnalysisMergeNodePlan,
+    result: DesktopModelResult,
+    description: str,
+) -> dict[str, object]:
+    contract = prompt_contract_for("knowledge_analysis_merge")
+    return {
+        "node_id": node.node_id,
+        "level": node.level,
+        "node_ordinal": node.ordinal,
+        "child_ids": list(node.child_ids),
+        "document_description": description,
+        "prompt_contract_snapshot": contract.snapshot(),
+        "prompt_digest": contract.digest,
+        "attempt_metadata": {
+            "call_id": result.call_id,
+            "attempt_count": result.attempt_count,
+        },
+        "response_sha256": hashlib.sha256(result.content.encode("utf-8")).hexdigest(),
+    }
+
+
+def _result_from_merge_node_checkpoint(
+    checkpoint: dict[str, object],
+    description: str,
+) -> DesktopModelResult:
+    metadata = checkpoint.get("attempt_metadata")
+    if not isinstance(metadata, dict):
+        raise _state_error("Knowledge Analysis merge-node metadata is invalid.")
+    call_id = metadata.get("call_id")
+    attempt_count = metadata.get("attempt_count")
+    if not isinstance(call_id, str) or not isinstance(attempt_count, int):
+        raise _state_error("Knowledge Analysis merge-node metadata is invalid.")
+    return DesktopModelResult(
+        call_id,
+        _json({"document_description": description}),
+        attempt_count,
+    )
 
 
 def _validate_batch_sources(
@@ -377,26 +660,12 @@ def _validate_merge_sources(
     *,
     result: DesktopModelResult | None = None,
 ) -> None:
-    allowed: dict[tuple[str, str, str], set[str]] = {}
-    allowed_identities: set[tuple[str, str]] = set()
-    for analysis in batches:
-        for candidate in (*analysis.concepts, *analysis.entities):
-            title = normalize_knowledge_title(candidate.title)[1]
-            allowed_identities.add((candidate.kind, title))
-            for claim in candidate.claims:
-                allowed.setdefault((candidate.kind, title, claim.text), set()).update(
-                    claim.source_evidence_ids
-                )
-    actual: dict[tuple[str, str, str], set[str]] = {}
-    actual_identities: set[tuple[str, str]] = set()
-    for candidate in (*merged.concepts, *merged.entities):
-        title = normalize_knowledge_title(candidate.title)[1]
-        actual_identities.add((candidate.kind, title))
-        for claim in candidate.claims:
-            actual.setdefault((candidate.kind, title, claim.text), set()).update(
-                claim.source_evidence_ids
-            )
-    if actual != allowed or actual_identities != allowed_identities:
+    expected = deterministic_merge_knowledge(batches)
+    if (
+        merged.concepts != expected.concepts
+        or merged.entities != expected.entities
+        or merged.analysis_scope != expected.analysis_scope
+    ):
         raise _invalid_model_result(
             "Knowledge Analysis merge must preserve every validated claim and source.", result
         )
@@ -420,6 +689,7 @@ def _result_checkpoint(
     provider: str,
     model: str,
     prompt_digest: str,
+    prompt_operation: str,
     engine_version: str,
     extra: dict[str, object] | None = None,
 ) -> dict[str, object]:
@@ -429,6 +699,7 @@ def _result_checkpoint(
         "provider": provider,
         "model": model,
         "prompt_digest": prompt_digest,
+        "prompt_contract_snapshot": prompt_contract_for(prompt_operation).snapshot(),
         "engine_version": engine_version,
         "attempt_metadata": {
             "call_id": result.call_id,
@@ -472,10 +743,6 @@ def knowledge_analysis_progress_in(
         if merge_status == "completed"
         else ("merge" if all(status == "completed" for status in statuses) else "batches")
     )
-    latest = model_calls[-1] if model_calls else None
-    waiting = latest is not None and latest.status in {"running", "retry_wait"}
-    timeout_seconds = latest.timeout_seconds if waiting and latest is not None else None
-    remaining_seconds = latest.remaining_seconds if waiting and latest is not None else None
     return DesktopKnowledgeAnalysisProgress(
         total=len(rows),
         completed=statuses.count("completed"),
@@ -483,51 +750,7 @@ def knowledge_analysis_progress_in(
         failed=statuses.count("failed"),
         current_batch=current,
         phase=phase,
-        current_timeout_seconds=timeout_seconds,
-        remaining_seconds=remaining_seconds,
     )
-
-
-def _natural_sections(
-    evidence: tuple[tuple[str, DocumentIRBlock], ...],
-) -> tuple[tuple[tuple[str, DocumentIRBlock], ...], ...]:
-    sections: list[list[tuple[str, DocumentIRBlock]]] = []
-    current: list[tuple[str, DocumentIRBlock]] = []
-    current_path: tuple[str, ...] | None = None
-    for item in evidence:
-        path = item[1].heading_path
-        if current and path != current_path:
-            sections.append(current)
-            current = []
-        current_path = path
-        current.append(item)
-    if current:
-        sections.append(current)
-    return tuple(tuple(section) for section in sections)
-
-
-def _batch_fits(
-    evidence: tuple[tuple[str, DocumentIRBlock], ...],
-    *,
-    max_evidence: int,
-    maximum: int,
-) -> bool:
-    if len(evidence) > max_evidence:
-        return False
-    payload = {"evidence": [_evidence_payload(item) for item in evidence]}
-    usable_characters = max(1, maximum - _BATCH_PROMPT_RESERVED_CHARACTERS)
-    return len(_json(payload)) <= usable_characters
-
-
-def _evidence_payload(item: tuple[str, DocumentIRBlock]) -> dict[str, object]:
-    evidence_id, block = item
-    return {
-        "evidence_id": evidence_id,
-        "kind": block.kind,
-        "section": " / ".join(block.heading_path),
-        "locator": block.locator or {"line_start": block.line_start, "line_end": block.line_end},
-        "text": block.text[:_MAX_EVIDENCE_TEXT_CHARACTERS],
-    }
 
 
 def _json(value: object) -> str:

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import type {
   DesktopBridge,
   DesktopCatalogRebuildTask,
+  DesktopKnowledgeGraphExtractionTask,
   DesktopPageTreeEnrichmentTask,
   DesktopPageTreeRebuildTask,
 } from "./contracts"
@@ -10,6 +11,7 @@ interface RebuildState {
   kbDir: string | null
   tasks: DesktopPageTreeRebuildTask[]
   enrichments: DesktopPageTreeEnrichmentTask[]
+  graphExtractions: DesktopKnowledgeGraphExtractionTask[]
   catalog: DesktopCatalogRebuildTask | null
   error: string | null
 }
@@ -30,6 +32,7 @@ export function usePageTreeRebuilds({
     kbDir: null,
     tasks: [],
     enrichments: [],
+    graphExtractions: [],
     catalog: null,
     error: null,
   })
@@ -46,6 +49,7 @@ export function usePageTreeRebuilds({
           kbDir,
           tasks: result.pageTreeRebuilds,
           enrichments: result.pageTreeEnrichments,
+          graphExtractions: result.knowledgeGraphExtractions,
           catalog: result.catalogRebuild,
           error: null,
         })
@@ -55,6 +59,7 @@ export function usePageTreeRebuilds({
             kbDir,
             tasks: [],
             enrichments: [],
+            graphExtractions: [],
             catalog: null,
             error: reason instanceof Error ? reason.message : String(reason),
           })
@@ -71,5 +76,5 @@ export function usePageTreeRebuilds({
 
   return engineReady && state.kbDir === kbDir
     ? state
-    : { kbDir, tasks: [], enrichments: [], catalog: null, error: null }
+    : { kbDir, tasks: [], enrichments: [], graphExtractions: [], catalog: null, error: null }
 }

@@ -78,12 +78,10 @@ export function DesktopKnowledgeReanalysisTasks({
                         })}
                       </p>
                     ) : null}
-                    {job.attemptCount !== null && job.timeoutSeconds !== null ? (
+                    {job.attemptCount !== null ? (
                       <p className="mt-1 text-xs text-muted-foreground">
                         {t("desktop.tasks.reanalysis.attempt", {
                           attempt: job.attemptCount,
-                          timeout: Math.ceil(job.timeoutSeconds),
-                          remaining: Math.ceil(job.remainingSeconds ?? 0),
                         })}
                       </p>
                     ) : null}

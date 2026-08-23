@@ -6,12 +6,12 @@ import logging
 import sqlite3
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from portalocker import LockException
 
 from openkb.desktop_import_artifacts import DesktopImportError
+from openkb.desktop_import_clock import lease_expiry, timestamp
 from openkb.desktop_import_store import IMPORT_STAGES, ImportJobState
 from openkb.desktop_import_types import (
     DesktopRecoveryOverride,
@@ -58,7 +58,7 @@ class DesktopImportRecoveryStore:
         with kb_ingest_lock(self._state_dir):
             connection = _connect(self._database_path)
             try:
-                now = _timestamp()
+                now = timestamp()
                 connection.execute("BEGIN IMMEDIATE")
                 row = connection.execute(
                     """
@@ -130,7 +130,7 @@ class DesktopImportRecoveryStore:
                     SET status = 'running', lease_owner = ?, lease_expires_at = ?, updated_at = ?
                     WHERE job_id = ?
                     """,
-                    (self._lease_owner, _lease_expiry(), now, job_id),
+                    (self._lease_owner, lease_expiry(), now, job_id),
                 )
                 connection.execute(
                     """
@@ -144,7 +144,7 @@ class DesktopImportRecoveryStore:
                         job_id,
                         str(stage_run_id),
                         override.model,
-                        override.initial_timeout_seconds,
+                        None,
                         now,
                     ),
                 )
@@ -182,7 +182,7 @@ class DesktopImportRecoveryStore:
             with kb_ingest_lock(self._state_dir):
                 connection = _connect(self._database_path)
                 try:
-                    now = _timestamp()
+                    now = timestamp()
                     connection.execute("BEGIN IMMEDIATE")
                     connection.execute(
                         """
@@ -233,7 +233,7 @@ class DesktopImportRecoveryStore:
                             SET status = ?, completed_at = ?
                             WHERE recovery_run_id = ?
                             """,
-                            (_recovery_status(status), _timestamp(), state.recovery_run_id),
+                            (_recovery_status(status), timestamp(), state.recovery_run_id),
                         )
                 finally:
                     connection.close()
@@ -283,11 +283,3 @@ def _connect(database_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path)
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
-
-
-def _timestamp() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
-
-
-def _lease_expiry() -> str:
-    return (datetime.now(tz=timezone.utc) + timedelta(seconds=30)).isoformat()

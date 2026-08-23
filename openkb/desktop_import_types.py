@@ -191,8 +191,7 @@ class DesktopModelAttempt:
 
     attempt: int
     status: str
-    timeout_seconds: float
-    remaining_seconds: float
+    elapsed_seconds: float = 0.0
     error_code: str | None = None
     reason: str | None = None
 
@@ -200,8 +199,7 @@ class DesktopModelAttempt:
         return {
             "attempt": self.attempt,
             "status": self.status,
-            "timeout_seconds": self.timeout_seconds,
-            "remaining_seconds": self.remaining_seconds,
+            "elapsed_seconds": self.elapsed_seconds,
             "error_code": self.error_code,
             "reason": self.reason,
         }
@@ -216,9 +214,7 @@ class DesktopModelCall:
     operation: str
     status: str
     attempt_count: int
-    timeout_seconds: float
-    next_timeout_seconds: float | None
-    remaining_seconds: float
+    elapsed_seconds: float = 0.0
     error_code: str | None = None
     reason: str | None = None
     suggested_action: str | None = None
@@ -231,9 +227,7 @@ class DesktopModelCall:
             "operation": self.operation,
             "status": self.status,
             "attempt_count": self.attempt_count,
-            "timeout_seconds": self.timeout_seconds,
-            "next_timeout_seconds": self.next_timeout_seconds,
-            "remaining_seconds": self.remaining_seconds,
+            "elapsed_seconds": self.elapsed_seconds,
             "error_code": self.error_code,
             "reason": self.reason,
             "suggested_action": self.suggested_action,
@@ -273,8 +267,6 @@ class DesktopKnowledgeAnalysisProgress:
     failed: int
     current_batch: int | None
     phase: str
-    current_timeout_seconds: float | None
-    remaining_seconds: float | None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -284,8 +276,6 @@ class DesktopKnowledgeAnalysisProgress:
             "failed": self.failed,
             "current_batch": self.current_batch,
             "phase": self.phase,
-            "current_timeout_seconds": self.current_timeout_seconds,
-            "remaining_seconds": self.remaining_seconds,
         }
 
 
@@ -294,7 +284,8 @@ class DesktopRecoveryOverride:
     """One manual recovery's model settings, never a knowledge-base default."""
 
     model: str | None = None
-    initial_timeout_seconds: float | None = None
+    context_capacity: int | None = None
+    legacy_recovery_choice: str | None = None
 
 
 @dataclass(frozen=True)
@@ -307,6 +298,11 @@ class DesktopTextImportResult:
     model_calls: tuple[DesktopModelCall, ...] = ()
     quarantine: DesktopQuarantinedDocument | None = None
     knowledge_analysis: DesktopKnowledgeAnalysisProgress | None = None
+    import_progress: tuple[dict[str, object], ...] = ()
+    model_usage: tuple[dict[str, object], ...] = ()
+    model_usage_aggregate: dict[str, object] | None = None
+    model_activity: dict[str, object] | None = None
+    legacy_model_recovery: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -318,6 +314,11 @@ class DesktopTextImportResult:
             "knowledge_analysis": (
                 self.knowledge_analysis.as_dict() if self.knowledge_analysis is not None else None
             ),
+            "import_progress": list(self.import_progress),
+            "model_usage": list(self.model_usage),
+            "model_usage_aggregate": self.model_usage_aggregate,
+            "model_activity": self.model_activity,
+            "legacy_model_recovery": self.legacy_model_recovery,
         }
 
 
@@ -331,6 +332,11 @@ class DesktopImportTask:
     model_calls: tuple[DesktopModelCall, ...] = ()
     quarantine: DesktopQuarantinedDocument | None = None
     knowledge_analysis: DesktopKnowledgeAnalysisProgress | None = None
+    import_progress: tuple[dict[str, object], ...] = ()
+    model_usage: tuple[dict[str, object], ...] = ()
+    model_usage_aggregate: dict[str, object] | None = None
+    model_activity: dict[str, object] | None = None
+    legacy_model_recovery: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -342,4 +348,9 @@ class DesktopImportTask:
             "knowledge_analysis": (
                 self.knowledge_analysis.as_dict() if self.knowledge_analysis is not None else None
             ),
+            "import_progress": list(self.import_progress),
+            "model_usage": list(self.model_usage),
+            "model_usage_aggregate": self.model_usage_aggregate,
+            "model_activity": self.model_activity,
+            "legacy_model_recovery": self.legacy_model_recovery,
         }

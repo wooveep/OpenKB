@@ -8,7 +8,8 @@ from collections.abc import Iterator
 
 from openkb.desktop_conversations import DesktopConversationService
 from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_model_gateway import DesktopModelCancelledError, DesktopModelGateway
+from openkb.desktop_model_terminal import MODEL_CONNECT_TIMEOUT_SECONDS
 from openkb.desktop_page_tree import (
     PageTreeEvidenceBinding,
     PageTreeGeneration,
@@ -89,7 +90,7 @@ def test_selected_page_tree_subtree_walks_large_tree_once() -> None:
     assert nodes.iterations <= 3
 
 
-def test_page_tree_selection_is_one_bounded_routing_call(tmp_path) -> None:
+def test_page_tree_selection_has_one_connect_bounded_routing_call(tmp_path) -> None:
     kb_dir = _knowledge_base(tmp_path)
     calls: list[tuple[str, float, str]] = []
 
@@ -107,7 +108,7 @@ def test_page_tree_selection_is_one_bounded_routing_call(tmp_path) -> None:
 
     selection_calls = [call for call in calls if call[0] == "page_tree_selection"]
     assert len(selection_calls) == 1
-    assert 19.9 < selection_calls[0][1] <= 20.0
+    assert selection_calls[0][1] == MODEL_CONNECT_TIMEOUT_SECONDS
     prompt = json.loads(selection_calls[0][2])
     assert len(prompt["trees"]) <= 3
     assert "multi_hop" in pack.retrieval_trace.trigger_reasons
@@ -178,20 +179,20 @@ def test_page_tree_selection_does_not_charge_when_provider_never_starts(tmp_path
     class ExhaustedTransport:
         calls = 0
 
-        def prepare_model_attempt(self, _is_cancelled, _remaining_seconds):
-            return False
+        def prepare_terminal_model_attempt(self, _is_cancelled):
+            raise DesktopModelCancelledError()
 
         def __call__(self, _request, _timeout_seconds):
             self.calls += 1
             return "unreachable"
 
     transport = ExhaustedTransport()
-    pack = DesktopEvidenceRetriever(
-        kb_dir, model_gateway=DesktopModelGateway(transport)
-    ).retrieve("Compare Alpha and Beta")
+    pack = DesktopEvidenceRetriever(kb_dir, model_gateway=DesktopModelGateway(transport)).retrieve(
+        "Compare Alpha and Beta"
+    )
 
     assert transport.calls == 0
-    assert "page_tree_selection_failed" in pack.retrieval_trace.degradation_reasons
+    assert "page_tree_selection_cancelled" in pack.retrieval_trace.degradation_reasons
     assert pack.retrieval_model_cost.model_calls == 0
     assert pack.retrieval_model_cost.input_characters == 0
 

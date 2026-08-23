@@ -1,3 +1,4 @@
+import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import {
   Drawer,
@@ -9,8 +10,10 @@ import {
 import { Button } from "@/components/ui/button"
 import type { DesktopImportBatchSummary } from "./DesktopDocumentImportPanel"
 import { DesktopKnowledgeAnalysisProgress } from "./DesktopKnowledgeAnalysisProgress"
+import { DesktopImportProgress } from "./DesktopImportProgress"
 import { DesktopCatalogRebuildTask } from "./DesktopCatalogRebuildTask"
 import { DesktopKnowledgeReanalysisTasks } from "./DesktopKnowledgeReanalysisTasks"
+import { DesktopKnowledgeGraphExtractionTasks } from "./DesktopKnowledgeGraphExtractionTasks"
 import { DesktopPageTreeEnrichmentTasks } from "./DesktopPageTreeEnrichmentTasks"
 import { DesktopPageTreeRebuildTasks } from "./DesktopPageTreeRebuildTasks"
 import type { DesktopBridge, DesktopImportTask } from "./contracts"
@@ -44,6 +47,7 @@ export function DesktopTaskDrawer({
   onControl: (jobId: string, action: ImportTaskAction) => void
 }) {
   const { t } = useTranslation("common")
+  const [cancellationWarning, setCancellationWarning] = useState(false)
   const batchTotal = batchSummary?.total ?? 0
   const batchActive = batchSummary ? Math.max(0, batchSummary.total - batchSummary.completed - batchSummary.failures.length) : 0
   const pageTreeRebuilds = usePageTreeRebuilds({ bridge, kbDir, open, engineReady })
@@ -60,7 +64,14 @@ export function DesktopTaskDrawer({
             error={pageTreeRebuilds.error}
           />
           <DesktopCatalogRebuildTask task={pageTreeRebuilds.catalog} />
-          <DesktopPageTreeEnrichmentTasks tasks={pageTreeRebuilds.enrichments} />
+          <DesktopPageTreeEnrichmentTasks
+            tasks={pageTreeRebuilds.enrichments}
+            bridge={bridge}
+          />
+          <DesktopKnowledgeGraphExtractionTasks
+            tasks={pageTreeRebuilds.graphExtractions}
+            bridge={bridge}
+          />
           <DesktopKnowledgeReanalysisTasks controller={knowledgeReanalysis} />
           {tasks.length || batchSummary ? (
             <div className="space-y-2">
@@ -91,6 +102,7 @@ export function DesktopTaskDrawer({
                       <span className="text-sm font-medium">{task.job.progress}%</span>
                     </div>
                     <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary" style={{ width: `${task.job.progress}%` }} /></div>
+                    <DesktopImportProgress steps={task.importProgress} activity={task.modelActivity} usage={task.modelUsageAggregate} records={task.modelUsage} />
                     {task.knowledgeAnalysis ? (
                       <DesktopKnowledgeAnalysisProgress progress={task.knowledgeAnalysis} />
                     ) : null}
@@ -105,14 +117,22 @@ export function DesktopTaskDrawer({
                       <div className="mt-3 flex gap-2">
                         {task.job.status === "running" ? <Button size="sm" variant="outline" disabled={controllingJobId === task.job.jobId} onClick={() => onControl(task.job.jobId, "pause")}>{t("desktop.knowledgeBases.pauseImport")}</Button> : null}
                         {["paused", "recoverable"].includes(task.job.status) ? <Button size="sm" disabled={controllingJobId === task.job.jobId} onClick={() => onControl(task.job.jobId, "resume")}>{t("desktop.knowledgeBases.resumeImport")}</Button> : null}
-                        <Button size="sm" variant="ghost" disabled={controllingJobId === task.job.jobId} onClick={() => onControl(task.job.jobId, "cancel")}>{t("desktop.knowledgeBases.cancelImport")}</Button>
+                        <Button size="sm" variant="ghost" disabled={controllingJobId === task.job.jobId} onClick={() => {
+                          setCancellationWarning(true)
+                          onControl(task.job.jobId, "cancel")
+                        }}>{t("desktop.knowledgeBases.cancelImport")}</Button>
                       </div>
                     ) : null}
                   </article>
                 )
               })}
+              {cancellationWarning ? (
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  {t("desktop.knowledgeBases.importCancellationWarning")}
+                </p>
+              ) : null}
             </div>
-          ) : pageTreeRebuilds.tasks.length || pageTreeRebuilds.enrichments.length || pageTreeRebuilds.catalog || pageTreeRebuilds.error || knowledgeReanalysis.overview.runs.length || knowledgeReanalysis.overview.documents.length ? null : (
+          ) : pageTreeRebuilds.tasks.length || pageTreeRebuilds.enrichments.length || pageTreeRebuilds.graphExtractions.length || pageTreeRebuilds.catalog || pageTreeRebuilds.error || knowledgeReanalysis.overview.runs.length || knowledgeReanalysis.overview.documents.length ? null : (
             <p className="py-8 text-center text-sm text-muted-foreground">{t("desktop.tasks.empty")}</p>
           )}
         </div>

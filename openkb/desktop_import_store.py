@@ -7,7 +7,6 @@ import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -19,6 +18,7 @@ from openkb.desktop_import_artifacts import (
     DocumentIRBlock,
     SourceImage,
 )
+from openkb.desktop_import_clock import lease_expiry, timestamp
 from openkb.desktop_import_deduplication import (
     complete_reused_import_in,
     publish_content_duplicate_in,
@@ -37,6 +37,7 @@ from openkb.desktop_import_types import (
     DesktopImportTask,
     DesktopStageRun,
 )
+from openkb.desktop_knowledge_graph_tasks import knowledge_graph_extraction_tasks_in
 from openkb.desktop_page_tree_enrichment_tasks import page_tree_enrichment_tasks_in
 from openkb.desktop_page_tree_tasks import page_tree_rebuild_tasks_in
 from openkb.desktop_source_image_assets import write_source_images as write_source_image_files
@@ -91,7 +92,7 @@ class DesktopImportStore:
     def create_job(self, source: Path) -> ImportJobState:
         job_id = uuid.uuid4().hex
         stage_ids = {stage: uuid.uuid4().hex for stage in IMPORT_STAGES}
-        now = _timestamp()
+        now = timestamp()
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             try:
@@ -111,7 +112,7 @@ class DesktopImportStore:
                             job_id, status, lease_owner, lease_expires_at, updated_at
                         ) VALUES (?, 'running', ?, ?, ?)
                         """,
-                        (job_id, self.lease_owner, _lease_expiry(), now),
+                        (job_id, self.lease_owner, lease_expiry(), now),
                     )
                     connection.executemany(
                         """
@@ -138,7 +139,7 @@ class DesktopImportStore:
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             try:
-                now = _timestamp()
+                now = timestamp()
                 connection.execute("BEGIN IMMEDIATE")
                 row = connection.execute(
                     """
@@ -162,7 +163,7 @@ class DesktopImportStore:
                     SET status = 'running', lease_owner = ?, lease_expires_at = ?, updated_at = ?
                     WHERE job_id = ?
                     """,
-                    (self.lease_owner, _lease_expiry(), now, job_id),
+                    (self.lease_owner, lease_expiry(), now, job_id),
                 )
                 connection.execute(
                     """
@@ -228,6 +229,7 @@ class DesktopImportStore:
             tasks = tuple(task_from_row(connection, row, _STAGE_ORDER_SQL) for row in rows)
             page_tree_rebuilds = page_tree_rebuild_tasks_in(connection)
             page_tree_enrichments = page_tree_enrichment_tasks_in(connection)
+            knowledge_graph_extractions = knowledge_graph_extraction_tasks_in(connection)
             catalog_rebuild = catalog_rebuild_task_in(connection)
         finally:
             connection.close()
@@ -235,6 +237,7 @@ class DesktopImportStore:
             "jobs": [task.as_dict() for task in tasks],
             "page_tree_rebuilds": page_tree_rebuilds,
             "page_tree_enrichments": page_tree_enrichments,
+            "knowledge_graph_extractions": knowledge_graph_extractions,
             "catalog_rebuild": catalog_rebuild,
         }
 
@@ -324,7 +327,7 @@ class DesktopImportStore:
     ) -> None:
         """Persist one stage transition and renew the owning job lease."""
         stage_run_id = state.stage_ids[stage]
-        now = _timestamp()
+        now = timestamp()
         base_status = status if status in _BASE_STAGE_STATUSES else "pending"
         started_at = now if status == "running" else None
         completed_at = now if status in {"completed", "failed", "skipped"} else None
@@ -375,7 +378,7 @@ class DesktopImportStore:
                         SET status = 'running', lease_owner = ?, lease_expires_at = ?, updated_at=?
                         WHERE job_id = ?
                         """,
-                        (self.lease_owner, _lease_expiry(), now, state.job_id),
+                        (self.lease_owner, lease_expiry(), now, state.job_id),
                     )
             finally:
                 connection.close()
@@ -433,7 +436,7 @@ class DesktopImportStore:
             connection.close()
 
     def complete_duplicate_job(self, state: ImportJobState, document_id: str) -> None:
-        now = _timestamp()
+        now = timestamp()
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             try:
@@ -484,7 +487,7 @@ class DesktopImportStore:
         before_commit: PublishDocumentCallback | None = None,
     ) -> tuple[DesktopImportedDocument, bool]:
         """Publish a distinct raw document that reuses an exact D1 processing result."""
-        now = _timestamp()
+        now = timestamp()
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             try:
@@ -539,7 +542,7 @@ class DesktopImportStore:
         normalized_body_sha256: str,
         before_commit: PublishDocumentCallback | None = None,
     ) -> tuple[DesktopImportedDocument, bool]:
-        now = _timestamp()
+        now = timestamp()
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             try:
@@ -577,7 +580,7 @@ class DesktopImportStore:
             with kb_ingest_lock(self.state_dir):
                 connection = self._connect()
                 try:
-                    now = _timestamp()
+                    now = timestamp()
                     connection.execute("BEGIN IMMEDIATE")
                     connection.execute(
                         """
@@ -629,6 +632,15 @@ class DesktopImportStore:
     def pause_job(self, state: ImportJobState, stage: str) -> None:
         self._set_terminal_control_state(state, stage, "paused", "import_paused")
 
+    def await_model_configuration(self, state: ImportJobState, stage: str) -> None:
+        """Keep parsed checkpoints resumable until the user fixes Analysis Model settings."""
+        self._set_terminal_control_state(
+            state,
+            stage,
+            "paused",
+            "awaiting_model_configuration",
+        )
+
     def cancel_job(self, state: ImportJobState, stage: str) -> None:
         self._set_terminal_control_state(state, stage, "cancelled", "import_cancelled")
 
@@ -636,7 +648,7 @@ class DesktopImportStore:
         self, state: ImportJobState, stage: str, status: str, code: str
     ) -> None:
         stage_run_id = state.stage_ids[stage]
-        now = _timestamp()
+        now = timestamp()
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             try:
@@ -769,7 +781,6 @@ class DesktopImportStore:
         connection = sqlite3.connect(self.database_path)
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
-
     def _emit_stage(
         self,
         job_id: str,
@@ -786,11 +797,3 @@ class DesktopImportStore:
             self._on_stage_progress(data)
         except Exception:
             logger.debug("Desktop import stage callback failed for job %s", job_id, exc_info=True)
-
-
-def _timestamp() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
-
-
-def _lease_expiry() -> str:
-    return (datetime.now(tz=timezone.utc) + timedelta(seconds=30)).isoformat()

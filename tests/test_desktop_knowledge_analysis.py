@@ -237,9 +237,7 @@ def test_reused_evidence_keeps_every_claim_source_backed(tmp_path: Path) -> None
             }
         )
 
-    DesktopTextImportService(
-        kb_dir, model_gateway=DesktopModelGateway(analyze)
-    ).import_text(source)
+    DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(analyze)).import_text(source)
 
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         content = str(
@@ -388,9 +386,7 @@ def test_d0_d1_reuse_structured_analysis_without_deterministic_pollution(
             }
         )
 
-    DesktopTextImportService(
-        kb_dir, model_gateway=DesktopModelGateway(analyze)
-    ).import_text(first)
+    DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(analyze)).import_text(first)
     duplicate = DesktopTextImportService(kb_dir).import_text(second)
 
     assert duplicate.job.deduplication is not None
@@ -412,9 +408,7 @@ def test_deterministic_replacement_clears_analysis_only_metadata(tmp_path: Path)
     first = tmp_path / "first.md"
     second = tmp_path / "second.md"
     first.write_text("# Concept: Metadata\n\nField: one", encoding="utf-8")
-    second.write_text(
-        "# Concept: Metadata\n\nField: one\n\nOther: two", encoding="utf-8"
-    )
+    second.write_text("# Concept: Metadata\n\nField: one\n\nOther: two", encoding="utf-8")
     DesktopKnowledgeBaseRuntime().create(kb_dir)
 
     def analyze(request, _timeout_seconds):
@@ -429,9 +423,7 @@ def test_deterministic_replacement_clears_analysis_only_metadata(tmp_path: Path)
                         "title": "Metadata",
                         "aliases": ["model alias"],
                         "tags": ["model-tag"],
-                        "claims": [
-                            {"text": "Field: one", "source_evidence_ids": [evidence_id]}
-                        ],
+                        "claims": [{"text": "Field: one", "source_evidence_ids": [evidence_id]}],
                     }
                 ],
                 "entities": [],
@@ -610,9 +602,7 @@ def test_duplicate_claim_merges_independent_available_sources(tmp_path: Path) ->
             }
         )
 
-    importer = DesktopTextImportService(
-        kb_dir, model_gateway=DesktopModelGateway(analyze)
-    )
+    importer = DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(analyze))
     first_result = importer.import_text(first)
     second_result = importer.import_text(second)
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
@@ -655,9 +645,7 @@ def test_analysis_application_failure_rolls_back_publication_for_resume(
         calls += 1
         return _analysis_response(_evidence_ids_from_request(request.content))
 
-    importer = DesktopTextImportService(
-        kb_dir, model_gateway=DesktopModelGateway(analyze)
-    )
+    importer = DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(analyze))
     original = importer._knowledge_reconciliation.record_analysis_changes_in
     monkeypatch.setattr(
         importer._knowledge_reconciliation,
@@ -674,9 +662,7 @@ def test_analysis_application_failure_rolls_back_publication_for_resume(
 
     DesktopTextImportService(kb_dir).import_text(source)
 
-    monkeypatch.setattr(
-        importer._knowledge_reconciliation, "record_analysis_changes_in", original
-    )
+    monkeypatch.setattr(importer._knowledge_reconciliation, "record_analysis_changes_in", original)
     recovered = importer.resume_text(job_id)
     assert recovered.document.availability == "available"
     assert calls == 1
@@ -734,7 +720,7 @@ def test_valid_empty_analysis_still_publishes_the_document(tmp_path: Path) -> No
         ),
     ),
 )
-def test_invalid_analysis_schema_is_quarantined_without_retry(
+def test_invalid_analysis_schema_is_quarantined_after_one_structured_repair(
     tmp_path: Path, response: str
 ) -> None:
     kb_dir = tmp_path / "knowledge"
@@ -754,10 +740,10 @@ def test_invalid_analysis_schema_is_quarantined_without_retry(
         )
 
     assert captured.value.code == "model_response_invalid"
-    assert calls == 1
+    assert calls == 2
     task = DesktopTextImportService(kb_dir).list_import_jobs()["jobs"][0]
     assert task["job"]["status"] == "quarantined"
     assert task["quarantine"]["stage"] == "model_analysis"
-    assert task["quarantine"]["attempt_count"] == 1
+    assert task["quarantine"]["attempt_count"] == 2
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)

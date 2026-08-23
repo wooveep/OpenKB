@@ -23,6 +23,9 @@ pub use knowledge_reconciliation::{
 #[path = "engine_wire_knowledge_reanalysis.rs"]
 mod knowledge_reanalysis;
 pub use knowledge_reanalysis::{KnowledgeReanalysisOverview, KnowledgeReanalysisRun};
+#[path = "engine_wire_knowledge_graph.rs"]
+mod knowledge_graph;
+pub use knowledge_graph::{KnowledgeGraphExtractionControlResult, KnowledgeGraphExtractionTask};
 #[path = "engine_wire_missing_sources.rs"]
 mod missing_sources;
 pub use missing_sources::{
@@ -30,16 +33,30 @@ pub use missing_sources::{
 };
 #[path = "engine_wire_model_lifecycle.rs"]
 mod model_lifecycle;
-pub use model_lifecycle::ModelCallLifecycleEventData;
+pub use model_lifecycle::{ModelCallLifecycleEventData, ModelCallLifecycleStatus};
+#[path = "engine_wire_import_observability.rs"]
+mod import_observability;
+pub use import_observability::{
+    ImportProgressStep, ImportUsageAggregate, LegacyModelRecovery, ModelActivity, ModelUsageRecord,
+};
 #[path = "engine_wire_page_tree.rs"]
 mod page_tree;
-pub use page_tree::{PageTreeEnrichmentTask, PageTreeRebuildTask};
+pub use page_tree::{PageTreeEnrichmentControlResult, PageTreeEnrichmentTask, PageTreeRebuildTask};
 #[path = "engine_wire_retrieval.rs"]
 mod retrieval;
 pub use retrieval::{GroundedAnswer, GroundedAnswersResult, RetrievalTrace};
 #[path = "engine_wire_settings.rs"]
 mod settings;
-pub use settings::{DiagnosticBundleResult, ModelSettings};
+pub use settings::{
+    DiagnosticBundleResult, ModelSettings, ModelSettingsDraft, ModelUsageAggregate,
+};
+
+#[cfg(test)]
+#[path = "engine_wire_import_tests.rs"]
+mod import_wire_tests;
+#[cfg(test)]
+#[path = "engine_wire_tests.rs"]
+mod tests;
 
 pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
@@ -79,11 +96,49 @@ pub struct EngineHealth {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParserReadiness {
-    pub family: String,
+    pub family: ParserFamily,
     pub formats: Vec<String>,
-    pub resource_state: String,
-    pub runtime_state: String,
+    pub resource_state: ParserResourceState,
+    pub runtime_state: ParserRuntimeState,
     pub diagnostic: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParserFamily {
+    Text,
+    NativeOffice,
+    LegacyOffice,
+    Pdf,
+    PdfOcr,
+    DeepDocument,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParserRoute {
+    Auto,
+    PlainText,
+    DirectStructured,
+    PymupdfFast,
+    BundledOnnxOcr,
+    TikaLegacy,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParserResourceState {
+    ResourcesReady,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParserRuntimeState {
+    NotLoaded,
+    Initializing,
+    Ready,
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -119,10 +174,11 @@ pub enum ImportStageStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ImportJobStatus {
     Running,
     Paused,
+    AwaitingModelConfiguration,
     Cancelled,
     Recoverable,
     Quarantined,
@@ -425,10 +481,8 @@ pub struct ImportStageRun {
 pub struct ModelAttempt {
     pub attempt: u32,
     pub status: ModelCallStatus,
-    #[serde(alias = "timeout_seconds")]
-    pub timeout_seconds: f64,
-    #[serde(alias = "remaining_seconds")]
-    pub remaining_seconds: f64,
+    #[serde(default, alias = "elapsed_seconds")]
+    pub elapsed_seconds: f64,
     #[serde(alias = "error_code")]
     pub error_code: Option<String>,
     pub reason: Option<String>,
@@ -445,12 +499,8 @@ pub struct ModelCall {
     pub status: ModelCallStatus,
     #[serde(alias = "attempt_count")]
     pub attempt_count: u32,
-    #[serde(alias = "timeout_seconds")]
-    pub timeout_seconds: f64,
-    #[serde(alias = "next_timeout_seconds")]
-    pub next_timeout_seconds: Option<f64>,
-    #[serde(alias = "remaining_seconds")]
-    pub remaining_seconds: f64,
+    #[serde(default, alias = "elapsed_seconds")]
+    pub elapsed_seconds: f64,
     #[serde(alias = "error_code")]
     pub error_code: Option<String>,
     pub reason: Option<String>,
@@ -493,17 +543,16 @@ pub struct KnowledgeAnalysisProgress {
     #[serde(alias = "current_batch")]
     pub current_batch: Option<u32>,
     pub phase: KnowledgeAnalysisPhase,
-    #[serde(alias = "current_timeout_seconds")]
-    pub current_timeout_seconds: Option<f64>,
-    #[serde(alias = "remaining_seconds")]
-    pub remaining_seconds: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryOverride {
     pub model: Option<String>,
-    pub initial_timeout_seconds: Option<f64>,
+    #[serde(default, alias = "context_capacity")]
+    pub context_capacity: Option<u64>,
+    #[serde(default, alias = "legacy_recovery_choice")]
+    pub legacy_recovery_choice: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -517,6 +566,16 @@ pub struct TextDocumentImportResult {
     pub quarantine: Option<QuarantinedDocument>,
     #[serde(default, alias = "knowledge_analysis")]
     pub knowledge_analysis: Option<KnowledgeAnalysisProgress>,
+    #[serde(default, alias = "import_progress")]
+    pub import_progress: Vec<ImportProgressStep>,
+    #[serde(default, alias = "model_usage")]
+    pub model_usage: Vec<ModelUsageRecord>,
+    #[serde(default, alias = "model_usage_aggregate")]
+    pub model_usage_aggregate: Option<ImportUsageAggregate>,
+    #[serde(default, alias = "model_activity")]
+    pub model_activity: Option<ModelActivity>,
+    #[serde(default, alias = "legacy_model_recovery")]
+    pub legacy_model_recovery: Option<LegacyModelRecovery>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -530,6 +589,16 @@ pub struct ImportTask {
     pub quarantine: Option<QuarantinedDocument>,
     #[serde(default, alias = "knowledge_analysis")]
     pub knowledge_analysis: Option<KnowledgeAnalysisProgress>,
+    #[serde(default, alias = "import_progress")]
+    pub import_progress: Vec<ImportProgressStep>,
+    #[serde(default, alias = "model_usage")]
+    pub model_usage: Vec<ModelUsageRecord>,
+    #[serde(default, alias = "model_usage_aggregate")]
+    pub model_usage_aggregate: Option<ImportUsageAggregate>,
+    #[serde(default, alias = "model_activity")]
+    pub model_activity: Option<ModelActivity>,
+    #[serde(default, alias = "legacy_model_recovery")]
+    pub legacy_model_recovery: Option<LegacyModelRecovery>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -540,6 +609,8 @@ pub struct ImportJobsResult {
     pub page_tree_rebuilds: Vec<PageTreeRebuildTask>,
     #[serde(default, alias = "page_tree_enrichments")]
     pub page_tree_enrichments: Vec<PageTreeEnrichmentTask>,
+    #[serde(default, alias = "knowledge_graph_extractions")]
+    pub knowledge_graph_extractions: Vec<KnowledgeGraphExtractionTask>,
     #[serde(default, alias = "catalog_rebuild")]
     pub catalog_rebuild: Option<CatalogRebuildTask>,
 }
@@ -682,115 +753,4 @@ pub(crate) fn write_frame<W: Write>(writer: &mut W, value: &Value) -> BridgeResu
                 format!("Could not write Engine stream: {error}"),
             )
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        BridgeEvent, EngineEvent, GroundedAnswer, KnowledgeAnalysisPhase, KnowledgeAnalysisProgress,
-    };
-    use serde_json::json;
-
-    #[test]
-    fn knowledge_analysis_progress_accepts_python_snake_case_fields() {
-        let progress: KnowledgeAnalysisProgress = serde_json::from_value(json!({
-            "total": 3,
-            "completed": 1,
-            "active": 1,
-            "failed": 0,
-            "current_batch": 2,
-            "phase": "batches",
-            "current_timeout_seconds": 30.0,
-            "remaining_seconds": 44.0
-        }))
-        .expect("Knowledge Analysis progress should deserialize");
-
-        assert_eq!(progress.current_batch, Some(2));
-        assert!(matches!(progress.phase, KnowledgeAnalysisPhase::Batches));
-        assert_eq!(progress.current_timeout_seconds, Some(30.0));
-    }
-
-    #[test]
-    fn knowledge_reanalysis_event_accepts_python_snake_case_fields() {
-        let event: BridgeEvent = serde_json::from_value(json!({
-            "sequence": 7,
-            "kind": "knowledge_reanalysis.updated",
-            "data": {"run_id": "run-1", "job_id": "job-1"}
-        }))
-        .expect("Knowledge Reanalysis event should deserialize");
-
-        assert!(matches!(
-            event.event,
-            EngineEvent::KnowledgeReanalysisUpdated(data)
-                if data.run_id == "run-1" && data.job_id == "job-1"
-        ));
-    }
-
-    #[test]
-    fn model_lifecycle_event_accepts_python_snake_case_fields() {
-        let event: BridgeEvent = serde_json::from_value(json!({
-            "sequence": 8,
-            "kind": "model.call_lifecycle",
-            "data": {
-                "request_id": "connection-check-1",
-                "call_id": "call-1",
-                "attempt": 1,
-                "status": "awaiting_model_result",
-                "elapsed_seconds": 180.0,
-                "failure_code": null,
-                "reason": null,
-                "retry_after_seconds": null
-            }
-        }))
-        .expect("Model lifecycle event should deserialize");
-
-        assert!(matches!(
-            event.event,
-            EngineEvent::ModelCallLifecycle(data)
-                if data.request_id == "connection-check-1"
-                    && data.call_id == "call-1"
-                    && matches!(
-                        data.status,
-                        super::model_lifecycle::ModelCallLifecycleStatus::AwaitingModelResult
-                    )
-                    && data.elapsed_seconds == 180.0
-        ));
-    }
-
-    #[test]
-    fn grounded_answer_accepts_python_retrieval_trace_fields() {
-        let answer: GroundedAnswer = serde_json::from_value(json!({
-            "answer_id": "answer-1",
-            "question": "Compare Alpha and Beta",
-            "answer_text": "They are related. [1]",
-            "retrieval_plan": {
-                "query": "Compare Alpha and Beta",
-                "terms": ["alpha", "beta"],
-                "source": "model"
-            },
-            "citations": [],
-            "degradations": [],
-            "status": "completed",
-            "created_at": "2026-08-20T00:00:00+00:00",
-            "retrieval_trace": {
-                "catalog_generation_ids": ["catalog-1"],
-                "page_tree_generation_ids": ["tree-1"],
-                "channels": [{
-                    "channel": "document_page_tree",
-                    "candidate_count": 2,
-                    "trigger_reasons": ["multi_hop"],
-                    "degradation_reasons": []
-                }],
-                "trigger_reasons": ["multi_hop"],
-                "degradation_reasons": [],
-                "selected_node_ids": ["node-1"],
-                "canonical_evidence_ids": ["evidence-1"],
-                "fusion_policy_version": "openkb.rrf-protected-baseline.v1"
-            }
-        }))
-        .expect("Retrieval Trace should deserialize");
-
-        assert_eq!(answer.retrieval_trace.page_tree_generation_ids, ["tree-1"]);
-        assert_eq!(answer.retrieval_trace.channels[0].candidate_count, 2);
-    }
 }

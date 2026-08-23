@@ -11,11 +11,12 @@ pub use crate::engine_wire::{
     CancelResult, DiagnosticBundleResult, DocumentVersionCandidate,
     DocumentVersionCandidateDecision, DocumentVersionCandidatesResult, EngineHealth,
     GroundedAnswer, GroundedAnswersResult, ImportControlResult, ImportJobsResult,
-    ImportSourceInspection, KnowledgeBaseActivationResult, KnowledgePageKind,
-    KnowledgeReanalysisOverview, KnowledgeReanalysisRun, KnowledgeReconciliationCommit,
-    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision,
-    MissingSourceBindingResult, MissingSourceCandidatesResult, MissingSourceDismissalResult,
-    ModelSettings, RawDocument, RecoveryOverride, TextDocumentImportResult,
+    ImportSourceInspection, KnowledgeBaseActivationResult, KnowledgeGraphExtractionControlResult,
+    KnowledgePageKind, KnowledgeReanalysisOverview, KnowledgeReanalysisRun,
+    KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
+    KnowledgeReconciliationDecision, MissingSourceBindingResult, MissingSourceCandidatesResult,
+    MissingSourceDismissalResult, ModelSettings, ModelSettingsDraft,
+    PageTreeEnrichmentControlResult, RawDocument, RecoveryOverride, TextDocumentImportResult,
 };
 pub use crate::engine_wire_knowledge_pages::{
     KnowledgeExportMode, KnowledgeExportResult, KnowledgePage, KnowledgePageDeletionResult,
@@ -46,6 +47,8 @@ mod conversations;
 mod document_versions;
 #[path = "engine_response_wait.rs"]
 mod engine_response_wait;
+#[path = "engine_protocol_knowledge_graph.rs"]
+mod knowledge_graph;
 #[path = "engine_protocol_knowledge_pages.rs"]
 mod knowledge_pages;
 #[path = "engine_protocol_knowledge_reanalysis.rs"]
@@ -56,6 +59,8 @@ mod knowledge_reconciliation;
 mod lifecycle;
 #[path = "engine_protocol_missing_sources.rs"]
 mod missing_sources;
+#[path = "engine_protocol_page_tree.rs"]
+mod page_tree;
 #[path = "engine_protocol_search.rs"]
 mod search;
 #[path = "engine_protocol_settings.rs"]
@@ -63,7 +68,7 @@ mod settings;
 
 const PROTOCOL_VERSION: u32 = 1;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-const IMPORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn validated_response<T: DeserializeOwned>(value: Value, shape: &str) -> BridgeResult<Value> {
@@ -227,7 +232,7 @@ impl EngineSupervisor {
             "workbench.import_text_document",
             json!({ "source_path": source_path, "parser_mode": parser_mode }),
             Some(request_id),
-            Some(IMPORT_REQUEST_TIMEOUT),
+            None,
         )?;
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(
@@ -298,7 +303,7 @@ impl EngineSupervisor {
             "workbench.resume_import_job",
             json!({ "job_id": job_id }),
             Some(request_id),
-            Some(IMPORT_REQUEST_TIMEOUT),
+            None,
         )?;
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(
@@ -319,7 +324,7 @@ impl EngineSupervisor {
             "workbench.recover_import_job",
             json!({ "job_id": job_id, "recovery_override": recovery_override }),
             Some(request_id),
-            Some(IMPORT_REQUEST_TIMEOUT),
+            None,
         )?;
         serde_json::from_value(value).map_err(|error| {
             BridgeError::new(

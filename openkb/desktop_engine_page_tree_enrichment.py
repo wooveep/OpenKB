@@ -14,7 +14,7 @@ from openkb.config import load_config_mapping
 from openkb.desktop_page_tree_enrichment import DesktopPageTreeEnrichmentService
 
 if TYPE_CHECKING:
-    from openkb.desktop_engine import DesktopEngineServer
+    from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
     from openkb.desktop_model_gateway import DesktopModelGateway
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,9 @@ def start_page_tree_enrichments(
             server._page_tree_enrichment_gateways[resolved] = gateway
             if retry_failed:
                 server._page_tree_enrichment_retries.add(resolved)
+                server._page_tree_enrichment_cancelled = {
+                    key for key in server._page_tree_enrichment_cancelled if key[0] != resolved
+                }
             if resolved in server._page_tree_enrichment_workers:
                 server._page_tree_enrichment_reruns.add(resolved)
                 return
@@ -89,6 +92,10 @@ def _run_worker(server: DesktopEngineServer, kb_dir: Path, lease: int) -> None:
     def should_stop() -> bool:
         return server._shutdown.is_set() or server._page_tree_enrichment_lease != lease
 
+    def document_cancelled(document_id: str) -> bool:
+        with server._workers_lock:
+            return (kb_dir, document_id) in server._page_tree_enrichment_cancelled
+
     try:
         service = DesktopPageTreeEnrichmentService(kb_dir)
         while not should_stop():
@@ -109,14 +116,27 @@ def _run_worker(server: DesktopEngineServer, kb_dir: Path, lease: int) -> None:
             for document_id in service.pending_document_ids(gateway):
                 if should_stop() or service.deterministic_work_active():
                     break
-                service.run_document(document_id, gateway, should_stop=should_stop)
+                if document_cancelled(document_id):
+                    continue
+
+                def should_stop_document() -> bool:
+                    return should_stop() or document_cancelled(document_id)
+
+                service.run_document(
+                    document_id,
+                    gateway,
+                    should_stop=should_stop_document,
+                )
             if should_stop():
                 break
             if service.deterministic_work_active():
                 server._shutdown.wait(0.2)
                 continue
             service.queue_eligible(gateway)
-            if service.pending_document_ids(gateway):
+            if any(
+                not document_cancelled(document_id)
+                for document_id in service.pending_document_ids(gateway)
+            ):
                 continue
             with server._workers_lock:
                 if kb_dir in server._page_tree_enrichment_reruns:
@@ -148,6 +168,40 @@ def _run_worker(server: DesktopEngineServer, kb_dir: Path, lease: int) -> None:
                 start_page_tree_enrichments(server, kb_dir, restart_gateway)
         with server._workers_lock:
             server._workers.discard(threading.current_thread())
+
+
+def dispatch_page_tree_enrichment_control(
+    server: DesktopEngineServer,
+    request: DesktopRequest,
+) -> dict[str, object]:
+    """Cancel or explicitly resume one optional PageTree model task."""
+    from openkb.desktop_engine import DesktopRequestError, _required_string_param
+
+    document_id = _required_string_param(request, "document_id")
+    with server._workspace_requests_lock:
+        active = server._workspace.active()
+        if active is None:
+            raise DesktopRequestError(
+                "no_active_knowledge_base",
+                "Open a Desktop Knowledge Base before controlling PageTree enrichment.",
+            )
+        kb_dir = Path(active.kb_dir).expanduser().resolve()
+        service = DesktopPageTreeEnrichmentService(kb_dir)
+        if request.method == "workbench.cancel_page_tree_enrichment":
+            accepted = service.request_cancel(document_id)
+            if accepted:
+                with server._workers_lock:
+                    server._page_tree_enrichment_cancelled.add((kb_dir, document_id))
+            return {"document_id": document_id, "accepted": accepted}
+        gateway = server._model_gateway_factory(kb_dir, None)
+        if gateway is None:
+            return {"document_id": document_id, "accepted": False}
+        accepted = service.retry_document(document_id, gateway)
+        if accepted:
+            with server._workers_lock:
+                server._page_tree_enrichment_cancelled.discard((kb_dir, document_id))
+            start_page_tree_enrichments(server, kb_dir, gateway)
+        return {"document_id": document_id, "accepted": accepted}
 
 
 def invalidate_page_tree_enrichment_workers(server: DesktopEngineServer) -> None:

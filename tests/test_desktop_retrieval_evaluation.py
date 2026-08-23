@@ -23,7 +23,7 @@ from openkb.desktop_knowledge_generations import (
     publish_generation_changes_in,
 )
 from openkb.desktop_knowledge_graph import DesktopKnowledgeGraphService
-from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_model_gateway import DesktopModelCancelledError, DesktopModelGateway
 from openkb.desktop_page_tree_selection import PageTreeSelectionResult
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_retrieval_evaluation import (
@@ -477,8 +477,8 @@ def test_retrieval_planning_does_not_charge_an_attempt_that_never_started(tmp_pa
     class ExhaustedTransport:
         calls = 0
 
-        def prepare_model_attempt(self, _is_cancelled, _remaining_seconds):
-            return False
+        def prepare_terminal_model_attempt(self, _is_cancelled):
+            raise DesktopModelCancelledError()
 
         def __call__(self, _request, _timeout_seconds):
             self.calls += 1
@@ -490,7 +490,7 @@ def test_retrieval_planning_does_not_charge_an_attempt_that_never_started(tmp_pa
     ).build_plan_with_cost("alpha question")
 
     assert transport.calls == 0
-    assert result.degradations == ("retrieval_plan_fallback",)
+    assert result.degradations == ("retrieval_plan_cancelled",)
     assert result.model_cost.model_calls == 0
     assert result.model_cost.input_characters == 0
 

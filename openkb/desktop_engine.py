@@ -35,7 +35,7 @@ from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageError
 from openkb.desktop_legacy_office_parsers import shutdown_legacy_office_runtime
 from openkb.desktop_logging import configure_desktop_engine_logging
-from openkb.desktop_model_gateway import MODEL_CALL_DEADLINE_SECONDS, DesktopModelGateway
+from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_model_transport import desktop_model_gateway_for
 from openkb.desktop_raw_assets import DesktopRawAssetService
 from openkb.desktop_workspace import (
@@ -180,7 +180,13 @@ class DesktopEngineServer:
         self._page_tree_enrichment_workers: set[Path] = set()
         self._page_tree_enrichment_reruns: set[Path] = set()
         self._page_tree_enrichment_retries: set[Path] = set()
+        self._page_tree_enrichment_cancelled: set[tuple[Path, str]] = set()
         self._page_tree_enrichment_gateways: dict[Path, DesktopModelGateway] = {}
+        self._knowledge_graph_extraction_lease = 0
+        self._knowledge_graph_extraction_workers: set[Path] = set()
+        self._knowledge_graph_extraction_reruns: set[Path] = set()
+        self._knowledge_graph_extraction_cancelled: set[tuple[Path, str]] = set()
+        self._knowledge_graph_extraction_gateways: dict[Path, DesktopModelGateway] = {}
         self._sequence = 0
         self._sequence_lock = threading.Lock()
 
@@ -212,6 +218,8 @@ class DesktopEngineServer:
         with self._active_lock:
             for cancel_event in self._active_requests.values():
                 cancel_event.set()
+            for control in self._import_controls.values():
+                control.request_pause()
         self._join_workers()
         shutdown_legacy_office_runtime()
 
@@ -346,6 +354,9 @@ class DesktopEngineServer:
 
         if request.method == "engine.shutdown":
             self._shutdown.set()
+            with self._active_lock:
+                for control in self._import_controls.values():
+                    control.request_pause()
             return {"accepted": True}
 
         if not self._handshake_complete:
@@ -452,6 +463,24 @@ class DesktopEngineServer:
             from openkb.desktop_engine_model_settings import dispatch_model_settings_request
 
             return dispatch_model_settings_request(self, request, cancel_event)
+        if request.method in {
+            "workbench.cancel_page_tree_enrichment",
+            "workbench.retry_page_tree_enrichment",
+        }:
+            from openkb.desktop_engine_page_tree_enrichment import (
+                dispatch_page_tree_enrichment_control,
+            )
+
+            return dispatch_page_tree_enrichment_control(self, request)
+        if request.method in {
+            "workbench.cancel_knowledge_graph_extraction",
+            "workbench.retry_knowledge_graph_extraction",
+        }:
+            from openkb.desktop_engine_knowledge_graph import (
+                dispatch_knowledge_graph_control,
+            )
+
+            return dispatch_knowledge_graph_control(self, request)
         if request.method in {
             "workbench.import_text_document",
             "workbench.resume_import_job",
@@ -586,25 +615,28 @@ def _recovery_override_param(request: DesktopRequest) -> DesktopRecoveryOverride
         raise DesktopRequestError(
             "invalid_params", "Recovery model must be a non-empty string when provided."
         )
-    timeout_value = (
-        value["initial_timeout_seconds"]
-        if "initial_timeout_seconds" in value
-        else value.get("initialTimeoutSeconds")
-    )
-    if timeout_value is not None and (
-        isinstance(timeout_value, bool) or not isinstance(timeout_value, (int, float))
+    context_value = value.get("context_capacity", value.get("contextCapacity"))
+    if context_value is not None and (
+        isinstance(context_value, bool)
+        or not isinstance(context_value, int)
+        or context_value < 4_096
     ):
         raise DesktopRequestError(
-            "invalid_params", "Recovery response timeout must be a number of seconds."
+            "invalid_params", "Recovery context capacity must be at least 4096 tokens."
         )
-    timeout = float(timeout_value) if timeout_value is not None else None
-    if timeout is not None and not 0 < timeout <= MODEL_CALL_DEADLINE_SECONDS:
-        raise DesktopRequestError(
-            "invalid_params", "Recovery response timeout must be between 1 and 60 seconds."
-        )
+    choice_value = value.get(
+        "legacy_recovery_choice",
+        value.get("legacyRecoveryChoice"),
+    )
+    if choice_value is not None and choice_value not in {
+        "continue_compatible",
+        "restart_current_plan",
+    }:
+        raise DesktopRequestError("invalid_params", "Choose a supported legacy recovery path.")
     return DesktopRecoveryOverride(
         model=model_value.strip() if isinstance(model_value, str) else None,
-        initial_timeout_seconds=timeout,
+        context_capacity=context_value,
+        legacy_recovery_choice=choice_value,
     )
 
 

@@ -12,8 +12,10 @@ from openkb import desktop_engine_page_tree_enrichment as enrichment_engine
 from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
-from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelRequest
 from openkb.desktop_model_settings import read_desktop_model_settings
+from openkb.desktop_model_terminal import DesktopTerminalModelEvent
+from openkb.desktop_model_usage import DesktopModelUsageStore
 from openkb.desktop_page_tree_enrichment import DesktopPageTreeEnrichmentService
 from openkb.desktop_page_tree_rebuild_state import queue_page_tree_rebuild_in
 from openkb.desktop_page_tree_store import load_current_page_tree_in
@@ -32,6 +34,21 @@ def _gateway(provider: str, model: str, summary: str) -> DesktopModelGateway:
         )
 
     return DesktopModelGateway(transport, provider_name=provider, model_name=model)
+
+
+def _wait_for_enrichment_status(kb_dir, expected: str, *, timeout: float = 2) -> tuple:
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    deadline = time.monotonic() + timeout
+    row = None
+    while time.monotonic() < deadline:
+        with sqlite3.connect(database_path) as connection:
+            row = connection.execute(
+                "SELECT status, error_code FROM document_page_tree_enrichment_tasks"
+            ).fetchone()
+        if row is not None and row[0] == expected:
+            return row
+        time.sleep(0.01)
+    raise AssertionError(f"PageTree enrichment did not reach {expected}: {row!r}")
 
 
 def test_enrichment_activates_only_summary_overlay_and_keeps_evidence_authoritative(tmp_path):
@@ -82,8 +99,43 @@ def test_enrichment_activates_only_summary_overlay_and_keeps_evidence_authoritat
             (imported.document.document_id,),
         ).fetchone() == ("completed",)
     task = DesktopTextImportService(kb_dir).list_import_jobs()["page_tree_enrichments"][0]
+    DesktopModelUsageStore(kb_dir).record_event(
+        request=DesktopModelRequest(
+            "page_tree_enrichment",
+            "guide.md",
+            "private source",
+            model_role="analysis",
+            model_name="model-a",
+        ),
+        event=DesktopTerminalModelEvent(
+            str(task["call_id"]),
+            1,
+            "completed",
+            12,
+        ),
+        provider="provider-a",
+        model="model-a",
+    )
+    task = DesktopTextImportService(kb_dir).list_import_jobs()["page_tree_enrichments"][0]
     assert task["status"] == "completed"
     assert task["provider"] == "provider-a"
+    assert task["model_activity"] == {
+        "operation": "page_tree_enrichment",
+        "model_role": "analysis",
+        "provider": "provider-a",
+        "model": "model-a",
+        "call_id": task["call_id"],
+        "attempt": 1,
+        "attempt_id": f"{task['call_id']}:1",
+        "batch_id": None,
+        "execution_lane": "background",
+        "status": "completed",
+        "failure_code": None,
+        "elapsed_seconds": 12.0,
+        "long_wait_advisory": False,
+        "long_wait_threshold_seconds": 300.0,
+        "available_actions": [],
+    }
 
 
 def test_enrichment_failure_is_task_only_and_deterministic_tree_stays_available(tmp_path):
@@ -116,7 +168,7 @@ def test_enrichment_failure_is_task_only_and_deterministic_tree_stays_available(
             "SELECT status, error_code, attempt_count, model_attempt "
             "FROM document_page_tree_enrichment_tasks WHERE document_id = ?",
             (imported.document.document_id,),
-        ).fetchone() == ("failed", "model_timeout", 1, 4)
+        ).fetchone() == ("failed", "model_network_transient", 1, 3)
         assert connection.execute("SELECT COUNT(*) FROM quarantined_documents").fetchone() == (0,)
 
 
@@ -368,6 +420,204 @@ def test_desktop_import_starts_engine_owned_enrichment_after_document_publicatio
     server._shutdown.set()
     server._join_workers()
     assert status == "completed"
+
+
+def test_engine_page_tree_enrichment_cancel_requires_explicit_retry(tmp_path):
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "cancel.md"
+    source.write_text("# Cancel\n\nOptional analysis can be resumed.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_transport(request, _timeout):
+        started.set()
+        assert release.wait(timeout=2)
+        payload = json.loads(request.content)
+        target = next(node for node in payload["nodes"] if node["evidence"])
+        return json.dumps(
+            {
+                "schema_version": "openkb.page-tree-enrichment.v1",
+                "summaries": [
+                    {"node_id": target["node_id"], "summary": "Cancelled result."}
+                ],
+            }
+        )
+
+    blocking_gateway = DesktopModelGateway(
+        blocking_transport,
+        provider_name="provider-a",
+        model_name="model-a",
+    )
+    current_gateway = [blocking_gateway]
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir, _override: current_gateway[0],
+    )
+    server._handshake_complete = True
+    enrichment_engine.start_page_tree_enrichments(server, kb_dir, blocking_gateway)
+    assert started.wait(timeout=1)
+
+    cancelled = server._dispatch(
+        DesktopRequest(
+            request_id="cancel-enrichment",
+            method="workbench.cancel_page_tree_enrichment",
+            params={"document_id": imported.document.document_id},
+        ),
+        cancel_event=None,
+    )
+    assert cancelled == {
+        "document_id": imported.document.document_id,
+        "accepted": True,
+    }
+    assert _wait_for_enrichment_status(kb_dir, "pending") == (
+        "pending",
+        "page_tree_enrichment_interrupted",
+    )
+    release.set()
+    time.sleep(0.05)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM document_page_tree_enrichment_generations"
+        ).fetchone() == (0,)
+
+    current_gateway[0] = _gateway("provider-a", "model-a", "Retried summary.")
+    retried = server._dispatch(
+        DesktopRequest(
+            request_id="retry-enrichment",
+            method="workbench.retry_page_tree_enrichment",
+            params={"document_id": imported.document.document_id},
+        ),
+        cancel_event=None,
+    )
+    assert retried == {
+        "document_id": imported.document.document_id,
+        "accepted": True,
+    }
+    assert _wait_for_enrichment_status(kb_dir, "completed")[0] == "completed"
+    server._shutdown.set()
+    server._join_workers()
+
+
+def test_interrupted_page_tree_enrichment_stays_paused_after_engine_restart(tmp_path):
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "restart-cancel.md"
+    source.write_text("# Pause\n\nCancellation survives restart.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    called = threading.Event()
+
+    def unexpected_transport(_request, _timeout):
+        called.set()
+        raise AssertionError("Interrupted enrichment restarted without user action.")
+
+    gateway = DesktopModelGateway(
+        unexpected_transport,
+        provider_name="provider-a",
+        model_name="model-a",
+    )
+    service = DesktopPageTreeEnrichmentService(kb_dir)
+    assert service.queue_eligible(gateway) == 1
+    assert service.request_cancel(imported.document.document_id)
+
+    restarted = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    enrichment_engine.start_page_tree_enrichments(restarted, kb_dir, gateway)
+    assert not called.wait(timeout=0.25)
+    restarted._shutdown.set()
+    restarted._join_workers()
+    assert _wait_for_enrichment_status(kb_dir, "pending") == (
+        "pending",
+        "page_tree_enrichment_interrupted",
+    )
+
+
+def test_page_tree_control_serializes_with_active_workspace_switch(tmp_path, monkeypatch):
+    kb_dir = tmp_path / "knowledge"
+    next_kb_dir = tmp_path / "next-knowledge"
+    source = tmp_path / "workspace-race.md"
+    source.write_text("# Ownership\n\nControls belong to one KB.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    DesktopKnowledgeBaseRuntime().create(next_kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    gateway = _gateway("provider-a", "model-a", "Summary.")
+    assert DesktopPageTreeEnrichmentService(kb_dir).queue_eligible(gateway) == 1
+    control_entered = threading.Event()
+    release_control = threading.Event()
+    switch_finished = threading.Event()
+    original_cancel = DesktopPageTreeEnrichmentService.request_cancel
+
+    def blocking_cancel(service, document_id):
+        control_entered.set()
+        assert release_control.wait(timeout=2)
+        return original_cancel(service, document_id)
+
+    monkeypatch.setattr(DesktopPageTreeEnrichmentService, "request_cancel", blocking_cancel)
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir, _override: gateway,
+    )
+    server._handshake_complete = True
+    results: list[dict[str, object]] = []
+    errors: list[Exception] = []
+
+    def cancel_task() -> None:
+        try:
+            results.append(
+                server._dispatch(
+                    DesktopRequest(
+                        request_id="cancel-old-kb",
+                        method="workbench.cancel_page_tree_enrichment",
+                        params={"document_id": imported.document.document_id},
+                    ),
+                    cancel_event=None,
+                )
+            )
+        except Exception as error:
+            errors.append(error)
+
+    def switch_workspace() -> None:
+        try:
+            server._dispatch(
+                DesktopRequest(
+                    request_id="open-next-kb",
+                    method="workbench.open_knowledge_base",
+                    params={"kb_dir": str(next_kb_dir)},
+                ),
+                cancel_event=None,
+            )
+        except Exception as error:
+            errors.append(error)
+        finally:
+            switch_finished.set()
+
+    control_worker = threading.Thread(target=cancel_task)
+    switch_worker = threading.Thread(target=switch_workspace)
+    control_worker.start()
+    assert control_entered.wait(timeout=1)
+    switch_worker.start()
+    assert not switch_finished.wait(timeout=0.1)
+    release_control.set()
+    control_worker.join(timeout=2)
+    switch_worker.join(timeout=2)
+
+    assert errors == []
+    assert results == [
+        {"document_id": imported.document.document_id, "accepted": True}
+    ]
+    assert workspace.active() is not None
+    assert workspace.active().kb_dir == str(next_kb_dir.resolve())
+    assert _wait_for_enrichment_status(kb_dir, "pending") == (
+        "pending",
+        "page_tree_enrichment_interrupted",
+    )
 
 
 def test_settings_save_rejects_old_result_and_restarts_with_live_gateway(tmp_path):

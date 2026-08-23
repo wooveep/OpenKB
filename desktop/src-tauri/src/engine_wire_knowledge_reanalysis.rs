@@ -94,10 +94,6 @@ pub struct KnowledgeReanalysisJob {
     pub current_batch: Option<u32>,
     #[serde(alias = "attempt_count")]
     pub attempt_count: Option<u32>,
-    #[serde(alias = "timeout_seconds")]
-    pub timeout_seconds: Option<f64>,
-    #[serde(alias = "remaining_seconds")]
-    pub remaining_seconds: Option<f64>,
     #[serde(alias = "created_at")]
     pub created_at: String,
     #[serde(alias = "completed_at")]
@@ -151,10 +147,9 @@ mod tests {
                     "job_id": "job-1", "run_id": "run-1", "document_id": "doc-1",
                     "document_name": "guide.md", "status": "failed", "phase": "failed",
                     "progress": 20, "provider": "openai", "model": "gpt",
-                    "error_code": "model_timeout", "reason": "timeout",
+                    "error_code": "model_provider_failure", "reason": "explicit provider error",
                     "batch_total": 2, "batch_completed": 1, "current_batch": 2,
-                    "attempt_count": 4, "timeout_seconds": 50.0,
-                    "remaining_seconds": 0.0, "created_at": "now", "completed_at": "now"
+                    "attempt_count": 4, "created_at": "now", "completed_at": "now"
                 }]
             }]
         });
@@ -170,6 +165,13 @@ mod tests {
             parsed.runs[0].status,
             KnowledgeReanalysisStatus::PartialFailure
         ));
+        let encoded = serde_json::to_value(parsed).expect("overview should serialize");
+        assert!(encoded["runs"][0]["jobs"][0]
+            .get("timeoutSeconds")
+            .is_none());
+        assert!(encoded["runs"][0]["jobs"][0]
+            .get("remainingSeconds")
+            .is_none());
     }
 
     #[test]
@@ -180,7 +182,6 @@ mod tests {
             "progress": 101, "provider": "openai", "model": "gpt",
             "error_code": null, "reason": null, "batch_total": 0,
             "batch_completed": 0, "current_batch": null, "attempt_count": null,
-            "timeout_seconds": null, "remaining_seconds": null,
             "created_at": "now", "completed_at": null
         });
         let payload = json!({

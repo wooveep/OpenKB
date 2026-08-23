@@ -13,6 +13,7 @@ from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
 from openkb.desktop_missing_sources import DesktopMissingSourceService
+from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
@@ -352,27 +353,18 @@ def test_bulk_dismiss_redacts_long_document_batch_and_merge_checkpoints(
                     "entities": [],
                 }
             )
-        first = dict(payload["batch_results"][0]["concepts"][0])
-        first["claims"] = [dict(claim) for claim in first["claims"]]
-        supported_sources = {
-            source_id
-            for batch in payload["batch_results"]
-            for source_id in batch["concepts"][0]["claims"][1]["source_evidence_ids"]
-        }
-        first["claims"][1]["source_evidence_ids"] = sorted(supported_sources)
-        return json.dumps(
-            {
-                "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
-                "analysis_scope": "document",
-                "document_description": "Merged review.",
-                "concepts": [first],
-                "entities": [],
-            }
-        )
+        assert request.operation == "knowledge_analysis_merge"
+        return json.dumps({"document_description": "Merged review."})
 
-    DesktopTextImportService(
-        kb_dir, model_gateway=DesktopModelGateway(transport)
-    ).import_text(source)
+    gateway = DesktopModelGateway(transport)
+    gateway.capability_for_operation = lambda _operation: DesktopModelCapabilityProfile(
+        context_capacity=8_192,
+        document_input_capacity=300,
+        supports_native_json_schema=False,
+        supports_streaming=True,
+        supports_reasoning=False,
+    )
+    DesktopTextImportService(kb_dir, model_gateway=gateway).import_text(source)
     service = DesktopMissingSourceService(kb_dir)
     candidate = next(item for item in service.list_candidates() if item.claim_text == secret)
 

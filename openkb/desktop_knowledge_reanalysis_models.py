@@ -58,8 +58,6 @@ class DesktopKnowledgeReanalysisJob:
     batch_completed: int
     current_batch: int | None
     attempt_count: int | None
-    timeout_seconds: float | None
-    remaining_seconds: float | None
     created_at: str
     completed_at: str | None
 
@@ -80,8 +78,6 @@ class DesktopKnowledgeReanalysisJob:
             "batch_completed": self.batch_completed,
             "current_batch": self.current_batch,
             "attempt_count": self.attempt_count,
-            "timeout_seconds": self.timeout_seconds,
-            "remaining_seconds": self.remaining_seconds,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
         }
@@ -154,8 +150,7 @@ def _run_from_row(
             (SELECT MIN(batch_ordinal) + 1 FROM knowledge_reanalysis_batches AS batches
                 WHERE batches.job_id = jobs.job_id
                     AND batches.status IN ('pending', 'running', 'failed')),
-            jobs.attempt_count, jobs.timeout_seconds, jobs.remaining_seconds,
-            jobs.created_at, jobs.completed_at
+            jobs.attempt_count, jobs.created_at, jobs.completed_at
         FROM knowledge_reanalysis_jobs AS jobs
         JOIN source_documents AS documents ON documents.document_id = jobs.document_id
         WHERE jobs.run_id = ? ORDER BY jobs.created_at, jobs.rowid
@@ -189,8 +184,6 @@ def _job_from_row(row: tuple[object, ...]) -> DesktopKnowledgeReanalysisJob:
         batch_completed=int(str(row[12])),
         current_batch=int(str(row[13])) if row[13] is not None else None,
         attempt_count=int(str(row[14])) if row[14] is not None else None,
-        timeout_seconds=float(str(row[15])) if row[15] is not None else None,
-        remaining_seconds=float(str(row[16])) if row[16] is not None else None,
-        created_at=str(row[17]),
-        completed_at=str(row[18]) if row[18] is not None else None,
+        created_at=str(row[15]),
+        completed_at=str(row[16]) if row[16] is not None else None,
     )

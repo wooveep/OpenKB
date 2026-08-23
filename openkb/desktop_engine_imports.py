@@ -1,22 +1,18 @@
-"""Desktop Engine Import Job routes and runtime-restoration workers."""
+"""Desktop Engine Import Job routes owned by explicit user requests."""
 
 from __future__ import annotations
 
-import logging
-import threading
 from pathlib import Path
 from threading import Event
 from typing import TYPE_CHECKING
 
+from openkb import desktop_engine_knowledge_graph as knowledge_graph_engine
 from openkb import desktop_engine_page_tree_enrichment as page_tree_enrichment_engine
-from openkb.desktop_import import DesktopImportControl, DesktopImportError, DesktopTextImportService
+from openkb.desktop_import import DesktopImportControl, DesktopTextImportService
 from openkb.desktop_import_types import DesktopRecoveryOverride
 
 if TYPE_CHECKING:
     from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
-
-logger = logging.getLogger(__name__)
-
 
 def dispatch_import_request(
     server: DesktopEngineServer,
@@ -116,6 +112,9 @@ def run_import(
         page_tree_enrichment_engine.start_page_tree_enrichments(
             server, kb_dir, server._model_gateway_factory(kb_dir, None)
         )
+        knowledge_graph_engine.start_knowledge_graph_extractions(
+            server, kb_dir, server._model_gateway_factory(kb_dir, None)
+        )
         return result.as_dict()
     finally:
         _release_import_control(server, control)
@@ -149,41 +148,6 @@ def cancel_import_job(server: DesktopEngineServer, job_id: str) -> dict[str, obj
         )
     DesktopTextImportService(Path(active.kb_dir)).cancel_paused_job(job_id)
     return {"job_id": job_id, "accepted": True}
-
-
-def start_recoverable_imports(server: DesktopEngineServer, kb_dir: Path) -> None:
-    job_ids = DesktopTextImportService(kb_dir).recoverable_job_ids()
-    if not job_ids:
-        return
-    threading.Thread(
-        target=_resume_recoverable_imports,
-        args=(server, kb_dir, job_ids),
-        daemon=True,
-        name="openkb-engine-import-recovery",
-    ).start()
-
-
-def _resume_recoverable_imports(
-    server: DesktopEngineServer, kb_dir: Path, job_ids: tuple[str, ...]
-) -> None:
-    from openkb.desktop_engine import DesktopRequestError
-
-    for job_id in job_ids:
-        if server._shutdown.is_set():
-            return
-        with server._workspace_transition.import_job(expected_kb_dir=kb_dir) as lease:
-            if lease is None:
-                return
-            try:
-                run_import(
-                    server,
-                    kb_dir,
-                    request_id=None,
-                    job_id=job_id,
-                    control=lease.control,
-                )
-            except (DesktopImportError, DesktopRequestError) as error:
-                logger.warning("Could not resume Desktop import job %s: %s", job_id, error)
 
 
 def _record_import_stage(

@@ -29,8 +29,6 @@ export interface DesktopKnowledgeReanalysisJob {
   batchCompleted: number
   currentBatch: number | null
   attemptCount: number | null
-  timeoutSeconds: number | null
-  remainingSeconds: number | null
   createdAt: string
   completedAt: string | null
 }

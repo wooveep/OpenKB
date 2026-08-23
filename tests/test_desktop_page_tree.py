@@ -10,6 +10,7 @@ import pytest
 
 from openkb import desktop_page_tree as page_tree_runtime
 from openkb import desktop_page_tree_store as page_tree_store
+from openkb import desktop_workspace
 from openkb.desktop_import import DesktopImportError, DesktopRecoveryOverride
 from openkb.desktop_import_artifacts import DocumentIRBlock, SourceImage, build_evidence
 from openkb.desktop_import_runner import DesktopTextImportService
@@ -17,6 +18,8 @@ from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_knowledge_analysis_batches import plan_knowledge_analysis_batches
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+
+LATEST_SCHEMA_VERSION = desktop_workspace._MIGRATIONS[-1][0]
 
 
 def _drop_catalog_schema(connection: sqlite3.Connection) -> None:
@@ -33,6 +36,27 @@ def _drop_catalog_schema(connection: sqlite3.Connection) -> None:
         "knowledge_catalog_generations",
     ):
         connection.execute(f"DROP TABLE IF EXISTS {table}")
+
+
+def _drop_post_v37_schema(connection: sqlite3.Connection) -> None:
+    for table in (
+        "knowledge_graph_extraction_tasks",
+        "legacy_model_recovery_audit",
+        "model_usage_records",
+        "knowledge_analysis_merge_nodes",
+        "knowledge_reanalysis_merge_nodes",
+        "knowledge_analysis_plans",
+        "knowledge_reanalysis_plans",
+    ):
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
+    for table in ("model_calls", "model_attempts"):
+        existing = {
+            str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for column in ("lifecycle_status", "elapsed_seconds", "retry_after_seconds"):
+            if column in existing:
+                connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    connection.execute("DELETE FROM schema_migrations WHERE version >= 38")
 
 
 def test_import_publishes_ordered_tree_and_d1_gets_its_own_generation(tmp_path) -> None:
@@ -652,6 +676,7 @@ def test_migration_backfills_stage_and_queues_available_legacy_document(tmp_path
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
         _drop_catalog_schema(connection)
+        _drop_post_v37_schema(connection)
         stage_id = connection.execute(
             "SELECT stage_run_id FROM stage_runs WHERE job_id = ? "
             "AND stage = 'deterministic_page_tree'",
@@ -682,7 +707,7 @@ def test_migration_backfills_stage_and_queues_available_legacy_document(tmp_path
 
     activation = DesktopKnowledgeBaseRuntime().open(kb_dir)
 
-    assert activation.knowledge_base.schema_version == 37
+    assert activation.knowledge_base.schema_version == LATEST_SCHEMA_VERSION
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT status FROM stage_runs WHERE job_id = ? AND stage = 'deterministic_page_tree'",
@@ -727,6 +752,7 @@ def test_migration_leaves_page_tree_pending_for_a_legacy_quarantined_import(tmp_
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
         _drop_catalog_schema(connection)
+        _drop_post_v37_schema(connection)
         stage_id = connection.execute(
             "SELECT stage_run_id FROM stage_runs WHERE job_id = ? "
             "AND stage = 'deterministic_page_tree'",

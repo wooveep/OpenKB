@@ -35,7 +35,8 @@ export function FailedDocumentsDialog({
   )
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
   const [model, setModel] = useState("")
-  const [timeout, setTimeout] = useState("")
+  const [contextCapacity, setContextCapacity] = useState("")
+  const [legacyChoice, setLegacyChoice] = useState<"continue_compatible" | "restart_current_plan" | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
 
   const selected = failedTasks.find((task) => task.job.jobId === selectedJobId) ?? failedTasks[0] ?? null
@@ -44,25 +45,32 @@ export function FailedDocumentsDialog({
   const chooseTask = (jobId: string) => {
     setSelectedJobId(jobId)
     setModel("")
-    setTimeout("")
+    setContextCapacity("")
+    setLegacyChoice(failedTasks.find((task) => task.job.jobId === jobId)?.legacyModelRecovery?.recommendedChoice ?? null)
     setFormError(null)
   }
 
   const recover = () => {
     if (selected === null) return
-    const timeoutValue = timeout.trim()
-    const parsedTimeout = timeoutValue ? Number(timeoutValue) : undefined
+    const contextValue = contextCapacity.trim()
+    const parsedContext = contextValue ? Number(contextValue) : undefined
     if (
-      parsedTimeout !== undefined
-      && (!Number.isFinite(parsedTimeout) || parsedTimeout <= 0 || parsedTimeout > 60)
+      parsedContext !== undefined
+      && (!Number.isInteger(parsedContext) || parsedContext < 4096)
     ) {
-      setFormError(t("desktop.knowledgeBases.recoveryInvalidTimeout"))
+      setFormError(t("desktop.knowledgeBases.recoveryInvalidContext"))
+      return
+    }
+    const selectedChoice = legacyChoice ?? selected.legacyModelRecovery?.recommendedChoice
+    if (selected.legacyModelRecovery && !selectedChoice) {
+      setFormError(t("desktop.knowledgeBases.recoveryChoiceRequired"))
       return
     }
     setFormError(null)
     onRecover(selected.job.jobId, {
       model: model.trim() || undefined,
-      initialTimeoutSeconds: parsedTimeout,
+      contextCapacity: parsedContext,
+      legacyRecoveryChoice: selectedChoice,
     })
   }
 
@@ -130,7 +138,7 @@ export function FailedDocumentsDialog({
                           {t("desktop.knowledgeBases.attemptRecord", {
                             attempt: attempt.attempt,
                             status: t(`desktop.knowledgeBases.modelCallStates.${attempt.status}`),
-                            timeout: Math.ceil(attempt.timeoutSeconds),
+                            elapsed: Math.floor(attempt.elapsedSeconds),
                           })}
                         </p>
                         {attempt.reason ? (
@@ -157,21 +165,48 @@ export function FailedDocumentsDialog({
                         className="mt-2 h-10 w-full rounded-md border border-input bg-background px-3 text-sm font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       />
                     </label>
-                    <label className="text-sm font-medium" htmlFor="desktop-recovery-timeout">
-                      {t("desktop.knowledgeBases.recoveryTimeout")}
+                    <label className="text-sm font-medium" htmlFor="desktop-recovery-context">
+                      {t("desktop.knowledgeBases.recoveryContext")}
                       <input
-                        id="desktop-recovery-timeout"
+                        id="desktop-recovery-context"
                         type="number"
-                        min="1"
-                        max="60"
-                        step="1"
-                        value={timeout}
-                        onChange={(event) => setTimeout(event.target.value)}
-                        placeholder={t("desktop.knowledgeBases.recoveryTimeoutPlaceholder")}
+                        min="4096"
+                        step="1024"
+                        value={contextCapacity}
+                        onChange={(event) => setContextCapacity(event.target.value)}
+                        placeholder={t("desktop.knowledgeBases.recoveryContextPlaceholder")}
                         className="mt-2 h-10 w-full rounded-md border border-input bg-background px-3 text-sm font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       />
                     </label>
                   </div>
+                  {selected.legacyModelRecovery ? (
+                    <fieldset className="mt-4 space-y-2">
+                      <legend className="text-sm font-medium">{t("desktop.knowledgeBases.recoveryChoiceTitle")}</legend>
+                      {(["continue_compatible", "restart_current_plan"] as const).map((choice) => {
+                        const estimate = selected.legacyModelRecovery!.choices[choice]
+                        const checked = (legacyChoice ?? selected.legacyModelRecovery!.recommendedChoice) === choice
+                        return (
+                          <label key={choice} className={`block rounded-lg border p-3 text-sm ${checked ? "border-primary bg-primary/5" : "border-border/70"} ${estimate.allowed ? "cursor-pointer" : "opacity-60"}`}>
+                            <span className="flex items-start gap-2">
+                              <input type="radio" name="legacy-recovery-choice" value={choice} checked={checked} disabled={!estimate.allowed} onChange={() => setLegacyChoice(choice)} />
+                              <span>
+                                <span className="font-medium">{t(`desktop.knowledgeBases.recoveryChoices.${choice}.title`)}</span>
+                                {selected.legacyModelRecovery!.recommendedChoice === choice ? <span className="ml-2 text-xs text-primary">{t("desktop.knowledgeBases.recoveryRecommended")}</span> : null}
+                                <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+                                  {t(`desktop.knowledgeBases.recoveryChoices.${choice}.description`, {
+                                    calls: estimate.estimatedRemainingCalls,
+                                    tokens: estimate.estimatedInputTokens.toLocaleString(),
+                                    batches: estimate.reusesCompletedBatches ?? 0,
+                                  })}
+                                </span>
+                              </span>
+                            </span>
+                          </label>
+                        )
+                      })}
+                      <p className="text-xs leading-5 text-muted-foreground">{selected.legacyModelRecovery.compatibilityReason}</p>
+                    </fieldset>
+                  ) : null}
                   {formError ? <p className="mt-3 text-sm text-destructive" role="alert">{formError}</p> : null}
                   <DialogFooter className="mt-4">
                     <Button

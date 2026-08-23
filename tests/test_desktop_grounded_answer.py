@@ -5,10 +5,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from openkb.desktop_answer_types import DesktopEvidencePack, DesktopRetrievalPlan
 from openkb.desktop_grounded_answer import (
     DesktopGroundedAnswerService,
-    generate_grounded_answer,
 )
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_model_gateway import DesktopModelGateway
@@ -190,7 +188,9 @@ def test_grounded_answer_streams_model_deltas_without_losing_baseline_terms(tmp_
             assert request.operation == "retrieval_plan"
             return '{"terms": ["unrelated"]}'
 
-        def stream(self, request, _timeout_seconds, on_delta):
+        def stream_until_terminal(self, request, _connect_timeout_seconds, on_delta):
+            if request.operation == "retrieval_plan":
+                return '{"terms": ["unrelated"]}'
             assert request.operation == "grounded_answer"
             on_delta("The orbital ")
             on_delta("ledger.")
@@ -248,7 +248,9 @@ def test_grounded_answer_replaces_a_failed_stream_attempt(tmp_path):
         def __call__(self, _request, _timeout_seconds):
             return '{"terms": ["evidence"]}'
 
-        def stream(self, _request, _timeout_seconds, on_delta):
+        def stream_until_terminal(self, request, _connect_timeout_seconds, on_delta):
+            if request.operation == "retrieval_plan":
+                return '{"terms": ["evidence"]}'
             self.attempts += 1
             if self.attempts == 1:
                 on_delta("failed attempt")
@@ -291,7 +293,9 @@ def test_grounded_answer_persists_partial_text_when_the_model_stream_is_interrup
         def __call__(self, _request, _timeout_seconds):
             return '{"terms": ["evidence"]}'
 
-        def stream(self, _request, _timeout_seconds, on_delta):
+        def stream_until_terminal(self, request, _connect_timeout_seconds, on_delta):
+            if request.operation == "retrieval_plan":
+                return '{"terms": ["evidence"]}'
             self.attempts += 1
             if self.attempts == 1:
                 on_delta("partial model text")
@@ -309,7 +313,7 @@ def test_grounded_answer_persists_partial_text_when_the_model_stream_is_interrup
     )
 
     assert answer.status == "interrupted"
-    assert answer.interruption_code == "model_timeout"
+    assert answer.interruption_code == "model_network_transient"
     assert answer.answer_text == "partial model text"
     assert deltas[0][1:] == ("partial model text", True, 1)
     assert len(deltas) == 1
@@ -330,7 +334,9 @@ def test_grounded_answer_retry_preserves_the_old_card_until_a_complete_replaceme
         def __call__(self, _request, _timeout_seconds):
             return '{"terms": ["evidence"]}'
 
-        def stream(self, _request, _timeout_seconds, on_delta):
+        def stream_until_terminal(self, request, _connect_timeout_seconds, on_delta):
+            if request.operation == "retrieval_plan":
+                return '{"terms": ["evidence"]}'
             self.stream_attempts += 1
             if self.stream_attempts < 3:
                 on_delta(f"partial attempt {self.stream_attempts}")
@@ -384,30 +390,3 @@ def test_grounded_answer_stops_deterministic_stream_at_the_visible_partial_text(
     assert answer.interruption_code == "answer_cancelled"
     assert answer.answer_text == deltas[0]
     assert len(deltas) == 1
-
-
-def test_grounded_answer_does_not_charge_when_provider_never_starts() -> None:
-    class ExhaustedTransport:
-        calls = 0
-
-        def prepare_model_attempt(self, _is_cancelled, _remaining_seconds):
-            return False
-
-        def __call__(self, _request, _timeout_seconds):
-            self.calls += 1
-            return "unreachable"
-
-    transport = ExhaustedTransport()
-    pack = DesktopEvidencePack(
-        retrieval_plan=DesktopRetrievalPlan("question", ("question",), "deterministic"),
-        evidence=(),
-    )
-
-    generation = generate_grounded_answer(
-        "question", pack, model_gateway=DesktopModelGateway(transport)
-    )
-
-    assert transport.calls == 0
-    assert generation.answer_text is None
-    assert generation.model_calls == 0
-    assert generation.model_input_characters == 0

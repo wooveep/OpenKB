@@ -23,7 +23,8 @@ from openkb.desktop_import import DesktopImportControl, DesktopImportError, Desk
 from openkb.desktop_import_store import DesktopImportStore
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
-from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelResult
+from openkb.desktop_model_terminal import DesktopTerminalModelEvent
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
@@ -286,7 +287,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 37,
+                "schema_version": 42,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -542,11 +543,11 @@ def test_engine_reads_persisted_import_tasks_for_the_active_knowledge_base(tmp_p
     assert history["jobs"][0]["document"]["availability"] == "available"
 
 
-def test_engine_uses_the_configured_model_gateway_for_imports(tmp_path):
-    """The production import path reaches retry/quarantine behavior when configured."""
+def test_engine_classifies_provider_timeout_as_a_network_failure(tmp_path):
+    """An explicit network timeout is a provider failure, never a response deadline."""
     desktop_kb = tmp_path / "desktop-kb"
     source = tmp_path / "slow.txt"
-    source.write_text("A model timeout must quarantine this document.", encoding="utf-8")
+    source.write_text("A network timeout must quarantine this document.", encoding="utf-8")
     workspace = DesktopKnowledgeBaseRuntime()
     workspace.create(desktop_kb)
 
@@ -575,11 +576,11 @@ def test_engine_uses_the_configured_model_gateway_for_imports(tmp_path):
         cancel_event=None,
     )
     assert history["jobs"][0]["job"]["status"] == "quarantined"
-    assert history["jobs"][0]["quarantine"]["error_code"] == "model_timeout"
+    assert history["jobs"][0]["quarantine"]["error_code"] == "model_network_transient"
 
 
-def test_engine_quarantines_new_import_when_model_is_not_configured(tmp_path):
-    """The Workbench cannot bypass its mandatory pre-publication analysis stage."""
+def test_engine_pauses_new_import_when_model_is_not_configured(tmp_path):
+    """Parsed evidence waits for configuration without becoming a failed document."""
     desktop_kb = tmp_path / "desktop-kb"
     source = tmp_path / "unconfigured.txt"
     source.write_text("This document needs Knowledge Analysis.", encoding="utf-8")
@@ -603,13 +604,13 @@ def test_engine_quarantines_new_import_when_model_is_not_configured(tmp_path):
             cancel_event=None,
         )
 
-    assert error.value.code == "model_configuration_invalid"
+    assert error.value.code == "awaiting_model_configuration"
     history = server._dispatch(
         DesktopRequest(request_id="history", method="workbench.import_jobs", params={}),
         cancel_event=None,
     )
-    assert history["jobs"][0]["job"]["status"] == "quarantined"
-    assert history["jobs"][0]["quarantine"]["error_code"] == "model_configuration_invalid"
+    assert history["jobs"][0]["job"]["status"] == "awaiting_model_configuration"
+    assert history["jobs"][0]["quarantine"] is None
     assert history["jobs"][0]["document"] is None
 
 
@@ -635,7 +636,7 @@ def test_engine_recovers_a_quarantined_import_with_a_run_scoped_override(tmp_pat
         model_gateway_factory=model_gateway_factory,
     )
     server._handshake_complete = True
-    with pytest.raises(DesktopImportError, match="response timeout"):
+    with pytest.raises(DesktopImportError, match="connection to the model provider"):
         server._dispatch(
             DesktopRequest(
                 request_id="import",
@@ -657,7 +658,7 @@ def test_engine_recovers_a_quarantined_import_with_a_run_scoped_override(tmp_pat
                 "job_id": job_id,
                 "recovery_override": {
                     "model": "test/recovery-model",
-                    "initialTimeoutSeconds": 30,
+                    "context_capacity": 32_768,
                 },
             },
         ),
@@ -668,11 +669,11 @@ def test_engine_recovers_a_quarantined_import_with_a_run_scoped_override(tmp_pat
     assert recovered["quarantine"] is None
     assert overrides[0] is None
     assert overrides[1].model == "test/recovery-model"
-    assert overrides[1].initial_timeout_seconds == 30
+    assert overrides[1].context_capacity == 32_768
 
 
-def test_open_starts_recovery_from_the_latest_verified_checkpoint(tmp_path):
-    """Opening a KB restarts recoverable work without waiting for a user action."""
+def test_open_leaves_recoverable_import_waiting_for_explicit_resume(tmp_path):
+    """Opening a KB preserves checkpoints without automatically spending model tokens."""
     desktop_kb = tmp_path / "desktop-kb"
     source = tmp_path / "recover.txt"
     source.write_text("# Recover\n\nResume from the raw checkpoint.", encoding="utf-8")
@@ -701,11 +702,13 @@ def test_open_starts_recovery_from_the_latest_verified_checkpoint(tmp_path):
         },
     )
     analysis_calls = 0
+    model_called = threading.Event()
 
     def analyze(_request, _timeout_seconds):
         nonlocal analysis_calls
         if _request.operation == "knowledge_analysis":
             analysis_calls += 1
+            model_called.set()
         return _empty_knowledge_analysis()
 
     server = DesktopEngineServer(
@@ -724,13 +727,12 @@ def test_open_starts_recovery_from_the_latest_verified_checkpoint(tmp_path):
         cancel_event=None,
     )
 
-    deadline = time.monotonic() + 1
-    while time.monotonic() < deadline:
-        if DesktopTextImportService(desktop_kb).task(state.job_id).job.status == "completed":
-            break
-        time.sleep(0.01)
-    assert DesktopTextImportService(desktop_kb).task(state.job_id).job.status == "completed"
-    assert analysis_calls == 1
+    assert not model_called.wait(0.2)
+    task = DesktopTextImportService(desktop_kb).task(state.job_id)
+    assert task.job.status == "recoverable"
+    assert task.stages[0].status == "completed"
+    assert task.stages[1].status == "completed"
+    assert analysis_calls == 0
 
 
 def test_engine_signals_an_active_import_without_waiting_for_workspace_lock():
@@ -798,6 +800,120 @@ def test_engine_streams_and_returns_a_grounded_answer(tmp_path):
     )
     assert delta_event["params"]["data"]["replace"] is True
     assert delta_event["params"]["data"]["attempt"] == 1
+
+
+def test_engine_emits_sanitized_interactive_answer_model_lifecycle(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "answer.txt"
+    source.write_text("OpenKB keeps local evidence available.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+    output = io.BytesIO()
+
+    class ObservedInteractiveGateway:
+        def for_lane(self, lane):
+            assert lane == "interactive"
+            return self
+
+        def analyze(self, request, *, on_event, is_cancelled):
+            assert request.operation == "retrieval_plan"
+            assert is_cancelled is not None
+            for status in (
+                "queued",
+                "connecting",
+                "awaiting_model_result",
+                "validating",
+                "completed",
+            ):
+                on_event(
+                    DesktopTerminalModelEvent(
+                        "retrieval-call",
+                        1,
+                        status,
+                        4,
+                        operation="retrieval_plan",
+                        model_role="analysis",
+                        provider_name="custom",
+                        model_name="analysis-model",
+                        execution_lane="interactive",
+                    )
+                )
+            return DesktopModelResult("retrieval-call", '{"terms":["evidence"]}', 1)
+
+        def stream(self, request, *, on_event, on_delta, on_reset, is_cancelled):
+            assert request.operation == "grounded_answer"
+            assert is_cancelled is not None
+            del on_reset
+            for status in ("queued", "connecting", "awaiting_model_result"):
+                on_event(
+                    DesktopTerminalModelEvent(
+                        "answer-call",
+                        1,
+                        status,
+                        7,
+                        operation="grounded_answer",
+                        model_role="answer",
+                        provider_name="custom",
+                        model_name="answer-model",
+                        execution_lane="interactive",
+                    )
+                )
+            on_delta(1, "private streamed answer")
+            for status in ("model_output_activity", "validating", "completed"):
+                on_event(
+                    DesktopTerminalModelEvent(
+                        "answer-call",
+                        1,
+                        status,
+                        9,
+                        operation="grounded_answer",
+                        model_role="answer",
+                        provider_name="custom",
+                        model_name="answer-model",
+                        execution_lane="interactive",
+                    )
+                )
+            return DesktopModelResult("answer-call", "private streamed answer", 1)
+
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        output,
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir, _override: ObservedInteractiveGateway(),
+    )
+    server._handshake_complete = True
+    server._run_request(
+        DesktopRequest(
+            request_id="answer-lifecycle",
+            method="workbench.ask_grounded",
+            params={"question": "What does OpenKB keep?"},
+        ),
+        cancel_event=threading.Event(),
+    )
+
+    frames = _decode_frames(output.getvalue())
+    lifecycle = [
+        frame["params"]["data"]
+        for frame in frames
+        if frame.get("method") == "event"
+        and frame["params"]["kind"] == "model.call_lifecycle"
+    ]
+    assert {event["operation"] for event in lifecycle} == {
+        "retrieval_plan",
+        "grounded_answer",
+    }
+    answer_activity = next(
+        event for event in lifecycle if event["status"] == "model_output_activity"
+    )
+    assert answer_activity["request_id"] == "answer-lifecycle"
+    assert answer_activity["model_role"] == "answer"
+    assert answer_activity["model_name"] == "answer-model"
+    assert answer_activity["call_id"] == "answer-call"
+    assert answer_activity["attempt_id"] == "answer-call:1"
+    assert answer_activity["execution_lane"] == "interactive"
+    assert answer_activity["long_wait_threshold_seconds"] == 300.0
+    assert "private streamed answer" not in repr(lifecycle)
 
 
 def test_engine_autosaves_then_explicitly_publishes_user_knowledge_pages(tmp_path):
@@ -1250,7 +1366,9 @@ def test_engine_returns_a_persisted_interrupted_answer_after_user_stop(tmp_path)
         def __call__(self, _request, _timeout_seconds):
             return '{"terms": ["evidence"]}'
 
-        def stream(self, _request, _timeout_seconds, on_delta):
+        def stream_until_terminal(self, request, _connect_timeout_seconds, on_delta):
+            if request.operation == "retrieval_plan":
+                return '{"terms": ["evidence"]}'
             on_delta("partial answer")
             stop.set()
             return "late answer"

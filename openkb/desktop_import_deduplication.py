@@ -20,6 +20,13 @@ from openkb.desktop_import_types import DesktopDeduplication, DesktopImportedDoc
 from openkb.desktop_source_image_assets import persist_source_images
 
 
+class DuplicateImportSignal(Exception):
+    """Internal worker signal carrying the canonical document to reuse."""
+
+    def __init__(self, document_id: str) -> None:
+        self.document_id = document_id
+
+
 class _ImportState(Protocol):
     @property
     def job_id(self) -> str: ...

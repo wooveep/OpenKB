@@ -320,7 +320,8 @@ def test_reanalysis_retry_reuses_completed_long_document_batch(
     source = tmp_path / "long.md"
     source.write_text(
         "\n\n".join(
-            f"# Section {ordinal}\n\nDurable fact for section {ordinal}." for ordinal in range(7)
+            f"# Section {ordinal}\n\n" + (f"Durable fact for section {ordinal}. " * 400)
+            for ordinal in range(7)
         ),
         encoding="utf-8",
     )
@@ -352,7 +353,9 @@ def test_reanalysis_retry_reuses_completed_long_document_batch(
     retried = service.retry_job(run.jobs[0].job_id, provider="provider", model="model")
     service.run_job(retried.jobs[0].job_id, gateway)
 
-    assert operations == ["batch:0", "batch:1", "batch:1", "merge"]
+    assert operations[:3] == ["batch:0", "batch:1", "batch:1"]
+    assert operations.count("batch:0") == 1
+    assert operations[-1] == "merge"
     assert service.overview()["runs"][0]["status"] == "completed"
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:

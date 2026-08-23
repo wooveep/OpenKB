@@ -6,6 +6,7 @@ import json
 import logging
 import sqlite3
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -46,8 +47,8 @@ from openkb.desktop_knowledge_reanalysis_recovery import (
 )
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
 from openkb.desktop_missing_sources import record_missing_source_candidates_in
+from openkb.desktop_model_event import normalize_model_event
 from openkb.desktop_model_gateway import (
-    DesktopModelAttemptEvent,
     DesktopModelCallError,
     DesktopModelGateway,
     DesktopModelRequest,
@@ -315,13 +316,17 @@ class DesktopKnowledgeReanalysisService:
                             "Knowledge Reanalysis stopped with the Desktop Runtime.",
                         )
 
-                def analyze(operation: str, prompt: str):
+                def analyze(request: DesktopModelRequest):
                     honor_control()
-                    self._set_phase(job_id, execution_token, operation)
+                    self._set_phase(job_id, execution_token, request.operation)
                     return gateway.analyze(
-                        DesktopModelRequest(operation, document_name, prompt),
+                        replace(
+                            request,
+                            job_id=job_id,
+                            stage_run_id=execution_token,
+                        ),
                         on_event=lambda event: self._record_attempt(
-                            job_id, execution_token, operation, event
+                            job_id, execution_token, request.operation, event
                         ),
                         is_cancelled=should_stop,
                     )
@@ -344,6 +349,17 @@ class DesktopKnowledgeReanalysisService:
                     honor_control=honor_control,
                     on_batch_completed=lambda completed, total: self._batch_completed(
                         job_id, execution_token, completed, total
+                    ),
+                    capability_profile=(
+                        capability("knowledge_analysis")
+                        if callable(
+                            capability := getattr(
+                                gateway,
+                                "capability_for_operation",
+                                None,
+                            )
+                        )
+                        else None
                     ),
                 )
                 honor_control()
@@ -451,8 +467,9 @@ class DesktopKnowledgeReanalysisService:
         job_id: str,
         execution_token: str,
         operation: str,
-        event: DesktopModelAttemptEvent,
+        event: object,
     ) -> None:
+        lifecycle = normalize_model_event(event)
         with kb_ingest_lock(self._state_dir):
             connection = _connect(self._database_path)
             try:
@@ -466,11 +483,11 @@ class DesktopKnowledgeReanalysisService:
                         """,
                         (
                             operation,
-                            event.attempt,
-                            event.timeout_seconds,
-                            event.remaining_seconds,
-                            event.next_timeout_seconds,
-                            event.error_code,
+                            lifecycle.attempt,
+                            None,
+                            None,
+                            None,
+                            lifecycle.error_code,
                             job_id,
                             execution_token,
                         ),
