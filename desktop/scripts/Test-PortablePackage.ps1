@@ -165,7 +165,7 @@ function Assert-UnconfiguredImportReachedModelBoundary {
         -Condition ($Response.PSObject.Properties.Name -contains "error") `
         -Message "Frozen Engine unexpectedly published $SourceName without mandatory Knowledge Analysis."
     Assert-That `
-        -Condition ($Response.error.code -eq "model_configuration_invalid") `
+        -Condition ($Response.error.code -eq "awaiting_model_configuration") `
         -Message "Frozen Engine returned the wrong unconfigured-model error for $SourceName."
 
     $jobsRequestId = "$RequestId-jobs"
@@ -178,11 +178,13 @@ function Assert-UnconfiguredImportReachedModelBoundary {
         $jobs.result.jobs | Where-Object { $_.job.source_name -eq $SourceName }
     ) | Select-Object -First 1
     Assert-That -Condition ($null -ne $task) -Message "Frozen Engine did not retain the $SourceName import job."
-    Assert-That -Condition ($task.job.status -eq "quarantined") -Message "Frozen Engine did not quarantine $SourceName."
+    Assert-That `
+        -Condition ($task.job.status -eq "awaiting_model_configuration") `
+        -Message "Frozen Engine did not preserve $SourceName while waiting for model configuration."
     Assert-That -Condition ($null -eq $task.document) -Message "Frozen Engine published $SourceName without Knowledge Analysis."
     Assert-That `
-        -Condition ($task.quarantine.error_code -eq "model_configuration_invalid") `
-        -Message "Frozen Engine retained the wrong quarantine reason for $SourceName."
+        -Condition ($null -eq $task.quarantine) `
+        -Message "Frozen Engine incorrectly quarantined $SourceName while waiting for model configuration."
 
     $stages = @{}
     foreach ($stage in @($task.stages)) {
@@ -194,8 +196,11 @@ function Assert-UnconfiguredImportReachedModelBoundary {
             -Message "Frozen Engine did not complete $stageName before the model boundary for $SourceName."
     }
     Assert-That `
-        -Condition ($stages["model_analysis"].status -eq "failed") `
-        -Message "Frozen Engine did not stop $SourceName at mandatory Knowledge Analysis."
+        -Condition (
+            $stages["model_analysis"].status -eq "paused" -and
+            $stages["model_analysis"].error_code -eq "awaiting_model_configuration"
+        ) `
+        -Message "Frozen Engine did not pause $SourceName at mandatory Knowledge Analysis."
 }
 
 function Lock-FileRangeWithRetry {
@@ -387,8 +392,8 @@ function Test-FrozenEngine {
         Write-Frame -Stream $input -Message @{
             jsonrpc = "2.0"; id = "package-model-import"; method = "workbench.import_text_document"; params = @{ source_path = $modelProbeSource }
         }
-        # The Desktop model call has a 60-second logical deadline. Allow a small
-        # process/IPC margin while the package proves its dynamic model runtime.
+        # The deliberately unreachable local endpoint must return an explicit
+        # network failure; the margin covers retries plus process/IPC overhead.
         $modelImport = Read-Response -Stream $output -RequestId "package-model-import" -Events $events -TimeoutSeconds 75
         Assert-That -Condition ($modelImport.PSObject.Properties.Name -contains "error") -Message "Frozen Engine unexpectedly completed the local model-runtime probe."
         Assert-That -Condition ($modelImport.error.code -eq "document_quarantined") -Message "Frozen Engine returned the wrong local model-runtime probe error."
