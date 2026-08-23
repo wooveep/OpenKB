@@ -128,6 +128,20 @@ export default function DesktopStartup({
               ) : null}
             </div>
           ) : null}
+          {state.phase !== "starting" && state.phase !== "error" && state.health.parserReadiness ? (
+            <div className="mt-3" data-testid="desktop-parser-readiness">
+              <p className="text-xs font-medium text-foreground">{t("desktop.engine.parsers")}</p>
+              <ul className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                {Object.values(state.health.parserReadiness).map((parser) => (
+                  <li key={parser.family}>
+                    {parser.formats.length ? parser.formats.join("/").toUpperCase() : parser.family}
+                    {" · "}
+                    {t(`desktop.engine.parserStates.${parser.runtimeState}`)}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           {state.phase === "unavailable" || state.phase === "error" ? (
             <div className="mt-5 flex flex-wrap gap-2">
               <Button onClick={() => void refresh()}>

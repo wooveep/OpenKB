@@ -354,7 +354,16 @@ class DesktopEngineServer:
             )
 
         if request.method == "engine.health":
-            return {"status": "ready", "protocol_version": PROTOCOL_VERSION}
+            from openkb.desktop_parser_runtime import inspect_parser_readiness
+
+            return {
+                "status": "ready",
+                "protocol_version": PROTOCOL_VERSION,
+                "parser_readiness": {
+                    family: readiness.as_dict()
+                    for family, readiness in inspect_parser_readiness().items()
+                },
+            }
 
         if (
             cancel_event is not None

@@ -261,7 +261,9 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
   async importTextDocument(
     sourcePath: string,
     requestId: string,
+    _parserMode?: "auto" | "fast" | "enhanced",
   ): Promise<DesktopTextDocumentImport> {
+    void _parserMode
     if (this.activeKnowledgeBaseResult === null) {
       throw new Error("Open a Desktop Knowledge Base before importing a document.")
     }

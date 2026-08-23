@@ -231,10 +231,12 @@ export class TauriDesktopBridge extends TauriKnowledgeReanalysisBridge implement
   async importTextDocument(
     sourcePath: string,
     requestId: string,
+    parserMode: "auto" | "fast" | "enhanced" = "auto",
   ): Promise<DesktopTextDocumentImport> {
     return this.call<DesktopTextDocumentImport>("desktop_import_text_document", {
       sourcePath,
       requestId,
+      parserMode,
     })
   }
 
@@ -594,9 +596,10 @@ class UnavailableDesktopBridge extends UnavailableKnowledgeReanalysisBridge impl
     return this.unavailable()
   }
 
-  importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport> {
+  importTextDocument(sourcePath: string, requestId: string, _parserMode?: "auto" | "fast" | "enhanced"): Promise<DesktopTextDocumentImport> {
     void sourcePath
     void requestId
+    void _parserMode
     return this.unavailable()
   }
 

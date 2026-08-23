@@ -16,6 +16,7 @@ from openkb import __version__
 from openkb import desktop_page_tree as page_tree_runtime
 from openkb import desktop_page_tree_store as page_tree_store
 from openkb.desktop_document_parsers import parse_structured_document
+from openkb.desktop_document_usability import require_usable_document_ir
 from openkb.desktop_document_versions import DesktopDocumentVersionService
 from openkb.desktop_import_artifacts import (
     DesktopImportError,
@@ -36,6 +37,7 @@ from openkb.desktop_import_artifacts import (
     validate_text_source,
 )
 from openkb.desktop_import_deduplication import normalized_body_sha256
+from openkb.desktop_import_failures import DIRECT_IMPORT_QUARANTINE_CODES
 from openkb.desktop_import_model_ledger import DesktopImportModelLedger
 from openkb.desktop_import_quarantine import DesktopImportQuarantineStore
 from openkb.desktop_import_recovery import DesktopImportRecoveryStore
@@ -81,16 +83,11 @@ from openkb.desktop_okf_projection import (
     discard_okf_projection_staging,
     stage_okf_projection_in,
 )
+from openkb.desktop_parser_runtime import begin_parser_warmup, require_parser_mode
 from openkb.locks import kb_ingest_lock
 
 StageProgressCallback = Callable[[dict[str, object]], None]
 _CONTROL_CODES = {"import_paused", "import_cancelled"}
-_DIRECT_QUARANTINE_CODES = {
-    "legacy_office_parse_failed",
-    "legacy_office_runtime_unavailable",
-    "model_configuration_invalid",
-    "model_response_invalid",
-}
 logger = logging.getLogger(__name__)
 
 
@@ -127,6 +124,7 @@ class DesktopTextImportService:
         control: DesktopImportControl | None = None,
         model_gateway: DesktopModelGateway | None = None,
         require_model_analysis: bool = False,
+        parser_mode: str = "auto",
     ) -> None:
         self._store = DesktopImportStore(kb_dir, on_stage_progress=on_stage_progress)
         self._model_ledger = DesktopImportModelLedger(kb_dir)
@@ -138,6 +136,7 @@ class DesktopTextImportService:
         self._control = control or DesktopImportControl()
         self._model_gateway = model_gateway
         self._require_model_analysis = require_model_analysis
+        self._parser_mode = require_parser_mode(parser_mode)
 
     def import_text(self, source_path: Path) -> DesktopTextImportResult:
         """Create and execute a brand-new supported document Import Job."""
@@ -235,6 +234,7 @@ class DesktopTextImportService:
             "raw_asset" if self._completed(stages, "raw_asset") else self._next_stage(state, stages)
         )
         terminal_state_committed = False
+        parser_warmup = begin_parser_warmup(state.source)
         try:
             raw_bytes, text, source_format, asset_sha256, raw_path = self._raw_input(state, stages)
             stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
@@ -248,10 +248,17 @@ class DesktopTextImportService:
                     blocks = build_document_ir(text)
                     source_images = ()
                 else:
-                    parsed = parse_structured_document(state.source, raw_bytes)
+                    if parser_warmup is not None:
+                        parser_warmup.wait()
+                    parsed = parse_structured_document(
+                        state.source,
+                        raw_bytes,
+                        parser_mode=self._parser_mode,
+                    )
                     blocks = parsed.blocks
                     source_images = parsed.source_images
                     self._store.write_source_images(source_images)
+                require_usable_document_ir(blocks)
                 self._store.set_stage(
                     state,
                     active_stage,
@@ -263,6 +270,7 @@ class DesktopTextImportService:
                 document_ir = self._checkpoint(state, "document_ir")
                 blocks = document_ir_from_checkpoint(document_ir)
                 source_images = source_images_from_checkpoint(document_ir)
+                require_usable_document_ir(blocks)
 
             stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
             normalized_body_hash = normalized_body_sha256(blocks)
@@ -497,7 +505,7 @@ class DesktopTextImportService:
             )
             raise DesktopImportError("document_quarantined", error.failure.reason) from error
         except DesktopImportError as error:
-            if error.code in _DIRECT_QUARANTINE_CODES:
+            if error.code in DIRECT_IMPORT_QUARANTINE_CODES:
                 self._quarantine.quarantine(
                     job_id=state.job_id,
                     stage_run_id=state.stage_ids[active_stage],

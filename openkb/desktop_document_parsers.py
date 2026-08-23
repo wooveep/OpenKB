@@ -12,6 +12,7 @@ from typing import cast
 from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree
 
+from openkb.desktop_document_usability import assess_document_ir
 from openkb.desktop_import_artifacts import (
     DesktopImportError,
     DocumentIRBlock,
@@ -40,13 +41,22 @@ _REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _NS = {"w": _W_NS, "r": _R_NS, "a": _A_NS, "rel": _REL_NS}
 
 
-def parse_structured_document(source: Path, raw_bytes: bytes) -> ParsedDocument:
+def parse_structured_document(
+    source: Path,
+    raw_bytes: bytes,
+    *,
+    parser_mode: str = "auto",
+) -> ParsedDocument:
     """Parse a structured Raw Asset directly into Document IR authority data."""
+    if parser_mode not in {"auto", "fast", "enhanced"}:
+        raise DesktopImportError("parser_mode_invalid", "Parser mode is invalid.")
     source_format = source_format_for_path(source)
     if source_format == "markdown":
         return _parse_markdown(source, decode_text(raw_bytes, source))
     if source_format == "docx":
-        return _parse_docx(source, raw_bytes)
+        return _maybe_enhance_office(
+            _parse_docx(source, raw_bytes), source_format=source_format, parser_mode=parser_mode
+        )
     if source_format in {"doc", "ppt"}:
         from openkb.desktop_legacy_office_parsers import parse_legacy_office_document
 
@@ -58,14 +68,34 @@ def parse_structured_document(source: Path, raw_bytes: bytes) -> ParsedDocument:
     if source_format == "pptx":
         from openkb.desktop_presentation_parsers import parse_presentation_document
 
-        return parse_presentation_document(source, raw_bytes)
+        return _maybe_enhance_office(
+            parse_presentation_document(source, raw_bytes),
+            source_format=source_format,
+            parser_mode=parser_mode,
+        )
     if source_format == "pdf":
         from openkb.desktop_pdf_parsers import parse_pdf_document
 
-        return parse_pdf_document(source, raw_bytes)
+        return parse_pdf_document(source, raw_bytes, parser_mode=parser_mode)
     raise DesktopImportError(
         "unsupported_import_format", f"No structured parser is registered for {source.name}."
     )
+
+
+def _maybe_enhance_office(
+    parsed: ParsedDocument,
+    *,
+    source_format: str,
+    parser_mode: str,
+) -> ParsedDocument:
+    if parser_mode == "fast":
+        return parsed
+    report = assess_document_ir(parsed.blocks, minimum_text_characters=16)
+    if parser_mode == "auto" and report.usable:
+        return parsed
+    from openkb.desktop_office_ocr import enhance_office_document
+
+    return enhance_office_document(parsed, source_format=source_format)
 
 
 def analysis_text(blocks: tuple[DocumentIRBlock, ...]) -> str:

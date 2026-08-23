@@ -144,7 +144,9 @@ def test_engine_reports_handshake_health_events_command_and_cancel_round_trip():
     frames = _decode_frames(output.getvalue())
     responses = {frame["id"]: frame for frame in frames if "id" in frame}
     assert responses["handshake"]["result"] == {"protocol_version": 1, "engine_version": "test"}
-    assert responses["health"]["result"] == {"status": "ready", "protocol_version": 1}
+    assert responses["health"]["result"]["status"] == "ready"
+    assert responses["health"]["result"]["protocol_version"] == 1
+    assert "native_office" in responses["health"]["result"]["parser_readiness"]
     assert responses["active"]["result"] == {"knowledge_base": None}
     assert responses["cancel"]["result"] == {"cancelled": False, "request_id": "not-running"}
     assert any(

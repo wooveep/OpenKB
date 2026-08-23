@@ -43,6 +43,13 @@
       "version": "引擎 {{version}}",
       "protocol": "桥接协议 {{version}}",
       "eventSequence": "事件 {{sequence}}",
+      "parsers": "文档解析器",
+      "parserStates": {
+        "not_loaded": "按需启动",
+        "initializing": "初始化中",
+        "ready": "已就绪",
+        "unavailable": "不可用"
+      },
       "retry": "重试引擎",
       "openLogs": "打开日志",
       "exit": "退出 OpenKB",

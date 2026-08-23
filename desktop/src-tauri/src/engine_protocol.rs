@@ -143,6 +143,7 @@ impl EngineSupervisor {
         Ok(EngineHealth {
             status: wire.status,
             protocol_version: wire.protocol_version,
+            parser_readiness: wire.parser_readiness,
         })
     }
 
@@ -218,12 +219,13 @@ impl EngineSupervisor {
     pub fn import_text_document(
         &self,
         source_path: String,
+        parser_mode: Option<String>,
         request_id: String,
     ) -> BridgeResult<TextDocumentImportResult> {
         self.ensure_started()?;
         let value = self.request_started_with_wait(
             "workbench.import_text_document",
-            json!({ "source_path": source_path }),
+            json!({ "source_path": source_path, "parser_mode": parser_mode }),
             Some(request_id),
             Some(IMPORT_REQUEST_TIMEOUT),
         )?;

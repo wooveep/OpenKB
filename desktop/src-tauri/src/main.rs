@@ -180,11 +180,12 @@ async fn desktop_inspect_import_sources(
 async fn desktop_import_text_document(
     state: State<'_, DesktopState>,
     source_path: String,
+    parser_mode: Option<String>,
     request_id: String,
 ) -> Result<TextDocumentImportResult, BridgeError> {
     let engine = Arc::clone(&state.engine);
     tauri::async_runtime::spawn_blocking(move || {
-        engine.import_text_document(source_path, request_id)
+        engine.import_text_document(source_path, parser_mode, request_id)
     })
     .await
     .map_err(|error| BridgeError {

@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
 #[path = "engine_wire_catalog.rs"]
@@ -72,6 +73,17 @@ pub struct BridgeHandshake {
 pub struct EngineHealth {
     pub status: EngineHealthStatus,
     pub protocol_version: u32,
+    pub parser_readiness: BTreeMap<String, ParserReadiness>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParserReadiness {
+    pub family: String,
+    pub formats: Vec<String>,
+    pub resource_state: String,
+    pub runtime_state: String,
+    pub diagnostic: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -568,6 +580,8 @@ pub(crate) struct EngineHandshake {
 pub(crate) struct EngineHealthWire {
     pub(crate) status: EngineHealthStatus,
     pub(crate) protocol_version: u32,
+    #[serde(default)]
+    pub(crate) parser_readiness: BTreeMap<String, ParserReadiness>,
 }
 
 pub(crate) fn parse_response(message: Value) -> BridgeResult<Value> {

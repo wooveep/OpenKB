@@ -49,6 +49,7 @@ def dispatch_import_request(
                     "The Active Knowledge Base changed before the import began.",
                 )
             server._begin_workspace_mutation(request, cancel_event)
+            parser_mode = _parser_mode(request.params.get("parser_mode"))
             if request.method == "workbench.import_text_document":
                 return run_import(
                     server,
@@ -56,6 +57,7 @@ def dispatch_import_request(
                     request_id=str(request.request_id),
                     source_path=Path(_required_path_param(request, "source_path")),
                     control=lease.control,
+                    parser_mode=parser_mode,
                 )
             if request.method == "workbench.resume_import_job":
                 return run_import(
@@ -64,6 +66,7 @@ def dispatch_import_request(
                     request_id=str(request.request_id),
                     job_id=_required_string_param(request, "job_id"),
                     control=lease.control,
+                    parser_mode=parser_mode,
                 )
             return run_import(
                 server,
@@ -72,6 +75,7 @@ def dispatch_import_request(
                 job_id=_required_string_param(request, "job_id"),
                 recovery_override=_recovery_override_param(request),
                 control=lease.control,
+                parser_mode=parser_mode,
             )
 
 
@@ -84,6 +88,7 @@ def run_import(
     job_id: str | None = None,
     recovery_override: DesktopRecoveryOverride | None = None,
     control: DesktopImportControl | None = None,
+    parser_mode: str = "auto",
 ) -> dict[str, object]:
     """Run one job while its durable state, not this worker, remains authoritative."""
     from openkb.desktop_engine import DesktopRequestError
@@ -95,6 +100,7 @@ def run_import(
         on_stage_progress=lambda data: _record_import_stage(server, request_id, control, data),
         model_gateway=server._model_gateway_factory(kb_dir, recovery_override),
         require_model_analysis=True,
+        parser_mode=parser_mode,
     )
     try:
         if source_path is not None:
@@ -198,3 +204,15 @@ def _release_import_control(server: DesktopEngineServer, control: DesktopImportC
         for job_id, active_control in tuple(server._import_controls.items()):
             if active_control is control:
                 del server._import_controls[job_id]
+
+
+def _parser_mode(value: object) -> str:
+    if value is None:
+        return "auto"
+    if isinstance(value, str) and value in {"auto", "fast", "enhanced"}:
+        return value
+    from openkb.desktop_engine import DesktopRequestError
+
+    raise DesktopRequestError(
+        "invalid_params", "parser_mode must be auto, fast, or enhanced."
+    )

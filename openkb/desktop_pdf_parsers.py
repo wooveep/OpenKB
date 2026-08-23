@@ -34,6 +34,36 @@ _OCR_RENDER_SCALE = 2
 pymupdf.no_recommend_layout()
 
 
+def warm_pdf_ocr_runtime() -> None:
+    """Construct and cache the bundled OCR engine without parsing a document."""
+    _ocr_engine()
+
+
+def ocr_image_text(content: bytes) -> str:
+    """Extract ordered text from one retained image with the shared cached OCR engine."""
+    try:
+        result, _ = _ocr_engine()(content)
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise DesktopImportError(
+            "enhanced_image_parse_failed",
+            "Enhanced image parsing failed.",
+        ) from error
+    if not result:
+        return ""
+    values: list[tuple[float, float, str]] = []
+    for item in result:
+        try:
+            box, text, _confidence = item
+            x = min(float(point[0]) for point in box)
+            y = min(float(point[1]) for point in box)
+        except (TypeError, ValueError, IndexError):
+            continue
+        normalized = " ".join(str(text).split())
+        if normalized:
+            values.append((y, x, normalized))
+    return "\n".join(value[2] for value in sorted(values))
+
+
 @dataclass(frozen=True)
 class _PageTextSnapshot:
     page_index: int
@@ -62,7 +92,12 @@ class _OcrTable:
     line_indexes: tuple[int, ...]
 
 
-def parse_pdf_document(source: Path, raw_bytes: bytes) -> ParsedDocument:
+def parse_pdf_document(
+    source: Path,
+    raw_bytes: bytes,
+    *,
+    parser_mode: str = "auto",
+) -> ParsedDocument:
     """Parse a PDF Raw Asset into page-aware Document IR and source images."""
     document = _open_pdf(source, raw_bytes)
     try:
@@ -74,7 +109,15 @@ def parse_pdf_document(source: Path, raw_bytes: bytes) -> ParsedDocument:
             _page_text_snapshot(page, page_index)
             for page_index, page in enumerate(document, start=1)
         )
-        parser_route = _parser_route(snapshots)
+        if parser_mode not in {"auto", "fast", "enhanced"}:
+            raise DesktopImportError("parser_mode_invalid", "Parser mode is invalid.")
+        parser_route = (
+            _FAST_ROUTE
+            if parser_mode == "fast"
+            else _ENHANCED_ROUTE
+            if parser_mode == "enhanced"
+            else _parser_route(snapshots)
+        )
         ocr_engine = _ocr_engine() if parser_route == _ENHANCED_ROUTE else None
         blocks: list[DocumentIRBlock] = []
         images: list[SourceImage] = []

@@ -27,6 +27,15 @@ export interface DesktopBridgeHandshake {
 export interface DesktopEngineHealth {
   status: "ready" | "starting" | "unavailable"
   protocolVersion: number
+  parserReadiness?: Record<string, DesktopParserReadiness>
+}
+
+export interface DesktopParserReadiness {
+  family: string
+  formats: string[]
+  resourceState: "resources_ready" | "unavailable"
+  runtimeState: "not_loaded" | "initializing" | "ready" | "unavailable"
+  diagnostic: string
 }
 
 export type DesktopBridgeEvent =
@@ -696,7 +705,7 @@ export interface DesktopBridge {
     page?: number,
     focusLocator?: Record<string, unknown>,
   ): Promise<DesktopRawDocument>
-  importTextDocument(sourcePath: string, requestId: string): Promise<DesktopTextDocumentImport>
+  importTextDocument(sourcePath: string, requestId: string, parserMode?: "auto" | "fast" | "enhanced"): Promise<DesktopTextDocumentImport>
   importJobs(): Promise<DesktopImportJobs>
   knowledgeReanalysis(): Promise<DesktopKnowledgeReanalysisOverview>
   startKnowledgeReanalysis(

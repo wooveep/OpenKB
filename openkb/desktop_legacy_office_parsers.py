@@ -9,6 +9,7 @@ modern OOXML counterparts.
 from __future__ import annotations
 
 import atexit
+import importlib.util
 import os
 import socket
 import subprocess
@@ -92,6 +93,20 @@ class _LegacyOfficeTikaRuntime:
 
 
 _TIKA_RUNTIME = _LegacyOfficeTikaRuntime()
+
+
+def legacy_office_resources_available() -> bool:
+    """Check packaged resource paths without starting Java or importing Tika."""
+    try:
+        _runtime_paths()
+    except DesktopImportError:
+        return False
+    return importlib.util.find_spec("tika") is not None
+
+
+def prewarm_legacy_office_runtime(source: Path | None = None) -> None:
+    """Start the reusable private runtime for an imminent DOC/PPT parse."""
+    _TIKA_RUNTIME.endpoint(source or Path("legacy-office.doc"))
 
 
 def parse_legacy_office_document(

@@ -43,6 +43,13 @@
       "version": "Engine {{version}}",
       "protocol": "Bridge protocol {{version}}",
       "eventSequence": "Event {{sequence}}",
+      "parsers": "Document parsers",
+      "parserStates": {
+        "not_loaded": "available on demand",
+        "initializing": "initializing",
+        "ready": "ready",
+        "unavailable": "unavailable"
+      },
       "retry": "Retry Engine",
       "openLogs": "Open logs",
       "exit": "Exit OpenKB",
