@@ -82,8 +82,8 @@ export function DesktopWorkbenchShell({
     <div className="min-h-screen bg-background text-foreground" data-testid="desktop-workbench">
       <header className="flex min-h-14 items-center justify-between gap-3 border-b border-border/70 bg-background/90 px-3 backdrop-blur md:px-4">
         <div className="flex min-w-0 items-center gap-2">
-          <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground shadow-sm">
-            <BookOpen className="size-4" />
+          <div className="grid size-8 shrink-0 place-items-center overflow-hidden rounded-lg shadow-sm" title="OpenKB">
+            <img src="/favicon.svg" alt="" className="size-8" />
           </div>
           <button
             type="button"

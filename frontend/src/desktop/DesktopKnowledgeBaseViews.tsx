@@ -1,4 +1,4 @@
-import { BookOpen, FolderOpen, Plus } from "lucide-react"
+import { FolderOpen, Plus } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
 import { DesktopConversationPanel } from "./DesktopConversationPanel"
@@ -24,7 +24,9 @@ export function EmptyKnowledgeBase({ onCreate, onOpen }: { onCreate: () => void;
   const { t } = useTranslation("common")
   return (
     <section className="mx-auto flex min-h-80 max-w-2xl flex-col justify-center rounded-apple-lg border border-border/70 bg-muted/20 p-8 shadow-sm">
-      <span className="grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary"><BookOpen className="size-6" /></span>
+      <span className="grid size-12 place-items-center rounded-2xl bg-primary/10">
+        <img src="/openkb-mark.svg" alt="" className="size-9" />
+      </span>
       <h1 className="mt-5 text-2xl font-semibold tracking-tight">{t("desktop.knowledgeBases.emptyTitle")}</h1>
       <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">{t("desktop.knowledgeBases.emptyDescription")}</p>
       <div className="mt-6 flex flex-wrap gap-3">

@@ -1,14 +1,10 @@
-import { createContext, useContext, useState, type ReactNode } from "react"
+import { useState, type ReactNode } from "react"
 import { Languages } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import i18n, { type Language } from "@/lib/i18n"
+import { LanguageContext, useLanguage } from "@/lib/language-context"
 
 const KEY = "openkb_lang"
-
-const LanguageCtx = createContext<{
-  language: Language
-  setLanguage: (l: Language) => void
-} | null>(null)
 
 /** Initial language: a stored choice wins; else browser/OS (anything starting
  * "zh" → zh, else en — `en` is the only non-Chinese bucket for the 2-locale
@@ -34,13 +30,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     void i18n.changeLanguage(l) // re-renders every mounted useTranslation() consumer
   }
 
-  return <LanguageCtx.Provider value={{ language, setLanguage }}>{children}</LanguageCtx.Provider>
-}
-
-export function useLanguage() {
-  const ctx = useContext(LanguageCtx)
-  if (!ctx) throw new Error("useLanguage must be used within LanguageProvider")
-  return ctx
+  return <LanguageContext.Provider value={{ language, setLanguage }}>{children}</LanguageContext.Provider>
 }
 
 /** Language toggle icon button (toggles between zh and en). */

@@ -43,3 +43,8 @@ Entity, or source-backed claim is still a successful Knowledge Analysis. It
 publishes the document for Evidence, FTS, Structure Lexical, and PageTree
 retrieval without manufacturing knowledge merely to satisfy a non-empty output
 expectation.
+
+Publication is atomic: every Knowledge Analysis Batch and the Knowledge
+Analysis Merge must validate before one publication transaction makes the
+Document Version Available Knowledge. Failed, interrupted, or Awaiting Model
+Configuration work is never partially searchable.

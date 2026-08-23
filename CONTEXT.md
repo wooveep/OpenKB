@@ -58,7 +58,8 @@ _Avoid_: installer, development environment
 
 **Diagnostic Bundle**:
 A user-reviewed, explicitly exported support artifact containing sanitized
-runtime metadata and logs but no source content, model payloads, or credentials.
+runtime metadata and logs but no source content, Prompt Contract snapshots,
+model outputs, raw reasoning, or credentials.
 _Avoid_: telemetry, automatic crash report
 
 **Application Log**:
@@ -76,6 +77,19 @@ A user-initiated, recoverable processing run that brings one or more source
 documents into a knowledge base and reports the state of each processing
 stage.
 _Avoid_: upload
+
+**Interrupted Import Job**:
+An Import Job stopped by user cancellation or application shutdown while its
+completed Stage Runs and Knowledge Analysis Batches remain recoverable. It is
+not quarantined and resumes only through an explicit user action.
+_Avoid_: failed import, automatic startup resume
+
+**Awaiting Model Configuration**:
+The recoverable Import Job state reached after usable DocumentIR is available
+but mandatory Knowledge Analysis cannot start because its Analysis Model is not
+configured or available. The document remains unpublished until explicit
+resume succeeds.
+_Avoid_: Quarantined Document, Available Knowledge
 
 **Import Batch**:
 A set of Import Jobs submitted together for progress tracking, not a boundary
@@ -152,16 +166,44 @@ Document IR plus independently stored Source Images and parser diagnostics.
 Parsing and evidence chunking are separate stages.
 _Avoid_: universal converter
 
+**Parser Readiness Check**:
+A lightweight startup verification that required packaged parser assets are
+present without loading heavyweight parser engines. It reports Parser Runtime
+State independently from import and model status.
+_Avoid_: parser prewarm, parser startup
+
+**Parser Runtime State**:
+The observable lifecycle of a heavyweight parser capability: `resources_ready`,
+`not_loaded`, `initializing`, `ready`, or `unavailable`, with a stable diagnostic
+code when unavailable.
+_Avoid_: Knowledge Analysis status, model timeout
+
+**DocumentIR Usability Gate**:
+The deterministic validation of extracted text quantity and quality, source
+locators, and structural integrity before evidence construction or any Model
+Call. An insufficient fast result selects an enhanced route when available;
+an insufficient final result requires manual recovery.
+_Avoid_: LLM quality check, non-empty string check
+
 **Enhanced PDF Parsing**:
 The bundled CPU path that adds OCR, document-layout recognition, and table
-structure recognition when fast text extraction is insufficient. It is a
-deterministic parser capability, not an Embedding or generative model.
+structure recognition when fast text extraction is empty, garbled, or sparse
+on at least half of the pages. It is a deterministic parser capability, not an
+Embedding or generative model.
 _Avoid_: automatic LLM analysis
+
+**Parser Route Override**:
+A manual recovery choice that forces the fast or enhanced parser route for one
+Import Job without changing the knowledge base default. Enhanced DOCX/PPTX
+recovery may OCR embedded images when direct document text is insufficient.
+_Avoid_: global parser setting, automatic OCR of every image
 
 **Legacy Office Compatibility**:
 Best-effort plain-text and metadata extraction for binary `.doc` and `.ppt`
 assets through packaged python-tika, a private Tika Server JAR, and a bundled
-Java runtime. It does not promise images, tables, pages, slides, or layout.
+Java runtime. Preflight may initialize that runtime alongside Raw Asset work;
+once loaded it is reused until Engine exit. It does not promise images, tables,
+pages, slides, or layout.
 _Avoid_: high-fidelity Office parsing
 
 **Document Version**:
@@ -197,19 +239,121 @@ item and therefore requires a prompt or Review Queue decision.
 _Avoid_: automatic duplicate
 
 **Model Configuration**:
-The Desktop Knowledge Base-scoped API Base URL, API Key, and model selection
-used for its Model Calls, entered directly in the Desktop Workbench.
+The Desktop Knowledge Base-scoped API Base URL, API Key, default model, and
+optional role-specific model selections and capability overrides used for its
+Model Calls. It contains no model response-timeout setting.
 _Avoid_: environment configuration, credential reference
 
+**Analysis Model**:
+The optional Model Configuration selection for `knowledge_analysis`,
+`knowledge_analysis_batch`, `knowledge_analysis_merge`,
+`page_tree_enrichment`, `knowledge_graph_extraction`, and `retrieval_plan`;
+when absent, those structured operations use the default model.
+_Avoid_: analysis provider, extraction credential
+
+**Analysis Concurrency**:
+The Desktop Knowledge Base limit on simultaneously active background Analysis
+Model Attempts. It defaults to two and is adjustable from one through four as
+an advanced Model Configuration setting; interactive retrieval planning uses a
+reserved Interactive Model Lane instead.
+_Avoid_: unbounded parallelism, import batch size
+
+**Answer Model**:
+The optional Model Configuration selection used only for `grounded_answer`;
+when absent, Grounded Answer generation uses the default model.
+_Avoid_: chat provider, answer credential
+
+**Model Capability Profile**:
+The context capacity, native structured-output support, and optional reasoning
+setting resolved for a configured model from known metadata and advanced user
+overrides. Unknown models use a 16K-token context assumption; reasoning defaults
+to provider behavior and unsupported reasoning settings are omitted.
+_Avoid_: Prompt Contract, provider promise
+
+**Model Capability Check**:
+A cancellable, user-initiated check of each distinct configured model. Analysis
+Models must demonstrate schema-valid structured output and Answer Models must
+demonstrate streaming; generated check content is not persisted.
+_Avoid_: TCP probe, document analysis, health telemetry
+
+**Interactive Model Lane**:
+At least one high-priority model execution slot reserved for an interactive
+`retrieval_plan` and `grounded_answer` pipeline so background imports cannot
+starve questions over already Available Knowledge.
+_Avoid_: background Analysis Concurrency, unlimited answer concurrency
+
+**Prompt Contract**:
+The code-owned, versioned combination of model instructions, input shape,
+output schema, validation rules, and bounded generation policy for one operation.
+Knowledge Analysis Plans retain its canonical snapshot and digest for recovery.
+_Avoid_: AGENTS.md prompt, user prompt override
+
+**Structured Output Repair**:
+The single Analysis Model call allowed after deterministic normalization and
+local schema validation cannot make a structured result valid. It receives the
+validation errors and evidence-bound source material; a second invalid result
+ends automatic recovery.
+_Avoid_: transport retry, unbounded self-correction
+
 **Model Call**:
-A logical request for one OpenKB analysis result from a configured model,
-bounded by one response deadline and potentially fulfilled by several Model
-Attempts.
+A logical request for one OpenKB result from a configured model, potentially
+fulfilled by several Model Attempts. It has no OpenKB-imposed total, read,
+thinking, or generation deadline; elapsed time alone never ends it.
 _Avoid_: API request
 
 **Model Attempt**:
-One provider request issued in pursuit of a Model Call.
+One provider request issued in pursuit of a Model Call. It ends only with a
+valid provider response, an explicit Provider Failure, a Network Failure, user
+cancellation, or application shutdown. Cancellation is best effort and does
+not guarantee that a provider without cancellation support stops computing.
 _Avoid_: retry
+
+**Model Retry Policy**:
+At most three Model Attempts for one Model Call, with `Retry-After` or bounded
+backoff between attempts, and no enclosing time budget. Only explicit transient
+Provider Failures and Network Failures are retryable; authentication, input,
+permission, and other permanent failures stop immediately.
+_Avoid_: deadline retry, retry forever
+
+**Awaiting Model Result**:
+The nonterminal Model Attempt state after request dispatch and before a terminal
+provider, transport, cancellation, or shutdown event. It means OpenKB is still
+waiting, not that it can observe provider-side reasoning or token generation.
+The UI reports this state with elapsed wait, batch progress, attempt count, and
+a cancellation action.
+_Avoid_: model thinking, hung model, model timeout
+
+**Model Output Activity**:
+An observed response chunk from a streaming Model Attempt. Structured output is
+buffered for final validation while the UI may report that output is arriving;
+raw chunks are not displayed or persisted, and activity never controls timeout.
+_Avoid_: reasoning progress, validated result, heartbeat deadline
+
+**Long Wait Advisory**:
+A nonterminal notice shown after a Model Attempt has waited longer than the
+greater of five minutes or twice that role/model's local historical P95. It
+offers cancellation but never fails or retries the attempt.
+_Avoid_: warning timeout, model deadline
+
+**Model Usage Record**:
+The local per-call record of role, model, IDs, batch, queue/connect/first-output
+and total timing, classified result, call count, and provider-reported tokens.
+Missing token counts are visibly estimated, and currency is shown only when the
+user configures pricing.
+_Avoid_: source telemetry, inferred provider bill
+
+**Provider Failure**:
+An explicit error returned by the model API, including a provider-declared
+timeout such as an HTTP 408 or 504. It ends the current Model Attempt but is not
+an OpenKB response timeout.
+_Avoid_: model deadline exceeded
+
+**Network Failure**:
+A failure to complete DNS/TCP/TLS connection establishment within 30 seconds,
+a connection loss, or another explicit transport error. Once the request is
+sent, OpenKB applies no first-byte, read, or total-response timeout; mere silence
+while awaiting a result is not a Network Failure.
+_Avoid_: model response timeout
 
 **Knowledge Analysis**:
 The mandatory, versioned Model Analysis result that describes one imported
@@ -218,9 +362,26 @@ that Document Version may be published.
 _Avoid_: provider connection test, graph extraction, PageTree Enrichment
 
 **Knowledge Analysis Batch**:
-A recoverable analysis checkpoint for one natural DocumentIR section group
-whose completed result is reused when the containing Knowledge Analysis resumes.
+A recoverable, token-budgeted analysis checkpoint for one group of natural
+DocumentIR sections. Its validated result is reused when the containing
+Knowledge Analysis resumes.
 _Avoid_: Import Batch, whole-document retry
+
+**Knowledge Analysis Plan**:
+The immutable execution manifest created when a Knowledge Analysis starts. It
+pins the DocumentIR digest, Analysis Model, Prompt Contract, input and output
+budgets, natural-section batch boundaries, and merge topology so recovery does
+not mix incompatible results. For a model with unknown capacity, it assumes a
+16K-token context and allows approximately 8K tokens of document input per
+batch, reserving the remainder for instructions and output.
+_Avoid_: latest model settings, mutable batch queue
+
+**Knowledge Analysis Merge**:
+The checkpointed document-level reduction of completed Knowledge Analysis
+Batches. It deterministically combines identical entities, aliases, tags,
+claims, and evidence links, then uses token-bounded hierarchical Model Calls
+only for document summaries and unresolved conflicts.
+_Avoid_: one giant merge prompt, concatenation
 
 **Outdated Knowledge Analysis**:
 A still-usable Knowledge Analysis produced by an older analysis schema, prompt,
@@ -241,6 +402,13 @@ _Avoid_: Missing Source Candidate, invalid migration
 An independently tracked execution of one named processing stage within an
 Import Job.
 _Avoid_: task
+
+**Import Progress**:
+The ordered status of preflight, Raw Asset, parser initialization, DocumentIR,
+Evidence, Knowledge Analysis Plan, batches, merge, and publication Stage Runs.
+Batch progress is based only on completed checkpoints; elapsed time never
+creates a synthetic completion percentage.
+_Avoid_: estimated percent, generic analyzing state
 
 **Conversation**:
 A persisted, ordered exchange of user questions and Grounded Answers within
@@ -488,5 +656,7 @@ _Avoid_: skipped document
 
 **Recovery Override**:
 A configuration snapshot selected for one manual recovery of a Quarantined
-Document that does not modify the knowledge base's default configuration.
+Document that does not modify the knowledge base's default configuration. It
+may select model capabilities or a Parser Route Override but cannot introduce a
+model response deadline.
 _Avoid_: knowledge-base setting

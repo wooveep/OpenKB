@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none">
+  <title>OpenKB social preview card</title>
+  <defs>
+    <linearGradient id="background" x1="70" y1="20" x2="1120" y2="650" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#173B86"/>
+      <stop offset="0.46" stop-color="#0A1B42"/>
+      <stop offset="1" stop-color="#050A18"/>
+    </linearGradient>
+    <radialGradient id="cyan-glow" cx="0" cy="0" r="1" gradientTransform="translate(230 190) rotate(53) scale(470 520)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5FC4CA" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#5FC4CA" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="violet-glow" cx="0" cy="0" r="1" gradientTransform="translate(1040 540) rotate(-137) scale(440 540)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6E8CDA" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#6E8CDA" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" rx="36" fill="url(#background)"/>
+  <rect width="1200" height="630" rx="36" fill="url(#cyan-glow)"/>
+  <rect width="1200" height="630" rx="36" fill="url(#violet-glow)"/>
+  <circle cx="1098" cy="-34" r="312" stroke="white" stroke-opacity="0.04" stroke-width="78"/>
+  <circle cx="1132" cy="678" r="250" stroke="#6D67FF" stroke-opacity="0.07" stroke-width="72"/>
+
+  <image href="openkb-app-icon.svg" x="62" y="103" width="424" height="424"/>
+  <image href="openkb-logo-horizontal-light.svg" x="508" y="150" width="600" height="186"/>
+  <text x="532" y="383" fill="#F7FAFF" font-family="Noto Sans, Inter, sans-serif" font-size="32" font-weight="600" letter-spacing="-0.4">Local knowledge. Grounded answers.</text>
+  <text x="534" y="431" fill="#B7C6E6" font-family="Noto Sans, Inter, sans-serif" font-size="20">A private desktop workbench for evidence-backed knowledge.</text>
+  <g transform="translate(534 480)">
+    <circle cx="8" cy="8" r="8" fill="#F0B654"/>
+    <text x="30" y="15" fill="#D8E4FA" font-family="Noto Sans, Inter, sans-serif" font-size="16" font-weight="600" letter-spacing="0.8">DOCUMENTS  ·  RETRIEVAL  ·  KNOWLEDGE GRAPH</text>
+  </g>
+</svg>
