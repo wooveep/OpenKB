@@ -41,6 +41,8 @@ jobs:
       - name: Test portable process-tree traversal
         shell: pwsh
         run: ./desktop/scripts/Test-PortableProcessTree.ps1
+      - name: Test Desktop bridge wire contracts
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
       - name: Build portable package
         shell: pwsh
         run: >-

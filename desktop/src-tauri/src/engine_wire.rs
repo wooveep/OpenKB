@@ -94,7 +94,7 @@ pub struct EngineHealth {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
 pub struct ParserReadiness {
     pub family: ParserFamily,
     pub formats: Vec<String>,

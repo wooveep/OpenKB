@@ -65,8 +65,19 @@ fn desktop_bridge_handshake(
 }
 
 #[tauri::command]
-fn desktop_engine_health(state: State<'_, DesktopState>) -> Result<EngineHealth, BridgeError> {
-    state.engine.health()
+fn desktop_engine_health(
+    app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<EngineHealth, BridgeError> {
+    state.engine.health().inspect_err(|error| {
+        desktop_runtime::append_application_log(
+            &app,
+            &format!(
+                "OpenKB Desktop Engine health check failed: {}: {}",
+                error.code, error.message
+            ),
+        );
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]

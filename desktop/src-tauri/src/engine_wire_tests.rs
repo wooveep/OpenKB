@@ -1,7 +1,46 @@
 use super::{
-    BridgeEvent, EngineEvent, GroundedAnswer, KnowledgeAnalysisPhase, KnowledgeAnalysisProgress,
+    BridgeEvent, EngineEvent, EngineHealthWire, GroundedAnswer, KnowledgeAnalysisPhase,
+    KnowledgeAnalysisProgress, ParserResourceState, ParserRuntimeState,
 };
 use serde_json::json;
+
+#[test]
+fn engine_health_accepts_python_parser_readiness_fields() {
+    let health: EngineHealthWire = serde_json::from_value(json!({
+        "status": "ready",
+        "protocol_version": 1,
+        "parser_readiness": {
+            "pdf_ocr": {
+                "family": "pdf_ocr",
+                "formats": ["pdf"],
+                "resource_state": "resources_ready",
+                "runtime_state": "not_loaded",
+                "diagnostic": "parser_resources_ready"
+            }
+        }
+    }))
+    .expect("Engine health should accept Python snake_case parser readiness fields");
+
+    let readiness = health
+        .parser_readiness
+        .get("pdf_ocr")
+        .expect("PDF OCR readiness should be present");
+    assert!(matches!(
+        readiness.resource_state,
+        ParserResourceState::ResourcesReady
+    ));
+    assert!(matches!(
+        readiness.runtime_state,
+        ParserRuntimeState::NotLoaded
+    ));
+
+    let frontend = serde_json::to_value(readiness)
+        .expect("Parser readiness should serialize for the frontend");
+    assert_eq!(frontend["resourceState"], "resources_ready");
+    assert_eq!(frontend["runtimeState"], "not_loaded");
+    assert!(frontend.get("resource_state").is_none());
+    assert!(frontend.get("runtime_state").is_none());
+}
 
 #[test]
 fn knowledge_analysis_progress_accepts_python_snake_case_fields() {
