@@ -14,6 +14,7 @@ from openkb.desktop_import_types import DesktopRecoveryOverride
 if TYPE_CHECKING:
     from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
 
+
 def dispatch_import_request(
     server: DesktopEngineServer,
     request: DesktopRequest,
@@ -46,33 +47,25 @@ def dispatch_import_request(
                 )
             server._begin_workspace_mutation(request, cancel_event)
             parser_mode = _parser_mode(request.params.get("parser_mode"))
+            source_path: Path | None = None
+            job_id: str | None = None
+            recovery_override: DesktopRecoveryOverride | None = None
             if request.method == "workbench.import_text_document":
-                return run_import(
-                    server,
-                    lease.kb_dir,
-                    request_id=str(request.request_id),
-                    source_path=Path(_required_path_param(request, "source_path")),
-                    control=lease.control,
-                    parser_mode=parser_mode,
-                )
-            if request.method == "workbench.resume_import_job":
-                return run_import(
-                    server,
-                    lease.kb_dir,
-                    request_id=str(request.request_id),
-                    job_id=_required_string_param(request, "job_id"),
-                    control=lease.control,
-                    parser_mode=parser_mode,
-                )
-            return run_import(
-                server,
-                lease.kb_dir,
-                request_id=str(request.request_id),
-                job_id=_required_string_param(request, "job_id"),
-                recovery_override=_recovery_override_param(request),
-                control=lease.control,
-                parser_mode=parser_mode,
-            )
+                source_path = Path(_required_path_param(request, "source_path"))
+            else:
+                job_id = _required_string_param(request, "job_id")
+                if request.method != "workbench.resume_import_job":
+                    recovery_override = _recovery_override_param(request)
+        return run_import(
+            server,
+            lease.kb_dir,
+            request_id=str(request.request_id),
+            source_path=source_path,
+            job_id=job_id,
+            recovery_override=recovery_override,
+            control=lease.control,
+            parser_mode=parser_mode,
+        )
 
 
 def run_import(
@@ -177,6 +170,4 @@ def _parser_mode(value: object) -> str:
         return value
     from openkb.desktop_engine import DesktopRequestError
 
-    raise DesktopRequestError(
-        "invalid_params", "parser_mode must be auto, fast, or enhanced."
-    )
+    raise DesktopRequestError("invalid_params", "parser_mode must be auto, fast, or enhanced.")

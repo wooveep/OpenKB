@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -13,13 +14,25 @@ from openkb.desktop_import_artifacts import DocumentIRBlock
 from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_knowledge_analysis import (
     KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+    DesktopKnowledgeAnalysis,
     parse_knowledge_analysis,
 )
 from openkb.desktop_knowledge_analysis_batches import (
+    _run_hierarchical_description_merge,
     knowledge_analysis_merge_prompt,
     plan_knowledge_analysis_batches,
 )
-from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelTransportError
+from openkb.desktop_knowledge_analysis_plan import (
+    KnowledgeAnalysisPlan,
+    hierarchical_merge_topology,
+)
+from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
+from openkb.desktop_model_gateway import (
+    DesktopModelGateway,
+    DesktopModelResult,
+    DesktopModelTransportError,
+)
+from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
@@ -77,6 +90,127 @@ def test_batch_planner_preserves_natural_sections_until_one_section_exceeds_boun
         ["evidence-2", "evidence-3"],
         ["evidence-4", "evidence-5"],
     ]
+
+
+def test_one_document_dispatches_independent_analysis_batches_concurrently(
+    tmp_path: Path,
+) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "long.md"
+    _long_source(source)
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    lock = threading.Lock()
+    two_batches_started = threading.Event()
+    active_batch_calls = 0
+    peak_batch_calls = 0
+    started_batch_calls = 0
+
+    def transport(request, _timeout_seconds):
+        nonlocal active_batch_calls, peak_batch_calls, started_batch_calls
+        if request.operation == "knowledge_analysis_batch":
+            assert request.generation_parameters is not None
+            assert request.generation_parameters["max_tokens"] == 4_096
+            with lock:
+                active_batch_calls += 1
+                started_batch_calls += 1
+                peak_batch_calls = max(peak_batch_calls, active_batch_calls)
+                if started_batch_calls == 2:
+                    two_batches_started.set()
+            two_batches_started.wait(timeout=0.5)
+            with lock:
+                active_batch_calls -= 1
+            return _analysis("batch")
+        if request.operation == "knowledge_analysis_merge":
+            assert request.generation_parameters is not None
+            assert request.generation_parameters["max_tokens"] > 0
+            return _analysis("document")
+        raise AssertionError(request.operation)
+
+    gateway = DesktopModelGateway(transport)
+    gateway.analysis_concurrency = 2
+    imported = DesktopTextImportService(kb_dir, model_gateway=gateway).import_text(source)
+
+    assert imported.document.availability == "available"
+    assert started_batch_calls == 2
+    assert peak_batch_calls == 2
+
+
+def test_independent_description_merge_nodes_run_concurrently() -> None:
+    topology = hierarchical_merge_topology(8)
+    contracts = {
+        operation: prompt_contract_for(operation).snapshot()
+        for operation in (
+            "knowledge_analysis",
+            "knowledge_analysis_batch",
+            "knowledge_analysis_merge",
+            "structured_output_repair",
+        )
+    }
+    plan = KnowledgeAnalysisPlan(
+        document_ir_digest="digest",
+        provider="provider",
+        analysis_model="model",
+        capability_profile=DesktopModelCapabilityProfile(16_000, 8_000, False, True, False),
+        prompt_contract_snapshot={
+            "primary_operation": "knowledge_analysis_batch",
+            "contracts": contracts,
+        },
+        prompt_contract_digest="digest",
+        input_budget_tokens=8_000,
+        output_budget_tokens=4_096,
+        batches=(),
+        merge_topology=topology,
+    )
+    lock = threading.Lock()
+    both_started = threading.Event()
+    active = 0
+    peak = 0
+
+    class Store:
+        def merge_node_checkpoint(self, _job_id, _node_id):
+            return None
+
+        def start_merge_node(self, _job_id, _node_id):
+            return None
+
+        def complete_merge_node(self, _job_id, _node_id, _checkpoint):
+            return None
+
+        def fail_merge_node(self, _job_id, _node_id, _error_code):
+            return None
+
+    def analyze(request):
+        nonlocal active, peak
+        node_id = json.loads(request.content)["merge_node_id"]
+        if node_id.startswith("merge:0"):
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                if active == 2:
+                    both_started.set()
+            both_started.wait(timeout=0.5)
+            with lock:
+                active -= 1
+        return DesktopModelResult(
+            node_id,
+            json.dumps({"document_description": f"Description {node_id}"}),
+            1,
+        )
+
+    _run_hierarchical_description_merge(
+        store=Store(),
+        plan=plan,
+        job_id="job",
+        document_name="document",
+        analyze=analyze,
+        analyses=tuple(
+            DesktopKnowledgeAnalysis(f"Batch {ordinal}", (), ()) for ordinal in range(8)
+        ),
+        honor_control=lambda: None,
+        max_parallel_batches=2,
+    )
+
+    assert peak == 2
 
 
 def test_failed_batch_recovery_reuses_completed_batch_and_runs_one_merge(tmp_path: Path) -> None:

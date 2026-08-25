@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import threading
-from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -17,13 +15,20 @@ from openkb.config import LlmCredentialBundle, resolve_credential_bundle
 from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_model_active_streams import DesktopActiveModelStreams
 from openkb.desktop_model_active_streams import once as _once
+from openkb.desktop_model_dispatch import (
+    _concurrency_gate_for,
+    _ConcurrentDesktopModelTransport,
+    _DesktopModelConcurrencyGate,
+    _DesktopModelRateLimiter,
+    _rate_limiter_for,
+)
 from openkb.desktop_model_gateway import (
-    DesktopModelCancelledError,
     DesktopModelGateway,
     DesktopModelProviderResponse,
     DesktopModelRequest,
     DesktopModelTransportError,
     DesktopProviderTokenUsage,
+    ExecutionLane,
 )
 from openkb.desktop_model_http_lifecycle import terminal_completion_client
 from openkb.desktop_model_roles import DesktopRoleModelGateway
@@ -37,9 +42,6 @@ from openkb.desktop_model_settings import (
 from openkb.desktop_model_terminal import DesktopTerminalModelGateway
 from openkb.desktop_model_usage import DesktopModelUsageStore
 from openkb.desktop_prompt_contracts import prompt_contract_for
-
-_concurrency_gates: dict[tuple[Path, str], _DesktopModelConcurrencyGate] = {}
-_concurrency_gates_lock = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +89,9 @@ def desktop_model_gateway_for_settings(
                 ),
             ),
             _DesktopModelConcurrencyGate(settings.max_concurrent_model_calls),
+            rate_limiter=_DesktopModelRateLimiter(
+                settings.requests_per_minute, settings.tokens_per_minute
+            ),
         )
     )
 
@@ -105,7 +110,7 @@ def _gateway_for(
         else DEFAULT_MAX_CONCURRENT_MODEL_CALLS
     )
 
-    def lane_gate(lane: str) -> _DesktopModelConcurrencyGate:
+    def lane_gate(lane: ExecutionLane) -> _DesktopModelConcurrencyGate:
         maximum = 1 if lane == "interactive" else concurrency
         return _concurrency_gate_for(kb_dir, maximum, lane=lane)
 
@@ -147,6 +152,9 @@ def _gateway_for(
         )
 
     gateways: dict[str, DesktopTerminalModelGateway] = {}
+    rate_limiter = _rate_limiter_for(
+        kb_dir, settings.requests_per_minute, settings.tokens_per_minute
+    )
 
     def terminal_gateway(selected_model: str) -> DesktopTerminalModelGateway:
         existing = gateways.get(selected_model)
@@ -160,6 +168,7 @@ def _gateway_for(
             _ConcurrentDesktopModelTransport(
                 transport,
                 lane_gate("background"),
+                rate_limiter=rate_limiter,
                 lane_factory=lane_gate,
             ),
             provider_name=provider,
@@ -176,182 +185,6 @@ def _gateway_for(
         gateway_factory=terminal_gateway,
         usage_store=DesktopModelUsageStore(kb_dir),
     )
-
-
-class _DesktopModelConcurrencyGate:
-    """A small KB-local limiter; it holds no model config or credentials."""
-
-    def __init__(self, maximum: int) -> None:
-        self._maximum = maximum
-        self._active = 0
-        self._condition = threading.Condition()
-        self._waiters: deque[object] = deque()
-
-    def configure(self, maximum: int) -> None:
-        with self._condition:
-            self._maximum = maximum
-            self._condition.notify_all()
-
-    def acquire_until_cancelled(self, is_cancelled: Callable[[], bool] | None) -> None:
-        """Wait for capacity without converting queue time into a Model Call deadline."""
-        ticket = object()
-        with self._condition:
-            self._waiters.append(ticket)
-            while self._active >= self._maximum or self._waiters[0] is not ticket:
-                if is_cancelled is not None and is_cancelled():
-                    self._remove_waiter(ticket)
-                    raise DesktopModelCancelledError()
-                self._condition.wait(0.05)
-            self._waiters.popleft()
-            self._active += 1
-
-    def release(self) -> None:
-        with self._condition:
-            self._active -= 1
-            self._condition.notify_all()
-
-    def _remove_waiter(self, ticket: object) -> None:
-        self._waiters.remove(ticket)
-        self._condition.notify_all()
-
-
-def _concurrency_gate_for(
-    kb_dir: Path,
-    maximum: int,
-    *,
-    lane: str = "background",
-) -> _DesktopModelConcurrencyGate:
-    key = (kb_dir, lane)
-    with _concurrency_gates_lock:
-        gate = _concurrency_gates.get(key)
-        if gate is None:
-            gate = _DesktopModelConcurrencyGate(maximum)
-            _concurrency_gates[key] = gate
-        else:
-            gate.configure(maximum)
-        return gate
-
-
-class _ConcurrentDesktopModelTransport:
-    """Apply the configured limit around both ordinary and streaming requests."""
-
-    def __init__(
-        self,
-        transport: Callable[[DesktopModelRequest, float], object],
-        gate: _DesktopModelConcurrencyGate,
-        *,
-        lane_factory: Callable[[str], _DesktopModelConcurrencyGate] | None = None,
-    ) -> None:
-        self._transport = transport
-        self._gate = gate
-        self._lane_factory = lane_factory
-
-    def for_lane(self, lane: str) -> _ConcurrentDesktopModelTransport:
-        """Share one provider transport while selecting an independently limited lane."""
-        if lane not in {"background", "interactive"}:
-            raise ValueError(f"Unknown model execution lane: {lane}")
-        if self._lane_factory is None:
-            return self
-        return _ConcurrentDesktopModelTransport(
-            self._transport,
-            self._lane_factory(lane),
-            lane_factory=self._lane_factory,
-        )
-
-    def __call__(self, request: DesktopModelRequest, connect_timeout_seconds: float) -> object:
-        return self._delegate_call("call_until_terminal", request, connect_timeout_seconds)
-
-    def release_prepared_model_attempt(self) -> None:
-        self._gate.release()
-
-    def cancel_active_stream(self, request: DesktopModelRequest) -> bool:
-        cancel = getattr(self._transport, "cancel_active_stream", None)
-        return bool(cancel(request)) if callable(cancel) else False
-
-    def prepare_active_stream(self, request: DesktopModelRequest) -> None:
-        prepare = getattr(self._transport, "prepare_active_stream", None)
-        if callable(prepare):
-            prepare(request)
-
-    def prepare_terminal_model_attempt(
-        self, is_cancelled: Callable[[], bool] | None
-    ) -> Callable[[], None]:
-        self._gate.acquire_until_cancelled(is_cancelled)
-        return _once(self._gate.release)
-
-    def call_until_terminal(
-        self, request: DesktopModelRequest, connect_timeout_seconds: float
-    ) -> object:
-        return self._delegate_call("call_until_terminal", request, connect_timeout_seconds)
-
-    def call_until_terminal_with_lifecycle(
-        self,
-        request: DesktopModelRequest,
-        connect_timeout_seconds: float,
-        on_request_sent: Callable[[], None],
-    ) -> object:
-        call = getattr(self._transport, "call_until_terminal_with_lifecycle", None)
-        if callable(call):
-            return call(request, connect_timeout_seconds, on_request_sent)
-        response = self._delegate_call("call_until_terminal", request, connect_timeout_seconds)
-        on_request_sent()
-        return response
-
-    def stream_until_terminal(
-        self,
-        request: DesktopModelRequest,
-        connect_timeout_seconds: float,
-        on_delta: Callable[[str], None],
-    ) -> object:
-        return self._delegate_stream(
-            "stream_until_terminal", request, connect_timeout_seconds, on_delta
-        )
-
-    def stream_until_terminal_with_lifecycle(
-        self,
-        request: DesktopModelRequest,
-        connect_timeout_seconds: float,
-        on_delta: Callable[[str], None],
-        on_request_sent: Callable[[], None],
-    ) -> object:
-        stream = getattr(self._transport, "stream_until_terminal_with_lifecycle", None)
-        if callable(stream):
-            return stream(
-                request,
-                connect_timeout_seconds,
-                on_delta,
-                on_request_sent,
-            )
-        on_request_sent()
-        return self._delegate_stream(
-            "stream_until_terminal", request, connect_timeout_seconds, on_delta
-        )
-
-    def _delegate_call(
-        self,
-        method_name: str,
-        request: DesktopModelRequest,
-        connect_timeout_seconds: float,
-    ) -> object:
-        call = getattr(self._transport, method_name, None)
-        if callable(call):
-            return call(request, connect_timeout_seconds)
-        return self._transport(request, connect_timeout_seconds)
-
-    def _delegate_stream(
-        self,
-        method_name: str,
-        request: DesktopModelRequest,
-        connect_timeout_seconds: float,
-        on_delta: Callable[[str], None],
-    ) -> object:
-        stream = getattr(self._transport, method_name, None)
-        if callable(stream):
-            return stream(request, connect_timeout_seconds, on_delta)
-        response = self._transport(request, connect_timeout_seconds)
-        if isinstance(response, str):
-            on_delta(response)
-        return response
 
 
 class DesktopLiteLLMTransport:

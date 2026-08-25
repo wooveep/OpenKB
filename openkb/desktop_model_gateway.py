@@ -5,13 +5,21 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from openkb.desktop_model_terminal import DesktopTerminalModelEvent
 
 ModelConnectTransport = Callable[["DesktopModelRequest", float], object]
 CancellationCallback = Callable[[], bool]
+ExecutionLane = Literal["background", "interactive"]
+
+
+def require_execution_lane(value: str) -> ExecutionLane:
+    """Validate an execution lane at an untyped Desktop protocol boundary."""
+    if value not in {"background", "interactive"}:
+        raise ValueError(f"Unknown model execution lane: {value}")
+    return cast(ExecutionLane, value)
 
 
 @dataclass(frozen=True)
@@ -36,7 +44,10 @@ class DesktopModelRequest:
     job_id: str | None = None
     stage_run_id: str | None = None
     batch_id: str | None = None
-    execution_lane: str = "background"
+    execution_lane: ExecutionLane = "background"
+
+    def __post_init__(self) -> None:
+        require_execution_lane(self.execution_lane)
 
 
 @dataclass(frozen=True)
@@ -213,7 +224,7 @@ class DesktopModelGateway:
     def model_name(self) -> str:
         raise NotImplementedError
 
-    def for_lane(self, lane: str) -> DesktopModelGateway:
+    def for_lane(self, lane: ExecutionLane) -> DesktopModelGateway:
         raise NotImplementedError
 
     def analyze(

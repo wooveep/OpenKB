@@ -14,6 +14,10 @@ pub struct ModelSettingsDraft {
     pub api_key: String,
     #[serde(alias = "max_concurrent_model_calls")]
     pub max_concurrent_model_calls: u32,
+    #[serde(default, alias = "requests_per_minute")]
+    pub requests_per_minute: Option<u64>,
+    #[serde(default, alias = "tokens_per_minute")]
+    pub tokens_per_minute: Option<u64>,
     #[serde(default, alias = "analysis_model")]
     pub analysis_model: Option<String>,
     #[serde(default, alias = "answer_model")]
@@ -111,6 +115,8 @@ mod tests {
             "api_key": "secret",
             "api_key_configured": true,
             "max_concurrent_model_calls": 2,
+            "requests_per_minute": 120,
+            "tokens_per_minute": 240000,
             "analysis_model": "analysis-model",
             "answer_model": "answer-model",
             "analysis_concurrency": 2,
@@ -146,6 +152,8 @@ mod tests {
             Value::String("analysis-model".into())
         );
         assert_eq!(encoded["usageAggregate"]["callCount"], 2);
+        assert_eq!(encoded["requestsPerMinute"], 120);
+        assert_eq!(encoded["tokensPerMinute"], 240000);
         assert!(!object.contains_key("initialTimeoutSeconds"));
         assert!(!object.contains_key("modelCallDeadlineSeconds"));
     }

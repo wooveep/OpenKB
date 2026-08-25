@@ -350,6 +350,7 @@ class DesktopKnowledgeReanalysisService:
                     on_batch_completed=lambda completed, total: self._batch_completed(
                         job_id, execution_token, completed, total
                     ),
+                    max_parallel_batches=getattr(gateway, "analysis_concurrency", 1),
                     capability_profile=(
                         capability("knowledge_analysis")
                         if callable(

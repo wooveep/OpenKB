@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 
@@ -23,9 +24,12 @@ from openkb.desktop_knowledge_analysis_batches import (
 from openkb.desktop_knowledge_analysis_plan import (
     estimate_model_tokens,
     hierarchical_merge_topology,
+    knowledge_analysis_input_budget,
 )
+from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
 from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelTransportError
 from openkb.desktop_model_settings import save_desktop_model_settings
+from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
@@ -117,15 +121,100 @@ def test_plan_is_committed_before_first_batch_model_call(tmp_path) -> None:
     assert len(plan["prompt_contract_digest"]) == 64
     assert plan["prompt_contract_snapshot"]["contracts"]["knowledge_analysis_batch"][
         "version"
-    ].endswith(".v1")
+    ].endswith(".v2")
     assert plan["document_ir_digest"]
     assert plan["batches"]
     assert plan["merge_topology"]
 
 
+def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_an_older_plan(tmp_path) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "legacy-prompt.txt"
+    source.write_text("Evidence analyzed under a persisted prompt contract.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+
+    def fail_after_plan(_request, _timeout_seconds):
+        raise DesktopModelTransportError("input")
+
+    importer = DesktopTextImportService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(fail_after_plan),
+    )
+    with pytest.raises(DesktopImportError, match="rejected"):
+        importer.import_text(source)
+    job_id = str(importer.list_import_jobs()["jobs"][0]["job"]["job_id"])
+
+    legacy_instructions = "Legacy v1 instructions pinned before the prompt changed."
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        (plan_json,) = connection.execute(
+            "SELECT plan_json FROM knowledge_analysis_plans WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        plan = json.loads(plan_json)
+        snapshot = plan["prompt_contract_snapshot"]["contracts"]["knowledge_analysis"]
+        snapshot["version"] = "openkb.prompt.knowledge_analysis.v1"
+        snapshot["instructions"] = legacy_instructions
+        bundle = json.dumps(
+            plan["prompt_contract_snapshot"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(bundle.encode("utf-8")).hexdigest()
+        plan["prompt_contract_digest"] = digest
+        connection.execute(
+            "UPDATE knowledge_analysis_plans "
+            "SET prompt_contract_digest = ?, plan_json = ? WHERE job_id = ?",
+            (
+                digest,
+                json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                job_id,
+            ),
+        )
+
+    recovered_requests = []
+
+    def recover(request, _timeout_seconds):
+        recovered_requests.append(request)
+        return json.dumps(
+            {
+                "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+                "analysis_scope": "document",
+                "document_description": "Recovered with the pinned contract.",
+                "concepts": [],
+                "entities": [],
+            }
+        )
+
+    DesktopTextImportService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(recover),
+    ).recover_text(job_id, DesktopRecoveryOverride())
+
+    assert len(recovered_requests) == 1
+    request = recovered_requests[0]
+    assert request.prompt_contract_version == "openkb.prompt.knowledge_analysis.v1"
+    assert request.prompt_contract_snapshot["instructions"] == legacy_instructions
+
+
 def test_token_estimator_is_conservative_for_chinese_and_ascii() -> None:
     assert estimate_model_tokens("知识分析") == 4
     assert estimate_model_tokens("abcdefgh") == 2
+
+
+def test_large_context_profiles_cap_analysis_batches_at_twelve_thousand_tokens() -> None:
+    capability = DesktopModelCapabilityProfile(
+        context_capacity=128_000,
+        document_input_capacity=100_000,
+        supports_native_json_schema=True,
+        supports_streaming=True,
+        supports_reasoning=True,
+    )
+
+    assert (
+        knowledge_analysis_input_budget(capability, prompt_contract_for("knowledge_analysis_batch"))
+        == 12_000
+    )
 
 
 def test_exact_knowledge_is_deduplicated_before_description_merge() -> None:

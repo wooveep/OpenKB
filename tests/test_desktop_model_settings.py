@@ -50,6 +50,8 @@ def test_absent_model_settings_keep_compatibility_defaults(tmp_path, config):
     assert settings.api_base_url == DEFAULT_API_BASE_URL
     assert settings.api_key == ""
     assert settings.max_concurrent_model_calls == DEFAULT_MAX_CONCURRENT_MODEL_CALLS
+    assert settings.requests_per_minute is None
+    assert settings.tokens_per_minute is None
 
 
 @pytest.mark.parametrize(
@@ -68,6 +70,9 @@ def test_absent_model_settings_keep_compatibility_defaults(tmp_path, config):
         {"desktop": {"max_concurrent_model_calls": True}},
         {"desktop": {"max_concurrent_model_calls": 0}},
         {"desktop": {"max_concurrent_model_calls": 9}},
+        {"desktop": {"requests_per_minute": True}},
+        {"desktop": {"requests_per_minute": 0}},
+        {"desktop": {"tokens_per_minute": -1}},
     ),
 )
 def test_present_malformed_model_settings_are_never_defaulted(tmp_path, config):
@@ -198,6 +203,8 @@ def test_model_roles_round_trip_and_fall_back_without_duplicating_connection(tmp
         api_base_url="https://models.example.test/v1",
         api_key="one-shared-key",
         max_concurrent_model_calls=4,
+        requests_per_minute=120,
+        tokens_per_minute=240_000,
         default_context_capacity=32_000,
         analysis_context_capacity=64_000,
         answer_context_capacity=None,
@@ -216,6 +223,8 @@ def test_model_roles_round_trip_and_fall_back_without_duplicating_connection(tmp
     assert saved.analysis_model_name == "analysis-model"
     assert saved.answer_model_name == "default-model"
     assert saved.max_concurrent_model_calls == 4
+    assert saved.requests_per_minute == 120
+    assert saved.tokens_per_minute == 240_000
     assert saved.analysis_reasoning == "low"
     assert saved.answer_reasoning == "off"
     assert read_desktop_model_settings(kb_dir) == saved
@@ -508,17 +517,17 @@ def test_engine_connection_check_emits_terminal_lifecycle_events(tmp_path, monke
                 "status": "awaiting_model_result",
                 "elapsed_seconds": 180,
                 "failure_code": None,
-                    "reason": None,
-                    "retry_after_seconds": None,
-                    "operation": "unknown",
-                    "model_role": "default",
-                    "provider": "scripted",
-                    "model_name": "unknown",
-                    "execution_lane": "background",
-                    "attempt_id": "call-1:1",
-                    "request_id": "connection-check-1",
-                    "long_wait_threshold_seconds": 300.0,
-                },
+                "reason": None,
+                "retry_after_seconds": None,
+                "operation": "unknown",
+                "model_role": "default",
+                "provider": "scripted",
+                "model_name": "unknown",
+                "execution_lane": "background",
+                "attempt_id": "call-1:1",
+                "request_id": "connection-check-1",
+                "long_wait_threshold_seconds": 300.0,
+            },
         )
     ]
     assert "private provider output" not in repr(emitted)

@@ -9,6 +9,8 @@ export interface DesktopModelSettingsDraft {
   apiBaseUrl: string
   apiKey: string
   maxConcurrentModelCalls: number
+  requestsPerMinute: number | null
+  tokensPerMinute: number | null
   analysisModel: string | null
   answerModel: string | null
   defaultContextCapacity: number | null

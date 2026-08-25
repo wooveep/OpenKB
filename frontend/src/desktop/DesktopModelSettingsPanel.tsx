@@ -31,6 +31,8 @@ type ModelSettingsDraft = {
   apiBaseUrl: string
   apiKey: string
   maxConcurrentModelCalls: string
+  requestsPerMinute: string
+  tokensPerMinute: string
   analysisModel: string
   answerModel: string
   defaultContextCapacity: string
@@ -73,6 +75,8 @@ function draftFrom(settings: DesktopModelSettings): ModelSettingsDraft {
     apiBaseUrl: settings.apiBaseUrl,
     apiKey: settings.apiKey,
     maxConcurrentModelCalls: String(settings.maxConcurrentModelCalls),
+    requestsPerMinute: settings.requestsPerMinute?.toString() ?? "",
+    tokensPerMinute: settings.tokensPerMinute?.toString() ?? "",
     analysisModel: settings.analysisModel ?? "",
     answerModel: settings.answerModel ?? "",
     defaultContextCapacity: settings.defaultContextCapacity?.toString() ?? "",
@@ -92,32 +96,54 @@ function draftFrom(settings: DesktopModelSettings): ModelSettingsDraft {
 
 type DraftValidation =
   | { settings: SettingsDraft; error: null }
-  | { settings: null; error: "invalidConcurrency" | "invalidContextCapacity" | "invalidPrice" }
+  | { settings: null; error: "invalidConcurrency" | "invalidRateLimit" | "invalidContextCapacity" | "invalidPrice" }
+
+function parseOptionalInteger(value: string, minimum: number): number | null | undefined {
+  if (!value.trim()) return null
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= minimum ? parsed : undefined
+}
+
+function parseOptionalNumber(value: string): number | null | undefined {
+  if (!value.trim()) return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined
+}
 
 function validatedDraft(draft: ModelSettingsDraft): DraftValidation {
   const maxConcurrentModelCalls = Number(draft.maxConcurrentModelCalls)
   if (!Number.isInteger(maxConcurrentModelCalls) || maxConcurrentModelCalls < 1 || maxConcurrentModelCalls > 4) {
     return { settings: null, error: "invalidConcurrency" }
   }
-  const capacityValues = [
-    draft.defaultContextCapacity,
-    draft.analysisContextCapacity,
-    draft.answerContextCapacity,
-  ]
-  const capacities = capacityValues.map((value) => value.trim() ? Number(value) : null)
-  if (capacities.some((value) => value !== null && (!Number.isInteger(value) || value < 4096))) {
+  const requestsPerMinute = parseOptionalInteger(draft.requestsPerMinute, 1)
+  const tokensPerMinute = parseOptionalInteger(draft.tokensPerMinute, 1)
+  if (requestsPerMinute === undefined || tokensPerMinute === undefined) {
+    return { settings: null, error: "invalidRateLimit" }
+  }
+  const defaultContextCapacity = parseOptionalInteger(draft.defaultContextCapacity, 4096)
+  const analysisContextCapacity = parseOptionalInteger(draft.analysisContextCapacity, 4096)
+  const answerContextCapacity = parseOptionalInteger(draft.answerContextCapacity, 4096)
+  if (
+    defaultContextCapacity === undefined
+    || analysisContextCapacity === undefined
+    || answerContextCapacity === undefined
+  ) {
     return { settings: null, error: "invalidContextCapacity" }
   }
-  const priceValues = [
-    draft.defaultInputPricePerMillion,
-    draft.defaultOutputPricePerMillion,
-    draft.analysisInputPricePerMillion,
-    draft.analysisOutputPricePerMillion,
-    draft.answerInputPricePerMillion,
-    draft.answerOutputPricePerMillion,
-  ]
-  const prices = priceValues.map((value) => value.trim() ? Number(value) : null)
-  if (prices.some((value) => value !== null && (!Number.isFinite(value) || value < 0))) {
+  const defaultInputPricePerMillion = parseOptionalNumber(draft.defaultInputPricePerMillion)
+  const defaultOutputPricePerMillion = parseOptionalNumber(draft.defaultOutputPricePerMillion)
+  const analysisInputPricePerMillion = parseOptionalNumber(draft.analysisInputPricePerMillion)
+  const analysisOutputPricePerMillion = parseOptionalNumber(draft.analysisOutputPricePerMillion)
+  const answerInputPricePerMillion = parseOptionalNumber(draft.answerInputPricePerMillion)
+  const answerOutputPricePerMillion = parseOptionalNumber(draft.answerOutputPricePerMillion)
+  if (
+    defaultInputPricePerMillion === undefined
+    || defaultOutputPricePerMillion === undefined
+    || analysisInputPricePerMillion === undefined
+    || analysisOutputPricePerMillion === undefined
+    || answerInputPricePerMillion === undefined
+    || answerOutputPricePerMillion === undefined
+  ) {
     return { settings: null, error: "invalidPrice" }
   }
   return {
@@ -128,20 +154,22 @@ function validatedDraft(draft: ModelSettingsDraft): DraftValidation {
       apiBaseUrl: draft.apiBaseUrl.trim(),
       apiKey: draft.apiKey.trim(),
       maxConcurrentModelCalls,
+      requestsPerMinute,
+      tokensPerMinute,
       analysisModel: draft.analysisModel.trim() || null,
       answerModel: draft.answerModel.trim() || null,
-      defaultContextCapacity: capacities[0],
-      analysisContextCapacity: capacities[1],
-      answerContextCapacity: capacities[2],
+      defaultContextCapacity,
+      analysisContextCapacity,
+      answerContextCapacity,
       defaultReasoning: draft.defaultReasoning || null,
       analysisReasoning: draft.analysisReasoning || null,
       answerReasoning: draft.answerReasoning || null,
-      defaultInputPricePerMillion: prices[0],
-      defaultOutputPricePerMillion: prices[1],
-      analysisInputPricePerMillion: prices[2],
-      analysisOutputPricePerMillion: prices[3],
-      answerInputPricePerMillion: prices[4],
-      answerOutputPricePerMillion: prices[5],
+      defaultInputPricePerMillion,
+      defaultOutputPricePerMillion,
+      analysisInputPricePerMillion,
+      analysisOutputPricePerMillion,
+      answerInputPricePerMillion,
+      answerOutputPricePerMillion,
     },
   }
 }
@@ -386,6 +414,17 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
             {t("desktop.knowledgeBases.modelSettings.concurrency")}
             <Input className="mt-1.5" type="number" min="1" max="4" value={draft.maxConcurrentModelCalls} disabled={saving} onChange={(event) => setDraft((current) => current ? { ...current, maxConcurrentModelCalls: event.target.value } : current)} />
           </label>
+          <label className="block text-sm font-medium">
+            {t("desktop.knowledgeBases.modelSettings.requestsPerMinute")}
+            <Input className="mt-1.5" type="number" min="1" value={draft.requestsPerMinute} disabled={saving} placeholder={t("desktop.knowledgeBases.modelSettings.unlimited")} onChange={(event) => setDraft((current) => current ? { ...current, requestsPerMinute: event.target.value } : current)} />
+          </label>
+          <label className="block text-sm font-medium">
+            {t("desktop.knowledgeBases.modelSettings.tokensPerMinute")}
+            <Input className="mt-1.5" type="number" min="1" value={draft.tokensPerMinute} disabled={saving} placeholder={t("desktop.knowledgeBases.modelSettings.unlimited")} onChange={(event) => setDraft((current) => current ? { ...current, tokensPerMinute: event.target.value } : current)} />
+          </label>
+          <p className="text-xs leading-5 text-muted-foreground md:col-span-2">
+            {t("desktop.knowledgeBases.modelSettings.rateLimitHelp")}
+          </p>
         </div>
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/20 px-4 py-3 text-sm">
           <span className="flex items-center gap-2 text-muted-foreground"><KeyRound className="size-4" />{settings.apiKeyConfigured ? t("desktop.knowledgeBases.modelSettings.apiKeyConfigured") : t("desktop.knowledgeBases.modelSettings.apiKeyRequired")}</span>

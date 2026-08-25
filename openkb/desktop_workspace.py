@@ -22,7 +22,7 @@ from openkb.desktop_workspace_feature_migrations import (
     KNOWLEDGE_ANALYSIS_MIGRATION_VERSION,
     MODEL_LIFECYCLE_MIGRATION_VERSION,
 )
-from openkb.locks import kb_ingest_lock
+from openkb.locks import kb_import_runtime_lock, kb_ingest_lock
 
 _STATE_DIRNAME = ".openkb"
 _STATE_FILENAME = "state.sqlite3"
@@ -487,7 +487,9 @@ def _require_creatable_knowledge_base(kb_dir: Path) -> None:
     state_dir = _state_dir(kb_dir)
     if not state_dir.is_dir():
         raise DesktopKnowledgeBaseDirectoryNotEmptyError(kb_dir)
-    if any(entry.name != "ingest.lock" for entry in state_dir.iterdir()):
+    if any(
+        entry.name not in {"ingest.lock", "import-runtime.lock"} for entry in state_dir.iterdir()
+    ):
         raise DesktopKnowledgeBaseDirectoryNotEmptyError(kb_dir)
 
 
@@ -726,7 +728,7 @@ def _load_desktop_knowledge_base(kb_dir: Path) -> DesktopKnowledgeBase:
         raise DesktopKnowledgeBaseNotFoundError(kb_dir)
 
     try:
-        with kb_ingest_lock(_state_dir(kb_dir)):
+        with kb_import_runtime_lock(_state_dir(kb_dir)), kb_ingest_lock(_state_dir(kb_dir)):
             _recover_interrupted_initialization(kb_dir)
             if _is_legacy_knowledge_base(kb_dir) and not database_path.exists():
                 raise LegacyKnowledgeBaseUnsupportedError(kb_dir)

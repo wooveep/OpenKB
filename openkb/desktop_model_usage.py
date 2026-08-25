@@ -12,6 +12,7 @@ from openkb.desktop_model_event import normalize_model_event
 from openkb.desktop_model_gateway import (
     DesktopModelRequest,
     DesktopProviderTokenUsage,
+    ExecutionLane,
 )
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
@@ -404,9 +405,7 @@ def _model_activity_from_row(
         "retrying",
     }
     elapsed = (
-        _elapsed_since(str(row[12])) + float(str(row[10]))
-        if active
-        else float(str(row[11] or 0.0))
+        _elapsed_since(str(row[12])) + float(str(row[10])) if active else float(str(row[11] or 0.0))
     )
     threshold = _long_wait_threshold_in(connection, str(row[3]), str(row[5]))
     return {
@@ -473,8 +472,8 @@ def _elapsed_since(value: str) -> float:
     return max(0.0, (datetime.now(tz=timezone.utc) - created_at).total_seconds())
 
 
-def _execution_lane(value: str) -> str:
-    return value if value in {"background", "interactive"} else "background"
+def _execution_lane(value: ExecutionLane) -> ExecutionLane:
+    return value
 
 
 def _cost(tokens: int, price_per_million: float | None) -> float | None:

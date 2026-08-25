@@ -10,6 +10,8 @@ from openkb.desktop_import_artifacts import DocumentIRBlock
 from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
 from openkb.desktop_prompt_contracts import DesktopPromptContract, prompt_contract_for
 
+MAX_KNOWLEDGE_ANALYSIS_INPUT_TOKENS = 12_000
+
 
 @dataclass(frozen=True)
 class KnowledgeAnalysisBatchPlan:
@@ -106,6 +108,18 @@ class KnowledgeAnalysisPlan:
         )
 
 
+def knowledge_analysis_input_budget(
+    capability: DesktopModelCapabilityProfile, contract: DesktopPromptContract
+) -> int:
+    """Bound latency and repair cost even when a model exposes a huge context window."""
+    output_budget = _positive_int(contract.token_budget_policy.get("reserve_output_tokens"), 4_096)
+    return min(
+        MAX_KNOWLEDGE_ANALYSIS_INPUT_TOKENS,
+        capability.document_input_capacity,
+        max(1, capability.context_capacity - output_budget),
+    )
+
+
 def build_knowledge_analysis_plan(
     *,
     evidence: tuple[tuple[str, DocumentIRBlock], ...],
@@ -117,10 +131,7 @@ def build_knowledge_analysis_plan(
     estimated_batch_tokens: tuple[int, ...],
 ) -> KnowledgeAnalysisPlan:
     output_budget = _positive_int(contract.token_budget_policy.get("reserve_output_tokens"), 4_096)
-    input_budget = min(
-        capability.document_input_capacity,
-        max(1, capability.context_capacity - output_budget),
-    )
+    input_budget = knowledge_analysis_input_budget(capability, contract)
     batch_plans = tuple(
         KnowledgeAnalysisBatchPlan(
             ordinal=ordinal,

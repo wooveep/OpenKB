@@ -39,6 +39,7 @@ from openkb.desktop_knowledge_analysis_plan import (
     KnowledgeAnalysisMergeNodePlan,
     KnowledgeAnalysisPlan,
     build_knowledge_analysis_plan,
+    knowledge_analysis_input_budget,
     prompt_snapshot_for_operation,
 )
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
@@ -52,6 +53,7 @@ from openkb.desktop_model_gateway import (
     DesktopModelResult,
 )
 from openkb.desktop_page_tree import PageTreeGeneration, page_tree_analysis_sections
+from openkb.desktop_parallel import parallel_map_ordered
 from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
@@ -96,6 +98,7 @@ def run_knowledge_analysis(
     analyze: Callable[[DesktopModelRequest], DesktopModelResult],
     honor_control: Callable[[], None],
     on_batch_completed: Callable[[int, int], None],
+    max_parallel_batches: int = 1,
     capability_profile: DesktopModelCapabilityProfile | None = None,
 ) -> KnowledgeAnalysisRun:
     """Execute a direct analysis or resume a persisted long-document batch plan."""
@@ -104,20 +107,7 @@ def run_knowledge_analysis(
     )
     capability = capability_profile or model_capability_profile(model)
     contract = prompt_contract_for("knowledge_analysis_batch")
-    reserve_output_tokens = contract.token_budget_policy.get("reserve_output_tokens")
-    if (
-        isinstance(reserve_output_tokens, bool)
-        or not isinstance(reserve_output_tokens, int)
-        or reserve_output_tokens <= 0
-    ):
-        reserve_output_tokens = 4_096
-    input_budget_tokens = min(
-        capability.document_input_capacity,
-        max(
-            1,
-            capability.context_capacity - reserve_output_tokens,
-        ),
-    )
+    input_budget_tokens = knowledge_analysis_input_budget(capability, contract)
     planned_batches = plan_knowledge_analysis_batches(
         evidence,
         natural_sections=natural_sections or None,
@@ -181,16 +171,22 @@ def run_knowledge_analysis(
             checkpoint,
         )
 
-    analyses: list[DesktopKnowledgeAnalysis] = []
-    batch_checkpoints: list[dict[str, object]] = []
+    analyses_by_ordinal: dict[int, DesktopKnowledgeAnalysis] = {}
+    checkpoints_by_ordinal: dict[int, dict[str, object]] = {}
+    pending_batches: list[KnowledgeAnalysisBatch] = []
     for batch in batches:
         if batch.status == "completed":
             assert batch.checkpoint is not None
             completed_analysis = parse_batch_checkpoint(batch.checkpoint)
             _validate_batch_sources(completed_analysis, batch)
-            analyses.append(completed_analysis)
-            batch_checkpoints.append(batch.checkpoint)
+            analyses_by_ordinal[batch.ordinal] = completed_analysis
+            checkpoints_by_ordinal[batch.ordinal] = batch.checkpoint
             continue
+        pending_batches.append(batch)
+
+    def execute_batch(
+        batch: KnowledgeAnalysisBatch,
+    ) -> tuple[DesktopKnowledgeAnalysis, dict[str, object]]:
         honor_control()
         store.start_batch(batch.batch_id)
         try:
@@ -232,9 +228,26 @@ def run_knowledge_analysis(
             },
         )
         store.complete_batch(batch.batch_id, checkpoint)
-        analyses.append(analysis)
-        batch_checkpoints.append(checkpoint)
-        on_batch_completed(len(analyses), len(batches))
+        return analysis, checkpoint
+
+    completed_count = len(analyses_by_ordinal)
+
+    def completed() -> None:
+        nonlocal completed_count
+        completed_count += 1
+        on_batch_completed(completed_count, len(batches))
+
+    pending_results = parallel_map_ordered(
+        pending_batches,
+        execute_batch,
+        maximum=max_parallel_batches,
+        on_completed=completed,
+    )
+    for batch, (analysis, checkpoint) in zip(pending_batches, pending_results, strict=True):
+        analyses_by_ordinal[batch.ordinal] = analysis
+        checkpoints_by_ordinal[batch.ordinal] = checkpoint
+    analyses = [analyses_by_ordinal[batch.ordinal] for batch in batches]
+    batch_checkpoints = [checkpoints_by_ordinal[batch.ordinal] for batch in batches]
 
     merged_checkpoint = store.merge_checkpoint(job_id)
     if merged_checkpoint is not None:
@@ -253,6 +266,7 @@ def run_knowledge_analysis(
                 analyze=analyze,
                 analyses=tuple(analyses),
                 honor_control=honor_control,
+                max_parallel_batches=max_parallel_batches,
             )
             merged = DesktopKnowledgeAnalysis(
                 description,
@@ -377,24 +391,25 @@ def _run_hierarchical_description_merge(
     analyze: Callable[[DesktopModelRequest], DesktopModelResult],
     analyses: tuple[DesktopKnowledgeAnalysis, ...],
     honor_control: Callable[[], None],
+    max_parallel_batches: int,
 ) -> tuple[str, DesktopModelResult, tuple[dict[str, object], ...]]:
+    if not plan.merge_topology:
+        description = _deterministic_description(analyses)
+        return (
+            description,
+            DesktopModelResult("deterministic", _json({"document_description": description}), 0),
+            (),
+        )
     descriptions = {
         f"batch:{ordinal}": analysis.document_description
         for ordinal, analysis in enumerate(analyses)
     }
-    checkpoints: list[dict[str, object]] = []
-    root_result: DesktopModelResult | None = None
-    for node in plan.merge_topology:
-        checkpoint = store.merge_node_checkpoint(job_id, node.node_id)
-        if checkpoint is not None:
-            description = checkpoint.get("document_description")
-            if not isinstance(description, str):
-                raise _state_error("Knowledge Analysis merge-node checkpoint is invalid.")
-            descriptions[node.node_id] = description
-            checkpoints.append(checkpoint)
-            if node == plan.merge_topology[-1]:
-                root_result = _result_from_merge_node_checkpoint(checkpoint, description)
-            continue
+    checkpoints: dict[str, dict[str, object]] = {}
+    results: dict[str, DesktopModelResult] = {}
+
+    def execute_node(
+        node: KnowledgeAnalysisMergeNodePlan,
+    ) -> tuple[str, DesktopModelResult, dict[str, object]]:
         child_descriptions = tuple(descriptions[child_id] for child_id in node.child_ids)
         prompt = knowledge_analysis_merge_prompt(
             document_name,
@@ -420,22 +435,38 @@ def _run_hierarchical_description_merge(
             raise
         checkpoint = _merge_node_checkpoint(node, result, description)
         store.complete_merge_node(job_id, node.node_id, checkpoint)
-        descriptions[node.node_id] = description
-        checkpoints.append(checkpoint)
-        if node == plan.merge_topology[-1]:
-            root_result = result
-    if not plan.merge_topology:
-        description = _deterministic_description(analyses)
-        deterministic_result = DesktopModelResult(
-            "deterministic",
-            _json({"document_description": description}),
-            0,
+        return description, result, checkpoint
+
+    for level in dict.fromkeys(node.level for node in plan.merge_topology):
+        pending: list[KnowledgeAnalysisMergeNodePlan] = []
+        for node in (candidate for candidate in plan.merge_topology if candidate.level == level):
+            checkpoint = store.merge_node_checkpoint(job_id, node.node_id)
+            if checkpoint is None:
+                pending.append(node)
+                continue
+            stored_description = checkpoint.get("document_description")
+            if not isinstance(stored_description, str):
+                raise _state_error("Knowledge Analysis merge-node checkpoint is invalid.")
+            descriptions[node.node_id] = stored_description
+            checkpoints[node.node_id] = checkpoint
+            results[node.node_id] = _result_from_merge_node_checkpoint(
+                checkpoint, stored_description
+            )
+        completed = parallel_map_ordered(
+            pending,
+            execute_node,
+            maximum=max_parallel_batches,
+            on_completed=lambda: None,
         )
-        return description, deterministic_result, ()
+        for node, (description, result, checkpoint) in zip(pending, completed, strict=True):
+            descriptions[node.node_id] = description
+            results[node.node_id] = result
+            checkpoints[node.node_id] = checkpoint
     root = plan.merge_topology[-1].node_id
-    if root_result is None:
+    if root not in results:
         raise _state_error("Knowledge Analysis merge topology has no completed root.")
-    return descriptions[root], root_result, tuple(checkpoints)
+    ordered_checkpoints = tuple(checkpoints[node.node_id] for node in plan.merge_topology)
+    return descriptions[root], results[root], ordered_checkpoints
 
 
 def _validated_description_merge_call(
@@ -477,11 +508,14 @@ def _request_pinned_to_plan(
     *,
     batch_id: str,
 ) -> DesktopModelRequest:
+    generation_parameters = dict(request.generation_parameters or {})
+    generation_parameters.setdefault("max_tokens", plan.output_budget_tokens)
     return replace(
         request,
         model_name=plan.analysis_model,
         context_capacity=plan.capability_profile.context_capacity,
         document_input_capacity=plan.capability_profile.document_input_capacity,
+        generation_parameters=generation_parameters,
         batch_id=batch_id,
     )
 

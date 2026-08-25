@@ -48,6 +48,63 @@ def _observe_pause_requests(monkeypatch) -> threading.Event:
     return pause_requested
 
 
+def test_engine_admits_multiple_documents_to_analysis_concurrently(tmp_path) -> None:
+    kb_dir = tmp_path / "knowledge"
+    sources = [tmp_path / "first.md", tmp_path / "second.md"]
+    for ordinal, source in enumerate(sources):
+        source.write_text(f"# Document {ordinal}\n\nIndependent evidence.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    both_started = threading.Event()
+    release_analysis = threading.Event()
+    started_documents: set[str] = set()
+    started_lock = threading.Lock()
+
+    def analyze(request, _timeout_seconds):
+        if request.operation == "knowledge_analysis":
+            with started_lock:
+                started_documents.add(request.document_name)
+                if len(started_documents) == 2:
+                    both_started.set()
+            assert release_analysis.wait(timeout=2)
+        return _empty_knowledge_analysis()
+
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(analyze),
+    )
+    server._handshake_complete = True
+    results: list[dict[str, object]] = []
+    errors: list[BaseException] = []
+
+    def run_import(source) -> None:
+        try:
+            results.append(
+                server._dispatch(
+                    _request(
+                        source.stem, "workbench.import_text_document", source_path=str(source)
+                    ),
+                    cancel_event=None,
+                )
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    workers = [threading.Thread(target=run_import, args=(source,)) for source in sources]
+    for worker in workers:
+        worker.start()
+    assert both_started.wait(timeout=2)
+    release_analysis.set()
+    for worker in workers:
+        worker.join(timeout=3)
+
+    assert not errors
+    assert len(results) == 2
+    assert started_documents == {"first.md", "second.md"}
+
+
 @pytest.mark.parametrize(
     "activation_method",
     ("workbench.open_knowledge_base", "workbench.create_knowledge_base"),
@@ -158,9 +215,7 @@ def test_switch_pauses_an_explicit_import_at_its_next_stage_checkpoint(
     } == completed_checkpoint_ids
 
 
-def test_switch_pauses_an_explicit_recovery_import_before_activation(
-    tmp_path, monkeypatch
-) -> None:
+def test_switch_pauses_an_explicit_recovery_import_before_activation(tmp_path, monkeypatch) -> None:
     """An explicitly resumed recovery drains through the same transition seam."""
     first_kb = tmp_path / "first-kb"
     second_kb = tmp_path / "second-kb"

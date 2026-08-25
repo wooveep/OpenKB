@@ -11,6 +11,8 @@ from openkb.desktop_model_gateway import (
     DesktopModelGateway,
     DesktopModelRequest,
     DesktopModelResult,
+    ExecutionLane,
+    require_execution_lane,
 )
 from openkb.desktop_model_settings import DesktopModelSettings
 from openkb.desktop_model_terminal import (
@@ -58,7 +60,7 @@ class DesktopRoleModelGateway(DesktopModelGateway):
         answer_gateway: DesktopTerminalModelGateway,
         gateway_factory: Callable[[str], DesktopTerminalModelGateway] | None = None,
         usage_store: DesktopModelUsageStore | None = None,
-        execution_lane: str = "background",
+        execution_lane: ExecutionLane = "background",
     ) -> None:
         self._settings = settings
         self._default_gateway = default_gateway
@@ -66,7 +68,7 @@ class DesktopRoleModelGateway(DesktopModelGateway):
         self._answer_gateway = answer_gateway
         self._gateway_factory = gateway_factory
         self._usage_store = usage_store
-        self._execution_lane = execution_lane
+        self._execution_lane = require_execution_lane(execution_lane)
 
     @property
     def provider_name(self) -> str:
@@ -77,7 +79,12 @@ class DesktopRoleModelGateway(DesktopModelGateway):
         """Return the Analysis model for analysis checkpoint compatibility."""
         return self._settings.analysis_model_name
 
-    def for_lane(self, lane: str) -> DesktopRoleModelGateway:
+    @property
+    def analysis_concurrency(self) -> int:
+        return self._settings.max_concurrent_model_calls
+
+    def for_lane(self, lane: ExecutionLane) -> DesktopRoleModelGateway:
+        lane = require_execution_lane(lane)
         gateway_factory = self._gateway_factory
         lane_gateway_factory = (
             (lambda model: gateway_factory(model).for_lane(lane))

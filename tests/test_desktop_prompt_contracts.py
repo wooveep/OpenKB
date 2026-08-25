@@ -43,6 +43,23 @@ def test_every_runtime_model_operation_has_a_canonical_versioned_contract() -> N
         assert "AGENTS.md" not in json.dumps(snapshot)
 
 
+def test_knowledge_analysis_contract_bounds_structured_output_size() -> None:
+    instructions = prompt_contract_for("knowledge_analysis_batch").instructions
+
+    assert "at most 16 concepts and 16 entities" in instructions
+    assert "at most 8 concise claims" in instructions
+    assert "within 2,000 characters" in instructions
+
+
+def test_changed_knowledge_analysis_prompts_are_version_two() -> None:
+    for operation in (
+        "knowledge_analysis",
+        "knowledge_analysis_batch",
+        "knowledge_analysis_merge",
+    ):
+        assert prompt_contract_for(operation).version == f"openkb.prompt.{operation}.v2"
+
+
 def test_normalization_removes_only_one_transport_fence() -> None:
     assert normalize_structured_output('```json\n{"terms":["知识"]}\n```') == ('{"terms":["知识"]}')
     assert normalize_structured_output("prefix {not json}") == "prefix {not json}"

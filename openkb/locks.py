@@ -53,11 +53,12 @@ class _LocalRwLock:
         self._condition = threading.Condition(threading.Lock())
         self._readers = 0
         self._writer = False
+        self._writers_waiting = 0
 
     @contextlib.contextmanager
     def read(self) -> Iterator[None]:
         with self._condition:
-            while self._writer:
+            while self._writer or self._writers_waiting:
                 self._condition.wait()
             self._readers += 1
         try:
@@ -71,9 +72,13 @@ class _LocalRwLock:
     @contextlib.contextmanager
     def write(self) -> Iterator[None]:
         with self._condition:
-            while self._writer or self._readers:
-                self._condition.wait()
-            self._writer = True
+            self._writers_waiting += 1
+            try:
+                while self._writer or self._readers:
+                    self._condition.wait()
+                self._writer = True
+            finally:
+                self._writers_waiting -= 1
         try:
             yield
         finally:
@@ -86,14 +91,20 @@ class _LocalRwLock:
         """Try to acquire the local writer slot before ``deadline``."""
         acquired = False
         with self._condition:
-            while self._writer or self._readers:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                self._condition.wait(timeout=remaining)
-            else:
-                self._writer = True
-                acquired = True
+            self._writers_waiting += 1
+            try:
+                while self._writer or self._readers:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._condition.wait(timeout=remaining)
+                else:
+                    self._writer = True
+                    acquired = True
+            finally:
+                self._writers_waiting -= 1
+                if not acquired:
+                    self._condition.notify_all()
         try:
             yield acquired
         finally:
@@ -121,10 +132,14 @@ def _local_lock(lock_path: Path) -> _LocalRwLock:
         return lock
 
 
-@contextlib.contextmanager
-def kb_lock(openkb_dir: Path, *, exclusive: bool) -> Iterator[None]:
+def kb_lock(openkb_dir: Path, *, exclusive: bool) -> contextlib.AbstractContextManager[None]:
     """Hold a KB-level advisory lock."""
-    lock_path = openkb_dir / "ingest.lock"
+    return _kb_named_lock(openkb_dir, "ingest.lock", exclusive=exclusive)
+
+
+@contextlib.contextmanager
+def _kb_named_lock(openkb_dir: Path, name: str, *, exclusive: bool) -> Iterator[None]:
+    lock_path = openkb_dir / name
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     resolved = lock_path.resolve()
     held = _held_locks()
@@ -167,6 +182,16 @@ def kb_lock(openkb_dir: Path, *, exclusive: bool) -> Iterator[None]:
 def kb_ingest_lock(openkb_dir: Path):
     """Hold an exclusive KB mutation lock."""
     return kb_lock(openkb_dir, exclusive=True)
+
+
+def kb_import_runtime_lock(openkb_dir: Path):
+    """Drain active imports before recovery or runtime activation work."""
+    return _kb_named_lock(openkb_dir, "import-runtime.lock", exclusive=True)
+
+
+def kb_import_activity_lock(openkb_dir: Path):
+    """Mark one active import while allowing sibling documents to run concurrently."""
+    return _kb_named_lock(openkb_dir, "import-runtime.lock", exclusive=False)
 
 
 @contextlib.contextmanager

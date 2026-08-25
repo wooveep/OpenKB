@@ -480,7 +480,24 @@ fn rotate_shell_log(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::launch_paths;
+    use serde_json::Value;
     use std::{fs, time::SystemTime};
+
+    #[test]
+    fn default_capability_allows_diagnostic_bundle_save_dialog() {
+        let capability: Value = serde_json::from_str(include_str!("../capabilities/default.json"))
+            .expect("parse default Desktop capability");
+        let permissions = capability["permissions"]
+            .as_array()
+            .expect("default capability permissions");
+
+        assert!(
+            permissions
+                .iter()
+                .any(|permission| permission == "dialog:allow-save"),
+            "diagnostic bundle export requires dialog:allow-save"
+        );
+    }
 
     #[test]
     fn launch_paths_classify_desktop_knowledge_base_and_import_sources() {

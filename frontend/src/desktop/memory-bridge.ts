@@ -44,6 +44,7 @@ import {
   updateImportTasks,
 } from "./memory-bridge-helpers"
 import { MemoryKnowledgeReviewBridge } from "./memory-knowledge-review-bridge"
+import { createMemoryModelSettings } from "./memory-model-settings"
 
 function emptyRetrievalTrace(canonicalEvidenceIds: string[] = []) {
   return {
@@ -79,39 +80,7 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
   private conversationResults: DesktopConversation[] = []
   private lastConversationId: string | null = null
   private documentVersionCandidateResults: DesktopDocumentVersionCandidate[] = []
-  private modelSettingsResult: DesktopModelSettings = {
-    provider: "custom",
-    model: "gpt-5.4",
-    apiBaseUrl: "https://api.openai.com/v1",
-    apiKey: "",
-    apiKeyConfigured: false,
-    maxConcurrentModelCalls: 1,
-    analysisModel: null,
-    answerModel: null,
-    defaultContextCapacity: null,
-    analysisContextCapacity: null,
-    answerContextCapacity: null,
-    defaultReasoning: null,
-    analysisReasoning: null,
-    answerReasoning: null,
-    defaultInputPricePerMillion: null,
-    defaultOutputPricePerMillion: null,
-    analysisInputPricePerMillion: null,
-    analysisOutputPricePerMillion: null,
-    answerInputPricePerMillion: null,
-    answerOutputPricePerMillion: null,
-    analysisConcurrency: 1,
-    usageAggregate: {
-      callCount: 0,
-      attemptCount: 0,
-      failureCount: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      totalTokens: 0,
-      totalCost: null,
-      tokenUsageSource: null,
-    },
-  }
+  private modelSettingsResult: DesktopModelSettings = createMemoryModelSettings()
 
   constructor(
     handshakeResult: DesktopBridgeHandshake = {

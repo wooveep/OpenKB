@@ -19,7 +19,9 @@ from openkb.desktop_model_gateway import (
     DesktopModelRequest,
     DesktopModelResult,
     DesktopModelTransportError,
+    ExecutionLane,
     classify_model_error,
+    require_execution_lane,
 )
 
 MODEL_CONNECT_TIMEOUT_SECONDS = 30.0
@@ -72,7 +74,7 @@ class DesktopTerminalModelEvent:
     model_role: str = "default"
     provider_name: str = "scripted"
     model_name: str = "unknown"
-    execution_lane: str = "background"
+    execution_lane: ExecutionLane = "background"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -102,7 +104,7 @@ class _TerminalAttemptContext:
     model_role: str
     provider_name: str
     model_name: str
-    execution_lane: str
+    execution_lane: ExecutionLane
 
 
 class DesktopTerminalModelGateway(DesktopModelGateway):
@@ -131,8 +133,9 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
     def model_name(self) -> str:
         return self._model_name
 
-    def for_lane(self, lane: str) -> DesktopTerminalModelGateway:
+    def for_lane(self, lane: ExecutionLane) -> DesktopTerminalModelGateway:
         """Return a gateway bound to a named transport lane when supported."""
+        lane = require_execution_lane(lane)
         select_lane = getattr(self._transport, "for_lane", None)
         if not callable(select_lane):
             return self
@@ -210,6 +213,7 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
         ) -> object:
             active = threading.Event()
             active.set()
+            activity_emitted = False
             pending_deltas: SimpleQueue[str] = SimpleQueue()
 
             def queue_delta(delta: str) -> None:
@@ -218,6 +222,7 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
                 pending_deltas.put(delta)
 
             def flush_stream_activity() -> None:
+                nonlocal activity_emitted
                 flush_request_sent()
                 while True:
                     try:
@@ -227,7 +232,9 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
                     if not active.is_set():
                         continue
                     on_delta(context.attempt, delta)
-                    self._emit(context, "model_output_activity")
+                    if not activity_emitted:
+                        self._emit(context, "model_output_activity")
+                        activity_emitted = True
 
             try:
                 self._prepare_active_stream(request)
@@ -311,7 +318,9 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
             self._raise_if_cancelled(is_cancelled, context)
             self._emit(context, "queued")
             try:
-                release_attempt = _prepare_terminal_model_attempt(self._transport, is_cancelled)
+                release_attempt = _prepare_terminal_model_attempt(
+                    self._transport, request, is_cancelled
+                )
             except DesktopModelCancelledError:
                 self._emit(context, "cancelled")
                 raise
@@ -602,8 +611,15 @@ def _is_cancelled(callback: CancellationCallback | None) -> bool:
 
 
 def _prepare_terminal_model_attempt(
-    transport: object, is_cancelled: CancellationCallback | None
+    transport: object,
+    request: DesktopModelRequest,
+    is_cancelled: CancellationCallback | None,
 ) -> AttemptRelease | None:
+    prepare_request = getattr(transport, "prepare_terminal_model_request", None)
+    if callable(prepare_request):
+        prepared = prepare_request(request, is_cancelled)
+        if callable(prepared):
+            return prepared
     prepare = getattr(transport, "prepare_terminal_model_attempt", None)
     if callable(prepare):
         prepared = prepare(is_cancelled)

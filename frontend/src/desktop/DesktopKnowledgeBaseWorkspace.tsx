@@ -27,6 +27,7 @@ import {
   type WorkspaceSection,
 } from "./DesktopWorkbenchShell"
 import { DesktopBridgeError } from "./contracts"
+import { runDocumentImportBatch } from "./desktop-import-batch"
 import { nextDesktopRequestId } from "./request-id"
 import { useDeferredImportSources } from "./useDeferredImportSources"
 import { useDesktopRuntimeEvents } from "./useDesktopRuntimeEvents"
@@ -472,7 +473,7 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
     setImportBatchSummary({ total: batchTotal, completed: 0, failures: [], running: true })
     let completed = 0
     const failures: Array<{ name: string; reason: string }> = []
-    for (const source of importInspection.supported) {
+    await runDocumentImportBatch(importInspection.supported, async (source) => {
       const requestId = nextDesktopRequestId("knowledge-base")
       try {
         const result = await bridge.importTextDocument(source.path, requestId)
@@ -487,17 +488,17 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
           reason: error instanceof Error ? error.message : String(error),
         })
       }
-      try {
-        setImportTasks((await bridge.importJobs()).jobs)
-      } catch {
-        // The batch summary still reports the document failure when task refresh is unavailable.
-      }
       setImportBatchSummary({
         total: batchTotal,
         completed,
         failures: [...failures],
         running: true,
       })
+    })
+    try {
+      setImportTasks((await bridge.importJobs()).jobs)
+    } catch {
+      // The batch summary still reports document failures when task refresh is unavailable.
     }
     setImportBatchSummary({ total: batchTotal, completed, failures, running: false })
     setImportSources([])

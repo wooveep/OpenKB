@@ -77,6 +77,8 @@ class DesktopModelSettings:
     api_base_url: str
     api_key: str
     max_concurrent_model_calls: int
+    requests_per_minute: int | None = None
+    tokens_per_minute: int | None = None
     analysis_model: str | None = None
     answer_model: str | None = None
     default_context_capacity: int | None = None
@@ -189,6 +191,8 @@ class DesktopModelSettings:
             "api_key": self.api_key,
             "api_key_configured": bool(self.api_key),
             "max_concurrent_model_calls": self.max_concurrent_model_calls,
+            "requests_per_minute": self.requests_per_minute,
+            "tokens_per_minute": self.tokens_per_minute,
             "analysis_model": self.analysis_model,
             "answer_model": self.answer_model,
             "analysis_concurrency": self.max_concurrent_model_calls,
@@ -246,6 +250,8 @@ def read_desktop_model_settings(kb_dir: Path) -> DesktopModelSettings:
         if "max_concurrent_model_calls" not in desktop_values
         else _required_concurrency(desktop_values["max_concurrent_model_calls"])
     )
+    requests_per_minute = _optional_rate_limit(desktop_values.get("requests_per_minute"), "RPM")
+    tokens_per_minute = _optional_rate_limit(desktop_values.get("tokens_per_minute"), "TPM")
     role_values = _role_values(desktop_values)
     return DesktopModelSettings(
         provider=provider,
@@ -253,6 +259,8 @@ def read_desktop_model_settings(kb_dir: Path) -> DesktopModelSettings:
         api_base_url=api_base_url,
         api_key=api_key,
         max_concurrent_model_calls=concurrency,
+        requests_per_minute=requests_per_minute,
+        tokens_per_minute=tokens_per_minute,
         **role_values,
     )
 
@@ -265,6 +273,8 @@ def save_desktop_model_settings(
     api_base_url: object,
     api_key: object,
     max_concurrent_model_calls: object,
+    requests_per_minute: object = None,
+    tokens_per_minute: object = None,
     analysis_model: object = None,
     answer_model: object = None,
     default_context_capacity: object = None,
@@ -289,6 +299,8 @@ def save_desktop_model_settings(
         api_base_url=api_base_url,
         api_key=api_key,
         max_concurrent_model_calls=max_concurrent_model_calls,
+        requests_per_minute=requests_per_minute,
+        tokens_per_minute=tokens_per_minute,
         analysis_model=analysis_model,
         answer_model=answer_model,
         default_context_capacity=default_context_capacity,
@@ -317,6 +329,8 @@ def save_desktop_model_settings(
                 "api_base_url": settings.api_base_url,
                 "api_key": settings.api_key,
                 "max_concurrent_model_calls": settings.max_concurrent_model_calls,
+                "requests_per_minute": settings.requests_per_minute,
+                "tokens_per_minute": settings.tokens_per_minute,
                 "analysis_model": settings.analysis_model,
                 "answer_model": settings.answer_model,
                 "default_context_capacity": settings.default_context_capacity,
@@ -348,6 +362,8 @@ def validate_desktop_model_settings(
     api_base_url: object,
     api_key: object,
     max_concurrent_model_calls: object,
+    requests_per_minute: object = None,
+    tokens_per_minute: object = None,
     analysis_model: object = None,
     answer_model: object = None,
     default_context_capacity: object = None,
@@ -371,6 +387,8 @@ def validate_desktop_model_settings(
     normalized_model = _display_model_for_provider(normalized_provider, _required_model(model))
     normalized_api_key = _required_api_key(api_key)
     normalized_concurrency = _required_concurrency(max_concurrent_model_calls)
+    normalized_requests_per_minute = _optional_rate_limit(requests_per_minute, "RPM")
+    normalized_tokens_per_minute = _optional_rate_limit(tokens_per_minute, "TPM")
     role_values: _RoleValues = {
         "analysis_model": _optional_model(analysis_model),
         "answer_model": _optional_model(answer_model),
@@ -393,6 +411,8 @@ def validate_desktop_model_settings(
         api_base_url=normalized_api_base_url,
         api_key=normalized_api_key,
         max_concurrent_model_calls=normalized_concurrency,
+        requests_per_minute=normalized_requests_per_minute,
+        tokens_per_minute=normalized_tokens_per_minute,
         **role_values,
     )
 
@@ -587,4 +607,12 @@ def _required_concurrency(value: object) -> int:
         raise DesktopModelSettingsError(
             f"Model concurrency must be an integer between 1 and {_MAX_CONCURRENT_MODEL_CALLS}."
         )
+    return value
+
+
+def _optional_rate_limit(value: object, label: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise DesktopModelSettingsError(f"Optional {label} limit must be a positive integer.")
     return value

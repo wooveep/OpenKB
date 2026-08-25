@@ -477,7 +477,7 @@ def test_structured_analyze_prefers_streaming_and_keeps_chunks_private() -> None
     )
 
     assert result.content == '{"terms":["OpenKB"]}'
-    assert "model_output_activity" in [event.status for event in events]
+    assert [event.status for event in events].count("model_output_activity") == 1
     assert all("OpenKB" not in repr(event.as_dict()) for event in events)
 
 

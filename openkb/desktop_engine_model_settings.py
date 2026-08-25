@@ -69,6 +69,8 @@ def dispatch_model_settings_request(
                 api_base_url=request.params.get("api_base_url"),
                 api_key=request.params.get("api_key"),
                 max_concurrent_model_calls=request.params.get("max_concurrent_model_calls"),
+                requests_per_minute=request.params.get("requests_per_minute"),
+                tokens_per_minute=request.params.get("tokens_per_minute"),
                 **_role_settings_params(request.params),
             )
             enrichment_engine.start_page_tree_enrichments(
@@ -87,6 +89,8 @@ def dispatch_model_settings_request(
                 api_base_url=request.params.get("api_base_url"),
                 api_key=request.params.get("api_key"),
                 max_concurrent_model_calls=request.params.get("max_concurrent_model_calls"),
+                requests_per_minute=request.params.get("requests_per_minute"),
+                tokens_per_minute=request.params.get("tokens_per_minute"),
                 **_role_settings_params(request.params),
             )
             started_at = time.monotonic()

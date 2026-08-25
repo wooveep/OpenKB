@@ -37,6 +37,9 @@ try {
   const { DesktopKnowledgeGraphExtractionTasks } = await vite.ssrLoadModule(
     "/src/desktop/DesktopKnowledgeGraphExtractionTasks.tsx",
   )
+  const { runDocumentImportBatch } = await vite.ssrLoadModule(
+    "/src/desktop/desktop-import-batch.ts",
+  )
   const activity = {
     operation: "knowledge_graph_extraction",
     modelRole: "analysis",
@@ -110,6 +113,15 @@ try {
   assert.match(graphMarkup, /guide\.docx/)
   assert.match(graphMarkup, /graph-call-1:1/)
   assert.match(graphMarkup, /Resume extraction/)
+  let activeImports = 0
+  let peakImports = 0
+  await runDocumentImportBatch([0, 1, 2, 3, 4, 5], async () => {
+    activeImports += 1
+    peakImports = Math.max(peakImports, activeImports)
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 5))
+    activeImports -= 1
+  })
+  assert.equal(peakImports, 4)
   console.log("model task UI tests: OK")
 } finally {
   await vite.close()

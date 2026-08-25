@@ -91,6 +91,8 @@ fn model_settings_params(settings: &ModelSettingsDraft) -> Value {
         "api_base_url": settings.api_base_url,
         "api_key": settings.api_key,
         "max_concurrent_model_calls": settings.max_concurrent_model_calls,
+        "requests_per_minute": settings.requests_per_minute,
+        "tokens_per_minute": settings.tokens_per_minute,
         "analysis_model": settings.analysis_model,
         "answer_model": settings.answer_model,
         "default_context_capacity": settings.default_context_capacity,
@@ -121,6 +123,8 @@ mod tests {
             "apiBaseUrl": "https://models.example.test/v1",
             "apiKey": "secret",
             "maxConcurrentModelCalls": 2,
+            "requestsPerMinute": 120,
+            "tokensPerMinute": 240000,
             "analysisModel": "analysis-model",
             "answerModel": null,
             "defaultContextCapacity": 65536,
@@ -141,6 +145,8 @@ mod tests {
         let params = model_settings_params(&draft);
         assert_eq!(params["analysis_model"], "analysis-model");
         assert_eq!(params["default_context_capacity"], 65536);
+        assert_eq!(params["requests_per_minute"], 120);
+        assert_eq!(params["tokens_per_minute"], 240000);
         assert!(params.get("initial_timeout_seconds").is_none());
         assert!(params.get("model_call_deadline_seconds").is_none());
     }

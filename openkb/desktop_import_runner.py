@@ -84,7 +84,7 @@ from openkb.desktop_okf_projection import (
     stage_okf_projection_in,
 )
 from openkb.desktop_parser_runtime import begin_parser_warmup, require_parser_mode
-from openkb.locks import kb_ingest_lock
+from openkb.locks import kb_import_activity_lock
 
 StageProgressCallback = Callable[[dict[str, object]], None]
 _CONTROL_CODES = {"import_paused", "import_cancelled", "awaiting_model_configuration"}
@@ -141,31 +141,30 @@ class DesktopTextImportService:
     def import_text(self, source_path: Path) -> DesktopTextImportResult:
         """Create and execute a brand-new supported document Import Job."""
         source = validate_text_source(source_path)
-        try:
-            # A live worker owns the KB lock, so open-time recovery sees only a crashed owner.
-            with kb_ingest_lock(self._store.state_dir):
+        with kb_import_activity_lock(self._store.state_dir):
+            try:
                 self._store.require_database()
                 result = self._run(self._store.create_job(source))
-        except DesktopImportError:
-            raise
-        except (OSError, sqlite3.Error, LockException) as error:
-            raise DesktopImportError(
-                "desktop_import_failed", f"Could not import {source.name}: {error}"
-            ) from error
+            except DesktopImportError:
+                raise
+            except (OSError, sqlite3.Error, LockException) as error:
+                raise DesktopImportError(
+                    "desktop_import_failed", f"Could not import {source.name}: {error}"
+                ) from error
         self._start_graph_extraction(result)
         return result
 
     def resume_text(self, job_id: str) -> DesktopTextImportResult:
         """Resume from the earliest pending stage without rerunning checkpoints."""
-        try:
-            with kb_ingest_lock(self._store.state_dir):
+        with kb_import_activity_lock(self._store.state_dir):
+            try:
                 result = self._run(self._store.resume_job(job_id))
-        except DesktopImportError:
-            raise
-        except (OSError, sqlite3.Error, LockException) as error:
-            raise DesktopImportError(
-                "desktop_import_failed", f"Could not resume import {job_id}: {error}"
-            ) from error
+            except DesktopImportError:
+                raise
+            except (OSError, sqlite3.Error, LockException) as error:
+                raise DesktopImportError(
+                    "desktop_import_failed", f"Could not resume import {job_id}: {error}"
+                ) from error
         self._start_graph_extraction(result)
         return result
 
@@ -173,33 +172,33 @@ class DesktopTextImportService:
         self, job_id: str, override: DesktopRecoveryOverride
     ) -> DesktopTextImportResult:
         """Resume a quarantined document at its failed stage using one run-only override."""
-        legacy_recovery = DesktopLegacyModelRecoveryService(self._store.kb_dir)
-        assessment = legacy_recovery.assessment(job_id)
-        selected_legacy_recovery = assessment is not None
-        if assessment is not None:
-            if override.legacy_recovery_choice is None:
-                raise DesktopImportError(
-                    "legacy_model_recovery_choice_required",
-                    "Choose a legacy Knowledge Analysis recovery path before continuing.",
+        with kb_import_activity_lock(self._store.state_dir):
+            legacy_recovery = DesktopLegacyModelRecoveryService(self._store.kb_dir)
+            assessment = legacy_recovery.assessment(job_id)
+            selected_legacy_recovery = assessment is not None
+            if assessment is not None:
+                if override.legacy_recovery_choice is None:
+                    raise DesktopImportError(
+                        "legacy_model_recovery_choice_required",
+                        "Choose a legacy Knowledge Analysis recovery path before continuing.",
+                    )
+                legacy_recovery.select(
+                    job_id,
+                    override.legacy_recovery_choice,
+                    model_override=override.model,
+                    context_capacity=override.context_capacity,
                 )
-            legacy_recovery.select(
-                job_id,
-                override.legacy_recovery_choice,
-                model_override=override.model,
-                context_capacity=override.context_capacity,
-            )
-        try:
-            with kb_ingest_lock(self._store.state_dir):
+            try:
                 result = self._run(self._recovery.begin(job_id, override))
-        except DesktopImportError:
-            raise
-        except (OSError, sqlite3.Error, LockException) as error:
-            raise DesktopImportError(
-                "desktop_import_failed", f"Could not recover import {job_id}: {error}"
-            ) from error
-        finally:
-            if selected_legacy_recovery:
-                legacy_recovery.record_resulting_plan(job_id)
+            except DesktopImportError:
+                raise
+            except (OSError, sqlite3.Error, LockException) as error:
+                raise DesktopImportError(
+                    "desktop_import_failed", f"Could not recover import {job_id}: {error}"
+                ) from error
+            finally:
+                if selected_legacy_recovery:
+                    legacy_recovery.record_resulting_plan(job_id)
         self._start_graph_extraction(result)
         return result
 
@@ -417,6 +416,7 @@ class DesktopTextImportService:
                             "running",
                             80 + min(4, round((completed / total) * 4)),
                         ),
+                        max_parallel_batches=getattr(gateway, "analysis_concurrency", 1),
                         capability_profile=(
                             capability("knowledge_analysis")
                             if callable(
