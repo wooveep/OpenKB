@@ -288,13 +288,82 @@ def test_result_and_capability_migrations_preserve_published_knowledge_idempoten
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE {column} IS NOT NULL"
             ).fetchone() == (0,)
-        assert connection.execute("SELECT COUNT(*) FROM model_capability_checks").fetchone() == (
-            0,
-        )
+        assert connection.execute("SELECT COUNT(*) FROM model_capability_checks").fetchone() == (0,)
         assert connection.execute(
             "SELECT availability FROM source_documents WHERE document_id = ?",
             (imported.document.document_id,),
         ).fetchone() == ("available",)
+
+
+def test_open_repairs_partial_preledger_result_observation_migration(tmp_path) -> None:
+    """A terminated pre-release v43 migration may expose only its first DDL columns."""
+    kb_dir = tmp_path / "partial-result-observations"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    retained = {
+        ("model_calls", "finish_reason"),
+        ("model_calls", "reasoning_observed"),
+        ("model_calls", "final_content_observed"),
+        ("model_calls", "reasoning_chunk_count"),
+        ("model_calls", "final_chunk_count"),
+        ("model_calls", "reasoning_character_count"),
+        ("model_calls", "final_character_count"),
+        ("model_attempts", "finish_reason"),
+        ("model_attempts", "reasoning_observed"),
+        ("model_attempts", "final_content_observed"),
+    }
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE model_capability_checks")
+        for table, column, _definition in MODEL_RESULT_OBSERVATION_COLUMNS:
+            if (table, column) not in retained:
+                connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        connection.execute("DELETE FROM schema_migrations WHERE version IN (43, 44)")
+        connection.commit()
+
+    activation = DesktopKnowledgeBaseRuntime().open(kb_dir)
+
+    assert activation.knowledge_base.schema_version == LATEST_SCHEMA_VERSION
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT version FROM schema_migrations WHERE version IN (43, 44) ORDER BY version"
+        ).fetchall() == [(43,), (44,)]
+        for table, column, _definition in MODEL_RESULT_OBSERVATION_COLUMNS:
+            columns = connection.execute(f"PRAGMA table_info({table})").fetchall()
+            assert [str(row[1]) for row in columns].count(column) == 1
+
+
+def test_existing_database_migration_ddl_rolls_back_before_ledger_commit(
+    tmp_path, monkeypatch
+) -> None:
+    kb_dir = tmp_path / "atomic-existing-migration"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE model_capability_checks")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 44")
+        connection.commit()
+
+    migrations = tuple(
+        (
+            version,
+            (
+                "ALTER TABLE model_calls ADD COLUMN atomic_migration_probe TEXT",
+                "THIS IS NOT VALID SQLITE",
+            )
+            if version == 44
+            else statements,
+        )
+        for version, statements in desktop_workspace._MIGRATIONS
+    )
+    monkeypatch.setattr(desktop_workspace, "_MIGRATIONS", migrations)
+
+    with pytest.raises(DesktopKnowledgeBaseStateError):
+        DesktopKnowledgeBaseRuntime().open(kb_dir)
+
+    with sqlite3.connect(database_path) as connection:
+        columns = connection.execute("PRAGMA table_info(model_calls)").fetchall()
+        assert "atomic_migration_probe" not in {str(row[1]) for row in columns}
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (43,)
 
 
 def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):
