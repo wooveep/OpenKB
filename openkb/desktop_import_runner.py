@@ -42,7 +42,10 @@ from openkb.desktop_import_checkpoint_validation import (
 from openkb.desktop_import_control import DesktopImportControl
 from openkb.desktop_import_deduplication import DuplicateImportSignal, normalized_body_sha256
 from openkb.desktop_import_failures import DIRECT_IMPORT_QUARANTINE_CODES
-from openkb.desktop_import_model_call import run_import_model_call
+from openkb.desktop_import_model_call import (
+    quarantine_import_model_call,
+    run_import_model_call,
+)
 from openkb.desktop_import_model_ledger import DesktopImportModelLedger
 from openkb.desktop_import_quarantine import DesktopImportQuarantineStore
 from openkb.desktop_import_recovery import DesktopImportRecoveryStore
@@ -75,7 +78,6 @@ from openkb.desktop_knowledge_graph import (
     start_graph_extraction,
 )
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
-from openkb.desktop_legacy_model_recovery import DesktopLegacyModelRecoveryService
 from openkb.desktop_missing_sources import record_missing_source_candidates_in
 from openkb.desktop_model_analysis_gate import (
     DesktopAnalysisCapabilityGate,
@@ -87,6 +89,7 @@ from openkb.desktop_model_gateway import (
     DesktopModelCancelledError,
     DesktopModelGateway,
 )
+from openkb.desktop_model_recovery import DesktopModelRecoveryService
 from openkb.desktop_okf_projection import (
     activate_okf_projection,
     discard_okf_projection_staging,
@@ -160,17 +163,13 @@ class DesktopTextImportService:
     ) -> DesktopTextImportResult:
         """Resume a quarantined document at its failed stage using one run-only override."""
         with kb_import_activity_lock(self._store.state_dir):
-            legacy_recovery = DesktopLegacyModelRecoveryService(self._store.kb_dir)
-            assessment = legacy_recovery.assessment(job_id)
-            selected_legacy_recovery = assessment is not None
+            model_recovery = DesktopModelRecoveryService(self._store.kb_dir)
+            assessment = model_recovery.assessment(job_id)
+            selected_model_recovery = assessment is not None
             if assessment is not None:
-                if override.legacy_recovery_choice is None:
-                    raise DesktopImportError(
-                        "legacy_model_recovery_choice_required",
-                        "Choose a legacy Knowledge Analysis recovery path before continuing.",
-                    )
-                legacy_recovery.select(
+                model_recovery.select_required(
                     job_id,
+                    assessment,
                     override.legacy_recovery_choice,
                     model_override=override.model,
                     context_capacity=override.context_capacity,
@@ -184,8 +183,8 @@ class DesktopTextImportService:
                     "desktop_import_failed", f"Could not recover import {job_id}: {error}"
                 ) from error
             finally:
-                if selected_legacy_recovery:
-                    legacy_recovery.record_resulting_plan(job_id)
+                if selected_model_recovery:
+                    model_recovery.record_resulting_plan(job_id)
         self._start_graph_extraction(result)
         return result
 
@@ -549,13 +548,12 @@ class DesktopTextImportService:
                 error.attempt_count,
                 error.failure.code,
             )
-            self._model_ledger.quarantine(
-                job_id=state.job_id,
-                stage_run_id=state.stage_ids[active_stage],
+            public_code = quarantine_import_model_call(
+                ledger=self._model_ledger,
+                store=self._store,
+                state=state,
                 stage=active_stage,
-                call_id=error.call_id,
-                failure=error.failure,
-                attempt_count=error.attempt_count,
+                error=error,
             )
             self._recovery.mark_finished(state, "failed")
             self._store.emit_stage(
@@ -565,7 +563,7 @@ class DesktopTextImportService:
                 100,
                 error_code=error.failure.code,
             )
-            raise DesktopImportError("document_quarantined", error.failure.reason) from error
+            raise DesktopImportError(public_code, error.failure.reason) from error
         except DesktopImportError as error:
             analysis_gate.invalidate_failure(error.code, reason=str(error))
             if error.code in DIRECT_IMPORT_QUARANTINE_CODES:

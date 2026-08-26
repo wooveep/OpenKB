@@ -10,15 +10,7 @@ from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
 from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
 from openkb.desktop_model_execution_profile import DesktopModelExecutionProfile
 from openkb.desktop_model_gateway import DesktopModelCallError
-
-MODEL_RESULT_FAILURE_CODES = frozenset(
-    {
-        "empty_final_result",
-        "reasoning_only_result",
-        "reasoning_output_exhausted",
-        "model_response_invalid",
-    }
-)
+from openkb.desktop_model_result_failure import is_model_result_failure
 
 
 @dataclass(frozen=True)
@@ -64,7 +56,7 @@ class DesktopAnalysisCapabilityGate:
 
     def invalidate_failure(self, failure_code: str, *, reason: str) -> None:
         """Forget successful evidence after one protocol-shaped result failure."""
-        if self.profile is None or failure_code not in MODEL_RESULT_FAILURE_CODES:
+        if self.profile is None or not is_model_result_failure(failure_code):
             return
         DesktopModelCapabilityStore(self.kb_dir).invalidate(
             self.profile,

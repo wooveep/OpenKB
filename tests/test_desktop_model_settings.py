@@ -13,12 +13,20 @@ import pytest
 from openkb import desktop_engine_model_settings, desktop_model_transport
 from openkb.config import DEFAULT_API_BASE_URL, DEFAULT_CONFIG, save_config
 from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
-from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
+from openkb.desktop_engine import DesktopEngineServer, DesktopRequest, DesktopRequestError
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.desktop_model_capability_check import answer_capability_check_request
 from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
-from openkb.desktop_model_execution_profile import analysis_execution_profile_for_settings
+from openkb.desktop_model_execution_profile import (
+    ANSWER_CAPABILITY_SYSTEM_PROMPT,
+    ANSWER_CAPABILITY_USER_PROMPT,
+    DesktopModelCapacityError,
+    analysis_execution_profile_for_settings,
+    answer_capability_profile_for_settings,
+)
 from openkb.desktop_model_gateway import (
+    DesktopModelCancelledError,
     DesktopModelGateway,
     DesktopModelRequest,
     DesktopModelResult,
@@ -39,6 +47,87 @@ from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 def _create_desktop_kb(kb_dir):
     DesktopKnowledgeBaseRuntime().create(kb_dir, name="Desktop KB")
     return kb_dir
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "expected_max_tokens"),
+    (
+        (None, 8_208),
+        ("off", 8_208),
+        ("low", 8_208),
+        ("medium", 8_208),
+        ("high", 16_400),
+    ),
+)
+def test_answer_capability_check_reserves_reasoning_before_final_text(
+    reasoning,
+    expected_max_tokens,
+) -> None:
+    settings = validate_desktop_model_settings(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+        answer_reasoning=reasoning,
+    )
+    profile = answer_capability_profile_for_settings(settings)
+
+    request = answer_capability_check_request(settings, profile=profile)
+
+    assert request.generation_parameters == {
+        "temperature": 0,
+        "max_tokens": expected_max_tokens,
+    }
+    assert profile.provider_output_ceiling_tokens == expected_max_tokens
+    assert profile.capability_version == "openkb.answer-streaming.v2"
+    assert request.content == ANSWER_CAPABILITY_USER_PROMPT
+    assert request.prompt_contract_snapshot == {"instructions": ANSWER_CAPABILITY_SYSTEM_PROMPT}
+    assert request.prompt_contract_digest == profile.prompt_contract_digest
+    assert ANSWER_CAPABILITY_SYSTEM_PROMPT != ANSWER_CAPABILITY_USER_PROMPT
+
+
+@pytest.mark.parametrize("reasoning", (None, "off"))
+def test_custom_answer_capability_check_does_not_invent_provider_reasoning_floor(
+    reasoning,
+) -> None:
+    settings = validate_desktop_model_settings(
+        provider="custom",
+        model="private-model",
+        api_base_url="https://models.example.test/v1",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+        answer_reasoning=reasoning,
+    )
+
+    profile = answer_capability_profile_for_settings(settings)
+    request = answer_capability_check_request(settings, profile=profile)
+
+    assert profile.reasoning_effort == reasoning
+    assert profile.reasoning_allowance_tokens == 0
+    assert request.generation_parameters == {"temperature": 0, "max_tokens": 16}
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "context_capacity"),
+    (("low", 4_096), ("low", 4_120), ("high", 16_384)),
+)
+def test_answer_capability_profile_rejects_a_reasoning_budget_larger_than_context(
+    reasoning,
+    context_capacity,
+) -> None:
+    settings = validate_desktop_model_settings(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+        answer_context_capacity=context_capacity,
+        answer_reasoning=reasoning,
+    )
+
+    with pytest.raises(DesktopModelCapacityError, match="Answer context capacity"):
+        answer_capability_profile_for_settings(settings)
 
 
 @pytest.mark.parametrize("config", ({}, {"desktop": {}}, {"desktop": {"api_key": ""}}))
@@ -649,6 +738,13 @@ def test_engine_deepseek_check_verifies_the_exact_analysis_profile(tmp_path, mon
             observed.append(request)
             return DesktopModelResult("capability-call", '{"status":"ok"}', 1)
 
+        def stream(self, request, *, on_event, on_delta, is_cancelled):
+            del on_event
+            assert is_cancelled is not None
+            observed.append(request)
+            on_delta(1, "OK")
+            return DesktopModelResult("answer-capability-call", "OK", 1)
+
     def gateway_for_settings(_kb_dir, settings):
         gateway_models.append(settings.model)
         return FakeTerminalGateway()
@@ -681,15 +777,174 @@ def test_engine_deepseek_check_verifies_the_exact_analysis_profile(tmp_path, mon
     profile = analysis_execution_profile_for_settings(settings)
     assert result["profile_identity"] == profile.identity
     assert result["capability_status"] == "verified"
+    assert result["role_results"]["analysis"]["status"] == "verified"
+    assert result["role_results"]["answer"]["status"] == "verified"
     assert DesktopModelCapabilityStore(kb_dir).is_verified(profile)
-    assert gateway_models == [profile.model]
-    assert len(observed) == 1
+    assert gateway_models == [profile.model, "deepseek-v4-flash"]
+    assert len(observed) == 2
     assert observed[0].structured_output_mode == "json_object"
     assert observed[0].reasoning_effort == "high"
     assert observed[0].generation_parameters == {
         "temperature": 0,
         "max_tokens": profile.provider_output_ceiling_tokens,
     }
+    assert observed[1].operation == "model_capability_answer"
+    assert observed[1].response_schema is None
+    assert observed[1].structured_output_mode is None
+
+
+def test_engine_rejects_unusable_analysis_capacity_before_check_or_cache_write(
+    tmp_path, monkeypatch
+):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    provider_calls: list[str] = []
+
+    def unexpected_gateway(_kb_dir, settings):
+        provider_calls.append(settings.model)
+        pytest.fail("capacity validation must finish before constructing a provider gateway")
+
+    monkeypatch.setattr(
+        desktop_engine_model_settings,
+        "desktop_model_gateway_for_settings",
+        unexpected_gateway,
+    )
+
+    with pytest.raises(DesktopRequestError) as captured:
+        server._dispatch(
+            DesktopRequest(
+                request_id="capacity-check",
+                method="workbench.test_model_connection",
+                params={
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-flash",
+                    "analysis_model": "deepseek-v4-pro",
+                    "answer_model": "deepseek-v4-flash",
+                    "api_base_url": "https://api.deepseek.com",
+                    "api_key": "test-key",
+                    "max_concurrent_model_calls": 1,
+                    "analysis_context_capacity": 4096,
+                },
+            ),
+            cancel_event=Event(),
+        )
+
+    assert captured.value.code == "analysis_profile_unavailable"
+    assert "context capacity" in str(captured.value)
+    assert provider_calls == []
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM model_capability_checks").fetchone() == (0,)
+
+
+def test_engine_projects_unusable_answer_capacity_before_provider_dispatch(tmp_path, monkeypatch):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    provider_calls: list[str] = []
+    params = {
+        "provider": "deepseek",
+        "model": "deepseek-v4-pro",
+        "api_base_url": "https://api.deepseek.com",
+        "api_key": "test-key",
+        "max_concurrent_model_calls": 1,
+        "answer_context_capacity": 4_096,
+        "answer_reasoning": "low",
+    }
+
+    def unexpected_gateway(_kb_dir, settings):
+        provider_calls.append(settings.model)
+        pytest.fail("Answer capacity validation must finish before provider dispatch")
+
+    monkeypatch.setattr(
+        desktop_engine_model_settings,
+        "desktop_model_gateway_for_settings",
+        unexpected_gateway,
+    )
+
+    with pytest.raises(DesktopRequestError) as captured:
+        server._dispatch(
+            DesktopRequest(
+                request_id="answer-capacity-check",
+                method="workbench.test_model_connection",
+                params=params,
+            ),
+            cancel_event=Event(),
+        )
+
+    assert captured.value.code == "answer_profile_unavailable"
+    assert "Answer context capacity" in str(captured.value)
+    assert provider_calls == []
+
+    save_desktop_model_settings(kb_dir, **params)
+    payload = server._dispatch(
+        DesktopRequest(
+            request_id="answer-capacity-settings",
+            method="workbench.model_settings",
+            params={},
+        ),
+        cancel_event=None,
+    )
+    assert payload["answer_capability"] == {
+        "profile_identity": None,
+        "status": "unchecked",
+        "failure_code": "answer_profile_unavailable",
+        "reason": str(captured.value),
+        "checked_at": None,
+    }
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM model_capability_checks").fetchone() == (0,)
+
+
+def test_engine_capability_cancellation_records_only_the_cancelled_analysis_role(
+    tmp_path, monkeypatch
+):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    class CancelledGateway:
+        def analyze(self, request, *, on_event, is_cancelled):
+            del request, on_event
+            assert is_cancelled is not None
+            raise DesktopModelCancelledError()
+
+    monkeypatch.setattr(
+        desktop_engine_model_settings,
+        "desktop_model_gateway_for_settings",
+        lambda _kb_dir, _settings: CancelledGateway(),
+    )
+    params = {
+        "provider": "deepseek",
+        "model": "deepseek-v4-pro",
+        "api_base_url": "https://api.deepseek.com",
+        "api_key": "test-key",
+        "max_concurrent_model_calls": 1,
+    }
+
+    with pytest.raises(DesktopRequestError) as captured:
+        server._dispatch(
+            DesktopRequest(
+                request_id="cancelled-capability-check",
+                method="workbench.test_model_connection",
+                params=params,
+            ),
+            cancel_event=Event(),
+        )
+
+    assert captured.value.code == "request_cancelled"
+    settings = validate_desktop_model_settings(**params)
+    profile = analysis_execution_profile_for_settings(settings)
+    state = DesktopModelCapabilityStore(kb_dir).state(profile)
+    assert state.status == "cancelled"
+    assert state.failure_code == "request_cancelled"
+    assert "Analysis Model Capability Check" in str(captured.value)
 
 
 def test_engine_capability_check_runs_once_for_each_distinct_selected_model(tmp_path, monkeypatch):
@@ -750,3 +1005,221 @@ def test_engine_capability_check_runs_once_for_each_distinct_selected_model(tmp_
         ("gpt-5-default", "model_capability_default", False),
         ("answer-only-model", "model_capability_answer", False),
     ]
+
+
+def test_custom_answer_check_persists_exact_credential_free_evidence_across_reopen(
+    tmp_path, monkeypatch
+):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    source = tmp_path / "answer-evidence.txt"
+    source.write_text("OpenKB answers from deterministic local evidence.", encoding="utf-8")
+    DesktopTextImportService(kb_dir).import_text(source)
+    params = {
+        "provider": "custom",
+        "model": "answer-model",
+        "answer_model": "answer-model",
+        "api_base_url": "https://model.test/v1",
+        "api_key": "private-test-key",
+        "max_concurrent_model_calls": 1,
+        "answer_context_capacity": 16_000,
+        "answer_reasoning": "off",
+    }
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    class AnswerCheckGateway:
+        def stream(self, request, *, on_event, on_delta, is_cancelled):
+            del on_event
+            assert is_cancelled is not None
+            assert request.operation == "model_capability_answer"
+            assert request.response_schema is None
+            on_delta(1, "OK")
+            return DesktopModelResult("answer-check", "OK", 1)
+
+    monkeypatch.setattr(
+        desktop_engine_model_settings,
+        "desktop_model_gateway_for_settings",
+        lambda _kb_dir, _settings: AnswerCheckGateway(),
+    )
+    server._dispatch(
+        DesktopRequest(
+            request_id="save-custom-answer",
+            method="workbench.save_model_settings",
+            params=params,
+        ),
+        cancel_event=None,
+    )
+
+    checked = server._dispatch(
+        DesktopRequest(
+            request_id="check-custom-answer",
+            method="workbench.test_model_connection",
+            params=params,
+        ),
+        cancel_event=Event(),
+    )
+
+    assert checked["capability_status"] == "answer_verified"
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT profile_identity, profile_json, status
+            FROM model_capability_checks WHERE status = 'verified'
+            """
+        ).fetchall()
+    assert len(rows) == 1
+    old_identity, stored_profile_json, status = rows[0]
+    assert status == "verified"
+    assert "private-test-key" not in stored_profile_json
+    assert "OK" not in stored_profile_json
+    stored_profile = json.loads(stored_profile_json)
+    assert stored_profile["role"] == "answer"
+    assert stored_profile["provider"] == "custom"
+    assert stored_profile["model"] == "answer-model"
+    assert stored_profile["streaming"] is True
+    assert stored_profile["reasoning_effort"] == "off"
+
+    reopened_workspace = DesktopKnowledgeBaseRuntime()
+    reopened_workspace.open(kb_dir)
+    reopened_server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=reopened_workspace)
+    reopened_server._handshake_complete = True
+    reopened = reopened_server._dispatch(
+        DesktopRequest(
+            request_id="reopened-settings",
+            method="workbench.model_settings",
+            params={},
+        ),
+        cancel_event=None,
+    )
+
+    assert reopened["answer_capability"]["status"] == "verified"
+    assert reopened["answer_capability"]["profile_identity"] == old_identity
+
+    provider_requests: list[DesktopModelRequest] = []
+
+    class CustomAnswerTransport:
+        def __init__(self, *, model, bundle):
+            del model, bundle
+
+        def __call__(self, request, _timeout_seconds):
+            pytest.fail(f"Custom structured Analysis must not dispatch: {request.operation}")
+
+        def stream_until_terminal(self, request, _timeout_seconds, on_delta):
+            provider_requests.append(request)
+            assert request.operation == "grounded_answer"
+            assert request.response_schema is None
+            assert request.structured_output_mode is None
+            on_delta("Custom natural-language answer.")
+            return "Custom natural-language answer."
+
+    monkeypatch.setattr(
+        desktop_model_transport,
+        "DesktopLiteLLMTransport",
+        CustomAnswerTransport,
+    )
+    answer = reopened_server._dispatch(
+        DesktopRequest(
+            request_id="ask-with-custom-answer",
+            method="workbench.ask_grounded",
+            params={"question": "How does OpenKB answer?"},
+        ),
+        cancel_event=Event(),
+    )
+
+    assert answer["retrieval_plan"]["source"] == "deterministic"
+    assert "retrieval_plan_unverified" in answer["degradations"]
+    assert "answer_model_unverified" not in answer["degradations"]
+    assert answer["answer_text"] == "Custom natural-language answer."
+    assert [request.operation for request in provider_requests] == ["grounded_answer"]
+
+    changed = dict(params)
+    changed.update(
+        {
+            "api_base_url": "https://replacement-model.test/v1",
+            "answer_model": "replacement-answer-model",
+            "answer_reasoning": "high",
+        }
+    )
+    saved = reopened_server._dispatch(
+        DesktopRequest(
+            request_id="change-custom-answer",
+            method="workbench.save_model_settings",
+            params=changed,
+        ),
+        cancel_event=None,
+    )
+
+    assert saved["answer_capability"]["status"] == "unchecked"
+    assert saved["answer_capability"]["profile_identity"] != old_identity
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT status, failure_code FROM model_capability_checks WHERE profile_identity = ?",
+            (old_identity,),
+        ).fetchone() == ("unchecked", "model_execution_profile_changed")
+    provider_requests.clear()
+
+    unverified_answer = reopened_server._dispatch(
+        DesktopRequest(
+            request_id="ask-after-answer-change",
+            method="workbench.ask_grounded",
+            params={"question": "How does OpenKB answer?"},
+        ),
+        cancel_event=Event(),
+    )
+
+    assert "answer_model_unverified" in unverified_answer["degradations"]
+    assert provider_requests == []
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("provider", "deepseek"),
+        ("api_base_url", "https://replacement-model.test/v1"),
+        ("answer_model", "replacement-answer-model"),
+        ("answer_context_capacity", 32_000),
+        ("answer_reasoning", "high"),
+    ),
+)
+def test_custom_answer_evidence_invalidates_for_each_configurable_identity_field(
+    tmp_path,
+    field,
+    replacement,
+) -> None:
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    params = {
+        "provider": "custom",
+        "model": "default-model",
+        "answer_model": "answer-model",
+        "api_base_url": "https://model.test/v1",
+        "api_key": "private-test-key",
+        "max_concurrent_model_calls": 1,
+        "answer_context_capacity": 16_000,
+        "answer_reasoning": "off",
+    }
+    settings = save_desktop_model_settings(kb_dir, **params)
+    old_profile = answer_capability_profile_for_settings(settings)
+    capability_store = DesktopModelCapabilityStore(kb_dir)
+    capability_store.mark_verified(old_profile)
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    changed = {**params, field: replacement}
+
+    saved = server._dispatch(
+        DesktopRequest(
+            request_id=f"change-answer-{field}",
+            method="workbench.save_model_settings",
+            params=changed,
+        ),
+        cancel_event=None,
+    )
+
+    assert capability_store.state(old_profile).status == "unchecked"
+    assert capability_store.state(old_profile).failure_code == "model_execution_profile_changed"
+    assert saved["answer_capability"]["profile_identity"] != old_profile.identity
+    assert saved["answer_capability"]["status"] == "unchecked"

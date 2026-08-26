@@ -25,6 +25,7 @@ import {
   type DesktopModelProviderAdapter,
   type DesktopEffectiveModelRoles,
   type DesktopModelCapabilityState,
+  type DesktopModelCapabilityCheckRoleResults,
   type DesktopReasoningEffort,
 } from "./contracts"
 
@@ -74,11 +75,13 @@ const reasoningOptions = ["", "off", "low", "medium", "high"] as const
 export function EffectiveModelRoleSettings({
   adapter,
   roles,
-  capability,
+  analysisCapability,
+  answerCapability,
 }: {
   adapter: DesktopModelProviderAdapter
   roles: DesktopEffectiveModelRoles
-  capability: DesktopModelCapabilityState
+  analysisCapability: DesktopModelCapabilityState
+  answerCapability: DesktopModelCapabilityState
 }) {
   const { t } = useTranslation("common")
   return (
@@ -109,11 +112,18 @@ export function EffectiveModelRoleSettings({
       {!adapter.supportsStructuredAnalysis && adapter.analysisUnavailableReason ? (
         <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">{adapter.analysisUnavailableReason}</p>
       ) : null}
-      <div className="mt-3 border-t border-border/60 pt-3 text-xs" data-testid="analysis-capability-state">
-        <span className="font-medium">
-          {t("desktop.knowledgeBases.modelSettings.analysisCapability")}: {t(`desktop.knowledgeBases.modelSettings.capabilityStates.${capability.status}`)}
-        </span>
-        {capability.reason ? <p className="mt-1 text-muted-foreground">{capability.reason}</p> : null}
+      <div className="mt-3 grid gap-3 border-t border-border/60 pt-3 text-xs sm:grid-cols-2">
+        {([
+          ["analysis", analysisCapability],
+          ["answer", answerCapability],
+        ] as const).map(([role, capability]) => (
+          <div key={role} data-testid={`${role}-capability-state`}>
+            <span className="font-medium">
+              {t(`desktop.knowledgeBases.modelSettings.${role}Capability`)}: {t(`desktop.knowledgeBases.modelSettings.capabilityStates.${capability.status}`)}
+            </span>
+            {capability.reason ? <p className="mt-1 text-muted-foreground">{capability.reason}</p> : null}
+          </div>
+        ))}
       </div>
     </div>
   )
@@ -239,6 +249,7 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
   const [testing, setTesting] = useState(false)
   const [testStatus, setTestStatus] = useState<DesktopModelCallLifecycleStatus | null>(null)
   const [testResult, setTestResult] = useState<string | null>(null)
+  const [testRoleResults, setTestRoleResults] = useState<DesktopModelCapabilityCheckRoleResults | null>(null)
   const [exporting, setExporting] = useState(false)
   const [diagnosticReviewOpen, setDiagnosticReviewOpen] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
@@ -316,6 +327,7 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
     setTesting(true)
     setError(null)
     setTestResult(null)
+    setTestRoleResults(null)
     setTestStatus("queued")
     const requestId = nextDesktopRequestId("model-connection-test")
     testRequestIdRef.current = requestId
@@ -330,6 +342,7 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
         attempts: result.attemptCount,
       })
       setTestResult(message)
+      setTestRoleResults(result.roleResults)
       toast.success(message)
     } catch (reason) {
       if (reason instanceof DesktopBridgeError && reason.code === "request_cancelled") {
@@ -339,6 +352,11 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
         setError(reason instanceof Error ? reason.message : String(reason))
       }
     } finally {
+      try {
+        setSettings(await bridge.modelSettings())
+      } catch {
+        // Keep the explicit check result visible if refreshing the persisted projection fails.
+      }
       if (testRequestIdRef.current === requestId) testRequestIdRef.current = null
       setTesting(false)
     }
@@ -422,6 +440,15 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
 
         {error ? <p className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">{error}</p> : null}
         {testResult ? <p className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-600/25 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-4" />{testResult}</p> : null}
+        {testRoleResults ? (
+          <div className="mt-3 flex flex-wrap gap-2 text-xs" data-testid="model-capability-role-results">
+            {Object.values(testRoleResults).map((result) => (
+              <span className="rounded-full border border-border/70 bg-muted/30 px-2.5 py-1" key={result.role}>
+                {t(`desktop.knowledgeBases.modelSettings.roles.${result.role}.name`)}: {t(`desktop.knowledgeBases.modelSettings.capabilityStates.${result.status}`)}
+              </span>
+            ))}
+          </div>
+        ) : null}
         {testing && testStatus ? <p className="mt-4 flex items-center gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-sm text-muted-foreground" role="status"><Loader2 className="size-4 animate-spin" />{t(`desktop.knowledgeBases.modelSettings.lifecycle.${testStatus}`)}</p> : null}
 
         <div className="mt-5 grid gap-4 md:grid-cols-2">
@@ -556,7 +583,8 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
           <EffectiveModelRoleSettings
             adapter={settings.providerAdapter}
             roles={settings.effectiveRoles}
-            capability={settings.analysisCapability}
+            analysisCapability={settings.analysisCapability}
+            answerCapability={settings.answerCapability}
           />
         </div>
 

@@ -16,9 +16,12 @@ from openkb.desktop_model_gateway import (
     DesktopModelCancelledError,
     DesktopModelProviderResponse,
     DesktopModelRequest,
+    DesktopModelResult,
     DesktopModelTransportError,
     DesktopProviderTokenUsage,
+    reject_model_result,
 )
+from openkb.desktop_model_result_failure import invalidate_structured_model_result
 from openkb.desktop_model_settings import DesktopModelSettings
 from openkb.desktop_model_terminal import (
     MAX_TERMINAL_MODEL_ATTEMPTS,
@@ -28,7 +31,10 @@ from openkb.desktop_model_terminal import (
     TerminalModelCallStatus,
 )
 from openkb.desktop_retrieval_plan import model_plan
-from openkb.desktop_structured_output import run_structured_output
+from openkb.desktop_structured_output import (
+    DesktopStructuredOutputInvalidError,
+    run_structured_output,
+)
 
 
 class FakeClock:
@@ -578,6 +584,63 @@ def test_streaming_and_non_streaming_structured_analysis_validate_to_same_domain
     )
     assert "model_output_activity" in [event.status for event in streamed_events]
     assert "model_output_activity" not in [event.status for event in compatible_events]
+
+
+def test_invalid_structured_results_emit_failure_only_after_local_validation() -> None:
+    events: list[DesktopTerminalModelEvent] = []
+    gateway = DesktopTerminalModelGateway(
+        lambda _request, _connect_timeout_seconds: '{"unexpected":true}'
+    )
+
+    with pytest.raises(DesktopStructuredOutputInvalidError) as captured:
+        run_structured_output(
+            operation="retrieval_plan",
+            document_name="Grounded answer question",
+            source_material="How does OpenKB preserve evidence?",
+            invoke=lambda request: gateway.analyze(
+                replace(request, supports_streaming=False),
+                on_event=events.append,
+            ),
+            validate=lambda value: model_plan(
+                "How does OpenKB preserve evidence?",
+                value,
+            ),
+        )
+
+    calls: dict[str, list[DesktopTerminalModelEvent]] = {}
+    for event in events:
+        calls.setdefault(event.call_id, []).append(event)
+    assert len(calls) == 2
+    for lifecycle in calls.values():
+        assert [event.status for event in lifecycle][-2:] == [
+            "validating",
+            "model_result_failure",
+        ]
+        assert all(event.status != "completed" for event in lifecycle)
+        assert lifecycle[-1].failure_code == "model_response_invalid"
+
+    corrections: list[tuple[str, str]] = []
+    invalidations: list[tuple[str, str]] = []
+
+    class TrackingGateway:
+        def record_model_result_failure(self, call_id: str, failure_code: str) -> None:
+            corrections.append((call_id, failure_code))
+
+        def invalidate_analysis_capability(self, failure_code: str, reason: str) -> None:
+            invalidations.append((failure_code, reason))
+
+    invalidate_structured_model_result(TrackingGateway(), captured.value)
+    assert corrections == []
+    assert invalidations[0][0] == "model_response_invalid"
+
+
+def test_model_result_failure_code_boundary_rejects_invented_values() -> None:
+    with pytest.raises(ValueError, match="Unknown Model Result Failure code"):
+        reject_model_result(
+            DesktopModelResult("call-1", "invalid", 1),
+            failure_code="invented_failure",  # type: ignore[arg-type]
+            reason="Invalid local result.",
+        )
 
 
 def test_terminal_gateway_closes_an_active_stream_on_user_cancel() -> None:

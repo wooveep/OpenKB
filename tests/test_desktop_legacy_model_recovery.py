@@ -19,6 +19,10 @@ from openkb.desktop_legacy_model_recovery import (
     RESTART_CURRENT_PLAN,
     DesktopLegacyModelRecoveryService,
 )
+from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
+from openkb.desktop_model_execution_profile import analysis_execution_profile_for_settings
+from openkb.desktop_model_gateway import DesktopModelCancelledError
+from openkb.desktop_model_recovery import DesktopModelRecoveryService
 from openkb.desktop_model_settings import save_desktop_model_settings
 from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
@@ -229,7 +233,8 @@ def test_protocol_failure_requires_replan_and_counts_discarded_model_checkpoints
             ("reasoning_output_exhausted", job_id),
         )
         connection.commit()
-    service = DesktopLegacyModelRecoveryService(kb_dir)
+    assert DesktopLegacyModelRecoveryService(kb_dir).assessment(job_id) is None
+    service = DesktopModelRecoveryService(kb_dir)
 
     assessment = service.assessment(job_id)
 
@@ -241,19 +246,30 @@ def test_protocol_failure_requires_replan_and_counts_discarded_model_checkpoints
     assert payload["choices"][RESTART_CURRENT_PLAN]["estimated_remaining_calls"] >= 1
     assert payload["choices"][CONTINUE_COMPATIBLE]["allowed"] is False
 
+    with pytest.raises(DesktopImportError) as captured:
+        DesktopTextImportService(kb_dir).recover_text(job_id, DesktopRecoveryOverride())
+    assert captured.value.code == "model_recovery_choice_required"
+    assert "legacy" not in str(captured.value).lower()
+
     service.select(job_id, RESTART_CURRENT_PLAN)
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM knowledge_analysis_batches WHERE job_id = ?",
-            (job_id,),
-        ).fetchone()[0] == 0
-        assert connection.execute(
-            """
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM knowledge_analysis_batches WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                """
             SELECT checkpoint_json FROM stage_run_runtime JOIN stage_runs USING(stage_run_id)
             WHERE stage_runs.job_id = ? AND stage_runs.stage = 'evidence'
             """,
-            (job_id,),
-        ).fetchone()[0] is not None
+                (job_id,),
+            ).fetchone()[0]
+            is not None
+        )
 
 
 def test_check_and_recover_verifies_replacement_before_discarding_model_state(
@@ -329,6 +345,9 @@ def test_check_and_recover_verifies_replacement_before_discarding_model_state(
         legacy_recovery_choice=RESTART_CURRENT_PLAN,
         check_and_recover=True,
     )
+    recovery_gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir, override)
+    assert recovery_gateway is not None
+    recovery_profile = recovery_gateway.execution_profile_for_operation("knowledge_analysis")
 
     with pytest.raises(DesktopRequestError, match="schema-valid structured output"):
         run_import(
@@ -340,31 +359,46 @@ def test_check_and_recover_verifies_replacement_before_discarding_model_state(
         )
 
     assert calls == ["model_capability_analysis"]
+    failed_capability = DesktopModelCapabilityStore(kb_dir).state(recovery_profile)
+    assert failed_capability.status == "failed"
+    assert failed_capability.failure_code == "model_capability_check_failed"
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute(
-            """
+        assert (
+            connection.execute(
+                """
             SELECT stage_runs.stage, stage_run_runtime.checkpoint_json
             FROM stage_runs JOIN stage_run_runtime USING(stage_run_id)
             WHERE stage_runs.job_id = ?
               AND stage_runs.stage IN ('raw_asset', 'document_ir', 'evidence')
             ORDER BY stage_runs.stage
             """,
-            (job_id,),
-        ).fetchall() == deterministic_before
-        assert connection.execute(
-            """
+                (job_id,),
+            ).fetchall()
+            == deterministic_before
+        )
+        assert (
+            connection.execute(
+                """
             SELECT batch_id, status, checkpoint_json
             FROM knowledge_analysis_batches WHERE job_id = ? ORDER BY batch_ordinal
             """,
-            (job_id,),
-        ).fetchall() == model_before
-        assert connection.execute(
-            "SELECT COUNT(*) FROM legacy_model_recovery_audit WHERE job_id = ?",
-            (job_id,),
-        ).fetchone()[0] == 0
-        assert connection.execute(
-            "SELECT status FROM import_jobs WHERE job_id = ?", (job_id,)
-        ).fetchone()[0] == "failed"
+                (job_id,),
+            ).fetchall()
+            == model_before
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM legacy_model_recovery_audit WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT status FROM import_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()[0]
+            == "failed"
+        )
 
     class SuccessfulTransport:
         def __init__(self, *, model, bundle):
@@ -403,22 +437,32 @@ def test_check_and_recover_verifies_replacement_before_discarding_model_state(
     assert recovered["job"]["status"] == "completed"
     assert recovered["document"]["availability"] == "available"
     assert calls.count("model_capability_analysis") == 2
+    assert DesktopModelCapabilityStore(kb_dir).state(recovery_profile).status == "verified"
     assert reasoning_efforts[0] == "off"
     assert reasoning_efforts[1] == "off"
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute(
-            """
+        assert (
+            connection.execute(
+                """
             SELECT stage_runs.stage, stage_run_runtime.checkpoint_json
             FROM stage_runs JOIN stage_run_runtime USING(stage_run_id)
             WHERE stage_runs.job_id = ?
               AND stage_runs.stage IN ('raw_asset', 'document_ir', 'evidence')
             ORDER BY stage_runs.stage
             """,
-            (job_id,),
-        ).fetchall() == deterministic_before
-        assert connection.execute(
-            "SELECT COUNT(*) FROM knowledge_analysis_batches WHERE batch_id LIKE 'legacy-batch-%'",
-        ).fetchone()[0] == 0
+                (job_id,),
+            ).fetchall()
+            == deterministic_before
+        )
+        assert (
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM knowledge_analysis_batches
+                WHERE batch_id LIKE 'legacy-batch-%'
+                """,
+            ).fetchone()[0]
+            == 0
+        )
         plan_identity = connection.execute(
             """
             SELECT json_extract(plan_json, '$.plan_identity')
@@ -441,3 +485,80 @@ def test_check_and_recover_verifies_replacement_before_discarding_model_state(
             (job_id,),
         ).fetchone()[0]
     assert audit_identity == plan_identity
+
+
+def test_check_and_recover_cancellation_preserves_recovery_state(tmp_path) -> None:
+    kb_dir, job_id = _legacy_deadline_job(tmp_path)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE quarantined_documents SET error_code = ? WHERE job_id = ?",
+            ("reasoning_output_exhausted", job_id),
+        )
+        connection.execute(
+            "UPDATE import_jobs SET error_code = ? WHERE job_id = ?",
+            ("reasoning_output_exhausted", job_id),
+        )
+        batches_before = connection.execute(
+            "SELECT batch_id, status, checkpoint_json FROM knowledge_analysis_batches "
+            "WHERE job_id = ? ORDER BY batch_ordinal",
+            (job_id,),
+        ).fetchall()
+        connection.commit()
+    settings = save_desktop_model_settings(
+        kb_dir,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+    )
+    profile = analysis_execution_profile_for_settings(settings)
+
+    class CancelledRecoveryGateway:
+        def execution_profile_for_operation(self, operation):
+            assert operation == "knowledge_analysis"
+            return profile
+
+        def analyze(self, request, *, on_event, is_cancelled):
+            del request, on_event, is_cancelled
+            raise DesktopModelCancelledError()
+
+    gateway = CancelledRecoveryGateway()
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        model_gateway_factory=lambda _kb_dir, _override: gateway,  # type: ignore[arg-type]
+    )
+    override = DesktopRecoveryOverride(
+        legacy_recovery_choice=RESTART_CURRENT_PLAN,
+        check_and_recover=True,
+    )
+
+    with pytest.raises(DesktopRequestError) as captured:
+        run_import(
+            server,
+            kb_dir,
+            request_id="cancelled-check",
+            job_id=job_id,
+            recovery_override=override,
+        )
+
+    assert captured.value.code == "request_cancelled"
+    assert "before Replan" in str(captured.value)
+    state = DesktopModelCapabilityStore(kb_dir).state(profile)
+    assert state.status == "cancelled"
+    assert state.failure_code == "request_cancelled"
+    with sqlite3.connect(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT batch_id, status, checkpoint_json FROM knowledge_analysis_batches "
+                "WHERE job_id = ? ORDER BY batch_ordinal",
+                (job_id,),
+            ).fetchall()
+            == batches_before
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM legacy_model_recovery_audit WHERE job_id = ?",
+            (job_id,),
+        ).fetchone() == (0,)

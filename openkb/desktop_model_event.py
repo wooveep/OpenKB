@@ -4,6 +4,37 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+MODEL_CALL_LIFECYCLE_STATUSES = frozenset(
+    {
+        "queued",
+        "connecting",
+        "awaiting_model_result",
+        "reasoning_output_activity",
+        "model_output_activity",
+        "validating",
+        "completed",
+        "retrying",
+        "cancelled",
+        "provider_failure",
+        "network_failure",
+        "model_result_failure",
+    }
+)
+
+_LIFECYCLE_SUMMARY_STATUS = {
+    "queued": "running",
+    "connecting": "running",
+    "awaiting_model_result": "running",
+    "reasoning_output_activity": "running",
+    "model_output_activity": "running",
+    "validating": "running",
+    "retrying": "retry_wait",
+    "cancelled": "failed",
+    "provider_failure": "failed",
+    "network_failure": "failed",
+    "model_result_failure": "failed",
+}
+
 
 @dataclass(frozen=True)
 class NormalizedModelEvent:
@@ -31,19 +62,7 @@ class NormalizedModelEvent:
 def normalize_model_event(event: object) -> NormalizedModelEvent:
     """Project either event generation without retaining model content."""
     lifecycle = str(getattr(event, "status"))
-    storage_status = {
-        "queued": "running",
-        "connecting": "running",
-        "awaiting_model_result": "running",
-        "reasoning_output_activity": "running",
-        "model_output_activity": "running",
-        "validating": "running",
-        "retrying": "retry_wait",
-        "cancelled": "failed",
-        "provider_failure": "failed",
-        "network_failure": "failed",
-        "model_result_failure": "failed",
-    }.get(lifecycle, lifecycle)
+    storage_status = _LIFECYCLE_SUMMARY_STATUS.get(lifecycle, lifecycle)
     return NormalizedModelEvent(
         call_id=str(getattr(event, "call_id")),
         attempt=int(getattr(event, "attempt")),
@@ -65,3 +84,11 @@ def normalize_model_event(event: object) -> NormalizedModelEvent:
         total_tokens=getattr(event, "total_tokens", None),
         provider_request_id=getattr(event, "provider_request_id", None),
     )
+
+
+def normalize_model_call_summary_status(status: object) -> str:
+    """Normalize only a persisted summary value; never infer it from lifecycle data."""
+    value = str(status) if status is not None else ""
+    if value in {"running", "retry_wait", "completed", "failed"}:
+        return value
+    return _LIFECYCLE_SUMMARY_STATUS.get(value, "failed")

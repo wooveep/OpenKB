@@ -15,7 +15,11 @@ import type {
   DesktopModelUsageRecord,
   DesktopRecoveryOverride,
 } from "./contracts-import-observability"
-import type { DesktopModelSettings, DesktopModelSettingsDraft } from "./model-settings-contracts"
+import type {
+  DesktopModelConnectionTest,
+  DesktopModelSettings,
+  DesktopModelSettingsDraft,
+} from "./model-settings-contracts"
 import type {
   DesktopAnswerSourceImage,
   DesktopEvidenceRef,
@@ -625,13 +629,6 @@ export class DesktopBridgeError extends Error {
     this.name = "DesktopBridgeError"
     this.code = code
   }
-}
-
-export interface DesktopModelConnectionTest {
-  ok: boolean
-  model: string
-  latencyMs: number
-  attemptCount: number
 }
 
 export interface DesktopDiagnosticBundle {

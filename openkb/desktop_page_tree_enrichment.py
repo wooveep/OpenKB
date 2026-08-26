@@ -19,6 +19,7 @@ from openkb.desktop_model_gateway import (
     gateway_analysis_capability_verified,
     invalidate_analysis_capability,
 )
+from openkb.desktop_model_result_failure import invalidate_structured_model_result
 from openkb.desktop_page_tree_enrichment_control import (
     INTERRUPTED_CODE as _INTERRUPTED_CODE,
 )
@@ -40,7 +41,6 @@ from openkb.locks import kb_ingest_lock
 
 PAGE_TREE_ENRICHMENT_SCHEMA = "openkb.page-tree-enrichment.v1"
 _PAGE_TREE_ENRICHMENT_CONTRACT = prompt_contract_for("page_tree_enrichment")
-PAGE_TREE_ENRICHMENT_SYSTEM_PROMPT = _PAGE_TREE_ENRICHMENT_CONTRACT.instructions
 PAGE_TREE_ENRICHMENT_PROMPT_DIGEST = _PAGE_TREE_ENRICHMENT_CONTRACT.digest
 
 _MAX_INPUT_NODES = 96
@@ -260,7 +260,7 @@ class DesktopPageTreeEnrichmentService:
             invalidate_analysis_capability(gateway, error.failure.code, error.failure.reason)
             self._fail(claim, error.failure.code, error.failure.reason)
         except DesktopStructuredOutputInvalidError as error:
-            invalidate_analysis_capability(gateway, _INVALID_RESPONSE_CODE, str(error))
+            invalidate_structured_model_result(gateway, error)
             self._fail(claim, _INVALID_RESPONSE_CODE, _INVALID_RESPONSE_REASON)
         except (json.JSONDecodeError, TypeError, ValueError):
             self._fail(claim, _INVALID_RESPONSE_CODE, _INVALID_RESPONSE_REASON)

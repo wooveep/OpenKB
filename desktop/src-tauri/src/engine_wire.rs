@@ -49,7 +49,8 @@ pub use retrieval::{GroundedAnswer, GroundedAnswersResult, RetrievalTrace};
 #[path = "engine_wire_settings.rs"]
 mod settings;
 pub use settings::{
-    DiagnosticBundleResult, ModelSettings, ModelSettingsDraft, ModelUsageAggregate,
+    DiagnosticBundleResult, ModelConnectionTest, ModelSettings, ModelSettingsDraft,
+    ModelUsageAggregate,
 };
 
 #[cfg(test)]

@@ -15,6 +15,7 @@ from openkb.desktop_model_gateway import (
     gateway_analysis_capability_verified,
     invalidate_analysis_capability,
 )
+from openkb.desktop_model_result_failure import invalidate_structured_model_result
 from openkb.desktop_retrieval_plan import deterministic_plan, model_plan, with_baseline_terms
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
@@ -108,11 +109,7 @@ def build_retrieval_plan(
             _planning_cost(question, response, attempts),
         )
     except DesktopStructuredOutputInvalidError as error:
-        invalidate_analysis_capability(
-            model_gateway,
-            "model_response_invalid",
-            str(error),
-        )
+        invalidate_structured_model_result(model_gateway, error)
         return DesktopRetrievalPlanningResult(
             fallback,
             ("retrieval_plan_fallback",),

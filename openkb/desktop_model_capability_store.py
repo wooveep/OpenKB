@@ -7,13 +7,21 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
-from openkb.desktop_model_execution_profile import DesktopModelExecutionProfile
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
 CapabilityStatus = Literal["unchecked", "checking", "verified", "failed", "cancelled"]
+
+
+class DesktopCapabilityEvidenceProfile(Protocol):
+    """Credential-free immutable identity accepted by the capability ledger."""
+
+    @property
+    def identity(self) -> str: ...
+
+    def as_dict(self) -> dict[str, object]: ...
 
 
 @dataclass(frozen=True)
@@ -42,7 +50,7 @@ class DesktopModelCapabilityStore:
         self._state_dir = desktop_state_dir(resolved)
         self._database_path = desktop_state_database_path(resolved)
 
-    def state(self, profile: DesktopModelExecutionProfile) -> DesktopModelCapabilityState:
+    def state(self, profile: DesktopCapabilityEvidenceProfile) -> DesktopModelCapabilityState:
         with kb_ingest_lock(self._state_dir):
             connection = _connect(self._database_path)
             try:
@@ -65,18 +73,18 @@ class DesktopModelCapabilityStore:
             checked_at=str(row[3]) if row[3] is not None else None,
         )
 
-    def is_verified(self, profile: DesktopModelExecutionProfile) -> bool:
+    def is_verified(self, profile: DesktopCapabilityEvidenceProfile) -> bool:
         return self.state(profile).status == "verified"
 
-    def begin(self, profile: DesktopModelExecutionProfile) -> None:
+    def begin(self, profile: DesktopCapabilityEvidenceProfile) -> None:
         self._write(profile, "checking")
 
-    def mark_verified(self, profile: DesktopModelExecutionProfile) -> None:
+    def mark_verified(self, profile: DesktopCapabilityEvidenceProfile) -> None:
         self._write(profile, "verified", checked=True)
 
     def mark_failed(
         self,
-        profile: DesktopModelExecutionProfile,
+        profile: DesktopCapabilityEvidenceProfile,
         *,
         failure_code: str,
         reason: str,
@@ -89,7 +97,7 @@ class DesktopModelCapabilityStore:
             checked=True,
         )
 
-    def mark_cancelled(self, profile: DesktopModelExecutionProfile) -> None:
+    def mark_cancelled(self, profile: DesktopCapabilityEvidenceProfile) -> None:
         self._write(
             profile,
             "cancelled",
@@ -100,7 +108,7 @@ class DesktopModelCapabilityStore:
 
     def invalidate(
         self,
-        profile: DesktopModelExecutionProfile,
+        profile: DesktopCapabilityEvidenceProfile,
         *,
         failure_code: str,
         reason: str,
@@ -114,7 +122,7 @@ class DesktopModelCapabilityStore:
 
     def _write(
         self,
-        profile: DesktopModelExecutionProfile,
+        profile: DesktopCapabilityEvidenceProfile,
         status: CapabilityStatus,
         *,
         failure_code: str | None = None,

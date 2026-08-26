@@ -12,6 +12,7 @@ from contextlib import contextmanager
 
 import openkb.desktop_retrieval as retrieval
 from openkb import desktop_engine_knowledge_graph as graph_engine
+from openkb import desktop_model_transport
 from openkb.desktop_answer_types import DesktopEvidenceRef
 from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
 from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
@@ -22,12 +23,15 @@ from openkb.desktop_knowledge_graph import (
     local_graph_evidence_ids,
 )
 from openkb.desktop_knowledge_graph_tasks import DesktopKnowledgeGraphExtractionTasks
+from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
 from openkb.desktop_model_gateway import (
     DesktopModelCancelledError,
     DesktopModelGateway,
     DesktopModelResult,
 )
+from openkb.desktop_model_settings import save_desktop_model_settings
 from openkb.desktop_model_terminal import DesktopTerminalModelEvent
+from openkb.desktop_model_usage import DesktopModelUsageStore
 from openkb.desktop_retrieval import DesktopEvidenceRetriever, _Candidate, _with_graph_budget
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_dir
 from openkb.locks import kb_ingest_lock
@@ -199,6 +203,59 @@ def test_graph_failures_keep_baseline_answers_and_only_record_safe_diagnostics(
         ).fetchall()
     assert ("extraction", "model_network_transient") in diagnostics
     assert ("query", "knowledge_graph_query_timeout") in diagnostics
+
+
+def test_invalid_graph_repair_marks_final_usage_as_model_result_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "invalid-graph.txt"
+    source.write_text("Atlas keeps a deterministic evidence baseline.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    save_desktop_model_settings(
+        kb_dir,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+    )
+
+    class InvalidTransport:
+        def __init__(self, *, model, bundle):
+            del model, bundle
+
+        def __call__(self, request, _timeout_seconds):
+            del request
+            return "not-json"
+
+    monkeypatch.setattr(desktop_model_transport, "DesktopLiteLLMTransport", InvalidTransport)
+    gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
+    assert gateway is not None
+    profile = gateway.execution_profile_for_operation("knowledge_graph_extraction")
+    capability_store = DesktopModelCapabilityStore(kb_dir)
+    capability_store.mark_verified(profile)
+
+    assert not DesktopKnowledgeGraphService(
+        kb_dir,
+        model_gateway=gateway,
+    ).extract_document(document.document_id)
+
+    usage = DesktopModelUsageStore(kb_dir).records()
+    assert {record["operation"] for record in usage} == {
+        "knowledge_graph_extraction",
+        "structured_output_repair",
+    }
+    failed = [record for record in usage if record["failure_code"] is not None]
+    assert [record["operation"] for record in failed] == [
+        "knowledge_graph_extraction",
+        "structured_output_repair",
+    ]
+    assert {record["lifecycle_status"] for record in failed} == {"model_result_failure"}
+    assert {record["failure_code"] for record in failed} == {"model_response_invalid"}
+    assert capability_store.state(profile).status == "unchecked"
 
 
 def test_graph_query_diagnostic_never_waits_for_an_active_kb_mutation(tmp_path, monkeypatch):

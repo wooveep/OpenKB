@@ -16,7 +16,7 @@ from openkb.desktop_import_types import (
     DesktopStageRun,
 )
 from openkb.desktop_knowledge_analysis_batches import knowledge_analysis_progress_in
-from openkb.desktop_legacy_model_recovery import legacy_model_recovery_assessment_in
+from openkb.desktop_model_recovery import model_recovery_assessment_in
 from openkb.desktop_model_usage import (
     current_model_activity_in,
     model_usage_aggregate_in,
@@ -44,7 +44,7 @@ def task_from_row(
     model_usage = model_usage_records_in(connection, job_id)
     model_usage_aggregate = model_usage_aggregate_in(connection, job_id)
     model_activity = current_model_activity_in(connection, job_id)
-    legacy_recovery = legacy_model_recovery_assessment_in(connection, job_id)
+    model_recovery = model_recovery_assessment_in(connection, job_id)
     deduplication = _deduplication_for_job(connection, job_id)
     runtime_status = str(row[1])
     if runtime_status == "running":
@@ -84,7 +84,7 @@ def task_from_row(
         model_usage=model_usage,
         model_usage_aggregate=model_usage_aggregate,
         model_activity=model_activity,
-        legacy_model_recovery=(legacy_recovery.as_dict() if legacy_recovery is not None else None),
+        legacy_model_recovery=(model_recovery.as_dict() if model_recovery is not None else None),
     )
 
 

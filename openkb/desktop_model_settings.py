@@ -20,7 +20,7 @@ from openkb.desktop_model_capabilities import (
     DesktopModelCapabilityProfile,
     model_capability_profile,
 )
-from openkb.desktop_model_provider_adapter import provider_adapter_for
+from openkb.desktop_model_provider_adapter import model_protocol_for
 from openkb.desktop_workspace import DesktopKnowledgeBaseError, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -211,7 +211,7 @@ class DesktopModelSettings:
         }
 
     def as_dict(self) -> dict[str, object]:
-        adapter = provider_adapter_for(self.provider)
+        adapter = model_protocol_for(self.provider)
         return {
             "provider": self.provider,
             "model": self.model,

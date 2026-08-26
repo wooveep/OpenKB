@@ -35,7 +35,7 @@ use engine_protocol::{
     GroundedAnswersResult, ImportControlResult, ImportJobsResult, ImportSourceInspection,
     KnowledgeBaseActivationResult, KnowledgeGraphExtractionControlResult,
     KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
-    KnowledgeReconciliationDecision, ModelSettings, ModelSettingsDraft,
+    KnowledgeReconciliationDecision, ModelConnectionTest, ModelSettings, ModelSettingsDraft,
     PageTreeEnrichmentControlResult, RawDocument, RecoveryOverride, TextDocumentImportResult,
 };
 use process_tree::ProcessTreeJob;
@@ -437,7 +437,7 @@ async fn desktop_test_model_connection(
     state: State<'_, DesktopState>,
     settings: ModelSettingsDraft,
     request_id: String,
-) -> Result<serde_json::Value, BridgeError> {
+) -> Result<ModelConnectionTest, BridgeError> {
     let engine = Arc::clone(&state.engine);
     tauri::async_runtime::spawn_blocking(move || engine.test_model_connection(settings, request_id))
         .await

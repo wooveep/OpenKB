@@ -161,7 +161,38 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
     requestId: string,
   ): Promise<DesktopModelConnectionTest> {
     void requestId
-    return { ok: true, model: settings.model, latencyMs: 42, attemptCount: 1 }
+    return {
+      ok: true,
+      model: settings.model,
+      models: [settings.model],
+      latencyMs: 42,
+      attemptCount: 1,
+      profileIdentity: "memory-answer-profile",
+      capabilityStatus: "answer_verified",
+      roleResults: {
+        default: { role: "default", model: settings.model, status: "verified", reason: null, attemptCount: 1, profileIdentity: "memory-answer-profile", cached: false, coveredBy: "answer" },
+        analysis: {
+          role: "analysis",
+          model: null,
+          status: "unavailable",
+          reason: "The memory Custom provider has no structured Analysis adapter.",
+          attemptCount: 0,
+          profileIdentity: null,
+          cached: false,
+          coveredBy: null,
+        },
+        answer: {
+          role: "answer",
+          model: settings.model,
+          status: "verified",
+          reason: null,
+          attemptCount: 1,
+          profileIdentity: "memory-answer-profile",
+          cached: false,
+          coveredBy: null,
+        },
+      },
+    }
   }
 
   async exportDiagnosticBundle(

@@ -24,6 +24,7 @@ from openkb.desktop_model_gateway import (
     DesktopProviderStreamEvent,
     DesktopProviderTokenUsage,
     ExecutionLane,
+    ModelResultLifecycleStatus,
     classify_model_error,
     require_execution_lane,
 )
@@ -465,20 +466,50 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
             self._raise_if_cancelled(is_cancelled, context)
             observations = getattr(response, "observations", None)
             self._emit(context, "validating", observations=observations)
-            self._emit(
-                context,
-                "completed",
-                observations=observations,
-                usage=getattr(response, "usage", None),
-                provider_request_id=getattr(response, "provider_request_id", None),
-            )
+            usage = getattr(response, "usage", None)
+            provider_request_id = getattr(response, "provider_request_id", None)
+            lifecycle_finalizer = None
+            if request.local_validation_required:
+                finalizer_lock = threading.Lock()
+                finalized = False
+
+                def finalize_lifecycle(
+                    status: ModelResultLifecycleStatus,
+                    failure_code: str | None,
+                    reason: str | None,
+                ) -> None:
+                    nonlocal finalized
+                    with finalizer_lock:
+                        if finalized:
+                            return
+                        finalized = True
+                    self._emit(
+                        context,
+                        status,
+                        failure_code=failure_code,
+                        reason=reason,
+                        observations=observations,
+                        usage=usage,
+                        provider_request_id=provider_request_id,
+                    )
+
+                lifecycle_finalizer = finalize_lifecycle
+            else:
+                self._emit(
+                    context,
+                    "completed",
+                    observations=observations,
+                    usage=usage,
+                    provider_request_id=provider_request_id,
+                )
             return DesktopModelResult(
                 call_id=call_id,
                 content=response,
                 attempt_count=attempt,
-                usage=getattr(response, "usage", None),
-                provider_request_id=getattr(response, "provider_request_id", None),
+                usage=usage,
+                provider_request_id=provider_request_id,
                 observations=observations,
+                _lifecycle_finalizer=lifecycle_finalizer,
             )
         raise AssertionError("Terminal Model Call exhausted attempts without a result.")
 

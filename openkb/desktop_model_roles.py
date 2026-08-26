@@ -8,8 +8,11 @@ from typing import TYPE_CHECKING
 
 from openkb.desktop_model_capabilities import model_capability_profile
 from openkb.desktop_model_execution_profile import (
+    DesktopAnswerCapabilityProfile,
+    DesktopModelCapacityError,
     DesktopModelExecutionProfile,
     analysis_execution_profile_for_settings,
+    answer_capability_profile_for_settings,
     build_analysis_execution_profile,
 )
 from openkb.desktop_model_gateway import (
@@ -19,7 +22,7 @@ from openkb.desktop_model_gateway import (
     ExecutionLane,
     require_execution_lane,
 )
-from openkb.desktop_model_provider_adapter import provider_adapter_for
+from openkb.desktop_model_provider_adapter import model_protocol_for
 from openkb.desktop_model_settings import DesktopModelSettings, DesktopModelSettingsError
 from openkb.desktop_model_terminal import (
     DesktopTerminalModelGateway,
@@ -30,6 +33,7 @@ if TYPE_CHECKING:
     from openkb.desktop_model_usage import DesktopModelUsageStore
 
 AnalysisCapabilityVerifier = Callable[[DesktopModelExecutionProfile], bool]
+AnswerCapabilityVerifier = Callable[[DesktopAnswerCapabilityProfile], bool]
 AnalysisCapabilityInvalidator = Callable[
     [DesktopModelExecutionProfile, str, str],
     None,
@@ -75,6 +79,7 @@ class DesktopRoleModelGateway(DesktopModelGateway):
         usage_store: DesktopModelUsageStore | None = None,
         analysis_capability_verifier: AnalysisCapabilityVerifier | None = None,
         analysis_capability_invalidator: AnalysisCapabilityInvalidator | None = None,
+        answer_capability_verifier: AnswerCapabilityVerifier | None = None,
         execution_lane: ExecutionLane = "background",
     ) -> None:
         self._settings = settings
@@ -85,6 +90,7 @@ class DesktopRoleModelGateway(DesktopModelGateway):
         self._usage_store = usage_store
         self._analysis_capability_verifier = analysis_capability_verifier
         self._analysis_capability_invalidator = analysis_capability_invalidator
+        self._answer_capability_verifier = answer_capability_verifier
         self._execution_lane = require_execution_lane(execution_lane)
 
     @property
@@ -121,16 +127,29 @@ class DesktopRoleModelGateway(DesktopModelGateway):
             usage_store=self._usage_store,
             analysis_capability_verifier=self._analysis_capability_verifier,
             analysis_capability_invalidator=self._analysis_capability_invalidator,
+            answer_capability_verifier=self._answer_capability_verifier,
             execution_lane=lane,
         )
 
     def analysis_capability_verified(self) -> bool:
         verifier = self._analysis_capability_verifier
-        return (
-            verifier(self.execution_profile_for_operation("knowledge_analysis"))
-            if verifier is not None
-            else True
-        )
+        if verifier is None:
+            return True
+        try:
+            profile = self.execution_profile_for_operation("knowledge_analysis")
+        except (DesktopModelCapacityError, DesktopModelSettingsError):
+            return False
+        return verifier(profile)
+
+    def answer_capability_verified(self) -> bool:
+        verifier = self._answer_capability_verifier
+        if verifier is None:
+            return True
+        try:
+            profile = answer_capability_profile_for_settings(self._settings)
+        except (DesktopModelCapacityError, DesktopModelSettingsError):
+            return False
+        return verifier(profile)
 
     def invalidate_analysis_capability(self, failure_code: str, reason: str) -> None:
         invalidator = self._analysis_capability_invalidator
@@ -140,6 +159,11 @@ class DesktopRoleModelGateway(DesktopModelGateway):
                 failure_code,
                 reason,
             )
+
+    def record_model_result_failure(self, call_id: str, failure_code: str) -> None:
+        usage_store = self._usage_store
+        if usage_store is not None:
+            usage_store.mark_result_failure(call_id, failure_code)
 
     def capability_for_operation(self, operation: str):
         role, _gateway = self._gateway_for(operation)
@@ -227,7 +251,7 @@ class DesktopRoleModelGateway(DesktopModelGateway):
             else self._settings.capability_for_role(role)
         )
         contract = prompt_contract_for(request.operation)
-        configured_adapter = provider_adapter_for(self._settings.provider)
+        configured_adapter = model_protocol_for(self._settings.provider)
         if (
             request.provider_adapter is not None
             and request.provider_adapter != configured_adapter.identity
@@ -235,7 +259,7 @@ class DesktopRoleModelGateway(DesktopModelGateway):
             raise DesktopModelSettingsError(
                 "The pinned Model Execution Profile no longer matches Model Configuration."
             )
-        adapter = provider_adapter_for(request.provider_adapter or self._settings.provider)
+        adapter = model_protocol_for(request.provider_adapter or self._settings.provider)
         reasoning = request.reasoning_effort or self._settings.reasoning_for_role(role)
         if reasoning is not None and reasoning not in adapter.supported_reasoning:
             reasoning = None

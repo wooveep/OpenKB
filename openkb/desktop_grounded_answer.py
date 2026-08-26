@@ -20,6 +20,7 @@ from openkb.desktop_model_gateway import (
     DesktopModelCancelledError,
     DesktopModelGateway,
     DesktopModelRequest,
+    gateway_answer_capability_verified,
 )
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 
@@ -291,6 +292,10 @@ def generate_grounded_answer(
     if model_gateway is None:
         return DesktopGroundedAnswerGeneration(
             _deterministic_answer(question, pack.evidence), ("answer_model_unavailable",)
+        )
+    if not gateway_answer_capability_verified(model_gateway):
+        return DesktopGroundedAnswerGeneration(
+            _deterministic_answer(question, pack.evidence), ("answer_model_unverified",)
         )
 
     prompt = _answer_prompt(question, pack.evidence, conversation_context)

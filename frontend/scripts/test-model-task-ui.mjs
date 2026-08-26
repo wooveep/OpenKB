@@ -147,16 +147,23 @@ try {
         analysis: { model: "deepseek-v4-pro", contextCapacity: 64000, reasoning: "off", reasoningSource: "analysis_safe_default" },
         answer: { model: "deepseek-v4-pro", contextCapacity: 64000, reasoning: null, reasoningSource: "provider_default" },
       },
-      capability: {
+      analysisCapability: {
         profileIdentity: "profile-1",
         status: "verified",
         failureCode: null,
         reason: null,
         checkedAt: "2026-08-26T00:00:00+00:00",
       },
+      answerCapability: {
+        profileIdentity: "answer-profile-1",
+        status: "unchecked",
+        failureCode: null,
+        reason: null,
+        checkedAt: null,
+      },
     }),
   )
-  for (const expected of ["DeepSeek", "json_object", "Analysis", "Off", "Provider default", "Verified"]) {
+  for (const expected of ["DeepSeek", "json_object", "Analysis", "Answer", "Off", "Provider default", "Verified", "Unchecked"]) {
     assert.match(effectiveSettingsMarkup, new RegExp(expected))
   }
   const resultDetailsMarkup = render(

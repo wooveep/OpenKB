@@ -398,12 +398,14 @@
         "testSucceeded": "Connected in {{latency}} ms ({{attempts}} attempt).",
         "testRejected": "The model provider did not accept the connection test.",
         "analysisCapability": "Analysis capability",
+        "answerCapability": "Answer capability",
         "capabilityStates": {
           "unchecked": "Unchecked",
           "checking": "Checking",
           "verified": "Verified",
           "failed": "Check failed",
-          "cancelled": "Check cancelled"
+          "cancelled": "Check cancelled",
+          "unavailable": "Unavailable"
         },
         "appearanceTitle": "Appearance & language",
         "appearanceDescription": "These preferences apply to the desktop workbench on this device.",
@@ -508,6 +510,8 @@
       "askingQuestion": "Answering…",
       "stopAnswer": "Stop",
       "answerCancellationWarning": "OpenKB stopped waiting and closed the active stream when possible. Provider-side cancellation cannot be guaranteed, so remote computation or billing may continue.",
+      "capabilityDegradationTitle": "Capability degradation",
+      "capabilityDegradationDescription": "OpenKB used a safe deterministic retrieval fallback because an optional capability was unavailable.",
       "answerStreaming": "Generating answer…",
       "answerRetrying": "Retrying answer…",
       "answerInterrupted": "Interrupted answer",

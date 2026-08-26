@@ -12,7 +12,10 @@ from openkb.desktop_model_gateway import (
     DesktopModelRequest,
     DesktopModelResult,
 )
-from openkb.desktop_model_provider_adapter import provider_adapter_for
+from openkb.desktop_model_provider_adapter import (
+    model_protocol_for,
+    named_provider_adapter_for,
+)
 from openkb.desktop_model_roles import DesktopRoleModelGateway
 from openkb.desktop_model_settings import DesktopModelSettings, DesktopModelSettingsError
 from openkb.desktop_model_terminal import DesktopTerminalModelGateway
@@ -27,13 +30,24 @@ def test_deepseek_resolves_role_reasoning_and_structured_protocol_explicitly() -
         max_concurrent_model_calls=1,
     )
 
-    adapter = provider_adapter_for(settings.provider)
+    adapter = named_provider_adapter_for(settings.provider)
 
     assert adapter.identity == "deepseek"
     assert adapter.version == "deepseek.v1"
     assert adapter.structured_output_mode == "json_object"
     assert settings.reasoning_for_role("analysis") == "off"
     assert settings.reasoning_for_role("answer") is None
+
+
+def test_custom_uses_compatibility_protocol_without_a_named_provider_adapter() -> None:
+    with pytest.raises(ValueError, match="Unknown Desktop model provider adapter"):
+        named_provider_adapter_for("custom")
+
+    protocol = model_protocol_for("custom")
+
+    assert protocol.identity == "custom"
+    assert protocol.version == "custom.compatibility.v1"
+    assert protocol.supports_structured_analysis is False
 
 
 def test_role_gateway_pins_deepseek_adapter_mode_and_effective_analysis_reasoning() -> None:
@@ -182,11 +196,7 @@ def test_deepseek_stream_separates_private_reasoning_from_final_output(monkeypat
                     {"delta": {"reasoning_content": private_reasoning}, "finish_reason": None}
                 ]
             },
-            {
-                "choices": [
-                    {"delta": {"content": '{"terms":["OpenKB"]}'}, "finish_reason": None}
-                ]
-            },
+            {"choices": [{"delta": {"content": '{"terms":["OpenKB"]}'}, "finish_reason": None}]},
             {
                 "choices": [{"delta": {}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},

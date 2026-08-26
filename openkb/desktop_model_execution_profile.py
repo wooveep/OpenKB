@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, cast
 from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
 from openkb.desktop_model_provider_adapter import (
     StructuredOutputMode,
-    provider_adapter_for,
+    model_protocol_for,
 )
 from openkb.desktop_prompt_contracts import prompt_contract_for
 
@@ -23,13 +23,26 @@ _ANALYSIS_PLAN_OPERATIONS = (
     "knowledge_analysis",
     "knowledge_analysis_batch",
     "knowledge_analysis_merge",
+    "page_tree_enrichment",
+    "knowledge_graph_extraction",
+    "retrieval_plan",
     "structured_output_repair",
 )
 _REASONING_ALLOWANCE_NUMERATORS = {"off": 0, "low": 1, "medium": 2, "high": 4}
+ANSWER_CAPABILITY_SYSTEM_PROMPT = "Stream the requested short answer capability value."
+ANSWER_CAPABILITY_USER_PROMPT = "Reply with the single word OK."
+_ANSWER_CAPABILITY_CHAT_FRAMING_RESERVE_TOKENS = 32
+_ANSWER_CAPABILITY_FINAL_OUTPUT_TOKENS = 16
+_ANSWER_CAPABILITY_REASONING_ALLOWANCE_TOKENS: dict[str, int] = {
+    "off": 0,
+    "low": 4_096,
+    "medium": 8_192,
+    "high": 16_384,
+}
 
 
 class DesktopModelCapacityError(ValueError):
-    """The selected immutable Analysis controls cannot fit a useful request."""
+    """The selected immutable model controls cannot fit a useful request."""
 
 
 @dataclass(frozen=True)
@@ -84,9 +97,7 @@ class DesktopModelExecutionProfile:
             prompt_material_tokens=_integer(value, "prompt_material_tokens"),
             final_output_reserve_tokens=_integer(value, "final_output_reserve_tokens"),
             reasoning_allowance_tokens=_integer(value, "reasoning_allowance_tokens"),
-            provider_output_ceiling_tokens=_integer(
-                value, "provider_output_ceiling_tokens"
-            ),
+            provider_output_ceiling_tokens=_integer(value, "provider_output_ceiling_tokens"),
             document_input_budget_tokens=_integer(value, "document_input_budget_tokens"),
         )
         stored_identity = value.get("identity")
@@ -116,6 +127,73 @@ class DesktopModelExecutionProfile:
         }
 
 
+@dataclass(frozen=True)
+class DesktopAnswerCapabilityProfile:
+    """Credential-free identity proven by one streamed Answer capability check."""
+
+    provider: str
+    model: str
+    endpoint_digest: str
+    adapter_identity: str
+    adapter_version: str
+    streaming: bool
+    reasoning_effort: str | None
+    reasoning_source: str
+    context_capacity: int
+    reasoning_allowance_tokens: int
+    capability_version: str = "openkb.answer-streaming.v2"
+    role: str = "answer"
+
+    @property
+    def provider_output_ceiling_tokens(self) -> int:
+        """Reserve final text after a bounded allowance for the selected reasoning mode."""
+        return _ANSWER_CAPABILITY_FINAL_OUTPUT_TOKENS + self.reasoning_allowance_tokens
+
+    @property
+    def prompt_material_tokens(self) -> int:
+        return (
+            estimate_model_tokens(ANSWER_CAPABILITY_SYSTEM_PROMPT)
+            + estimate_model_tokens(ANSWER_CAPABILITY_USER_PROMPT)
+            + _ANSWER_CAPABILITY_CHAT_FRAMING_RESERVE_TOKENS
+        )
+
+    @property
+    def prompt_contract_digest(self) -> str:
+        return _digest(
+            {
+                "system": ANSWER_CAPABILITY_SYSTEM_PROMPT,
+                "user": ANSWER_CAPABILITY_USER_PROMPT,
+                "chat_framing_reserve_tokens": (_ANSWER_CAPABILITY_CHAT_FRAMING_RESERVE_TOKENS),
+            }
+        )
+
+    @property
+    def identity(self) -> str:
+        return hashlib.sha256(_json(self._identity_payload()).encode("utf-8")).hexdigest()
+
+    def as_dict(self) -> dict[str, object]:
+        return {**self._identity_payload(), "identity": self.identity}
+
+    def _identity_payload(self) -> dict[str, object]:
+        return {
+            "role": self.role,
+            "provider": self.provider,
+            "model": self.model,
+            "endpoint_digest": self.endpoint_digest,
+            "adapter_identity": self.adapter_identity,
+            "adapter_version": self.adapter_version,
+            "streaming": self.streaming,
+            "reasoning_effort": self.reasoning_effort,
+            "reasoning_source": self.reasoning_source,
+            "reasoning_allowance_tokens": self.reasoning_allowance_tokens,
+            "context_capacity": self.context_capacity,
+            "prompt_material_tokens": self.prompt_material_tokens,
+            "prompt_contract_digest": self.prompt_contract_digest,
+            "provider_output_ceiling_tokens": self.provider_output_ceiling_tokens,
+            "capability_version": self.capability_version,
+        }
+
+
 def analysis_prompt_contract_bundle() -> dict[str, object]:
     """Return the canonical prompt material pinned by every Analysis plan."""
     return {
@@ -136,7 +214,7 @@ def build_analysis_execution_profile(
     api_base_url: str = "",
 ) -> DesktopModelExecutionProfile:
     """Resolve one complete Analysis profile without making a provider request."""
-    adapter = provider_adapter_for(provider)
+    adapter = model_protocol_for(provider)
     if not adapter.supports_structured_analysis or adapter.structured_output_mode is None:
         raise DesktopModelCapacityError(
             adapter.analysis_unavailable_reason
@@ -144,8 +222,7 @@ def build_analysis_execution_profile(
         )
     if reasoning_effort not in adapter.supported_reasoning:
         raise DesktopModelCapacityError(
-            f"The {adapter.identity} adapter cannot honor Analysis reasoning "
-            f"'{reasoning_effort}'."
+            f"The {adapter.identity} adapter cannot honor Analysis reasoning '{reasoning_effort}'."
         )
     if not capability.supports_streaming:
         raise DesktopModelCapacityError(
@@ -211,6 +288,44 @@ def analysis_execution_profile_for_settings(
         reasoning_effort=settings.reasoning_for_role("analysis") or "off",
         api_base_url=settings.api_base_url,
     )
+
+
+def answer_capability_profile_for_settings(
+    settings: DesktopModelSettings,
+) -> DesktopAnswerCapabilityProfile:
+    """Resolve the exact streamed Answer identity without provider I/O or credentials."""
+    adapter = model_protocol_for(settings.provider)
+    capability = settings.capability_for_role("answer")
+    reasoning_effort = settings.reasoning_for_role("answer")
+    selected_reasoning_allowance = (
+        adapter.provider_default_reasoning_allowance_tokens
+        if reasoning_effort is None
+        else _ANSWER_CAPABILITY_REASONING_ALLOWANCE_TOKENS[reasoning_effort]
+    )
+    reasoning_allowance = max(
+        selected_reasoning_allowance,
+        adapter.minimum_capability_reasoning_allowance_tokens,
+    )
+    profile = DesktopAnswerCapabilityProfile(
+        provider=settings.provider,
+        model=settings.answer_model_name,
+        endpoint_digest=hashlib.sha256(settings.api_base_url.encode("utf-8")).hexdigest(),
+        adapter_identity=adapter.identity,
+        adapter_version=adapter.version,
+        streaming=True,
+        reasoning_effort=reasoning_effort,
+        reasoning_source=settings.reasoning_source_for_role("answer"),
+        context_capacity=capability.context_capacity,
+        reasoning_allowance_tokens=reasoning_allowance,
+    )
+    required_capacity = profile.prompt_material_tokens + profile.provider_output_ceiling_tokens
+    if required_capacity > profile.context_capacity:
+        raise DesktopModelCapacityError(
+            "The selected Answer context capacity cannot fit the capability prompt, "
+            "reasoning allowance, and final-text reserve. Choose a larger Answer context "
+            "capacity or a lower explicit Answer reasoning level."
+        )
+    return profile
 
 
 def _reserve_output_tokens(value: object) -> int:

@@ -1,7 +1,7 @@
 use super::import_observability::ImportProgressStage;
 use super::{
-    ImportJobStatus, ImportProgressStep, ImportTask, LegacyModelRecovery, ModelActivity,
-    ModelUsageRecord, RecoveryOverride,
+    ImportJobStatus, ImportJobsResult, ImportProgressStep, ImportTask, LegacyModelRecovery,
+    ModelActivity, ModelUsageRecord, RecoveryOverride,
 };
 use serde_json::json;
 
@@ -111,6 +111,65 @@ fn current_import_task_has_truthful_activity_without_timeout_budgets() {
     );
     assert_eq!(encoded["modelActivity"]["elapsedSeconds"], 181.0);
     assert!(encoded["modelActivity"].get("elapsed_seconds").is_none());
+}
+
+#[test]
+fn historical_engine_import_jobs_keep_nullable_lifecycle_at_the_bridge_boundary() {
+    let history: ImportJobsResult = serde_json::from_value(json!({
+        "jobs": [{
+            "job": {
+                "job_id": "historical-job",
+                "source_name": "historical.txt",
+                "status": "failed",
+                "progress": 100,
+                "document_id": null,
+                "deduplicated": false
+            },
+            "document": null,
+            "stages": [],
+            "model_calls": [{
+                "call_id": "historical-call",
+                "stage_run_id": "historical-stage",
+                "operation": "page_tree_enrichment",
+                "status": "failed",
+                "lifecycle_status": null,
+                "attempt_count": 1,
+                "error_code": "provider_failure",
+                "reason": "Historical provider failure.",
+                "suggested_action": null,
+                "attempts": [{
+                    "attempt": 1,
+                    "status": "failed",
+                    "lifecycle_status": null,
+                    "error_code": "provider_failure",
+                    "reason": "Historical provider failure."
+                }]
+            }],
+            "quarantine": null,
+            "knowledge_analysis": null,
+            "import_progress": [],
+            "model_usage": [],
+            "model_usage_aggregate": null,
+            "model_activity": null,
+            "legacy_model_recovery": null
+        }],
+        "page_tree_rebuilds": [],
+        "page_tree_enrichments": [],
+        "knowledge_graph_extractions": [],
+        "catalog_rebuild": null
+    }))
+    .expect("serialized pre-lifecycle Engine history should cross the Rust Bridge");
+    let call = &history.jobs[0].model_calls[0];
+
+    assert!(call.lifecycle_status.is_none());
+    assert!(call.attempts[0].lifecycle_status.is_none());
+    let encoded = serde_json::to_value(history).expect("historical history should serialize");
+    assert_eq!(encoded["jobs"][0]["modelCalls"][0]["status"], "failed");
+    assert!(encoded["jobs"][0]["modelCalls"][0]["lifecycleStatus"].is_null());
+    assert_eq!(
+        encoded["jobs"][0]["modelCalls"][0]["errorCode"],
+        "provider_failure"
+    );
 }
 
 #[test]

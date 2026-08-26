@@ -15,7 +15,7 @@ pub use crate::engine_wire::{
     KnowledgePageKind, KnowledgeReanalysisOverview, KnowledgeReanalysisRun,
     KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
     KnowledgeReconciliationDecision, MissingSourceBindingResult, MissingSourceCandidatesResult,
-    MissingSourceDismissalResult, ModelSettings, ModelSettingsDraft,
+    MissingSourceDismissalResult, ModelConnectionTest, ModelSettings, ModelSettingsDraft,
     PageTreeEnrichmentControlResult, RawDocument, RecoveryOverride, TextDocumentImportResult,
 };
 pub use crate::engine_wire_knowledge_pages::{

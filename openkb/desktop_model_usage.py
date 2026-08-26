@@ -14,6 +14,7 @@ from openkb.desktop_model_gateway import (
     DesktopProviderTokenUsage,
     ExecutionLane,
 )
+from openkb.desktop_model_result_failure import is_model_result_failure
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -55,6 +56,28 @@ _PUBLIC_COLUMNS = (
     "created_at",
     "updated_at",
 )
+
+
+def mark_model_usage_result_failure_in(
+    connection: sqlite3.Connection,
+    *,
+    call_id: str,
+    failure_code: str,
+    now: str,
+) -> None:
+    """Correct the final usage attempt inside an owning caller's transaction."""
+    if not is_model_result_failure(failure_code):
+        return
+    connection.execute(
+        """
+        UPDATE model_usage_records
+        SET lifecycle_status = 'model_result_failure', failure_code = ?, updated_at = ?
+        WHERE call_id = ? AND attempt = (
+            SELECT MAX(attempt) FROM model_usage_records WHERE call_id = ?
+        )
+        """,
+        (failure_code, now, call_id, call_id),
+    )
 
 
 class DesktopModelUsageStore:
@@ -246,6 +269,23 @@ class DesktopModelUsageStore:
                             call_id,
                             attempt,
                         ),
+                    )
+            finally:
+                connection.close()
+
+    def mark_result_failure(self, call_id: str, failure_code: str) -> None:
+        """Replace a provider completion with its final local-validation outcome."""
+        if not is_model_result_failure(failure_code):
+            return
+        with kb_ingest_lock(self._state_dir):
+            connection = _connect(self._database_path)
+            try:
+                with connection:
+                    mark_model_usage_result_failure_in(
+                        connection,
+                        call_id=call_id,
+                        failure_code=failure_code,
+                        now=_timestamp(),
                     )
             finally:
                 connection.close()

@@ -31,6 +31,7 @@ from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
 from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
 from openkb.desktop_model_execution_profile import (
     DesktopModelCapacityError,
+    analysis_prompt_contract_bundle,
     build_analysis_execution_profile,
 )
 from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelTransportError
@@ -214,14 +215,17 @@ def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_an_older_plan(tmp_
         ).fetchone()
     checkpoint = json.loads(checkpoint_json)
     assert checkpoint["prompt_contract_snapshot"]["instructions"] == legacy_instructions
-    assert checkpoint["prompt_digest"] == hashlib.sha256(
-        json.dumps(
-            checkpoint["prompt_contract_snapshot"],
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    assert (
+        checkpoint["prompt_digest"]
+        == hashlib.sha256(
+            json.dumps(
+                checkpoint["prompt_contract_snapshot"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
 
 
 def test_token_estimator_is_conservative_for_chinese_and_ascii() -> None:
@@ -339,6 +343,35 @@ def test_complete_execution_profile_round_trips_and_changes_plan_identity() -> N
     assert restored.execution_profile == off_profile
     assert restored.plan_identity == off_plan.plan_identity
     assert high_plan.plan_identity != off_plan.plan_identity
+
+
+def test_analysis_profile_identity_covers_every_structured_prompt_contract() -> None:
+    operations = {
+        "knowledge_analysis",
+        "knowledge_analysis_batch",
+        "knowledge_analysis_merge",
+        "page_tree_enrichment",
+        "knowledge_graph_extraction",
+        "retrieval_plan",
+        "structured_output_repair",
+    }
+    bundle = analysis_prompt_contract_bundle()
+    contracts = bundle["contracts"]
+    assert isinstance(contracts, dict)
+    assert set(contracts) == operations
+    canonical = json.dumps(bundle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    baseline_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    for operation in operations:
+        changed = json.loads(canonical)
+        changed["contracts"][operation]["version"] += ".changed"
+        changed_digest = hashlib.sha256(
+            json.dumps(changed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        assert changed_digest != baseline_digest
+
 
 def test_exact_knowledge_is_deduplicated_before_description_merge() -> None:
     def analysis(evidence_id: str, aliases: list[str], tags: list[str]):

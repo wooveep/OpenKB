@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 if TYPE_CHECKING:
     from openkb.desktop_model_terminal import DesktopTerminalModelEvent
@@ -13,6 +13,17 @@ if TYPE_CHECKING:
 ModelConnectTransport = Callable[["DesktopModelRequest", float], object]
 CancellationCallback = Callable[[], bool]
 ExecutionLane = Literal["background", "interactive"]
+ModelResultLifecycleStatus = Literal["completed", "model_result_failure"]
+ModelResultFailureCode = Literal[
+    "empty_final_result",
+    "reasoning_only_result",
+    "reasoning_output_exhausted",
+    "model_response_invalid",
+]
+MODEL_RESULT_FAILURE_CODES: frozenset[str] = frozenset(get_args(ModelResultFailureCode))
+ModelResultLifecycleFinalizer = Callable[
+    [ModelResultLifecycleStatus, str | None, str | None], None
+]
 
 
 def require_execution_lane(value: str) -> ExecutionLane:
@@ -38,6 +49,7 @@ class DesktopModelRequest:
     provider_adapter_version: str | None = None
     structured_output_mode: str | None = None
     response_schema: dict[str, object] | None = None
+    local_validation_required: bool = False
     response_example: dict[str, object] | None = None
     response_schema_name: str | None = None
     generation_parameters: dict[str, object] | None = None
@@ -113,7 +125,7 @@ class DesktopModelProviderResponse(str):
 
 @dataclass(frozen=True)
 class DesktopModelResult:
-    """A successful logical call; only callers retain its content."""
+    """A provider result whose local-validation owner controls its final lifecycle."""
 
     call_id: str
     content: str
@@ -121,6 +133,35 @@ class DesktopModelResult:
     usage: DesktopProviderTokenUsage | None = None
     provider_request_id: str | None = None
     observations: DesktopModelOutputObservations | None = None
+    _lifecycle_finalizer: ModelResultLifecycleFinalizer | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+
+def complete_model_result(result: DesktopModelResult) -> None:
+    """Terminal a deferred provider result only after local acceptance succeeds."""
+    if result._lifecycle_finalizer is not None:
+        result._lifecycle_finalizer("completed", None, None)
+
+
+def reject_model_result(
+    result: DesktopModelResult,
+    *,
+    failure_code: ModelResultFailureCode,
+    reason: str,
+) -> None:
+    """Terminal a deferred provider result with a content-free validation failure."""
+    if failure_code not in MODEL_RESULT_FAILURE_CODES:
+        raise ValueError(f"Unknown Model Result Failure code: {failure_code}")
+    if result._lifecycle_finalizer is not None:
+        result._lifecycle_finalizer("model_result_failure", failure_code, reason)
+
+
+def has_deferred_model_result_lifecycle(result: DesktopModelResult) -> bool:
+    """Return whether local validation, rather than the provider seam, owns terminalization."""
+    return result._lifecycle_finalizer is not None
 
 
 @dataclass(frozen=True)
@@ -318,6 +359,14 @@ class DesktopModelGateway:
         """Invalidate current-profile evidence when the gateway owns such a cache."""
         del failure_code, reason
 
+    def answer_capability_verified(self) -> bool:
+        """Return whether this gateway's exact streamed Answer identity was checked."""
+        return True
+
+    def record_model_result_failure(self, call_id: str, failure_code: str) -> None:
+        """Correct a provider completion after local result validation rejects it."""
+        del call_id, failure_code
+
     def analyze(
         self,
         request: DesktopModelRequest,
@@ -354,6 +403,12 @@ def gateway_analysis_capability_verified(gateway: object) -> bool:
     return bool(verifier()) if callable(verifier) else True
 
 
+def gateway_answer_capability_verified(gateway: object) -> bool:
+    """Preserve compatibility for simple gateways without an Answer evidence cache."""
+    verifier = getattr(gateway, "answer_capability_verified", None)
+    return bool(verifier()) if callable(verifier) else True
+
+
 def invalidate_analysis_capability(
     gateway: object,
     failure_code: str,
@@ -363,6 +418,17 @@ def invalidate_analysis_capability(
     invalidator = getattr(gateway, "invalidate_analysis_capability", None)
     if callable(invalidator):
         invalidator(failure_code, reason)
+
+
+def record_model_result_failure(
+    gateway: object,
+    call_id: str,
+    failure_code: str,
+) -> None:
+    """Correct usage for cache-backed gateways while simple test gateways remain valid."""
+    recorder = getattr(gateway, "record_model_result_failure", None)
+    if callable(recorder):
+        recorder(call_id, failure_code)
 
 
 def classify_model_error(error: Exception) -> DesktopModelFailure:

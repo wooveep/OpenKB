@@ -37,6 +37,7 @@ from openkb.desktop_model_gateway import (
     gateway_analysis_capability_verified,
     invalidate_analysis_capability,
 )
+from openkb.desktop_model_result_failure import invalidate_structured_model_result
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
     run_structured_output,
@@ -119,9 +120,8 @@ class DesktopKnowledgeGraphService:
         publish_transaction: PublishTransaction | None = None,
     ) -> bool:
         """Best-effort extraction; a failure never changes the document's availability."""
-        if (
-            self._model_gateway is not None
-            and not gateway_analysis_capability_verified(self._model_gateway)
+        if self._model_gateway is not None and not gateway_analysis_capability_verified(
+            self._model_gateway
         ):
             return False
         try:
@@ -157,11 +157,7 @@ class DesktopKnowledgeGraphService:
             return False
         except DesktopStructuredOutputInvalidError as error:
             if self._model_gateway is not None:
-                invalidate_analysis_capability(
-                    self._model_gateway,
-                    "model_response_invalid",
-                    str(error),
-                )
+                invalidate_structured_model_result(self._model_gateway, error)
             _report_failure(on_failure, "knowledge_graph_response_invalid")
             self._record_diagnostic("extraction", "knowledge_graph_response_invalid", document_id)
             return False

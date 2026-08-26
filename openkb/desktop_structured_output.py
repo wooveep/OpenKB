@@ -8,7 +8,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from openkb.desktop_model_gateway import DesktopModelRequest, DesktopModelResult
+from openkb.desktop_model_gateway import (
+    DesktopModelRequest,
+    DesktopModelResult,
+    complete_model_result,
+    reject_model_result,
+)
 from openkb.desktop_prompt_contracts import minimal_json_example, prompt_contract_for
 
 ValidatedValue = TypeVar("ValidatedValue")
@@ -19,9 +24,16 @@ StructuredValidator = Callable[[str], ValidatedValue]
 class DesktopStructuredOutputInvalidError(ValueError):
     """The initial output and its sole automatic repair both failed validation."""
 
-    def __init__(self, *, attempt_count: int) -> None:
+    def __init__(
+        self,
+        *,
+        initial_result: DesktopModelResult,
+        final_result: DesktopModelResult,
+    ) -> None:
         super().__init__("The model returned invalid structured output after one automatic repair.")
-        self.attempt_count = attempt_count
+        self.initial_result = initial_result
+        self.final_result = final_result
+        self.attempt_count = initial_result.attempt_count + final_result.attempt_count
 
 
 @dataclass(frozen=True)
@@ -64,6 +76,7 @@ def run_structured_output(
         document_name,
         source_material,
         response_schema=output_schema,
+        local_validation_required=True,
         response_example=output_example,
         response_schema_name=_schema_name(contract_version),
         generation_parameters=dict(generation_parameters),
@@ -75,6 +88,11 @@ def run_structured_output(
     try:
         value = validate(normalize_structured_output(initial.content))
     except Exception as first_error:
+        reject_model_result(
+            initial,
+            failure_code="model_response_invalid",
+            reason="Local schema validation rejected the model result.",
+        )
         repair_contract = prompt_contract_for("structured_output_repair")
         repair_snapshot = repair_contract_snapshot or repair_contract.snapshot()
         repair_generation = repair_snapshot.get("generation_parameters")
@@ -93,6 +111,7 @@ def run_structured_output(
                 source_material=source_material,
             ),
             response_schema=output_schema,
+            local_validation_required=True,
             response_example=output_example,
             response_schema_name=_schema_name(contract_version),
             generation_parameters=dict(repair_generation),
@@ -104,10 +123,18 @@ def run_structured_output(
         try:
             value = validate(normalize_structured_output(repaired.content))
         except Exception as second_error:
+            reject_model_result(
+                repaired,
+                failure_code="model_response_invalid",
+                reason="Local schema validation rejected the model result.",
+            )
             raise DesktopStructuredOutputInvalidError(
-                attempt_count=initial.attempt_count + repaired.attempt_count
+                initial_result=initial,
+                final_result=repaired,
             ) from second_error
+        complete_model_result(repaired)
         return DesktopValidatedStructuredOutput(repaired, value, True)
+    complete_model_result(initial)
     return DesktopValidatedStructuredOutput(initial, value, False)
 
 

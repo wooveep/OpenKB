@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from threading import Event
 from typing import TYPE_CHECKING
@@ -12,12 +11,11 @@ from openkb import desktop_engine_page_tree_enrichment as page_tree_enrichment_e
 from openkb.desktop_engine_model_lifecycle import emit_model_lifecycle
 from openkb.desktop_import import DesktopImportControl, DesktopTextImportService
 from openkb.desktop_import_types import DesktopRecoveryOverride
-from openkb.desktop_model_capability_check import (
-    capability_check_request,
-    validate_capability_result,
+from openkb.desktop_model_capability_check import capability_check_request
+from openkb.desktop_model_capability_verifier import (
+    DesktopModelCapabilityVerificationError,
+    verify_model_capability,
 )
-from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
-from openkb.desktop_model_gateway import DesktopModelCallError, DesktopModelCancelledError
 from openkb.desktop_model_settings import read_desktop_model_settings
 
 if TYPE_CHECKING:
@@ -105,9 +103,7 @@ def run_import(
         importer = DesktopTextImportService(
             kb_dir,
             control=control,
-            on_stage_progress=lambda data: _record_import_stage(
-                server, request_id, control, data
-            ),
+            on_stage_progress=lambda data: _record_import_stage(server, request_id, control, data),
             model_gateway=model_gateway,
             require_model_analysis=True,
             parser_mode=parser_mode,
@@ -219,13 +215,14 @@ def _check_recovery_profile(
         profile = profile_factory("knowledge_analysis")
     except ValueError as error:
         raise DesktopRequestError("model_capability_check_failed", str(error)) from error
-    store = DesktopModelCapabilityStore(kb_dir)
-    if store.is_verified(profile):
-        return
-    store.begin(profile)
     try:
-        result = gateway.analyze(
-            capability_check_request(read_desktop_model_settings(kb_dir), profile=profile),
+        verify_model_capability(
+            kb_dir,
+            role="analysis",
+            model=profile.model,
+            profile=profile,
+            gateway=gateway,
+            request=capability_check_request(read_desktop_model_settings(kb_dir), profile=profile),
             on_event=lambda event: emit_model_lifecycle(
                 server,
                 kb_dir=kb_dir,
@@ -233,25 +230,12 @@ def _check_recovery_profile(
                 event=event,
             ),
             is_cancelled=is_cancelled,
+            reuse_verified=True,
         )
-        validate_capability_result("model_capability_analysis", result.content)
-    except DesktopModelCancelledError as error:
-        store.mark_cancelled(profile)
-        raise DesktopRequestError(
-            "request_cancelled", "Check and Recover was cancelled before Replan."
-        ) from error
-    except DesktopModelCallError as error:
-        store.mark_failed(
-            profile,
-            failure_code=error.failure.code,
-            reason=error.failure.reason,
+    except DesktopModelCapabilityVerificationError as error:
+        message = (
+            "Check and Recover was cancelled before Replan."
+            if error.code == "request_cancelled"
+            else error.reason
         )
-        raise DesktopRequestError(error.failure.code, error.failure.reason) from error
-    except (ValueError, json.JSONDecodeError) as error:
-        store.mark_failed(
-            profile,
-            failure_code="model_capability_check_failed",
-            reason=str(error),
-        )
-        raise DesktopRequestError("model_capability_check_failed", str(error)) from error
-    store.mark_verified(profile)
+        raise DesktopRequestError(error.code, message) from error

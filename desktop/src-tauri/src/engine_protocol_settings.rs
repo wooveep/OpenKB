@@ -1,20 +1,10 @@
 //! Model-settings and diagnostic-bundle requests for the private Engine transport.
 
 use super::{
-    validated_response, BridgeError, BridgeResult, DiagnosticBundleResult, EngineSupervisor,
+    BridgeError, BridgeResult, DiagnosticBundleResult, EngineSupervisor, ModelConnectionTest,
     ModelSettings, ModelSettingsDraft,
 };
-use serde::Deserialize;
 use serde_json::{json, Value};
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct ModelConnectionTest {
-    ok: bool,
-    model: String,
-    latency_ms: u64,
-    attempt_count: u64,
-}
 
 impl EngineSupervisor {
     pub fn model_settings(&self) -> BridgeResult<ModelSettings> {
@@ -37,7 +27,7 @@ impl EngineSupervisor {
         &self,
         settings: ModelSettingsDraft,
         request_id: String,
-    ) -> BridgeResult<Value> {
+    ) -> BridgeResult<ModelConnectionTest> {
         self.ensure_started()?;
         let value = self.request_started_with_wait(
             "workbench.test_model_connection",
@@ -45,7 +35,12 @@ impl EngineSupervisor {
             Some(request_id),
             None,
         )?;
-        validated_response::<ModelConnectionTest>(value, "model connection test")
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine model-connection response has an invalid shape: {error}"),
+            )
+        })
     }
 
     pub fn export_diagnostic_bundle(

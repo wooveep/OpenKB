@@ -28,7 +28,7 @@ export function createMemoryModelSettings(): DesktopModelSettings {
     analysisConcurrency: 1,
     providerAdapter: {
       identity: "custom",
-      version: "custom.v1",
+      version: "custom.compatibility.v1",
       structuredOutputMode: null,
       supportsStructuredAnalysis: false,
       supportedReasoning: [],
@@ -44,6 +44,13 @@ export function createMemoryModelSettings(): DesktopModelSettings {
       status: "unchecked",
       failureCode: "analysis_profile_unavailable",
       reason: "Custom providers do not have a code-owned structured Analysis protocol.",
+      checkedAt: null,
+    },
+    answerCapability: {
+      profileIdentity: null,
+      status: "unchecked",
+      failureCode: null,
+      reason: null,
       checkedAt: null,
     },
     usageAggregate: {

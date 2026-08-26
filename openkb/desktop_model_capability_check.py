@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from typing import Literal
 
-from openkb.desktop_model_execution_profile import DesktopModelExecutionProfile
+from openkb.desktop_model_capability_store import DesktopCapabilityEvidenceProfile
+from openkb.desktop_model_execution_profile import (
+    ANSWER_CAPABILITY_SYSTEM_PROMPT,
+    ANSWER_CAPABILITY_USER_PROMPT,
+    DesktopAnswerCapabilityProfile,
+    DesktopModelExecutionProfile,
+)
 from openkb.desktop_model_gateway import DesktopModelRequest
-from openkb.desktop_model_provider_adapter import provider_adapter_for
 from openkb.desktop_model_settings import DesktopModelSettings
+
+ModelCapabilityRole = Literal["default", "analysis", "answer"]
 
 CAPABILITY_CHECK_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -18,39 +26,63 @@ CAPABILITY_CHECK_SCHEMA: dict[str, object] = {
 }
 
 
-def selected_model_checks(
+@dataclass(frozen=True)
+class DesktopModelCapabilityCheckPlan:
+    """One role-specific provider call and the exact evidence identity it can verify."""
+
+    role: ModelCapabilityRole
+    model: str
+    evidence_profile: DesktopCapabilityEvidenceProfile | None
+    settings: DesktopModelSettings
+    request: DesktopModelRequest
+
+
+def model_capability_check_plans(
     settings: DesktopModelSettings,
-) -> tuple[tuple[str, str, DesktopModelSettings], ...]:
-    """Return one strongest applicable check for every distinct selected model."""
-    roles_by_model: dict[str, set[str]] = {}
-    order: list[str] = []
-    roles = [("default", settings.model), ("answer", settings.answer_model_name)]
-    if provider_adapter_for(settings.provider).supports_structured_analysis:
-        roles.insert(1, ("analysis", settings.analysis_model_name))
-    for role, model in roles:
-        if model not in roles_by_model:
-            roles_by_model[model] = set()
-            order.append(model)
-        roles_by_model[model].add(role)
-    checks: list[tuple[str, str, DesktopModelSettings]] = []
-    for model in order:
-        selected_roles = roles_by_model[model]
-        operation = (
-            "model_capability_analysis_streaming"
-            if {"analysis", "answer"}.issubset(selected_roles)
-            else "model_capability_analysis"
-            if "analysis" in selected_roles
-            else "model_capability_answer"
-            if "answer" in selected_roles
-            else "model_capability_default"
-        )
+    *,
+    analysis_profile: DesktopModelExecutionProfile | None,
+    answer_profile: DesktopAnswerCapabilityProfile,
+) -> tuple[DesktopModelCapabilityCheckPlan, ...]:
+    """Build the single ordered check plan used by the Model Configuration route."""
+    checks: list[DesktopModelCapabilityCheckPlan] = []
+    if settings.model != settings.answer_model_name:
         checks.append(
-            (
-                model,
-                operation,
-                replace(settings, model=model, analysis_model=None, answer_model=None),
+            DesktopModelCapabilityCheckPlan(
+                role="default",
+                model=settings.model,
+                evidence_profile=None,
+                settings=replace(settings, analysis_model=None, answer_model=None),
+                request=capability_check_request(
+                    settings,
+                    model=settings.model,
+                    operation="model_capability_default",
+                ),
             )
         )
+    if analysis_profile is not None:
+        checks.append(
+            DesktopModelCapabilityCheckPlan(
+                role="analysis",
+                model=analysis_profile.model,
+                evidence_profile=analysis_profile,
+                settings=replace(settings, model=analysis_profile.model),
+                request=capability_check_request(settings, profile=analysis_profile),
+            )
+        )
+    checks.append(
+        DesktopModelCapabilityCheckPlan(
+            role="answer",
+            model=answer_profile.model,
+            evidence_profile=answer_profile,
+            settings=replace(
+                settings,
+                model=answer_profile.model,
+                analysis_model=None,
+                answer_model=None,
+            ),
+            request=answer_capability_check_request(settings, profile=answer_profile),
+        )
+    )
     return tuple(checks)
 
 
@@ -78,6 +110,7 @@ def capability_check_request(
             provider_adapter_version=profile.adapter_version,
             structured_output_mode=profile.structured_output_mode,
             response_schema=CAPABILITY_CHECK_SCHEMA,
+            local_validation_required=True,
             response_example={"status": "ok"},
             response_schema_name="openkb_model_capability_check",
             generation_parameters={
@@ -99,7 +132,14 @@ def capability_check_request(
         "model_capability_analysis",
         "model_capability_analysis_streaming",
     }
-    capability = settings.capability_for_role("default")
+    role = (
+        "analysis"
+        if analysis
+        else "answer"
+        if operation == "model_capability_answer"
+        else "default"
+    )
+    capability = settings.capability_for_role(role)
     return DesktopModelRequest(
         operation=operation,
         document_name="OpenKB model capability check",
@@ -111,15 +151,46 @@ def capability_check_request(
         model_name=model,
         context_capacity=capability.context_capacity,
         document_input_capacity=capability.document_input_capacity,
+        reasoning_effort=settings.reasoning_for_role(role),
         response_schema=(
             CAPABILITY_CHECK_SCHEMA if analysis and capability.supports_native_json_schema else None
         ),
+        local_validation_required=True,
         response_schema_name="openkb_model_capability_check" if analysis else None,
         supports_streaming=(
             True
             if operation == "model_capability_analysis_streaming"
             else capability.supports_streaming
         ),
+    )
+
+
+def answer_capability_check_request(
+    settings: DesktopModelSettings,
+    *,
+    profile: DesktopAnswerCapabilityProfile,
+) -> DesktopModelRequest:
+    """Build the exact natural-language streaming check used for Answer evidence."""
+    capability = settings.capability_for_role("answer")
+    return DesktopModelRequest(
+        operation="model_capability_answer",
+        document_name="OpenKB Answer capability check",
+        content=ANSWER_CAPABILITY_USER_PROMPT,
+        model_name=profile.model,
+        context_capacity=profile.context_capacity,
+        document_input_capacity=capability.document_input_capacity,
+        reasoning_effort=profile.reasoning_effort,
+        provider_adapter=profile.adapter_identity,
+        provider_adapter_version=profile.adapter_version,
+        local_validation_required=True,
+        generation_parameters={
+            "temperature": 0,
+            "max_tokens": profile.provider_output_ceiling_tokens,
+        },
+        prompt_contract_digest=profile.prompt_contract_digest,
+        prompt_contract_version=profile.capability_version,
+        prompt_contract_snapshot={"instructions": ANSWER_CAPABILITY_SYSTEM_PROMPT},
+        supports_streaming=profile.streaming,
     )
 
 

@@ -9,11 +9,16 @@ import threading
 import time
 
 from openkb import desktop_engine_page_tree_enrichment as enrichment_engine
+from openkb import desktop_model_transport
 from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
 from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelRequest
-from openkb.desktop_model_settings import read_desktop_model_settings
+from openkb.desktop_model_settings import (
+    read_desktop_model_settings,
+    save_desktop_model_settings,
+)
 from openkb.desktop_model_terminal import DesktopTerminalModelEvent
 from openkb.desktop_model_usage import DesktopModelUsageStore
 from openkb.desktop_page_tree_enrichment import DesktopPageTreeEnrichmentService
@@ -170,6 +175,59 @@ def test_enrichment_failure_is_task_only_and_deterministic_tree_stays_available(
             (imported.document.document_id,),
         ).fetchone() == ("failed", "model_network_transient", 1, 3)
         assert connection.execute("SELECT COUNT(*) FROM quarantined_documents").fetchone() == (0,)
+
+
+def test_invalid_enrichment_repair_marks_final_usage_as_model_result_failure(tmp_path, monkeypatch):
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "invalid-enrichment.md"
+    source.write_text("# Stable\n\nThe deterministic tree remains available.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    save_desktop_model_settings(
+        kb_dir,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+    )
+
+    class InvalidTransport:
+        def __init__(self, *, model, bundle):
+            del model, bundle
+
+        def __call__(self, request, _timeout_seconds):
+            del request
+            return "not-json"
+
+    monkeypatch.setattr(desktop_model_transport, "DesktopLiteLLMTransport", InvalidTransport)
+    gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
+    assert gateway is not None
+    profile = gateway.execution_profile_for_operation("page_tree_enrichment")
+    capability_store = DesktopModelCapabilityStore(kb_dir)
+    capability_store.mark_verified(profile)
+    service = DesktopPageTreeEnrichmentService(kb_dir)
+
+    assert service.queue_eligible(gateway) == 1
+    assert not service.run_document(
+        imported.document.document_id,
+        gateway,
+        should_stop=lambda: False,
+    )
+
+    usage = DesktopModelUsageStore(kb_dir).records()
+    assert {record["operation"] for record in usage} == {
+        "page_tree_enrichment",
+        "structured_output_repair",
+    }
+    failed = [record for record in usage if record["failure_code"] is not None]
+    assert [record["operation"] for record in failed] == [
+        "page_tree_enrichment",
+        "structured_output_repair",
+    ]
+    assert {record["lifecycle_status"] for record in failed} == {"model_result_failure"}
+    assert {record["failure_code"] for record in failed} == {"model_response_invalid"}
+    assert capability_store.state(profile).status == "unchecked"
 
 
 def test_model_change_creates_a_new_enrichment_generation_without_overwriting_base(tmp_path):
@@ -440,9 +498,7 @@ def test_engine_page_tree_enrichment_cancel_requires_explicit_retry(tmp_path):
         return json.dumps(
             {
                 "schema_version": "openkb.page-tree-enrichment.v1",
-                "summaries": [
-                    {"node_id": target["node_id"], "summary": "Cancelled result."}
-                ],
+                "summaries": [{"node_id": target["node_id"], "summary": "Cancelled result."}],
             }
         )
 
@@ -609,9 +665,7 @@ def test_page_tree_control_serializes_with_active_workspace_switch(tmp_path, mon
     switch_worker.join(timeout=2)
 
     assert errors == []
-    assert results == [
-        {"document_id": imported.document.document_id, "accepted": True}
-    ]
+    assert results == [{"document_id": imported.document.document_id, "accepted": True}]
     assert workspace.active() is not None
     assert workspace.active().kb_dir == str(next_kb_dir.resolve())
     assert _wait_for_enrichment_status(kb_dir, "pending") == (

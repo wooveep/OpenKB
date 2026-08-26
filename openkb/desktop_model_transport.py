@@ -36,7 +36,7 @@ from openkb.desktop_model_gateway import (
     ExecutionLane,
 )
 from openkb.desktop_model_http_lifecycle import terminal_completion_client
-from openkb.desktop_model_provider_adapter import provider_adapter_for
+from openkb.desktop_model_provider_adapter import model_protocol_for
 from openkb.desktop_model_roles import DesktopRoleModelGateway
 from openkb.desktop_model_settings import (
     DEFAULT_MAX_CONCURRENT_MODEL_CALLS,
@@ -212,6 +212,7 @@ def _gateway_for(
         usage_store=DesktopModelUsageStore(kb_dir),
         analysis_capability_verifier=capability_store.is_verified,
         analysis_capability_invalidator=invalidate_analysis_capability,
+        answer_capability_verifier=capability_store.is_verified,
     )
 
 
@@ -321,7 +322,7 @@ class DesktopLiteLLMTransport:
         final_character_count = 0
         output_limit_reached = False
         adapter = (
-            provider_adapter_for(request.provider_adapter)
+            model_protocol_for(request.provider_adapter)
             if request.provider_adapter is not None
             else None
         )
@@ -530,7 +531,7 @@ def _messages_for(request: DesktopModelRequest) -> list[dict[str, str]]:
 def _provider_request_parameters(request: DesktopModelRequest) -> dict[str, object]:
     """Translate pinned request semantics through the selected provider adapter."""
     if request.provider_adapter is not None:
-        adapter = provider_adapter_for(request.provider_adapter)
+        adapter = model_protocol_for(request.provider_adapter)
         if (
             request.provider_adapter_version is not None
             and request.provider_adapter_version != adapter.version
@@ -587,8 +588,7 @@ def _response_content(response: object) -> str:
             final_chunk_count=1 if content else 0,
             reasoning_character_count=reasoning_characters,
             final_character_count=len(content),
-            output_limit_reached=finish_reason
-            in {"length", "max_tokens", "max_output_tokens"},
+            output_limit_reached=finish_reason in {"length", "max_tokens", "max_output_tokens"},
         ),
     )
 

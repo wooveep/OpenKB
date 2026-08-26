@@ -119,16 +119,10 @@ export class TauriDesktopBridge extends TauriKnowledgeReanalysisBridge implement
     settings: DesktopModelSettingsDraft,
     requestId: string,
   ): Promise<DesktopModelConnectionTest> {
-    const result = await this.call<Record<string, unknown>>("desktop_test_model_connection", {
+    return this.call<DesktopModelConnectionTest>("desktop_test_model_connection", {
       settings,
       requestId,
     })
-    return {
-      ok: Boolean(result.ok),
-      model: typeof result.model === "string" ? result.model : settings.model,
-      latencyMs: typeof result.latency_ms === "number" ? result.latency_ms : 0,
-      attemptCount: typeof result.attempt_count === "number" ? result.attempt_count : 0,
-    }
   }
 
   async exportDiagnosticBundle(destination: string, requestId: string): Promise<DesktopDiagnosticBundle> {

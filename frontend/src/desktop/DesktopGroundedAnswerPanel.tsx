@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import MarkdownView from "@/components/MarkdownView"
 import { useDesktopBridge } from "./bridge-context"
 import type { DesktopAnswerSourceImage, DesktopGroundedAnswer } from "./contracts"
+import { DesktopCapabilityDegradationNotice } from "./DesktopCapabilityDegradationNotice"
 import {
   DesktopLiveModelActivityDetails,
   type DesktopLiveModelActivity,
@@ -247,6 +248,7 @@ function CompletedAnswerCard({
   const { t } = useTranslation("common")
   return (
     <AnswerCard answerText={answer.answerText} title={answer.question}>
+      <DesktopCapabilityDegradationNotice codes={answer.degradations} />
       {answer.status === "interrupted" ? (
         <section className="mt-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
           <p className="font-medium">{t("desktop.knowledgeBases.answerInterrupted")}</p>

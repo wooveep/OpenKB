@@ -64,6 +64,7 @@ from openkb.desktop_model_gateway import (
     DesktopModelRequest,
     DesktopModelResult,
 )
+from openkb.desktop_model_result_failure import structured_model_result_failure as result_failure
 from openkb.desktop_page_tree import PageTreeGeneration, page_tree_analysis_sections
 from openkb.desktop_parallel import parallel_map_ordered
 from openkb.desktop_prompt_contracts import prompt_contract_for
@@ -85,6 +86,7 @@ KNOWLEDGE_ANALYSIS_BATCH_PIPELINE_DIGEST = hashlib.sha256(
         "utf-8"
     )
 ).hexdigest()
+_INVALID_RESULT_ACTION = "Retry with a model that follows the Knowledge Analysis schema."
 
 
 @dataclass(frozen=True)
@@ -372,9 +374,7 @@ def _validated_analysis_call(
             ),
         )
     except DesktopStructuredOutputInvalidError as error:
-        invalid = _invalid_model_result(str(error), None)
-        invalid.attempt_count = error.attempt_count
-        raise invalid from error
+        raise result_failure(error, suggested_action=_INVALID_RESULT_ACTION) from error
     return output.result, output.value
 
 
@@ -514,9 +514,7 @@ def _validated_description_merge_call(
             ),
         )
     except DesktopStructuredOutputInvalidError as error:
-        invalid = _invalid_model_result(str(error), None)
-        invalid.attempt_count = error.attempt_count
-        raise invalid from error
+        raise result_failure(error, suggested_action=_INVALID_RESULT_ACTION) from error
     return output.result, output.value
 
 

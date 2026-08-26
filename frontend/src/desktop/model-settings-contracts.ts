@@ -45,6 +45,38 @@ export interface DesktopModelCapabilityState {
   checkedAt: string | null
 }
 
+export type DesktopModelCapabilityCheckStatus = "verified" | "answer_verified"
+export type DesktopModelCapabilityCheckRoleStatus = "verified" | "unavailable"
+export type DesktopModelCapabilityCheckRole = "default" | "analysis" | "answer"
+
+export interface DesktopModelCapabilityCheckRoleResult {
+  role: DesktopModelCapabilityCheckRole
+  model: string | null
+  status: DesktopModelCapabilityCheckRoleStatus
+  reason: string | null
+  attemptCount: number
+  profileIdentity: string | null
+  cached: boolean
+  coveredBy: DesktopModelCapabilityCheckRole | null
+}
+
+export interface DesktopModelCapabilityCheckRoleResults {
+  default: DesktopModelCapabilityCheckRoleResult
+  analysis: DesktopModelCapabilityCheckRoleResult
+  answer: DesktopModelCapabilityCheckRoleResult
+}
+
+export interface DesktopModelConnectionTest {
+  ok: boolean
+  model: string
+  models: string[]
+  latencyMs: number
+  attemptCount: number
+  profileIdentity: string
+  capabilityStatus: DesktopModelCapabilityCheckStatus
+  roleResults: DesktopModelCapabilityCheckRoleResults
+}
+
 /** Editable KB-local model role, capacity, reasoning, and user-priced cost values. */
 export interface DesktopModelSettingsDraft {
   provider: string
@@ -77,5 +109,6 @@ export interface DesktopModelSettings extends DesktopModelSettingsDraft {
   providerAdapter: DesktopModelProviderAdapter
   effectiveRoles: DesktopEffectiveModelRoles
   analysisCapability: DesktopModelCapabilityState
+  answerCapability: DesktopModelCapabilityState
   usageAggregate: DesktopModelUsageAggregate
 }

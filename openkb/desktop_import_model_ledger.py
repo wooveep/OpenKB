@@ -12,8 +12,14 @@ from openkb.desktop_import_types import (
     DesktopModelCall,
     DesktopQuarantinedDocument,
 )
-from openkb.desktop_model_event import normalize_model_event
+from openkb.desktop_model_event import (
+    MODEL_CALL_LIFECYCLE_STATUSES,
+    normalize_model_call_summary_status,
+    normalize_model_event,
+)
 from openkb.desktop_model_gateway import DesktopModelFailure
+from openkb.desktop_model_result_failure import is_model_result_failure
+from openkb.desktop_model_usage import mark_model_usage_result_failure_in
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -242,6 +248,7 @@ class DesktopImportModelLedger:
     ) -> None:
         """Atomically mark a required model-stage failure as unpublished quarantine work."""
         now = _timestamp()
+        lifecycle_status = "model_result_failure" if is_model_result_failure(failure.code) else None
         with kb_ingest_lock(self._state_dir):
             connection = _connect(self._database_path)
             try:
@@ -250,11 +257,45 @@ class DesktopImportModelLedger:
                     """
                     UPDATE model_calls
                     SET status = 'failed', error_code = ?, reason = ?, suggested_action = ?,
-                        completed_at = COALESCE(completed_at, ?)
+                        completed_at = COALESCE(completed_at, ?),
+                        lifecycle_status = COALESCE(?, lifecycle_status)
                     WHERE call_id = ?
                     """,
-                    (failure.code, failure.reason, failure.suggested_action, now, call_id),
+                    (
+                        failure.code,
+                        failure.reason,
+                        failure.suggested_action,
+                        now,
+                        lifecycle_status,
+                        call_id,
+                    ),
                 )
+                if lifecycle_status is not None:
+                    connection.execute(
+                        """
+                        UPDATE model_attempts
+                        SET status = 'failed', error_code = ?, reason = ?,
+                            completed_at = COALESCE(completed_at, ?),
+                            lifecycle_status = ?
+                        WHERE call_id = ? AND attempt = (
+                            SELECT MAX(attempt) FROM model_attempts WHERE call_id = ?
+                        )
+                        """,
+                        (
+                            failure.code,
+                            failure.reason,
+                            now,
+                            lifecycle_status,
+                            call_id,
+                            call_id,
+                        ),
+                    )
+                    mark_model_usage_result_failure_in(
+                        connection,
+                        call_id=call_id,
+                        failure_code=failure.code,
+                        now=now,
+                    )
                 quarantine_import_in(
                     connection,
                     job_id=job_id,
@@ -281,7 +322,7 @@ def model_details_for_job(
     rows = connection.execute(
         """
         SELECT call_id, stage_run_id, operation, status,
-            COALESCE(lifecycle_status, status), attempt_count, error_code, reason,
+            lifecycle_status, attempt_count, error_code, reason,
             suggested_action, elapsed_seconds
             , finish_reason, reasoning_observed, final_content_observed
             , reasoning_chunk_count, final_chunk_count
@@ -298,8 +339,8 @@ def model_details_for_job(
             call_id=str(row[0]),
             stage_run_id=str(row[1]),
             operation=str(row[2]),
-            status=_model_call_status(row[3], row[4]),
-            lifecycle_status=str(row[4]),
+            status=normalize_model_call_summary_status(row[3]),
+            lifecycle_status=_model_call_lifecycle_status(row[4]),
             attempt_count=int(row[5]),
             elapsed_seconds=float(row[9]),
             error_code=str(row[6]) if row[6] is not None else None,
@@ -348,7 +389,7 @@ def _attempts_for_call(
 ) -> tuple[DesktopModelAttempt, ...]:
     rows = connection.execute(
         """
-        SELECT attempt, status, COALESCE(lifecycle_status, status),
+        SELECT attempt, status, lifecycle_status,
             error_code, reason, elapsed_seconds
             , finish_reason, reasoning_observed, final_content_observed
             , reasoning_chunk_count, final_chunk_count
@@ -363,8 +404,8 @@ def _attempts_for_call(
     return tuple(
         DesktopModelAttempt(
             attempt=int(row[0]),
-            status=_model_call_status(row[1], row[2]),
-            lifecycle_status=str(row[2]),
+            status=normalize_model_call_summary_status(row[1]),
+            lifecycle_status=_model_call_lifecycle_status(row[2]),
             elapsed_seconds=float(row[5]),
             error_code=str(row[3]) if row[3] is not None else None,
             reason=str(row[4]) if row[4] is not None else None,
@@ -384,25 +425,11 @@ def _attempts_for_call(
     )
 
 
-def _model_call_status(status: object, lifecycle_status: object) -> str:
-    value = str(status) if status is not None else ""
-    if value in {"running", "retry_wait", "completed", "failed"}:
-        return value
-    lifecycle = str(lifecycle_status) if lifecycle_status is not None else value
-    if lifecycle == "completed":
-        return "completed"
-    if lifecycle == "retrying":
-        return "retry_wait"
-    if lifecycle in {
-        "queued",
-        "connecting",
-        "awaiting_model_result",
-        "reasoning_output_activity",
-        "model_output_activity",
-        "validating",
-    }:
-        return "running"
-    return "failed"
+def _model_call_lifecycle_status(lifecycle_status: object) -> str | None:
+    if lifecycle_status is None:
+        return None
+    value = str(lifecycle_status)
+    return value if value in MODEL_CALL_LIFECYCLE_STATUSES else None
 
 
 def _connect(database_path: Path) -> sqlite3.Connection:
