@@ -134,15 +134,23 @@ class DesktopDiagnosticBundleService:
                             connection,
                             """
                             SELECT call_id, job_id, stage_run_id, operation, status, attempt_count,
-                                error_code,
-                                reason, suggested_action, created_at, completed_at
+                                error_code, reason, suggested_action, finish_reason,
+                                reasoning_observed, final_content_observed,
+                                reasoning_chunk_count, final_chunk_count,
+                                reasoning_character_count, final_character_count,
+                                input_tokens, output_tokens, total_tokens, provider_request_id,
+                                created_at, completed_at
                             FROM model_calls ORDER BY created_at DESC
                             """,
                         ),
                         "attempts": _rows(
                             connection,
                             """
-                            SELECT call_id, attempt, status, error_code, reason,
+                            SELECT call_id, attempt, status, error_code, reason, finish_reason,
+                                reasoning_observed, final_content_observed,
+                                reasoning_chunk_count, final_chunk_count,
+                                reasoning_character_count, final_character_count,
+                                input_tokens, output_tokens, total_tokens, provider_request_id,
                                 created_at, completed_at
                             FROM model_attempts ORDER BY call_id, attempt
                             """,
@@ -156,6 +164,9 @@ class DesktopDiagnosticBundleService:
                                 provider, model, job_id, stage_run_id, batch_id,
                                 execution_lane, lifecycle_status, failure_code, queue_seconds,
                                 connect_seconds, first_output_seconds, total_seconds,
+                                finish_reason, reasoning_observed, final_content_observed,
+                                reasoning_chunk_count, final_chunk_count,
+                                reasoning_character_count, final_character_count,
                                 input_tokens, output_tokens, total_tokens,
                                 token_usage_source, input_cost, output_cost, total_cost,
                                 provider_request_id, created_at, updated_at

@@ -24,6 +24,7 @@ fn current_import_task_has_truthful_activity_without_timeout_budgets() {
             "stage_run_id": "stage-1",
             "operation": "knowledge_analysis_batch",
             "status": "running",
+            "lifecycle_status": "awaiting_model_result",
             "attempt_count": 1,
             "error_code": null,
             "reason": null,
@@ -31,6 +32,7 @@ fn current_import_task_has_truthful_activity_without_timeout_budgets() {
             "attempts": [{
                 "attempt": 1,
                 "status": "running",
+                "lifecycle_status": "awaiting_model_result",
                 "error_code": null,
                 "reason": null
             }]
@@ -98,23 +100,78 @@ fn current_import_task_has_truthful_activity_without_timeout_budgets() {
     );
     let encoded = serde_json::to_value(task).expect("task should serialize");
     assert_eq!(encoded["importProgress"][0]["sourceStageRunId"], "stage-1");
+    assert_eq!(encoded["modelCalls"][0]["status"], "running");
+    assert_eq!(
+        encoded["modelCalls"][0]["lifecycleStatus"],
+        "awaiting_model_result"
+    );
+    assert_eq!(
+        encoded["modelCalls"][0]["attempts"][0]["lifecycleStatus"],
+        "awaiting_model_result"
+    );
     assert_eq!(encoded["modelActivity"]["elapsedSeconds"], 181.0);
     assert!(encoded["modelActivity"].get("elapsed_seconds").is_none());
 }
 
 #[test]
-fn recovery_override_has_context_and_explicit_legacy_choice_only() {
+fn recovery_override_has_context_reasoning_and_explicit_legacy_choice_only() {
     let recovery: RecoveryOverride = serde_json::from_value(json!({
         "model": "analysis-model",
         "contextCapacity": 32768,
-        "legacyRecoveryChoice": "restart_current_plan"
+        "reasoning": "off",
+        "legacyRecoveryChoice": "restart_current_plan",
+        "checkAndRecover": true
     }))
     .expect("current recovery override should deserialize");
 
     let encoded = serde_json::to_value(recovery).expect("recovery override should serialize");
     assert_eq!(encoded["contextCapacity"], 32768);
+    assert_eq!(encoded["reasoning"], "off");
     assert_eq!(encoded["legacyRecoveryChoice"], "restart_current_plan");
+    assert_eq!(encoded["checkAndRecover"], true);
     assert!(encoded.get("initialTimeoutSeconds").is_none());
+}
+
+#[test]
+fn profile_replan_recovery_exposes_discarded_model_checkpoints() {
+    let recovery: LegacyModelRecovery = serde_json::from_value(json!({
+        "kind": "model_execution_profile_replan",
+        "compatible": false,
+        "compatibility_reason": "incompatible_or_failed_model_execution_profile",
+        "previous_prompt_digest": "old-prompt",
+        "provider": "deepseek",
+        "model": "deepseek-v4-pro",
+        "completed_batches": 1,
+        "total_batches": 2,
+        "choices": {
+            "continue_compatible": {
+                "allowed": false,
+                "estimated_remaining_calls": 3,
+                "estimated_input_tokens": 100,
+                "reuses_completed_batches": 1
+            },
+            "restart_current_plan": {
+                "allowed": true,
+                "estimated_remaining_calls": 3,
+                "estimated_input_tokens": 100,
+                "reuses_parser_document_ir_evidence": true,
+                "discarded_model_checkpoints": 2
+            }
+        },
+        "recommended_choice": "restart_current_plan",
+        "selected_choice": null,
+        "discarded_model_checkpoints": 2,
+        "starts_automatically": false
+    }))
+    .expect("profile Replan recovery should deserialize");
+
+    let encoded = serde_json::to_value(recovery).expect("recovery should serialize");
+    assert_eq!(encoded["kind"], "model_execution_profile_replan");
+    assert_eq!(encoded["discardedModelCheckpoints"], 2);
+    assert_eq!(
+        encoded["choices"]["restart_current_plan"]["discardedModelCheckpoints"],
+        2
+    );
 }
 
 #[test]

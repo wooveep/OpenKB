@@ -1,8 +1,8 @@
 //! Typed, content-free import progress and model observability wire values.
 
 use super::{
-    ImportStageStatus, ModelCallLifecycleStatus, ModelUsageAggregate, ParserFamily,
-    ParserResourceState, ParserRoute, ParserRuntimeState,
+    ImportStageStatus, ModelCallLifecycleStatus, ModelCallStatus, ModelUsageAggregate,
+    ParserFamily, ParserResourceState, ParserRoute, ParserRuntimeState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +55,7 @@ pub enum ModelActivityStatus {
     Queued,
     Connecting,
     AwaitingFirstResult,
+    ReceivingReasoning,
     ReceivingOutput,
     Validating,
     Retrying,
@@ -62,6 +63,7 @@ pub enum ModelActivityStatus {
     Interrupted,
     ProviderFailure,
     NetworkFailure,
+    ModelResultFailure,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -76,6 +78,7 @@ pub enum ModelActivityAction {
 #[serde(rename_all = "snake_case")]
 pub enum LegacyModelRecoveryKind {
     LegacyModelDeadline,
+    ModelExecutionProfileReplan,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -83,6 +86,88 @@ pub enum LegacyModelRecoveryKind {
 pub enum LegacyModelRecoveryAction {
     ContinueCompatible,
     RestartCurrentPlan,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelAttempt {
+    pub attempt: u32,
+    pub status: ModelCallStatus,
+    #[serde(default, alias = "lifecycle_status")]
+    pub lifecycle_status: Option<ModelCallLifecycleStatus>,
+    #[serde(default, alias = "elapsed_seconds")]
+    pub elapsed_seconds: f64,
+    #[serde(alias = "error_code")]
+    pub error_code: Option<String>,
+    pub reason: Option<String>,
+    #[serde(default, alias = "finish_reason")]
+    pub finish_reason: Option<String>,
+    #[serde(default, alias = "reasoning_observed")]
+    pub reasoning_observed: Option<bool>,
+    #[serde(default, alias = "final_content_observed")]
+    pub final_content_observed: Option<bool>,
+    #[serde(default, alias = "reasoning_chunk_count")]
+    pub reasoning_chunk_count: Option<u64>,
+    #[serde(default, alias = "final_chunk_count")]
+    pub final_chunk_count: Option<u64>,
+    #[serde(default, alias = "reasoning_character_count")]
+    pub reasoning_character_count: Option<u64>,
+    #[serde(default, alias = "final_character_count")]
+    pub final_character_count: Option<u64>,
+    #[serde(default, alias = "input_tokens")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, alias = "output_tokens")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, alias = "total_tokens")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, alias = "provider_request_id")]
+    pub provider_request_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCall {
+    #[serde(alias = "call_id")]
+    pub call_id: String,
+    #[serde(alias = "stage_run_id")]
+    pub stage_run_id: String,
+    pub operation: String,
+    pub status: ModelCallStatus,
+    #[serde(default, alias = "lifecycle_status")]
+    pub lifecycle_status: Option<ModelCallLifecycleStatus>,
+    #[serde(alias = "attempt_count")]
+    pub attempt_count: u32,
+    #[serde(default, alias = "elapsed_seconds")]
+    pub elapsed_seconds: f64,
+    #[serde(alias = "error_code")]
+    pub error_code: Option<String>,
+    pub reason: Option<String>,
+    #[serde(alias = "suggested_action")]
+    pub suggested_action: Option<String>,
+    #[serde(default, alias = "finish_reason")]
+    pub finish_reason: Option<String>,
+    #[serde(default, alias = "reasoning_observed")]
+    pub reasoning_observed: Option<bool>,
+    #[serde(default, alias = "final_content_observed")]
+    pub final_content_observed: Option<bool>,
+    #[serde(default, alias = "reasoning_chunk_count")]
+    pub reasoning_chunk_count: Option<u64>,
+    #[serde(default, alias = "final_chunk_count")]
+    pub final_chunk_count: Option<u64>,
+    #[serde(default, alias = "reasoning_character_count")]
+    pub reasoning_character_count: Option<u64>,
+    #[serde(default, alias = "final_character_count")]
+    pub final_character_count: Option<u64>,
+    #[serde(default, alias = "input_tokens")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, alias = "output_tokens")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, alias = "total_tokens")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, alias = "provider_request_id")]
+    pub provider_request_id: Option<String>,
+    #[serde(default)]
+    pub attempts: Vec<ModelAttempt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -207,6 +292,8 @@ pub struct LegacyModelRecoveryChoice {
     pub reuses_completed_batches: Option<u32>,
     #[serde(default, alias = "reuses_parser_document_ir_evidence")]
     pub reuses_parser_document_ir_evidence: Option<bool>,
+    #[serde(default, alias = "discarded_model_checkpoints")]
+    pub discarded_model_checkpoints: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -236,6 +323,8 @@ pub struct LegacyModelRecovery {
     pub recommended_choice: LegacyModelRecoveryAction,
     #[serde(alias = "selected_choice")]
     pub selected_choice: Option<LegacyModelRecoveryAction>,
+    #[serde(default, alias = "discarded_model_checkpoints")]
+    pub discarded_model_checkpoints: u32,
     #[serde(alias = "starts_automatically")]
     pub starts_automatically: bool,
 }

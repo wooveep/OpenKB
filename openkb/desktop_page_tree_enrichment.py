@@ -16,6 +16,8 @@ from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
     DesktopModelGateway,
+    gateway_analysis_capability_verified,
+    invalidate_analysis_capability,
 )
 from openkb.desktop_page_tree_enrichment_control import (
     INTERRUPTED_CODE as _INTERRUPTED_CODE,
@@ -29,7 +31,10 @@ from openkb.desktop_page_tree_enrichment_control import (
     retry_document_in,
 )
 from openkb.desktop_prompt_contracts import prompt_contract_for
-from openkb.desktop_structured_output import run_structured_output
+from openkb.desktop_structured_output import (
+    DesktopStructuredOutputInvalidError,
+    run_structured_output,
+)
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -48,7 +53,6 @@ _UNAVAILABLE_CODE = "source_document_unavailable"
 _UNAVAILABLE_REASON = "The source document is no longer Available."
 _INVALID_RESPONSE_CODE = "model_response_invalid"
 _INVALID_RESPONSE_REASON = "The PageTree enrichment response could not be validated."
-
 logger = logging.getLogger(__name__)
 StopCallback = Callable[[], bool]
 
@@ -216,6 +220,8 @@ class DesktopPageTreeEnrichmentService:
         should_stop: StopCallback,
     ) -> bool:
         """Run one claimed task and atomically activate only its summary overlay."""
+        if not gateway_analysis_capability_verified(gateway):
+            return False
         claim = self._claim(document_id, gateway)
         if claim is None:
             return False
@@ -251,7 +257,11 @@ class DesktopPageTreeEnrichmentService:
         except DesktopModelCancelledError:
             self._interrupt(claim)
         except DesktopModelCallError as error:
+            invalidate_analysis_capability(gateway, error.failure.code, error.failure.reason)
             self._fail(claim, error.failure.code, error.failure.reason)
+        except DesktopStructuredOutputInvalidError as error:
+            invalidate_analysis_capability(gateway, _INVALID_RESPONSE_CODE, str(error))
+            self._fail(claim, _INVALID_RESPONSE_CODE, _INVALID_RESPONSE_REASON)
         except (json.JSONDecodeError, TypeError, ValueError):
             self._fail(claim, _INVALID_RESPONSE_CODE, _INVALID_RESPONSE_REASON)
         except Exception:

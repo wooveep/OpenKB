@@ -16,9 +16,13 @@ from openkb.desktop_model_gateway import (
     DesktopModelCancelledError,
     DesktopModelFailure,
     DesktopModelGateway,
+    DesktopModelOutputObservations,
     DesktopModelRequest,
     DesktopModelResult,
+    DesktopModelResultError,
     DesktopModelTransportError,
+    DesktopProviderStreamEvent,
+    DesktopProviderTokenUsage,
     ExecutionLane,
     classify_model_error,
     require_execution_lane,
@@ -32,6 +36,7 @@ TerminalModelCallStatus = Literal[
     "queued",
     "connecting",
     "awaiting_model_result",
+    "reasoning_output_activity",
     "model_output_activity",
     "validating",
     "completed",
@@ -39,6 +44,7 @@ TerminalModelCallStatus = Literal[
     "cancelled",
     "provider_failure",
     "network_failure",
+    "model_result_failure",
 ]
 TerminalModelTransport = Callable[[DesktopModelRequest, float], object]
 CancellationCallback = Callable[[], bool]
@@ -75,6 +81,17 @@ class DesktopTerminalModelEvent:
     provider_name: str = "scripted"
     model_name: str = "unknown"
     execution_lane: ExecutionLane = "background"
+    finish_reason: str | None = None
+    reasoning_observed: bool | None = None
+    final_content_observed: bool | None = None
+    reasoning_chunk_count: int | None = None
+    final_chunk_count: int | None = None
+    reasoning_character_count: int | None = None
+    final_character_count: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    provider_request_id: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -91,6 +108,17 @@ class DesktopTerminalModelEvent:
             "model_name": self.model_name,
             "execution_lane": self.execution_lane,
             "attempt_id": f"{self.call_id}:{self.attempt}",
+            "finish_reason": self.finish_reason,
+            "reasoning_observed": self.reasoning_observed,
+            "final_content_observed": self.final_content_observed,
+            "reasoning_chunk_count": self.reasoning_chunk_count,
+            "final_chunk_count": self.final_chunk_count,
+            "reasoning_character_count": self.reasoning_character_count,
+            "final_character_count": self.final_character_count,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "provider_request_id": self.provider_request_id,
         }
 
 
@@ -214,27 +242,37 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
             active = threading.Event()
             active.set()
             activity_emitted = False
-            pending_deltas: SimpleQueue[str] = SimpleQueue()
+            pending_deltas: SimpleQueue[object] = SimpleQueue()
+            reasoning_activity_emitted = False
 
-            def queue_delta(delta: str) -> None:
+            def queue_delta(delta: object) -> None:
                 if not active.is_set() or not delta or _is_cancelled(is_cancelled):
                     return
                 pending_deltas.put(delta)
 
             def flush_stream_activity() -> None:
-                nonlocal activity_emitted
+                nonlocal activity_emitted, reasoning_activity_emitted
                 flush_request_sent()
                 while True:
                     try:
-                        delta = pending_deltas.get_nowait()
+                        provider_event = pending_deltas.get_nowait()
                     except Empty:
                         return
                     if not active.is_set():
                         continue
-                    on_delta(context.attempt, delta)
-                    if not activity_emitted:
-                        self._emit(context, "model_output_activity")
-                        activity_emitted = True
+                    event = (
+                        provider_event
+                        if isinstance(provider_event, DesktopProviderStreamEvent)
+                        else DesktopProviderStreamEvent(final_content=str(provider_event))
+                    )
+                    if event.reasoning_character_count and not reasoning_activity_emitted:
+                        self._emit(context, "reasoning_output_activity")
+                        reasoning_activity_emitted = True
+                    if event.final_content:
+                        on_delta(context.attempt, event.final_content)
+                        if not activity_emitted:
+                            self._emit(context, "model_output_activity")
+                            activity_emitted = True
 
             try:
                 self._prepare_active_stream(request)
@@ -358,13 +396,25 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
                         elapsed_seconds=request_sent_elapsed[0],
                     )
 
+            response: object | None = None
             try:
                 try:
                     response = attempt_call(context, on_request_sent, flush_request_sent)
                     on_request_sent()
                     flush_request_sent()
-                    if not isinstance(response, str) or not response.strip():
+                    if not isinstance(response, str):
                         raise ValueError("The model response must contain text.")
+                    observations = getattr(
+                        response,
+                        "observations",
+                        DesktopModelOutputObservations(
+                            final_content_observed=bool(response.strip()),
+                            final_chunk_count=1 if response.strip() else 0,
+                            final_character_count=len(response) if response.strip() else 0,
+                        ),
+                    )
+                    if not response.strip():
+                        raise DesktopModelResultError(observations)
                 finally:
                     attempt_active.clear()
                     if release_attempt is not None:
@@ -374,11 +424,15 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
                 raise
             except Exception as error:
                 failure = classify_terminal_model_error(error)
+                observations = getattr(error, "observations", None)
                 retry_after = _retry_after_seconds(error)
                 self._emit_failure(
                     context,
                     failure,
                     retry_after_seconds=retry_after,
+                    observations=observations,
+                    usage=getattr(response, "usage", None),
+                    provider_request_id=getattr(response, "provider_request_id", None),
                 )
                 if failure.retryable and attempt < max_attempts:
                     self._emit(
@@ -400,16 +454,31 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
                         self._emit(context, "cancelled")
                         raise
                     continue
-                raise DesktopModelCallError(call_id, failure, attempt) from error
+                raise DesktopModelCallError(
+                    call_id,
+                    failure,
+                    attempt,
+                    observations=observations,
+                    usage=getattr(response, "usage", None),
+                    provider_request_id=getattr(response, "provider_request_id", None),
+                ) from error
             self._raise_if_cancelled(is_cancelled, context)
-            self._emit(context, "validating")
-            self._emit(context, "completed")
+            observations = getattr(response, "observations", None)
+            self._emit(context, "validating", observations=observations)
+            self._emit(
+                context,
+                "completed",
+                observations=observations,
+                usage=getattr(response, "usage", None),
+                provider_request_id=getattr(response, "provider_request_id", None),
+            )
             return DesktopModelResult(
                 call_id=call_id,
                 content=response,
                 attempt_count=attempt,
                 usage=getattr(response, "usage", None),
                 provider_request_id=getattr(response, "provider_request_id", None),
+                observations=observations,
             )
         raise AssertionError("Terminal Model Call exhausted attempts without a result.")
 
@@ -540,6 +609,9 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
         reason: str | None = None,
         retry_after_seconds: float | None = None,
         elapsed_seconds: float | None = None,
+        observations: DesktopModelOutputObservations | None = None,
+        usage: DesktopProviderTokenUsage | None = None,
+        provider_request_id: str | None = None,
     ) -> None:
         context.on_event(
             DesktopTerminalModelEvent(
@@ -559,6 +631,29 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
                 provider_name=context.provider_name,
                 model_name=context.model_name,
                 execution_lane=context.execution_lane,
+                finish_reason=observations.finish_reason if observations is not None else None,
+                reasoning_observed=(
+                    observations.reasoning_observed if observations is not None else None
+                ),
+                final_content_observed=(
+                    observations.final_content_observed if observations is not None else None
+                ),
+                reasoning_chunk_count=(
+                    observations.reasoning_chunk_count if observations is not None else None
+                ),
+                final_chunk_count=(
+                    observations.final_chunk_count if observations is not None else None
+                ),
+                reasoning_character_count=(
+                    observations.reasoning_character_count if observations is not None else None
+                ),
+                final_character_count=(
+                    observations.final_character_count if observations is not None else None
+                ),
+                input_tokens=usage.input_tokens if usage is not None else None,
+                output_tokens=usage.output_tokens if usage is not None else None,
+                total_tokens=usage.total_tokens if usage is not None else None,
+                provider_request_id=provider_request_id,
             )
         )
 
@@ -568,17 +663,30 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
         failure: DesktopModelFailure,
         *,
         retry_after_seconds: float | None,
+        observations: DesktopModelOutputObservations | None = None,
+        usage: DesktopProviderTokenUsage | None = None,
+        provider_request_id: str | None = None,
     ) -> None:
         self._emit(
             context,
             (
-                "network_failure"
+                "model_result_failure"
+                if failure.code
+                in {
+                    "empty_final_result",
+                    "reasoning_only_result",
+                    "reasoning_output_exhausted",
+                }
+                else "network_failure"
                 if failure.code == "model_network_transient"
                 else "provider_failure"
             ),
             failure_code=failure.code,
             reason=failure.reason,
             retry_after_seconds=retry_after_seconds,
+            observations=observations,
+            usage=usage,
+            provider_request_id=provider_request_id,
         )
 
 

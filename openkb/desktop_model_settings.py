@@ -20,6 +20,7 @@ from openkb.desktop_model_capabilities import (
     DesktopModelCapabilityProfile,
     model_capability_profile,
 )
+from openkb.desktop_model_provider_adapter import provider_adapter_for
 from openkb.desktop_workspace import DesktopKnowledgeBaseError, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -124,6 +125,8 @@ class DesktopModelSettings:
                     self.analysis_reasoning
                     if self.analysis_reasoning is not None
                     else default.reasoning
+                    if default.reasoning is not None
+                    else "off"
                 ),
                 input_price_per_million=(
                     self.analysis_input_price_per_million
@@ -173,6 +176,7 @@ class DesktopModelSettings:
         return model_capability_profile(
             role_settings.model,
             context_capacity=role_settings.context_capacity,
+            supports_streaming=True if self.provider == "deepseek" else None,
         )
 
     def reasoning_for_role(self, role: str) -> str | None:
@@ -183,7 +187,31 @@ class DesktopModelSettings:
         settings = self.role_settings(role)
         return settings.input_price_per_million, settings.output_price_per_million
 
+    def reasoning_source_for_role(self, role: str) -> str:
+        """Explain whether an effective reasoning value was selected or inherited."""
+        if role == "default":
+            return "explicit_role" if self.default_reasoning is not None else "provider_default"
+        selected = self.analysis_reasoning if role == "analysis" else self.answer_reasoning
+        if selected is not None:
+            return "explicit_role"
+        if self.default_reasoning is not None:
+            return "inherited_default"
+        return "analysis_safe_default" if role == "analysis" else "provider_default"
+
+    def effective_roles(self) -> dict[str, dict[str, object]]:
+        """Return credential-free values actually used for each model role."""
+        return {
+            role: {
+                "model": self.model_for_role(role),
+                "context_capacity": self.capability_for_role(role).context_capacity,
+                "reasoning": self.reasoning_for_role(role),
+                "reasoning_source": self.reasoning_source_for_role(role),
+            }
+            for role in ("default", "analysis", "answer")
+        }
+
     def as_dict(self) -> dict[str, object]:
+        adapter = provider_adapter_for(self.provider)
         return {
             "provider": self.provider,
             "model": self.model,
@@ -208,6 +236,15 @@ class DesktopModelSettings:
             "analysis_output_price_per_million": self.analysis_output_price_per_million,
             "answer_input_price_per_million": self.answer_input_price_per_million,
             "answer_output_price_per_million": self.answer_output_price_per_million,
+            "provider_adapter": {
+                "identity": adapter.identity,
+                "version": adapter.version,
+                "structured_output_mode": adapter.structured_output_mode,
+                "supports_structured_analysis": adapter.supports_structured_analysis,
+                "supported_reasoning": sorted(adapter.supported_reasoning),
+                "analysis_unavailable_reason": adapter.analysis_unavailable_reason,
+            },
+            "effective_roles": self.effective_roles(),
         }
 
     def as_diagnostic_dict(self) -> dict[str, object]:

@@ -45,6 +45,13 @@ _PUBLIC_COLUMNS = (
     "output_cost",
     "total_cost",
     "provider_request_id",
+    "finish_reason",
+    "reasoning_observed",
+    "final_content_observed",
+    "reasoning_chunk_count",
+    "final_chunk_count",
+    "reasoning_character_count",
+    "final_character_count",
     "created_at",
     "updated_at",
 )
@@ -81,8 +88,16 @@ class DesktopModelUsageStore:
                             provider, model, job_id, stage_run_id, batch_id,
                             execution_lane, lifecycle_status, failure_code,
                             attempt_started_elapsed, last_event_elapsed,
+                            finish_reason, reasoning_observed, final_content_observed,
+                            reasoning_chunk_count, final_chunk_count,
+                            reasoning_character_count, final_character_count,
+                            input_tokens, output_tokens, total_tokens,
+                            token_usage_source, provider_request_id,
                             created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?
+                        )
                         ON CONFLICT(call_id, attempt) DO UPDATE SET
                             lifecycle_status = excluded.lifecycle_status,
                             failure_code = COALESCE(
@@ -90,6 +105,49 @@ class DesktopModelUsageStore:
                                 model_usage_records.failure_code
                             ),
                             last_event_elapsed = excluded.last_event_elapsed,
+                            finish_reason = COALESCE(
+                                excluded.finish_reason, model_usage_records.finish_reason
+                            ),
+                            reasoning_observed = COALESCE(
+                                excluded.reasoning_observed, model_usage_records.reasoning_observed
+                            ),
+                            final_content_observed = COALESCE(
+                                excluded.final_content_observed,
+                                model_usage_records.final_content_observed
+                            ),
+                            reasoning_chunk_count = COALESCE(
+                                excluded.reasoning_chunk_count,
+                                model_usage_records.reasoning_chunk_count
+                            ),
+                            final_chunk_count = COALESCE(
+                                excluded.final_chunk_count,
+                                model_usage_records.final_chunk_count
+                            ),
+                            reasoning_character_count = COALESCE(
+                                excluded.reasoning_character_count,
+                                model_usage_records.reasoning_character_count
+                            ),
+                            final_character_count = COALESCE(
+                                excluded.final_character_count,
+                                model_usage_records.final_character_count
+                            ),
+                            input_tokens = COALESCE(
+                                excluded.input_tokens, model_usage_records.input_tokens
+                            ),
+                            output_tokens = COALESCE(
+                                excluded.output_tokens, model_usage_records.output_tokens
+                            ),
+                            total_tokens = COALESCE(
+                                excluded.total_tokens, model_usage_records.total_tokens
+                            ),
+                            token_usage_source = COALESCE(
+                                excluded.token_usage_source,
+                                model_usage_records.token_usage_source
+                            ),
+                            provider_request_id = COALESCE(
+                                excluded.provider_request_id,
+                                model_usage_records.provider_request_id
+                            ),
                             updated_at = excluded.updated_at
                         """,
                         (
@@ -108,6 +166,23 @@ class DesktopModelUsageStore:
                             normalized.error_code,
                             normalized.elapsed_seconds,
                             normalized.elapsed_seconds,
+                            normalized.finish_reason,
+                            normalized.reasoning_observed,
+                            normalized.final_content_observed,
+                            normalized.reasoning_chunk_count,
+                            normalized.final_chunk_count,
+                            normalized.reasoning_character_count,
+                            normalized.final_character_count,
+                            normalized.input_tokens,
+                            normalized.output_tokens,
+                            normalized.total_tokens,
+                            (
+                                "provider_reported"
+                                if normalized.input_tokens is not None
+                                and normalized.output_tokens is not None
+                                else None
+                            ),
+                            normalized.provider_request_id,
                             now,
                             now,
                         ),
@@ -270,6 +345,7 @@ class DesktopModelUsageStore:
             "cancelled",
             "provider_failure",
             "network_failure",
+            "model_result_failure",
         }:
             connection.execute(
                 """
@@ -400,6 +476,7 @@ def _model_activity_from_row(
         "queued",
         "connecting",
         "awaiting_model_result",
+        "reasoning_output_activity",
         "model_output_activity",
         "validating",
         "retrying",
@@ -429,7 +506,7 @@ def _model_activity_from_row(
             else ["resume"]
             if lifecycle == "cancelled"
             else ["retry"]
-            if lifecycle in {"provider_failure", "network_failure"}
+            if lifecycle in {"provider_failure", "network_failure", "model_result_failure"}
             else []
         ),
     }
@@ -459,6 +536,7 @@ def _long_wait_threshold_in(
 def _user_visible_status(lifecycle: str) -> str:
     return {
         "awaiting_model_result": "awaiting_first_result",
+        "reasoning_output_activity": "receiving_reasoning",
         "model_output_activity": "receiving_output",
         "cancelled": "interrupted",
     }.get(lifecycle, lifecycle)
@@ -493,7 +571,12 @@ def _rows(
 ) -> list[dict[str, object]]:
     cursor = connection.execute(query, values)
     names = tuple(column[0] for column in cursor.description or ())
-    return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+    rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+    for row in rows:
+        for name in ("reasoning_observed", "final_content_observed"):
+            if row.get(name) is not None:
+                row[name] = bool(row[name])
+    return rows
 
 
 def _timestamp() -> str:

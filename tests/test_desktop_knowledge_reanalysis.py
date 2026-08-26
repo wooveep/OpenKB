@@ -11,11 +11,16 @@ import pytest
 
 from openkb.desktop_import import DesktopImportError, DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.desktop_knowledge_analysis_batch_store import DesktopKnowledgeAnalysisBatchStore
 from openkb.desktop_knowledge_reanalysis import (
     DesktopKnowledgeReanalysisService,
     recover_interrupted_knowledge_reanalysis,
 )
+from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
+from openkb.desktop_model_execution_profile import analysis_execution_profile_for_settings
 from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelTransportError
+from openkb.desktop_model_roles import DesktopRoleModelGateway
+from openkb.desktop_model_settings import DesktopModelSettings
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
@@ -376,3 +381,78 @@ def test_reanalysis_retry_reuses_completed_long_document_batch(
         "changed-batch-pipeline-digest",
     )
     assert service.overview()["documents"][0]["state"] == "analysis_outdated"
+
+
+def test_reanalysis_resume_gates_the_profile_pinned_by_the_persisted_plan(
+    tmp_path: Path,
+) -> None:
+    kb_dir, document_id = _imported_document(tmp_path)
+    service = DesktopKnowledgeReanalysisService(kb_dir)
+    run = service.create_run((document_id,), provider="deepseek", model="deepseek-v4-pro")
+
+    def role_gateway(settings: DesktopModelSettings, transport):
+        terminal = DesktopModelGateway(
+            transport,
+            provider_name="deepseek",
+            model_name=settings.analysis_model_name,
+        )
+        return DesktopRoleModelGateway(
+            settings=settings,
+            default_gateway=terminal,
+            analysis_gateway=terminal,
+            answer_gateway=terminal,
+        )
+
+    old_settings = DesktopModelSettings(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+        analysis_reasoning="off",
+    )
+    old_profile = analysis_execution_profile_for_settings(old_settings)
+    capability_store = DesktopModelCapabilityStore(kb_dir)
+    capability_store.mark_verified(old_profile)
+
+    def fail_first(_request, _timeout_seconds):
+        raise DesktopModelTransportError("input")
+
+    service.run_job(run.jobs[0].job_id, role_gateway(old_settings, fail_first))
+    persisted = DesktopKnowledgeAnalysisBatchStore(
+        kb_dir,
+        reanalysis=True,
+    ).persisted_plan(run.jobs[0].job_id)
+    assert persisted is not None
+    assert persisted.execution_profile == old_profile
+    capability_store.invalidate(
+        old_profile,
+        failure_code="model_execution_profile_changed",
+        reason="Profile changed in the test.",
+    )
+
+    retried = service.retry_job(
+        run.jobs[0].job_id,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+    )
+    new_settings = DesktopModelSettings(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+        analysis_reasoning="high",
+    )
+    capability_store.mark_verified(analysis_execution_profile_for_settings(new_settings))
+    resumed_calls = 0
+
+    def unexpected_resume(_request, _timeout_seconds):
+        nonlocal resumed_calls
+        resumed_calls += 1
+        raise AssertionError("An unverified persisted profile must stop before dispatch.")
+
+    service.run_job(retried.jobs[0].job_id, role_gateway(new_settings, unexpected_resume))
+
+    assert resumed_calls == 0
+    assert service.overview()["runs"][0]["jobs"][0]["status"] == "pending"

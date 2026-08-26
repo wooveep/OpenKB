@@ -15,6 +15,7 @@ const activeLifecycleStatuses = new Set<DesktopModelCallLifecycleStatus>([
   "queued",
   "connecting",
   "awaiting_model_result",
+  "reasoning_output_activity",
   "model_output_activity",
   "validating",
   "retrying",
@@ -102,6 +103,7 @@ function lifecycleActivityStatus(
   status: DesktopModelCallLifecycleStatus,
 ): DesktopModelActivity["status"] {
   if (status === "awaiting_model_result") return "awaiting_first_result"
+  if (status === "reasoning_output_activity") return "receiving_reasoning"
   if (status === "model_output_activity") return "receiving_output"
   if (status === "cancelled") return "interrupted"
   return status

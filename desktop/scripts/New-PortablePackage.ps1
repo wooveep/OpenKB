@@ -210,7 +210,7 @@ try {
             --collect-all tika `
             --add-data "$deepDocRuntime;deepdoc" `
             --add-data "$legacyOfficeRuntime;legacy-office" `
-            (Join-Path $repoRoot "openkb\desktop_engine.py")
+            (Join-Path $repoRoot "openkb\desktop_engine_entrypoint.py")
     }
 }
 finally {

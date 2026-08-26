@@ -12,6 +12,8 @@ from openkb.desktop_model_gateway import (
     DesktopModelCancelledError,
     DesktopModelGateway,
     DesktopModelRequest,
+    gateway_analysis_capability_verified,
+    invalidate_analysis_capability,
 )
 from openkb.desktop_retrieval_plan import deterministic_plan, model_plan, with_baseline_terms
 from openkb.desktop_structured_output import (
@@ -40,6 +42,8 @@ def build_retrieval_plan(
     fallback = deterministic_plan(question)
     if model_gateway is None:
         return DesktopRetrievalPlanningResult(fallback, ("retrieval_plan_unavailable",))
+    if not gateway_analysis_capability_verified(model_gateway):
+        return DesktopRetrievalPlanningResult(fallback, ("retrieval_plan_unverified",))
     attempts = 0
     response = ""
 
@@ -92,13 +96,29 @@ def build_retrieval_plan(
             ("retrieval_plan_cancelled",),
             _planning_cost(question, response, attempts),
         )
-    except DesktopModelCallError:
+    except DesktopModelCallError as error:
+        invalidate_analysis_capability(
+            model_gateway,
+            error.failure.code,
+            error.failure.reason,
+        )
         return DesktopRetrievalPlanningResult(
             fallback,
             ("retrieval_plan_fallback",),
             _planning_cost(question, response, attempts),
         )
-    except (DesktopStructuredOutputInvalidError, ValueError, json.JSONDecodeError):
+    except DesktopStructuredOutputInvalidError as error:
+        invalidate_analysis_capability(
+            model_gateway,
+            "model_response_invalid",
+            str(error),
+        )
+        return DesktopRetrievalPlanningResult(
+            fallback,
+            ("retrieval_plan_fallback",),
+            _planning_cost(question, response, attempts),
+        )
+    except (ValueError, json.JSONDecodeError):
         return DesktopRetrievalPlanningResult(
             fallback,
             ("retrieval_plan_fallback",),

@@ -7,4 +7,5 @@ DIRECT_IMPORT_QUARANTINE_CODES = DOCUMENT_IR_FAILURE_CODES | {
     "legacy_office_runtime_unavailable",
     "model_configuration_invalid",
     "model_response_invalid",
+    "knowledge_analysis_replan_required",
 }

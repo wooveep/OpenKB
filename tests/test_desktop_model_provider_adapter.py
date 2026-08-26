@@ -1,0 +1,326 @@
+"""Provider-owned protocol behavior for Desktop model roles."""
+
+from __future__ import annotations
+
+import pytest
+
+from openkb import desktop_model_transport
+from openkb.config import LlmCredentialBundle
+from openkb.desktop_model_execution_profile import analysis_execution_profile_for_settings
+from openkb.desktop_model_gateway import (
+    DesktopModelCallError,
+    DesktopModelRequest,
+    DesktopModelResult,
+)
+from openkb.desktop_model_provider_adapter import provider_adapter_for
+from openkb.desktop_model_roles import DesktopRoleModelGateway
+from openkb.desktop_model_settings import DesktopModelSettings, DesktopModelSettingsError
+from openkb.desktop_model_terminal import DesktopTerminalModelGateway
+
+
+def test_deepseek_resolves_role_reasoning_and_structured_protocol_explicitly() -> None:
+    settings = DesktopModelSettings(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+    )
+
+    adapter = provider_adapter_for(settings.provider)
+
+    assert adapter.identity == "deepseek"
+    assert adapter.version == "deepseek.v1"
+    assert adapter.structured_output_mode == "json_object"
+    assert settings.reasoning_for_role("analysis") == "off"
+    assert settings.reasoning_for_role("answer") is None
+
+
+def test_role_gateway_pins_deepseek_adapter_mode_and_effective_analysis_reasoning() -> None:
+    requests: list[DesktopModelRequest] = []
+
+    class CapturingGateway:
+        def analyze(self, request: DesktopModelRequest, **_kwargs) -> DesktopModelResult:
+            requests.append(request)
+            return DesktopModelResult("call-1", '{"terms":["OpenKB"]}', 1)
+
+    terminal = CapturingGateway()
+    settings = DesktopModelSettings(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+    )
+    gateway = DesktopRoleModelGateway(
+        settings=settings,
+        default_gateway=terminal,  # type: ignore[arg-type]
+        analysis_gateway=terminal,  # type: ignore[arg-type]
+        answer_gateway=terminal,  # type: ignore[arg-type]
+    )
+
+    gateway.analyze(
+        DesktopModelRequest("retrieval_plan", "question", "Build a retrieval plan."),
+        on_event=lambda _event: None,
+    )
+
+    assert requests[0].model_role == "analysis"
+    assert requests[0].provider_adapter == "deepseek"
+    assert requests[0].provider_adapter_version == "deepseek.v1"
+    assert requests[0].structured_output_mode == "json_object"
+    assert requests[0].reasoning_effort == "off"
+    assert requests[0].generation_parameters == {
+        "temperature": 0,
+        "max_tokens": analysis_execution_profile_for_settings(
+            settings
+        ).provider_output_ceiling_tokens,
+    }
+
+
+def test_deepseek_structured_request_uses_json_object_and_disables_thinking(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    def completion(**kwargs):
+        captured.append(kwargs)
+        return {"choices": [{"message": {"content": '{"terms":["OpenKB"]}'}}]}
+
+    monkeypatch.setattr("litellm.completion", completion)
+    transport = desktop_model_transport.DesktopLiteLLMTransport(
+        model="deepseek/deepseek-v4-pro",
+        bundle=LlmCredentialBundle(
+            api_key="test-key",
+            base_url="https://api.deepseek.com",
+        ),
+    )
+
+    transport(
+        DesktopModelRequest(
+            "retrieval_plan",
+            "question",
+            "Build a retrieval plan.",
+            reasoning_effort="off",
+            provider_adapter="deepseek",
+            provider_adapter_version="deepseek.v1",
+            structured_output_mode="json_object",
+            response_schema={"type": "object"},
+        ),
+        30,
+    )
+
+    assert captured[0]["response_format"] == {"type": "json_object"}
+    assert captured[0]["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in captured[0]
+
+
+def test_deepseek_grounded_answer_omits_structured_format_and_provider_default_thinking(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    def completion(**kwargs):
+        captured.append(kwargs)
+        return {"choices": [{"message": {"content": "A cited answer [1]."}}]}
+
+    monkeypatch.setattr("litellm.completion", completion)
+    transport = desktop_model_transport.DesktopLiteLLMTransport(
+        model="deepseek/deepseek-v4-pro",
+        bundle=LlmCredentialBundle(
+            api_key="test-key",
+            base_url="https://api.deepseek.com",
+        ),
+    )
+
+    transport(
+        DesktopModelRequest(
+            "grounded_answer",
+            "question",
+            "Evidence",
+            model_role="answer",
+            provider_adapter="deepseek",
+            provider_adapter_version="deepseek.v1",
+        ),
+        30,
+    )
+
+    assert "response_format" not in captured[0]
+    assert "thinking" not in captured[0]
+    assert "reasoning_effort" not in captured[0]
+
+
+def test_custom_provider_model_name_cannot_impersonate_a_structured_analysis_adapter() -> None:
+    class UnexpectedGateway:
+        def analyze(self, _request: DesktopModelRequest, **_kwargs) -> DesktopModelResult:
+            raise AssertionError("Unsupported Custom Analysis must stop before provider dispatch.")
+
+    terminal = UnexpectedGateway()
+    gateway = DesktopRoleModelGateway(
+        settings=DesktopModelSettings(
+            provider="custom",
+            model="deepseek-v4-pro",
+            api_base_url="https://custom.example.test/v1",
+            api_key="test-key",
+            max_concurrent_model_calls=1,
+        ),
+        default_gateway=terminal,  # type: ignore[arg-type]
+        analysis_gateway=terminal,  # type: ignore[arg-type]
+        answer_gateway=terminal,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(DesktopModelSettingsError, match="Custom.*structured Analysis"):
+        gateway.analyze(
+            DesktopModelRequest("retrieval_plan", "question", "Build a plan."),
+            on_event=lambda _event: None,
+        )
+
+
+def test_deepseek_stream_separates_private_reasoning_from_final_output(monkeypatch) -> None:
+    private_reasoning = "private chain of thought"
+    chunks = iter(
+        [
+            {
+                "choices": [
+                    {"delta": {"reasoning_content": private_reasoning}, "finish_reason": None}
+                ]
+            },
+            {
+                "choices": [
+                    {"delta": {"content": '{"terms":["OpenKB"]}'}, "finish_reason": None}
+                ]
+            },
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
+            },
+        ]
+    )
+    monkeypatch.setattr("litellm.completion", lambda **_kwargs: chunks)
+    events = []
+    visible: list[str] = []
+    gateway = DesktopTerminalModelGateway(
+        desktop_model_transport.DesktopLiteLLMTransport(
+            model="deepseek/deepseek-v4-pro",
+            bundle=LlmCredentialBundle(
+                api_key="test-key",
+                base_url="https://api.deepseek.com",
+            ),
+        ),
+        provider_name="deepseek",
+        model_name="deepseek-v4-pro",
+    )
+
+    result = gateway.stream(
+        DesktopModelRequest(
+            "retrieval_plan",
+            "question",
+            "Build a plan.",
+            provider_adapter="deepseek",
+            provider_adapter_version="deepseek.v1",
+            structured_output_mode="json_object",
+            response_schema={"type": "object"},
+        ),
+        on_event=events.append,
+        on_delta=lambda _attempt, delta: visible.append(delta),
+    )
+
+    assert result.content == '{"terms":["OpenKB"]}'
+    assert visible == ['{"terms":["OpenKB"]}']
+    assert "reasoning_output_activity" in [event.status for event in events]
+    assert "model_output_activity" in [event.status for event in events]
+    assert result.observations is not None
+    assert result.observations.finish_reason == "stop"
+    assert result.observations.reasoning_chunk_count == 1
+    assert result.observations.final_chunk_count == 1
+    assert result.observations.reasoning_character_count == len(private_reasoning)
+    assert private_reasoning not in repr(events)
+    assert private_reasoning not in repr(result.observations)
+
+
+@pytest.mark.parametrize(
+    ("chunks", "expected_code", "reasoning_chunks", "final_chunks"),
+    (
+        (
+            [
+                {"choices": [{"delta": {"reasoning_content": "private"}, "finish_reason": None}]},
+                {"choices": [{"delta": {}, "finish_reason": "length"}]},
+            ],
+            "reasoning_output_exhausted",
+            1,
+            0,
+        ),
+        (
+            [
+                {"choices": [{"delta": {"reasoning_content": "private"}, "finish_reason": None}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            ],
+            "reasoning_only_result",
+            1,
+            0,
+        ),
+        (
+            [{"choices": [{"delta": {}, "finish_reason": "stop"}]}],
+            "empty_final_result",
+            0,
+            0,
+        ),
+        (
+            [
+                {"choices": [{"delta": {"content": "   "}, "finish_reason": None}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            ],
+            "empty_final_result",
+            0,
+            1,
+        ),
+    ),
+)
+def test_deepseek_empty_final_results_are_specific_and_never_retried(
+    monkeypatch,
+    chunks,
+    expected_code: str,
+    reasoning_chunks: int,
+    final_chunks: int,
+) -> None:
+    calls = 0
+
+    def completion(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return iter(chunks)
+
+    monkeypatch.setattr("litellm.completion", completion)
+    events = []
+    gateway = DesktopTerminalModelGateway(
+        desktop_model_transport.DesktopLiteLLMTransport(
+            model="deepseek/deepseek-v4-pro",
+            bundle=LlmCredentialBundle(
+                api_key="test-key",
+                base_url="https://api.deepseek.com",
+            ),
+        ),
+        provider_name="deepseek",
+        model_name="deepseek-v4-pro",
+    )
+
+    with pytest.raises(DesktopModelCallError) as captured:
+        gateway.stream(
+            DesktopModelRequest(
+                "retrieval_plan",
+                "question",
+                "Build a plan.",
+                provider_adapter="deepseek",
+                provider_adapter_version="deepseek.v1",
+                structured_output_mode="json_object",
+                response_schema={"type": "object"},
+            ),
+            on_event=events.append,
+            on_delta=lambda _attempt, _delta: None,
+        )
+
+    assert calls == 1
+    assert captured.value.attempt_count == 1
+    assert captured.value.failure.code == expected_code
+    assert captured.value.observations is not None
+    assert captured.value.observations.reasoning_chunk_count == reasoning_chunks
+    assert captured.value.observations.final_chunk_count == final_chunks
+    assert events[-1].status == "model_result_failure"
+    assert events[-1].failure_code == expected_code

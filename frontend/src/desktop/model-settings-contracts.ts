@@ -1,6 +1,49 @@
 import type { DesktopModelUsageAggregate } from "./contracts-import-observability"
 
 export type DesktopReasoningEffort = "off" | "low" | "medium" | "high"
+export type DesktopStructuredOutputMode = "json_schema" | "json_object" | "prompt_contract"
+export type DesktopReasoningSource =
+  | "explicit_role"
+  | "inherited_default"
+  | "analysis_safe_default"
+  | "provider_default"
+
+export interface DesktopModelProviderAdapter {
+  identity: string
+  version: string
+  structuredOutputMode: DesktopStructuredOutputMode | null
+  supportsStructuredAnalysis: boolean
+  supportedReasoning: DesktopReasoningEffort[]
+  analysisUnavailableReason: string | null
+}
+
+export interface DesktopEffectiveModelRole {
+  model: string
+  contextCapacity: number
+  reasoning: DesktopReasoningEffort | null
+  reasoningSource: DesktopReasoningSource
+}
+
+export interface DesktopEffectiveModelRoles {
+  default: DesktopEffectiveModelRole
+  analysis: DesktopEffectiveModelRole
+  answer: DesktopEffectiveModelRole
+}
+
+export type DesktopModelCapabilityStatus =
+  | "unchecked"
+  | "checking"
+  | "verified"
+  | "failed"
+  | "cancelled"
+
+export interface DesktopModelCapabilityState {
+  profileIdentity: string | null
+  status: DesktopModelCapabilityStatus
+  failureCode: string | null
+  reason: string | null
+  checkedAt: string | null
+}
 
 /** Editable KB-local model role, capacity, reasoning, and user-priced cost values. */
 export interface DesktopModelSettingsDraft {
@@ -31,5 +74,8 @@ export interface DesktopModelSettingsDraft {
 export interface DesktopModelSettings extends DesktopModelSettingsDraft {
   apiKeyConfigured: boolean
   analysisConcurrency: number
+  providerAdapter: DesktopModelProviderAdapter
+  effectiveRoles: DesktopEffectiveModelRoles
+  analysisCapability: DesktopModelCapabilityState
   usageAggregate: DesktopModelUsageAggregate
 }

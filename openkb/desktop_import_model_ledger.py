@@ -46,8 +46,15 @@ class DesktopImportModelLedger:
                             call_id, job_id, stage_run_id, operation, status, attempt_count,
                             timeout_seconds, next_timeout_seconds, remaining_seconds,
                             error_code, reason, suggested_action, created_at, completed_at,
-                            lifecycle_status, elapsed_seconds, retry_after_seconds
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                            lifecycle_status, elapsed_seconds, retry_after_seconds,
+                            finish_reason, reasoning_observed, final_content_observed,
+                            reasoning_chunk_count, final_chunk_count,
+                            reasoning_character_count, final_character_count,
+                            input_tokens, output_tokens, total_tokens, provider_request_id
+                        ) VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        )
                         ON CONFLICT(call_id) DO UPDATE SET
                             status = excluded.status,
                             attempt_count = excluded.attempt_count,
@@ -59,7 +66,45 @@ class DesktopImportModelLedger:
                             completed_at = excluded.completed_at,
                             lifecycle_status = excluded.lifecycle_status,
                             elapsed_seconds = excluded.elapsed_seconds,
-                            retry_after_seconds = excluded.retry_after_seconds
+                            retry_after_seconds = excluded.retry_after_seconds,
+                            finish_reason = COALESCE(
+                                excluded.finish_reason, model_calls.finish_reason
+                            ),
+                            reasoning_observed = COALESCE(
+                                excluded.reasoning_observed, model_calls.reasoning_observed
+                            ),
+                            final_content_observed = COALESCE(
+                                excluded.final_content_observed,
+                                model_calls.final_content_observed
+                            ),
+                            reasoning_chunk_count = COALESCE(
+                                excluded.reasoning_chunk_count,
+                                model_calls.reasoning_chunk_count
+                            ),
+                            final_chunk_count = COALESCE(
+                                excluded.final_chunk_count, model_calls.final_chunk_count
+                            ),
+                            reasoning_character_count = COALESCE(
+                                excluded.reasoning_character_count,
+                                model_calls.reasoning_character_count
+                            ),
+                            final_character_count = COALESCE(
+                                excluded.final_character_count,
+                                model_calls.final_character_count
+                            ),
+                            input_tokens = COALESCE(
+                                excluded.input_tokens, model_calls.input_tokens
+                            ),
+                            output_tokens = COALESCE(
+                                excluded.output_tokens, model_calls.output_tokens
+                            ),
+                            total_tokens = COALESCE(
+                                excluded.total_tokens, model_calls.total_tokens
+                            ),
+                            provider_request_id = COALESCE(
+                                excluded.provider_request_id,
+                                model_calls.provider_request_id
+                            )
                         """,
                         (
                             normalized.call_id,
@@ -78,6 +123,17 @@ class DesktopImportModelLedger:
                             normalized.lifecycle_status,
                             normalized.elapsed_seconds,
                             normalized.retry_after_seconds,
+                            normalized.finish_reason,
+                            normalized.reasoning_observed,
+                            normalized.final_content_observed,
+                            normalized.reasoning_chunk_count,
+                            normalized.final_chunk_count,
+                            normalized.reasoning_character_count,
+                            normalized.final_character_count,
+                            normalized.input_tokens,
+                            normalized.output_tokens,
+                            normalized.total_tokens,
+                            normalized.provider_request_id,
                         ),
                     )
                     connection.execute(
@@ -85,8 +141,15 @@ class DesktopImportModelLedger:
                         INSERT INTO model_attempts (
                             call_id, attempt, status, timeout_seconds, remaining_seconds,
                             error_code, reason, created_at, completed_at, lifecycle_status,
-                            elapsed_seconds, retry_after_seconds
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            elapsed_seconds, retry_after_seconds, finish_reason,
+                            reasoning_observed, final_content_observed,
+                            reasoning_chunk_count, final_chunk_count,
+                            reasoning_character_count, final_character_count,
+                            input_tokens, output_tokens, total_tokens, provider_request_id
+                        ) VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?
+                        )
                         ON CONFLICT(call_id, attempt) DO UPDATE SET
                             status = excluded.status,
                             timeout_seconds = excluded.timeout_seconds,
@@ -96,7 +159,47 @@ class DesktopImportModelLedger:
                             completed_at = excluded.completed_at,
                             lifecycle_status = excluded.lifecycle_status,
                             elapsed_seconds = excluded.elapsed_seconds,
-                            retry_after_seconds = excluded.retry_after_seconds
+                            retry_after_seconds = excluded.retry_after_seconds,
+                            finish_reason = COALESCE(
+                                excluded.finish_reason, model_attempts.finish_reason
+                            ),
+                            reasoning_observed = COALESCE(
+                                excluded.reasoning_observed,
+                                model_attempts.reasoning_observed
+                            ),
+                            final_content_observed = COALESCE(
+                                excluded.final_content_observed,
+                                model_attempts.final_content_observed
+                            ),
+                            reasoning_chunk_count = COALESCE(
+                                excluded.reasoning_chunk_count,
+                                model_attempts.reasoning_chunk_count
+                            ),
+                            final_chunk_count = COALESCE(
+                                excluded.final_chunk_count,
+                                model_attempts.final_chunk_count
+                            ),
+                            reasoning_character_count = COALESCE(
+                                excluded.reasoning_character_count,
+                                model_attempts.reasoning_character_count
+                            ),
+                            final_character_count = COALESCE(
+                                excluded.final_character_count,
+                                model_attempts.final_character_count
+                            ),
+                            input_tokens = COALESCE(
+                                excluded.input_tokens, model_attempts.input_tokens
+                            ),
+                            output_tokens = COALESCE(
+                                excluded.output_tokens, model_attempts.output_tokens
+                            ),
+                            total_tokens = COALESCE(
+                                excluded.total_tokens, model_attempts.total_tokens
+                            ),
+                            provider_request_id = COALESCE(
+                                excluded.provider_request_id,
+                                model_attempts.provider_request_id
+                            )
                         """,
                         (
                             normalized.call_id,
@@ -111,6 +214,17 @@ class DesktopImportModelLedger:
                             normalized.lifecycle_status,
                             normalized.elapsed_seconds,
                             normalized.retry_after_seconds,
+                            normalized.finish_reason,
+                            normalized.reasoning_observed,
+                            normalized.final_content_observed,
+                            normalized.reasoning_chunk_count,
+                            normalized.final_chunk_count,
+                            normalized.reasoning_character_count,
+                            normalized.final_character_count,
+                            normalized.input_tokens,
+                            normalized.output_tokens,
+                            normalized.total_tokens,
+                            normalized.provider_request_id,
                         ),
                     )
             finally:
@@ -166,8 +280,13 @@ def model_details_for_job(
     """Project the safe ledger entries used by task cards and failure menus."""
     rows = connection.execute(
         """
-        SELECT call_id, stage_run_id, operation, COALESCE(lifecycle_status, status),
-            attempt_count, error_code, reason, suggested_action, elapsed_seconds
+        SELECT call_id, stage_run_id, operation, status,
+            COALESCE(lifecycle_status, status), attempt_count, error_code, reason,
+            suggested_action, elapsed_seconds
+            , finish_reason, reasoning_observed, final_content_observed
+            , reasoning_chunk_count, final_chunk_count
+            , reasoning_character_count, final_character_count
+            , input_tokens, output_tokens, total_tokens, provider_request_id
         FROM model_calls
         WHERE job_id = ?
         ORDER BY created_at, rowid
@@ -179,12 +298,24 @@ def model_details_for_job(
             call_id=str(row[0]),
             stage_run_id=str(row[1]),
             operation=str(row[2]),
-            status=str(row[3]),
-            attempt_count=int(row[4]),
-            elapsed_seconds=float(row[8]),
-            error_code=str(row[5]) if row[5] is not None else None,
-            reason=str(row[6]) if row[6] is not None else None,
-            suggested_action=str(row[7]) if row[7] is not None else None,
+            status=_model_call_status(row[3], row[4]),
+            lifecycle_status=str(row[4]),
+            attempt_count=int(row[5]),
+            elapsed_seconds=float(row[9]),
+            error_code=str(row[6]) if row[6] is not None else None,
+            reason=str(row[7]) if row[7] is not None else None,
+            suggested_action=str(row[8]) if row[8] is not None else None,
+            finish_reason=str(row[10]) if row[10] is not None else None,
+            reasoning_observed=bool(row[11]) if row[11] is not None else None,
+            final_content_observed=bool(row[12]) if row[12] is not None else None,
+            reasoning_chunk_count=int(row[13]) if row[13] is not None else None,
+            final_chunk_count=int(row[14]) if row[14] is not None else None,
+            reasoning_character_count=int(row[15]) if row[15] is not None else None,
+            final_character_count=int(row[16]) if row[16] is not None else None,
+            input_tokens=int(row[17]) if row[17] is not None else None,
+            output_tokens=int(row[18]) if row[18] is not None else None,
+            total_tokens=int(row[19]) if row[19] is not None else None,
+            provider_request_id=str(row[20]) if row[20] is not None else None,
             attempts=_attempts_for_call(connection, str(row[0])),
         )
         for row in rows
@@ -217,8 +348,12 @@ def _attempts_for_call(
 ) -> tuple[DesktopModelAttempt, ...]:
     rows = connection.execute(
         """
-        SELECT attempt, COALESCE(lifecycle_status, status),
+        SELECT attempt, status, COALESCE(lifecycle_status, status),
             error_code, reason, elapsed_seconds
+            , finish_reason, reasoning_observed, final_content_observed
+            , reasoning_chunk_count, final_chunk_count
+            , reasoning_character_count, final_character_count
+            , input_tokens, output_tokens, total_tokens, provider_request_id
         FROM model_attempts
         WHERE call_id = ?
         ORDER BY attempt
@@ -228,13 +363,46 @@ def _attempts_for_call(
     return tuple(
         DesktopModelAttempt(
             attempt=int(row[0]),
-            status=str(row[1]),
-            elapsed_seconds=float(row[4]),
-            error_code=str(row[2]) if row[2] is not None else None,
-            reason=str(row[3]) if row[3] is not None else None,
+            status=_model_call_status(row[1], row[2]),
+            lifecycle_status=str(row[2]),
+            elapsed_seconds=float(row[5]),
+            error_code=str(row[3]) if row[3] is not None else None,
+            reason=str(row[4]) if row[4] is not None else None,
+            finish_reason=str(row[6]) if row[6] is not None else None,
+            reasoning_observed=bool(row[7]) if row[7] is not None else None,
+            final_content_observed=bool(row[8]) if row[8] is not None else None,
+            reasoning_chunk_count=int(row[9]) if row[9] is not None else None,
+            final_chunk_count=int(row[10]) if row[10] is not None else None,
+            reasoning_character_count=int(row[11]) if row[11] is not None else None,
+            final_character_count=int(row[12]) if row[12] is not None else None,
+            input_tokens=int(row[13]) if row[13] is not None else None,
+            output_tokens=int(row[14]) if row[14] is not None else None,
+            total_tokens=int(row[15]) if row[15] is not None else None,
+            provider_request_id=str(row[16]) if row[16] is not None else None,
         )
         for row in rows
     )
+
+
+def _model_call_status(status: object, lifecycle_status: object) -> str:
+    value = str(status) if status is not None else ""
+    if value in {"running", "retry_wait", "completed", "failed"}:
+        return value
+    lifecycle = str(lifecycle_status) if lifecycle_status is not None else value
+    if lifecycle == "completed":
+        return "completed"
+    if lifecycle == "retrying":
+        return "retry_wait"
+    if lifecycle in {
+        "queued",
+        "connecting",
+        "awaiting_model_result",
+        "reasoning_output_activity",
+        "model_output_activity",
+        "validating",
+    }:
+        return "running"
+    return "failed"
 
 
 def _connect(database_path: Path) -> sqlite3.Connection:

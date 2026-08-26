@@ -7,6 +7,11 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from openkb.desktop_model_capabilities import model_capability_profile
+from openkb.desktop_model_execution_profile import (
+    DesktopModelExecutionProfile,
+    analysis_execution_profile_for_settings,
+    build_analysis_execution_profile,
+)
 from openkb.desktop_model_gateway import (
     DesktopModelGateway,
     DesktopModelRequest,
@@ -14,7 +19,8 @@ from openkb.desktop_model_gateway import (
     ExecutionLane,
     require_execution_lane,
 )
-from openkb.desktop_model_settings import DesktopModelSettings
+from openkb.desktop_model_provider_adapter import provider_adapter_for
+from openkb.desktop_model_settings import DesktopModelSettings, DesktopModelSettingsError
 from openkb.desktop_model_terminal import (
     DesktopTerminalModelGateway,
 )
@@ -22,6 +28,12 @@ from openkb.desktop_prompt_contracts import prompt_contract_for
 
 if TYPE_CHECKING:
     from openkb.desktop_model_usage import DesktopModelUsageStore
+
+AnalysisCapabilityVerifier = Callable[[DesktopModelExecutionProfile], bool]
+AnalysisCapabilityInvalidator = Callable[
+    [DesktopModelExecutionProfile, str, str],
+    None,
+]
 
 ANALYSIS_MODEL_OPERATIONS = frozenset(
     {
@@ -34,6 +46,7 @@ ANALYSIS_MODEL_OPERATIONS = frozenset(
         "retrieval_plan",
         "structured_output_repair",
         "model_capability_analysis",
+        "model_capability_analysis_streaming",
     }
 )
 ANSWER_MODEL_OPERATIONS = frozenset({"grounded_answer", "model_capability_answer"})
@@ -60,6 +73,8 @@ class DesktopRoleModelGateway(DesktopModelGateway):
         answer_gateway: DesktopTerminalModelGateway,
         gateway_factory: Callable[[str], DesktopTerminalModelGateway] | None = None,
         usage_store: DesktopModelUsageStore | None = None,
+        analysis_capability_verifier: AnalysisCapabilityVerifier | None = None,
+        analysis_capability_invalidator: AnalysisCapabilityInvalidator | None = None,
         execution_lane: ExecutionLane = "background",
     ) -> None:
         self._settings = settings
@@ -68,6 +83,8 @@ class DesktopRoleModelGateway(DesktopModelGateway):
         self._answer_gateway = answer_gateway
         self._gateway_factory = gateway_factory
         self._usage_store = usage_store
+        self._analysis_capability_verifier = analysis_capability_verifier
+        self._analysis_capability_invalidator = analysis_capability_invalidator
         self._execution_lane = require_execution_lane(execution_lane)
 
     @property
@@ -82,6 +99,10 @@ class DesktopRoleModelGateway(DesktopModelGateway):
     @property
     def analysis_concurrency(self) -> int:
         return self._settings.max_concurrent_model_calls
+
+    @property
+    def requires_analysis_capability_check(self) -> bool:
+        return True
 
     def for_lane(self, lane: ExecutionLane) -> DesktopRoleModelGateway:
         lane = require_execution_lane(lane)
@@ -98,12 +119,40 @@ class DesktopRoleModelGateway(DesktopModelGateway):
             answer_gateway=self._answer_gateway.for_lane(lane),
             gateway_factory=lane_gateway_factory,
             usage_store=self._usage_store,
+            analysis_capability_verifier=self._analysis_capability_verifier,
+            analysis_capability_invalidator=self._analysis_capability_invalidator,
             execution_lane=lane,
         )
+
+    def analysis_capability_verified(self) -> bool:
+        verifier = self._analysis_capability_verifier
+        return (
+            verifier(self.execution_profile_for_operation("knowledge_analysis"))
+            if verifier is not None
+            else True
+        )
+
+    def invalidate_analysis_capability(self, failure_code: str, reason: str) -> None:
+        invalidator = self._analysis_capability_invalidator
+        if invalidator is not None:
+            invalidator(
+                self.execution_profile_for_operation("knowledge_analysis"),
+                failure_code,
+                reason,
+            )
 
     def capability_for_operation(self, operation: str):
         role, _gateway = self._gateway_for(operation)
         return self._settings.capability_for_role(role)
+
+    def execution_profile_for_operation(self, operation: str) -> DesktopModelExecutionProfile:
+        """Resolve the immutable structured-Analysis profile without provider I/O."""
+        role = model_role_for_operation(operation)
+        if role != "analysis":
+            raise DesktopModelSettingsError(
+                "Only structured Analysis operations use an Analysis execution profile."
+            )
+        return analysis_execution_profile_for_settings(self._settings)
 
     def analyze(self, request: DesktopModelRequest, **kwargs) -> DesktopModelResult:
         role, gateway = self._gateway_for(request.operation, request.model_name)
@@ -178,9 +227,41 @@ class DesktopRoleModelGateway(DesktopModelGateway):
             else self._settings.capability_for_role(role)
         )
         contract = prompt_contract_for(request.operation)
-        reasoning = self._settings.reasoning_for_role(role)
-        if not capability.supports_reasoning:
+        configured_adapter = provider_adapter_for(self._settings.provider)
+        if (
+            request.provider_adapter is not None
+            and request.provider_adapter != configured_adapter.identity
+        ):
+            raise DesktopModelSettingsError(
+                "The pinned Model Execution Profile no longer matches Model Configuration."
+            )
+        adapter = provider_adapter_for(request.provider_adapter or self._settings.provider)
+        reasoning = request.reasoning_effort or self._settings.reasoning_for_role(role)
+        if reasoning is not None and reasoning not in adapter.supported_reasoning:
             reasoning = None
+        response_schema = request.response_schema or contract.output_schema
+        if response_schema is not None and not adapter.supports_structured_analysis:
+            raise DesktopModelSettingsError(
+                "Custom model providers cannot run structured Analysis. "
+                "Choose the named DeepSeek provider for the Analysis role."
+            )
+        generation_parameters = (
+            dict(request.generation_parameters)
+            if request.generation_parameters
+            else dict(contract.generation_parameters)
+        )
+        if (
+            response_schema is not None
+            and role == "analysis"
+            and "max_tokens" not in generation_parameters
+        ):
+            generation_parameters["max_tokens"] = build_analysis_execution_profile(
+                provider=self._settings.provider,
+                model=selected_model,
+                capability=capability,
+                reasoning_effort=reasoning or "off",
+                api_base_url=self._settings.api_base_url,
+            ).provider_output_ceiling_tokens
         return replace(
             request,
             model_role=role,
@@ -189,19 +270,27 @@ class DesktopRoleModelGateway(DesktopModelGateway):
             document_input_capacity=(
                 request.document_input_capacity or capability.document_input_capacity
             ),
-            reasoning_effort="none" if reasoning == "off" else reasoning,
-            response_schema=(
-                request.response_schema or contract.output_schema
-                if capability.supports_native_json_schema
+            reasoning_effort=reasoning,
+            provider_adapter=request.provider_adapter or adapter.identity,
+            provider_adapter_version=request.provider_adapter_version or adapter.version,
+            structured_output_mode=(
+                request.structured_output_mode
+                if response_schema is not None and request.structured_output_mode is not None
+                else adapter.structured_output_mode
+                if response_schema is not None
                 else None
             ),
+            response_schema=response_schema,
             response_schema_name=request.response_schema_name
             or contract.version.replace(".", "_").replace("-", "_")[:64],
-            generation_parameters=request.generation_parameters
-            or dict(contract.generation_parameters),
+            generation_parameters=generation_parameters,
             prompt_contract_digest=request.prompt_contract_digest or contract.digest,
             prompt_contract_version=request.prompt_contract_version or contract.version,
             prompt_contract_snapshot=request.prompt_contract_snapshot,
-            supports_streaming=capability.supports_streaming,
+            supports_streaming=(
+                request.supports_streaming
+                if request.supports_streaming is not None
+                else capability.supports_streaming
+            ),
             execution_lane=self._execution_lane,
         )

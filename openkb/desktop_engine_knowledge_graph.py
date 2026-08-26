@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from openkb.desktop_knowledge_graph_tasks import DesktopKnowledgeGraphExtractionTasks
+from openkb.desktop_model_gateway import gateway_analysis_capability_verified
 
 if TYPE_CHECKING:
     from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
@@ -22,7 +23,7 @@ def start_knowledge_graph_extractions(
     gateway: DesktopModelGateway | None,
 ) -> None:
     """Run durably queued graph work under the Engine worker lifecycle."""
-    if gateway is None:
+    if gateway is None or not gateway_analysis_capability_verified(gateway):
         return
     resolved = kb_dir.expanduser().resolve()
     with server._workspace_requests_lock:
@@ -64,6 +65,11 @@ def _run_worker(server: DesktopEngineServer, kb_dir: Path, lease: int) -> None:
         with server._workers_lock:
             return (kb_dir, document_id) in server._knowledge_graph_extraction_cancelled
 
+    def gateway_is_current(gateway: DesktopModelGateway) -> bool:
+        with server._workers_lock:
+            current = server._knowledge_graph_extraction_gateways.get(kb_dir) is gateway
+        return current and gateway_analysis_capability_verified(gateway)
+
     try:
         tasks = DesktopKnowledgeGraphExtractionTasks(kb_dir)
         while not should_stop():
@@ -73,7 +79,7 @@ def _run_worker(server: DesktopEngineServer, kb_dir: Path, lease: int) -> None:
             if gateway is None:
                 break
             for document_id in tasks.pending_document_ids(gateway):
-                if should_stop():
+                if should_stop() or not gateway_is_current(gateway):
                     break
                 if document_cancelled(document_id):
                     continue
@@ -87,6 +93,8 @@ def _run_worker(server: DesktopEngineServer, kb_dir: Path, lease: int) -> None:
                     should_stop=should_stop_document,
                 )
             if should_stop():
+                break
+            if not gateway_is_current(gateway):
                 break
             if any(
                 not document_cancelled(document_id)
@@ -161,3 +169,11 @@ def invalidate_knowledge_graph_workers(server: DesktopEngineServer) -> None:
     """Invalidate graph workers before a KB or model-settings transition."""
     with server._workers_lock:
         server._knowledge_graph_extraction_lease += 1
+
+
+def retire_knowledge_graph_gateway(server: DesktopEngineServer, kb_dir: Path) -> None:
+    """Let an active attempt finish, but prevent its captured gateway dispatching again."""
+    resolved = kb_dir.expanduser().resolve()
+    with server._workers_lock:
+        server._knowledge_graph_extraction_gateways.pop(resolved, None)
+        server._knowledge_graph_extraction_reruns.discard(resolved)

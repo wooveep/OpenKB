@@ -158,6 +158,9 @@ def test_independent_description_merge_nodes_run_concurrently() -> None:
         prompt_contract_digest="digest",
         input_budget_tokens=8_000,
         output_budget_tokens=4_096,
+        final_output_reserve_tokens=4_096,
+        reasoning_allowance_tokens=0,
+        execution_profile=None,
         batches=(),
         merge_topology=topology,
     )

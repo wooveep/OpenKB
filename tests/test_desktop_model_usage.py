@@ -6,9 +6,13 @@ import json
 import sqlite3
 import zipfile
 
+import pytest
+
 from openkb import desktop_model_transport
 from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
 from openkb.desktop_model_gateway import (
+    DesktopModelCallError,
+    DesktopModelOutputObservations,
     DesktopModelProviderResponse,
     DesktopModelRequest,
     DesktopProviderTokenUsage,
@@ -99,15 +103,117 @@ def test_provider_tokens_timings_and_optional_user_pricing_are_persisted(tmp_pat
     assert store.aggregate()["token_usage_source"] == "provider_reported"
 
 
+def test_model_result_failure_persists_only_content_free_stream_observations(tmp_path):
+    kb_dir = _create_kb(tmp_path)
+    store = DesktopModelUsageStore(kb_dir)
+    request = _request()
+    event = DesktopTerminalModelEvent(
+        call_id="call-result-failure",
+        attempt=1,
+        status="model_result_failure",
+        elapsed_seconds=12.0,
+        failure_code="reasoning_output_exhausted",
+        finish_reason="length",
+        reasoning_observed=True,
+        final_content_observed=False,
+        reasoning_chunk_count=3,
+        final_chunk_count=0,
+        reasoning_character_count=240,
+        final_character_count=0,
+    )
+
+    store.record_event(
+        request=request,
+        event=event,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+    )
+
+    record = store.records()[0]
+    assert record["lifecycle_status"] == "model_result_failure"
+    assert record["failure_code"] == "reasoning_output_exhausted"
+    assert record["finish_reason"] == "length"
+    assert record["reasoning_observed"] is True
+    assert record["final_content_observed"] is False
+    assert record["reasoning_chunk_count"] == 3
+    assert record["final_chunk_count"] == 0
+    assert record["reasoning_character_count"] == 240
+    assert record["final_character_count"] == 0
+    assert "reasoning" not in json.dumps(record).lower().replace(
+        "reasoning_output_exhausted", ""
+    ).replace("reasoning_observed", "").replace("reasoning_chunk_count", "").replace(
+        "reasoning_character_count", ""
+    )
+
+
+def test_failed_provider_result_retains_reported_tokens_without_result_content(
+    tmp_path, monkeypatch
+):
+    kb_dir = _create_kb(tmp_path)
+    save_desktop_model_settings(
+        kb_dir,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="secret-key",
+        max_concurrent_model_calls=1,
+    )
+
+    class ReasoningOnlyTransport:
+        def __init__(self, *, model, bundle):
+            del model, bundle
+
+        def __call__(self, _request, _connect_timeout):
+            return DesktopModelProviderResponse(
+                "",
+                usage=DesktopProviderTokenUsage(10, 90, 100),
+                provider_request_id="request-safe-id",
+                observations=DesktopModelOutputObservations(
+                    finish_reason="length",
+                    reasoning_observed=True,
+                    reasoning_chunk_count=2,
+                    reasoning_character_count=180,
+                    output_limit_reached=True,
+                ),
+            )
+
+    monkeypatch.setattr(
+        desktop_model_transport,
+        "DesktopLiteLLMTransport",
+        ReasoningOnlyTransport,
+    )
+    gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
+    assert gateway is not None
+
+    with pytest.raises(DesktopModelCallError):
+        gateway.analyze(
+            DesktopModelRequest(
+                "retrieval_plan",
+                "question",
+                "private retrieval question",
+                job_id="job-safe-failure",
+            ),
+            on_event=lambda _event: None,
+        )
+
+    record = DesktopModelUsageStore(kb_dir).records()[0]
+    assert record["input_tokens"] == 10
+    assert record["output_tokens"] == 90
+    assert record["total_tokens"] == 100
+    assert record["token_usage_source"] == "provider_reported"
+    assert record["provider_request_id"] == "request-safe-id"
+    assert "private retrieval question" not in json.dumps(record)
+
+
 def test_production_role_gateway_records_analysis_answer_and_default_calls(tmp_path, monkeypatch):
     kb_dir = _create_kb(tmp_path)
     save_desktop_model_settings(
         kb_dir,
-        provider="custom",
+        provider="deepseek",
         model="default-model",
         analysis_model="analysis-model",
         answer_model="answer-model",
-        api_base_url="https://models.example.test/v1",
+        api_base_url="https://api.deepseek.com",
         api_key="secret-key",
         max_concurrent_model_calls=2,
         initial_timeout_seconds=1,
@@ -230,7 +336,20 @@ def test_explicit_diagnostic_export_contains_only_sanitized_usage(tmp_path):
     store = DesktopModelUsageStore(kb_dir)
     store.record_event(
         request=request,
-        event=_event("completed", 5.0),
+        event=DesktopTerminalModelEvent(
+            call_id="call-1",
+            attempt=1,
+            status="model_result_failure",
+            elapsed_seconds=5.0,
+            failure_code="reasoning_only_result",
+            finish_reason="stop",
+            reasoning_observed=True,
+            final_content_observed=False,
+            reasoning_chunk_count=2,
+            final_chunk_count=0,
+            reasoning_character_count=180,
+            final_character_count=0,
+        ),
         provider="custom",
         model="analysis-model",
     )
@@ -249,6 +368,11 @@ def test_explicit_diagnostic_export_contains_only_sanitized_usage(tmp_path):
         all_content = "\n".join(archive.read(name).decode("utf-8") for name in archive.namelist())
 
     assert '"token_usage_source": "estimated"' in usage
+    assert '"finish_reason": "stop"' in usage
+    assert '"reasoning_observed": 1' in usage
+    assert '"final_content_observed": 0' in usage
+    assert '"reasoning_chunk_count": 2' in usage
+    assert '"reasoning_character_count": 180' in usage
     for secret in (
         "source-secret",
         "prompt-secret",

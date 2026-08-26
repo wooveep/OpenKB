@@ -16,6 +16,8 @@ from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
 from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
+from openkb.desktop_model_execution_profile import analysis_execution_profile_for_settings
 from openkb.desktop_model_gateway import (
     DesktopModelGateway,
     DesktopModelRequest,
@@ -28,6 +30,7 @@ from openkb.desktop_model_settings import (
     model_capability_profile,
     read_desktop_model_settings,
     save_desktop_model_settings,
+    validate_desktop_model_settings,
 )
 from openkb.desktop_model_terminal import DesktopTerminalModelEvent
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
@@ -256,6 +259,47 @@ def test_role_settings_centralize_default_fallbacks() -> None:
     assert analysis.output_price_per_million == 2.0
 
 
+def test_settings_export_selected_and_effective_deepseek_role_semantics() -> None:
+    settings = DesktopModelSettings(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="secret",
+        max_concurrent_model_calls=2,
+    )
+
+    payload = settings.as_dict()
+
+    assert payload["provider_adapter"] == {
+        "identity": "deepseek",
+        "version": "deepseek.v1",
+        "structured_output_mode": "json_object",
+        "supports_structured_analysis": True,
+        "supported_reasoning": ["high", "low", "medium", "off"],
+        "analysis_unavailable_reason": None,
+    }
+    assert payload["effective_roles"] == {
+        "default": {
+            "model": "deepseek-v4-pro",
+            "context_capacity": 64_000,
+            "reasoning": None,
+            "reasoning_source": "provider_default",
+        },
+        "analysis": {
+            "model": "deepseek-v4-pro",
+            "context_capacity": 64_000,
+            "reasoning": "off",
+            "reasoning_source": "analysis_safe_default",
+        },
+        "answer": {
+            "model": "deepseek-v4-pro",
+            "context_capacity": 64_000,
+            "reasoning": None,
+            "reasoning_source": "provider_default",
+        },
+    }
+
+
 def test_unknown_model_capability_is_conservative_and_overridable():
     unknown = model_capability_profile("private-model")
     overridden = model_capability_profile("private-model", context_capacity=48_000)
@@ -280,11 +324,11 @@ def test_role_gateway_routes_analysis_and_answer_to_distinct_models(tmp_path, mo
     kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
     save_desktop_model_settings(
         kb_dir,
-        provider="custom",
+        provider="deepseek",
         model="default-model",
         analysis_model="analysis-model",
         answer_model="answer-model",
-        api_base_url="https://models.example.test/v1",
+        api_base_url="https://api.deepseek.com",
         api_key="shared-key",
         max_concurrent_model_calls=2,
         initial_timeout_seconds=1,
@@ -326,10 +370,10 @@ def test_role_gateway_routes_analysis_and_answer_to_distinct_models(tmp_path, mo
     )
 
     assert [str(model) for model, _operation, _reasoning in calls[:6]] == [
-        "openai/analysis-model"
+        "deepseek/analysis-model"
     ] * 6
-    assert str(calls[6][0]) == "openai/answer-model"
-    assert str(calls[7][0]) == "openai/default-model"
+    assert str(calls[6][0]) == "deepseek/answer-model"
+    assert str(calls[7][0]) == "deepseek/default-model"
 
 
 def test_deepseek_endpoint_routes_an_unprefixed_model_through_litellm(tmp_path, monkeypatch):
@@ -417,12 +461,19 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
     assert '"api_key_configured": true' in content
 
 
-def test_engine_settings_routes_accept_a_direct_api_key_without_persisting_it_in_sqlite(tmp_path):
+def test_engine_settings_routes_accept_a_direct_api_key_without_persisting_it_in_sqlite(
+    tmp_path, monkeypatch
+):
     kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
     workspace = DesktopKnowledgeBaseRuntime()
     workspace.open(kb_dir)
     server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
     server._handshake_complete = True
+    monkeypatch.setattr(
+        server,
+        "_model_gateway_factory",
+        lambda *_args, **_kwargs: pytest.fail("saving settings must not call a provider"),
+    )
 
     saved = server._dispatch(
         DesktopRequest(
@@ -457,6 +508,44 @@ def test_engine_settings_routes_accept_a_direct_api_key_without_persisting_it_in
     assert all("engine-settings-key" not in value[0] for value in values)
 
 
+def test_saving_an_unusable_analysis_profile_invalidates_old_capability_evidence(tmp_path):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    previous = save_desktop_model_settings(
+        kb_dir,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+    )
+    old_profile = analysis_execution_profile_for_settings(previous)
+    capability_store = DesktopModelCapabilityStore(kb_dir)
+    capability_store.mark_verified(old_profile)
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    server._dispatch(
+        DesktopRequest(
+            request_id="settings-save-custom",
+            method="workbench.save_model_settings",
+            params={
+                "provider": "custom",
+                "model": "private-model",
+                "api_base_url": "https://models.example.test/v1",
+                "api_key": "test-key",
+                "max_concurrent_model_calls": 1,
+            },
+        ),
+        cancel_event=None,
+    )
+
+    state = capability_store.state(old_profile)
+    assert state.status == "unchecked"
+    assert state.failure_code == "model_execution_profile_changed"
+
+
 def test_engine_connection_check_emits_terminal_lifecycle_events(tmp_path, monkeypatch):
     kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
     workspace = DesktopKnowledgeBaseRuntime()
@@ -466,10 +555,10 @@ def test_engine_connection_check_emits_terminal_lifecycle_events(tmp_path, monke
     emitted: list[tuple[str, dict[str, object]]] = []
 
     class FakeTerminalGateway:
-        def analyze(self, request, *, on_event, is_cancelled):
+        def stream(self, request, *, on_event, on_delta, is_cancelled):
+            del on_delta
             assert is_cancelled is not None
-            assert request.operation == "model_capability_analysis_streaming"
-            assert request.supports_streaming is True
+            assert request.operation == "model_capability_answer"
             on_event(
                 DesktopTerminalModelEvent(
                     call_id="call-1",
@@ -478,7 +567,7 @@ def test_engine_connection_check_emits_terminal_lifecycle_events(tmp_path, monke
                     elapsed_seconds=180,
                 )
             )
-            return DesktopModelResult("call-1", '{"status":"ok"}', 1)
+            return DesktopModelResult("call-1", "OK", 1)
 
     monkeypatch.setattr(
         desktop_engine_model_settings,
@@ -525,12 +614,82 @@ def test_engine_connection_check_emits_terminal_lifecycle_events(tmp_path, monke
                 "model_name": "unknown",
                 "execution_lane": "background",
                 "attempt_id": "call-1:1",
+                "finish_reason": None,
+                "reasoning_observed": None,
+                "final_content_observed": None,
+                "reasoning_chunk_count": None,
+                "final_chunk_count": None,
+                "reasoning_character_count": None,
+                "final_character_count": None,
+                "input_tokens": None,
+                "output_tokens": None,
+                "total_tokens": None,
+                "provider_request_id": None,
                 "request_id": "connection-check-1",
                 "long_wait_threshold_seconds": 300.0,
             },
         )
     ]
     assert "private provider output" not in repr(emitted)
+
+
+def test_engine_deepseek_check_verifies_the_exact_analysis_profile(tmp_path, monkeypatch):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    observed: list[DesktopModelRequest] = []
+    gateway_models: list[str] = []
+
+    class FakeTerminalGateway:
+        def analyze(self, request, *, on_event, is_cancelled):
+            del on_event
+            assert is_cancelled is not None
+            observed.append(request)
+            return DesktopModelResult("capability-call", '{"status":"ok"}', 1)
+
+    def gateway_for_settings(_kb_dir, settings):
+        gateway_models.append(settings.model)
+        return FakeTerminalGateway()
+
+    monkeypatch.setattr(
+        desktop_engine_model_settings,
+        "desktop_model_gateway_for_settings",
+        gateway_for_settings,
+    )
+    params = {
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "analysis_model": "deepseek-v4-pro",
+        "api_base_url": "https://api.deepseek.com",
+        "api_key": "test-key",
+        "max_concurrent_model_calls": 1,
+        "analysis_reasoning": "high",
+    }
+
+    result = server._dispatch(
+        DesktopRequest(
+            request_id="deepseek-capability-check",
+            method="workbench.test_model_connection",
+            params=params,
+        ),
+        cancel_event=Event(),
+    )
+
+    settings = validate_desktop_model_settings(**params)
+    profile = analysis_execution_profile_for_settings(settings)
+    assert result["profile_identity"] == profile.identity
+    assert result["capability_status"] == "verified"
+    assert DesktopModelCapabilityStore(kb_dir).is_verified(profile)
+    assert gateway_models == [profile.model]
+    assert len(observed) == 1
+    assert observed[0].structured_output_mode == "json_object"
+    assert observed[0].reasoning_effort == "high"
+    assert observed[0].generation_parameters == {
+        "temperature": 0,
+        "max_tokens": profile.provider_output_ceiling_tokens,
+    }
 
 
 def test_engine_capability_check_runs_once_for_each_distinct_selected_model(tmp_path, monkeypatch):
@@ -585,11 +744,9 @@ def test_engine_capability_check_runs_once_for_each_distinct_selected_model(tmp_
     assert result["ok"] is True
     assert result["models"] == [
         "gpt-5-default",
-        "gpt-5-analysis",
         "answer-only-model",
     ]
     assert checked == [
         ("gpt-5-default", "model_capability_default", False),
-        ("gpt-5-analysis", "model_capability_analysis", True),
         ("answer-only-model", "model_capability_answer", False),
     ]

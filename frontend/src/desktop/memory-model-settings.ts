@@ -26,6 +26,26 @@ export function createMemoryModelSettings(): DesktopModelSettings {
     answerInputPricePerMillion: null,
     answerOutputPricePerMillion: null,
     analysisConcurrency: 1,
+    providerAdapter: {
+      identity: "custom",
+      version: "custom.v1",
+      structuredOutputMode: null,
+      supportsStructuredAnalysis: false,
+      supportedReasoning: [],
+      analysisUnavailableReason: "Custom providers do not have a code-owned structured Analysis protocol.",
+    },
+    effectiveRoles: {
+      default: { model: "gpt-5.4", contextCapacity: 128000, reasoning: null, reasoningSource: "provider_default" },
+      analysis: { model: "gpt-5.4", contextCapacity: 128000, reasoning: "off", reasoningSource: "analysis_safe_default" },
+      answer: { model: "gpt-5.4", contextCapacity: 128000, reasoning: null, reasoningSource: "provider_default" },
+    },
+    analysisCapability: {
+      profileIdentity: null,
+      status: "unchecked",
+      failureCode: "analysis_profile_unavailable",
+      reason: "Custom providers do not have a code-owned structured Analysis protocol.",
+      checkedAt: null,
+    },
     usageAggregate: {
       callCount: 0,
       attemptCount: 0,

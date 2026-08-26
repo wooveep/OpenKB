@@ -17,6 +17,7 @@ from openkb.desktop_import_runner import DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_knowledge_analysis_batches import plan_knowledge_analysis_batches
 from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 LATEST_SCHEMA_VERSION = desktop_workspace._MIGRATIONS[-1][0]
@@ -28,6 +29,7 @@ def _drop_catalog_schema(connection: sqlite3.Connection) -> None:
     ).fetchall():
         connection.execute(f'DROP TRIGGER "{name}"')
     for table in (
+        "model_capability_checks",
         "knowledge_catalog_rebuild_tasks",
         "knowledge_catalog_state",
         "knowledge_catalog_links",
@@ -56,6 +58,11 @@ def _drop_post_v37_schema(connection: sqlite3.Connection) -> None:
         for column in ("lifecycle_status", "elapsed_seconds", "retry_after_seconds"):
             if column in existing:
                 connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    for table, column, _definition in MODEL_RESULT_OBSERVATION_COLUMNS:
+        if connection.execute(
+            "SELECT 1 FROM pragma_table_info(?) WHERE name = ?", (table, column)
+        ).fetchone():
+            connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
     connection.execute("DELETE FROM schema_migrations WHERE version >= 38")
 
 

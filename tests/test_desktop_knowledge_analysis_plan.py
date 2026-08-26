@@ -22,11 +22,17 @@ from openkb.desktop_knowledge_analysis_batches import (
     plan_knowledge_analysis_batches,
 )
 from openkb.desktop_knowledge_analysis_plan import (
+    build_knowledge_analysis_plan,
     estimate_model_tokens,
     hierarchical_merge_topology,
     knowledge_analysis_input_budget,
 )
 from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
+from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
+from openkb.desktop_model_execution_profile import (
+    DesktopModelCapacityError,
+    build_analysis_execution_profile,
+)
 from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelTransportError
 from openkb.desktop_model_settings import save_desktop_model_settings
 from openkb.desktop_prompt_contracts import prompt_contract_for
@@ -121,7 +127,7 @@ def test_plan_is_committed_before_first_batch_model_call(tmp_path) -> None:
     assert len(plan["prompt_contract_digest"]) == 64
     assert plan["prompt_contract_snapshot"]["contracts"]["knowledge_analysis_batch"][
         "version"
-    ].endswith(".v2")
+    ].endswith(".v3")
     assert plan["document_ir_digest"]
     assert plan["batches"]
     assert plan["merge_topology"]
@@ -162,6 +168,7 @@ def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_an_older_plan(tmp_
         )
         digest = hashlib.sha256(bundle.encode("utf-8")).hexdigest()
         plan["prompt_contract_digest"] = digest
+        plan.pop("plan_identity", None)
         connection.execute(
             "UPDATE knowledge_analysis_plans "
             "SET prompt_contract_digest = ?, plan_json = ? WHERE job_id = ?",
@@ -195,6 +202,26 @@ def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_an_older_plan(tmp_
     request = recovered_requests[0]
     assert request.prompt_contract_version == "openkb.prompt.knowledge_analysis.v1"
     assert request.prompt_contract_snapshot["instructions"] == legacy_instructions
+    with sqlite3.connect(database_path) as connection:
+        (checkpoint_json,) = connection.execute(
+            """
+            SELECT runtime.checkpoint_json
+            FROM stage_run_runtime AS runtime
+            JOIN stage_runs AS stages ON stages.stage_run_id = runtime.stage_run_id
+            WHERE stages.job_id = ? AND stages.stage = 'model_analysis'
+            """,
+            (job_id,),
+        ).fetchone()
+    checkpoint = json.loads(checkpoint_json)
+    assert checkpoint["prompt_contract_snapshot"]["instructions"] == legacy_instructions
+    assert checkpoint["prompt_digest"] == hashlib.sha256(
+        json.dumps(
+            checkpoint["prompt_contract_snapshot"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def test_token_estimator_is_conservative_for_chinese_and_ascii() -> None:
@@ -216,6 +243,102 @@ def test_large_context_profiles_cap_analysis_batches_at_twelve_thousand_tokens()
         == 12_000
     )
 
+
+@pytest.mark.parametrize(
+    ("reasoning", "allowance_multiplier"),
+    [("off", 0.0), ("low", 0.5), ("medium", 1.0), ("high", 2.0)],
+)
+def test_analysis_execution_profile_reserves_final_json_before_reasoning(
+    reasoning: str,
+    allowance_multiplier: float,
+) -> None:
+    capability = DesktopModelCapabilityProfile(
+        context_capacity=64_000,
+        document_input_capacity=48_000,
+        supports_native_json_schema=False,
+        supports_streaming=True,
+        supports_reasoning=True,
+    )
+
+    profile = build_analysis_execution_profile(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        capability=capability,
+        reasoning_effort=reasoning,
+    )
+
+    assert profile.adapter_identity == "deepseek"
+    assert profile.adapter_version == "deepseek.v1"
+    assert profile.structured_output_mode == "json_object"
+    assert profile.final_output_reserve_tokens == 8_192
+    assert profile.reasoning_allowance_tokens == int(8_192 * allowance_multiplier)
+    assert profile.provider_output_ceiling_tokens == (
+        profile.final_output_reserve_tokens + profile.reasoning_allowance_tokens
+    )
+    assert profile.document_input_budget_tokens <= 12_000
+    assert profile.identity == profile.identity
+
+
+def test_analysis_execution_profile_fails_before_dispatch_when_minimum_batch_cannot_fit() -> None:
+    capability = DesktopModelCapabilityProfile(
+        context_capacity=12_000,
+        document_input_capacity=8_000,
+        supports_native_json_schema=False,
+        supports_streaming=True,
+        supports_reasoning=True,
+    )
+
+    with pytest.raises(DesktopModelCapacityError, match="minimum useful Analysis batch"):
+        build_analysis_execution_profile(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            capability=capability,
+            reasoning_effort="high",
+        )
+
+
+def test_complete_execution_profile_round_trips_and_changes_plan_identity() -> None:
+    evidence = _representative_evidence(2)
+    capability = DesktopModelCapabilityProfile(
+        context_capacity=64_000,
+        document_input_capacity=48_000,
+        supports_native_json_schema=False,
+        supports_streaming=True,
+        supports_reasoning=True,
+    )
+    off_profile = build_analysis_execution_profile(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        capability=capability,
+        reasoning_effort="off",
+    )
+    high_profile = build_analysis_execution_profile(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        capability=capability,
+        reasoning_effort="high",
+    )
+
+    def plan(profile):
+        return build_knowledge_analysis_plan(
+            evidence=evidence,
+            planned_batches=(evidence,),
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            capability=capability,
+            contract=prompt_contract_for("knowledge_analysis_batch"),
+            estimated_batch_tokens=(100,),
+            execution_profile=profile,
+        )
+
+    off_plan = plan(off_profile)
+    restored = type(off_plan).from_dict(off_plan.as_dict())
+    high_plan = plan(high_profile)
+
+    assert restored == off_plan
+    assert restored.execution_profile == off_profile
+    assert restored.plan_identity == off_plan.plan_identity
+    assert high_plan.plan_identity != off_plan.plan_identity
 
 def test_exact_knowledge_is_deduplicated_before_description_merge() -> None:
     def analysis(evidence_id: str, aliases: list[str], tags: list[str]):
@@ -331,7 +454,7 @@ def test_recovery_uses_the_analysis_model_pinned_before_settings_changed(
     DesktopKnowledgeBaseRuntime().create(kb_dir)
     save_desktop_model_settings(
         kb_dir,
-        provider="custom",
+        provider="deepseek",
         model="default-model",
         analysis_model="old-analysis",
         api_base_url="https://model.test/v1",
@@ -370,6 +493,9 @@ def test_recovery_uses_the_analysis_model_pinned_before_settings_changed(
     monkeypatch.setattr(desktop_model_transport, "DesktopLiteLLMTransport", FakeTransport)
     first_gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert first_gateway is not None
+    DesktopModelCapabilityStore(kb_dir).mark_verified(
+        first_gateway.execution_profile_for_operation("knowledge_analysis")
+    )
     importer = DesktopTextImportService(kb_dir, model_gateway=first_gateway)
     with pytest.raises(DesktopImportError):
         importer.import_text(source)
@@ -377,7 +503,7 @@ def test_recovery_uses_the_analysis_model_pinned_before_settings_changed(
 
     save_desktop_model_settings(
         kb_dir,
-        provider="custom",
+        provider="deepseek",
         model="default-model",
         analysis_model="new-analysis",
         api_base_url="https://model.test/v1",
@@ -395,4 +521,4 @@ def test_recovery_uses_the_analysis_model_pinned_before_settings_changed(
 
     analysis_calls = [model for model, operation in calls if "analysis" in operation]
     assert analysis_calls
-    assert set(analysis_calls) == {"openai/old-analysis"}
+    assert set(analysis_calls) == {"deepseek/old-analysis"}

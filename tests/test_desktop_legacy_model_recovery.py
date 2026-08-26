@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 from datetime import datetime, timezone
 
 import pytest
 
+from openkb import desktop_model_transport
+from openkb.desktop_engine import DesktopEngineServer, DesktopRequestError
+from openkb.desktop_engine_imports import run_import
 from openkb.desktop_import import DesktopImportError, DesktopTextImportService
 from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_legacy_model_recovery import (
@@ -15,6 +19,7 @@ from openkb.desktop_legacy_model_recovery import (
     RESTART_CURRENT_PLAN,
     DesktopLegacyModelRecoveryService,
 )
+from openkb.desktop_model_settings import save_desktop_model_settings
 from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
@@ -210,3 +215,229 @@ def test_historical_deadline_recovery_requires_an_explicit_choice(tmp_path):
         CONTINUE_COMPATIBLE,
         RESTART_CURRENT_PLAN,
     }
+
+
+def test_protocol_failure_requires_replan_and_counts_discarded_model_checkpoints(tmp_path):
+    kb_dir, job_id = _legacy_deadline_job(tmp_path)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        connection.execute(
+            "UPDATE quarantined_documents SET error_code = ? WHERE job_id = ?",
+            ("reasoning_output_exhausted", job_id),
+        )
+        connection.execute(
+            "UPDATE import_jobs SET error_code = ? WHERE job_id = ?",
+            ("reasoning_output_exhausted", job_id),
+        )
+        connection.commit()
+    service = DesktopLegacyModelRecoveryService(kb_dir)
+
+    assessment = service.assessment(job_id)
+
+    assert assessment is not None
+    payload = assessment.as_dict()
+    assert payload["kind"] == "model_execution_profile_replan"
+    assert payload["compatible"] is False
+    assert payload["discarded_model_checkpoints"] == 1
+    assert payload["choices"][RESTART_CURRENT_PLAN]["estimated_remaining_calls"] >= 1
+    assert payload["choices"][CONTINUE_COMPATIBLE]["allowed"] is False
+
+    service.select(job_id, RESTART_CURRENT_PLAN)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM knowledge_analysis_batches WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            """
+            SELECT checkpoint_json FROM stage_run_runtime JOIN stage_runs USING(stage_run_id)
+            WHERE stage_runs.job_id = ? AND stage_runs.stage = 'evidence'
+            """,
+            (job_id,),
+        ).fetchone()[0] is not None
+
+
+def test_check_and_recover_verifies_replacement_before_discarding_model_state(
+    tmp_path, monkeypatch
+) -> None:
+    kb_dir, job_id = _legacy_deadline_job(tmp_path)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE quarantined_documents SET error_code = ? WHERE job_id = ?",
+            ("reasoning_output_exhausted", job_id),
+        )
+        connection.execute(
+            "UPDATE import_jobs SET error_code = ? WHERE job_id = ?",
+            ("reasoning_output_exhausted", job_id),
+        )
+        deterministic_before = connection.execute(
+            """
+            SELECT stage_runs.stage, stage_run_runtime.checkpoint_json
+            FROM stage_runs JOIN stage_run_runtime USING(stage_run_id)
+            WHERE stage_runs.job_id = ?
+              AND stage_runs.stage IN ('raw_asset', 'document_ir', 'evidence')
+            ORDER BY stage_runs.stage
+            """,
+            (job_id,),
+        ).fetchall()
+        model_before = connection.execute(
+            """
+            SELECT batch_id, status, checkpoint_json
+            FROM knowledge_analysis_batches WHERE job_id = ? ORDER BY batch_ordinal
+            """,
+            (job_id,),
+        ).fetchall()
+        connection.commit()
+    save_desktop_model_settings(
+        kb_dir,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+        analysis_reasoning="high",
+    )
+    calls: list[str] = []
+    reasoning_efforts: list[str | None] = []
+
+    class FailingCapabilityTransport:
+        def __init__(self, *, model, bundle):
+            del model, bundle
+
+        def __call__(self, request, _timeout_seconds):
+            calls.append(request.operation)
+            reasoning_efforts.append(request.reasoning_effort)
+            return '{"status":"not-ok"}'
+
+    monkeypatch.setattr(
+        desktop_model_transport, "DesktopLiteLLMTransport", FailingCapabilityTransport
+    )
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        "openkb.desktop_engine_imports.page_tree_enrichment_engine.start_page_tree_enrichments",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "openkb.desktop_engine_imports.knowledge_graph_engine.start_knowledge_graph_extractions",
+        lambda *_args, **_kwargs: None,
+    )
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO())
+    override = DesktopRecoveryOverride(
+        reasoning="off",
+        legacy_recovery_choice=RESTART_CURRENT_PLAN,
+        check_and_recover=True,
+    )
+
+    with pytest.raises(DesktopRequestError, match="schema-valid structured output"):
+        run_import(
+            server,
+            kb_dir,
+            request_id="failed-check",
+            job_id=job_id,
+            recovery_override=override,
+        )
+
+    assert calls == ["model_capability_analysis"]
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            """
+            SELECT stage_runs.stage, stage_run_runtime.checkpoint_json
+            FROM stage_runs JOIN stage_run_runtime USING(stage_run_id)
+            WHERE stage_runs.job_id = ?
+              AND stage_runs.stage IN ('raw_asset', 'document_ir', 'evidence')
+            ORDER BY stage_runs.stage
+            """,
+            (job_id,),
+        ).fetchall() == deterministic_before
+        assert connection.execute(
+            """
+            SELECT batch_id, status, checkpoint_json
+            FROM knowledge_analysis_batches WHERE job_id = ? ORDER BY batch_ordinal
+            """,
+            (job_id,),
+        ).fetchall() == model_before
+        assert connection.execute(
+            "SELECT COUNT(*) FROM legacy_model_recovery_audit WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT status FROM import_jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()[0] == "failed"
+
+    class SuccessfulTransport:
+        def __init__(self, *, model, bundle):
+            del model, bundle
+
+        def __call__(self, request, _timeout_seconds):
+            calls.append(request.operation)
+            reasoning_efforts.append(request.reasoning_effort)
+            if request.operation == "model_capability_analysis":
+                return '{"status":"ok"}'
+            if request.operation == "knowledge_analysis_merge":
+                return '{"document_description":"Recovered analysis."}'
+            scope = "batch" if request.operation == "knowledge_analysis_batch" else "document"
+            return json.dumps(
+                {
+                    "schema_version": "openkb.knowledge-analysis.v1",
+                    "analysis_scope": scope,
+                    "document_description": "Recovered analysis.",
+                    "concepts": [],
+                    "entities": [],
+                }
+            )
+
+    monkeypatch.setattr(desktop_model_transport, "DesktopLiteLLMTransport", SuccessfulTransport)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO())
+
+    recovered = run_import(
+        server,
+        kb_dir,
+        request_id="successful-check",
+        job_id=job_id,
+        recovery_override=override,
+    )
+
+    assert recovered["job"]["job_id"] == job_id
+    assert recovered["job"]["status"] == "completed"
+    assert recovered["document"]["availability"] == "available"
+    assert calls.count("model_capability_analysis") == 2
+    assert reasoning_efforts[0] == "off"
+    assert reasoning_efforts[1] == "off"
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            """
+            SELECT stage_runs.stage, stage_run_runtime.checkpoint_json
+            FROM stage_runs JOIN stage_run_runtime USING(stage_run_id)
+            WHERE stage_runs.job_id = ?
+              AND stage_runs.stage IN ('raw_asset', 'document_ir', 'evidence')
+            ORDER BY stage_runs.stage
+            """,
+            (job_id,),
+        ).fetchall() == deterministic_before
+        assert connection.execute(
+            "SELECT COUNT(*) FROM knowledge_analysis_batches WHERE batch_id LIKE 'legacy-batch-%'",
+        ).fetchone()[0] == 0
+        plan_identity = connection.execute(
+            """
+            SELECT json_extract(plan_json, '$.plan_identity')
+            FROM knowledge_analysis_plans WHERE job_id = ?
+            """,
+            (job_id,),
+        ).fetchone()[0]
+        plan_json = json.loads(
+            connection.execute(
+                "SELECT plan_json FROM knowledge_analysis_plans WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()[0]
+        )
+        assert plan_json["execution_profile"]["reasoning_effort"] == "off"
+        audit_identity = connection.execute(
+            """
+            SELECT resulting_plan_identity FROM legacy_model_recovery_audit
+            WHERE job_id = ? ORDER BY selected_at DESC LIMIT 1
+            """,
+            (job_id,),
+        ).fetchone()[0]
+    assert audit_identity == plan_identity

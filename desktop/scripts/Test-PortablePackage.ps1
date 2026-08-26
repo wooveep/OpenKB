@@ -371,43 +371,36 @@ function Test-FrozenEngine {
 
         # Keep this last: the deliberately invalid endpoint becomes KB-local
         # configuration, and must not affect the offline parser smoke checks.
-        $modelProbeSource = Join-Path $ScratchDirectory "package-model-probe.txt"
-        [System.IO.File]::WriteAllText(
-            $modelProbeSource,
-            "Portable model-runtime probe.",
-            (New-Object System.Text.UTF8Encoding($false))
-        )
+        $modelProbeSettings = @{
+            provider = "deepseek"
+            model = "deepseek-v4-pro"
+            api_base_url = "http://127.0.0.1:9/v1"
+            api_key = "package-model-probe-key"
+            max_concurrent_model_calls = 1
+            initial_timeout_seconds = 1
+        }
         Write-Frame -Stream $input -Message @{
-            jsonrpc = "2.0"; id = "package-model-settings"; method = "workbench.save_model_settings"; params = @{
-                model = "gpt-4o-mini"
-                api_base_url = "http://127.0.0.1:9/v1"
-                api_key = "package-model-probe-key"
-                max_concurrent_model_calls = 1
-                initial_timeout_seconds = 1
-            }
+            jsonrpc = "2.0"; id = "package-model-settings"; method = "workbench.save_model_settings"; params = $modelProbeSettings
         }
         $modelSettings = Read-Response -Stream $output -RequestId "package-model-settings" -Events $events
         Assert-SuccessResponse -Response $modelSettings -RequestId "package-model-settings"
 
         Write-Frame -Stream $input -Message @{
-            jsonrpc = "2.0"; id = "package-model-import"; method = "workbench.import_text_document"; params = @{ source_path = $modelProbeSource }
+            jsonrpc = "2.0"; id = "package-model-check"; method = "workbench.test_model_connection"; params = $modelProbeSettings
         }
-        # The deliberately unreachable local endpoint must return an explicit
-        # network failure; the margin covers retries plus process/IPC overhead.
-        $modelImport = Read-Response -Stream $output -RequestId "package-model-import" -Events $events -TimeoutSeconds 75
-        Assert-That -Condition ($modelImport.PSObject.Properties.Name -contains "error") -Message "Frozen Engine unexpectedly completed the local model-runtime probe."
-        Assert-That -Condition ($modelImport.error.code -eq "document_quarantined") -Message "Frozen Engine returned the wrong local model-runtime probe error."
+        # The named structured adapter must reach the frozen LiteLLM runtime.
+        # Its deliberately unreachable endpoint then returns an explicit network failure.
+        $modelCheck = Read-Response -Stream $output -RequestId "package-model-check" -Events $events -TimeoutSeconds 75
+        Assert-That -Condition ($modelCheck.PSObject.Properties.Name -contains "error") -Message "Frozen Engine unexpectedly completed the local Model Capability Check."
+        Assert-That -Condition ($modelCheck.error.code -in @("model_network_transient", "model_timeout", "model_server_error")) -Message "Frozen Engine model runtime failed before reaching the local endpoint: $($modelCheck.error.code)."
 
         Write-Frame -Stream $input -Message @{
-            jsonrpc = "2.0"; id = "package-model-jobs"; method = "workbench.import_jobs"; params = @{}
+            jsonrpc = "2.0"; id = "package-model-state"; method = "workbench.model_settings"; params = @{}
         }
-        $modelJobs = Read-Response -Stream $output -RequestId "package-model-jobs" -Events $events
-        Assert-SuccessResponse -Response $modelJobs -RequestId "package-model-jobs"
-        $modelJob = @($modelJobs.result.jobs | Where-Object { $_.job.source_name -eq "package-model-probe.txt" }) | Select-Object -First 1
-        Assert-That -Condition ($null -ne $modelJob) -Message "Frozen Engine did not retain the local model-runtime probe job."
-        $modelCall = @($modelJob.model_calls) | Select-Object -First 1
-        Assert-That -Condition ($null -ne $modelCall) -Message "Frozen Engine did not record a model call for the local model-runtime probe."
-        Assert-That -Condition ($modelCall.error_code -in @("model_network_transient", "model_timeout", "model_server_error")) -Message "Frozen Engine model runtime failed before reaching the local endpoint: $($modelCall.error_code)."
+        $modelState = Read-Response -Stream $output -RequestId "package-model-state" -Events $events
+        Assert-SuccessResponse -Response $modelState -RequestId "package-model-state"
+        Assert-That -Condition ($modelState.result.analysis_capability.status -eq "failed") -Message "Frozen Engine did not persist the failed Model Capability Check."
+        Assert-That -Condition ($modelState.result.analysis_capability.failure_code -eq $modelCheck.error.code) -Message "Frozen Engine persisted the wrong Model Capability failure code."
 
         Write-Frame -Stream $input -Message @{
             jsonrpc = "2.0"; id = "package-no-legacy-workbench"; method = "workbench.inspect_knowledge_base"; params = @{}
@@ -432,9 +425,17 @@ function Test-FrozenEngine {
 }
 
 function Test-ShellProcessTree {
-    param([Parameter(Mandatory = $true)] [string] $PackageRoot)
+    param(
+        [Parameter(Mandatory = $true)] [string] $PackageRoot,
+        [Parameter(Mandatory = $true)] [string] $ScratchDirectory
+    )
 
     $shellPath = Join-Path $PackageRoot "OpenKB.exe"
+    $shellProfile = Join-Path $ScratchDirectory "shell-profile"
+    $roamingData = Join-Path $shellProfile "Roaming"
+    $localData = Join-Path $shellProfile "Local"
+    $temporaryData = Join-Path $shellProfile "Temp"
+    New-Item -ItemType Directory -Force -Path $roamingData, $localData, $temporaryData | Out-Null
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $shellPath
     $startInfo.WorkingDirectory = $PackageRoot
@@ -445,6 +446,11 @@ function Test-ShellProcessTree {
     $startInfo.EnvironmentVariables["PIP_NO_INDEX"] = "1"
     $startInfo.EnvironmentVariables["UV_OFFLINE"] = "1"
     $startInfo.EnvironmentVariables["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    $startInfo.EnvironmentVariables["APPDATA"] = $roamingData
+    $startInfo.EnvironmentVariables["LOCALAPPDATA"] = $localData
+    $startInfo.EnvironmentVariables["TEMP"] = $temporaryData
+    $startInfo.EnvironmentVariables["TMP"] = $temporaryData
+    $startInfo.EnvironmentVariables["OPENKB_DESKTOP_RUNTIME_DIR"] = Join-Path $shellProfile "Runtime"
     $startInfo.EnvironmentVariables["HTTP_PROXY"] = "http://127.0.0.1:9"
     $startInfo.EnvironmentVariables["HTTPS_PROXY"] = "http://127.0.0.1:9"
     $startInfo.EnvironmentVariables["ALL_PROXY"] = "http://127.0.0.1:9"
@@ -638,7 +644,7 @@ try {
     Test-FrozenPageIndexWorker -WorkerPath $pageIndexWorker -ScratchDirectory $temporaryRoot
     Test-PackagedPageIndexAdapter -EnginePath $engine -WorkerPath $pageIndexWorker -ScratchDirectory $temporaryRoot
     Test-FrozenEngine -EnginePath $engine -WorkingDirectory $copiedPackage -ScratchDirectory $temporaryRoot
-    Test-ShellProcessTree -PackageRoot $copiedPackage
+    Test-ShellProcessTree -PackageRoot $copiedPackage -ScratchDirectory $temporaryRoot
     Write-Host "Portable package acceptance passed: $copiedPackage"
 }
 finally {

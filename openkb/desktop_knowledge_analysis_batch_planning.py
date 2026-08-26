@@ -15,6 +15,7 @@ from openkb.desktop_knowledge_analysis_batch_store import KnowledgeAnalysisBatch
 from openkb.desktop_knowledge_analysis_plan import estimate_model_tokens
 
 _MAX_EVIDENCE_TEXT_CHARACTERS = 12_000
+_BATCH_ENVELOPE_RESERVE_TOKENS = 64
 
 
 def plan_knowledge_analysis_batches(
@@ -214,7 +215,10 @@ def _batch_fits(
     )
     if max_prompt_characters is not None and len(content) > max_prompt_characters:
         return False
-    return estimate_model_tokens(content) <= input_budget_tokens
+    return (
+        estimate_model_tokens(content) + _BATCH_ENVELOPE_RESERVE_TOKENS
+        <= input_budget_tokens
+    )
 
 
 def _evidence_payload(item: tuple[str, DocumentIRBlock]) -> dict[str, object]:

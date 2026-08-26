@@ -57,8 +57,61 @@ pub struct ModelSettings {
     pub api_key_configured: bool,
     #[serde(alias = "analysis_concurrency")]
     pub analysis_concurrency: u32,
+    #[serde(alias = "provider_adapter")]
+    pub provider_adapter: ModelProviderAdapter,
+    #[serde(alias = "effective_roles")]
+    pub effective_roles: EffectiveModelRoles,
+    #[serde(alias = "analysis_capability")]
+    pub analysis_capability: ModelCapabilityState,
     #[serde(alias = "usage_aggregate")]
     pub usage_aggregate: ModelUsageAggregate,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProviderAdapter {
+    pub identity: String,
+    pub version: String,
+    #[serde(alias = "structured_output_mode")]
+    pub structured_output_mode: Option<String>,
+    #[serde(alias = "supports_structured_analysis")]
+    pub supports_structured_analysis: bool,
+    #[serde(alias = "supported_reasoning")]
+    pub supported_reasoning: Vec<String>,
+    #[serde(alias = "analysis_unavailable_reason")]
+    pub analysis_unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveModelRoles {
+    pub default: EffectiveModelRole,
+    pub analysis: EffectiveModelRole,
+    pub answer: EffectiveModelRole,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveModelRole {
+    pub model: String,
+    #[serde(alias = "context_capacity")]
+    pub context_capacity: u64,
+    pub reasoning: Option<String>,
+    #[serde(alias = "reasoning_source")]
+    pub reasoning_source: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCapabilityState {
+    #[serde(alias = "profile_identity")]
+    pub profile_identity: Option<String>,
+    pub status: String,
+    #[serde(alias = "failure_code")]
+    pub failure_code: Option<String>,
+    pub reason: Option<String>,
+    #[serde(alias = "checked_at")]
+    pub checked_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -132,6 +185,26 @@ mod tests {
             "analysis_output_price_per_million": null,
             "answer_input_price_per_million": 2.0,
             "answer_output_price_per_million": 4.0,
+            "provider_adapter": {
+                "identity": "deepseek",
+                "version": "deepseek.v1",
+                "structured_output_mode": "json_object",
+                "supports_structured_analysis": true,
+                "supported_reasoning": ["high", "low", "medium", "off"],
+                "analysis_unavailable_reason": null
+            },
+            "effective_roles": {
+                "default": {"model": "default-model", "context_capacity": 65536, "reasoning": "medium", "reasoning_source": "explicit_role"},
+                "analysis": {"model": "analysis-model", "context_capacity": 32768, "reasoning": "high", "reasoning_source": "explicit_role"},
+                "answer": {"model": "answer-model", "context_capacity": 65536, "reasoning": "off", "reasoning_source": "explicit_role"}
+            },
+            "analysis_capability": {
+                "profile_identity": "profile-1",
+                "status": "verified",
+                "failure_code": null,
+                "reason": null,
+                "checked_at": "2026-08-26T00:00:00+00:00"
+            },
             "usage_aggregate": {
                 "call_count": 2,
                 "attempt_count": 3,
@@ -145,7 +218,7 @@ mod tests {
         }))
         .expect("current Engine model settings should deserialize");
 
-        let encoded = serde_json::to_value(settings).expect("settings should serialize");
+        let encoded = serde_json::to_value(&settings).expect("settings should serialize");
         let object = encoded.as_object().expect("settings should stay an object");
         assert_eq!(
             encoded["analysisModel"],
@@ -154,6 +227,12 @@ mod tests {
         assert_eq!(encoded["usageAggregate"]["callCount"], 2);
         assert_eq!(encoded["requestsPerMinute"], 120);
         assert_eq!(encoded["tokensPerMinute"], 240000);
+        assert_eq!(settings.provider_adapter.identity, "deepseek");
+        assert_eq!(
+            settings.effective_roles.analysis.reasoning.as_deref(),
+            Some("high")
+        );
+        assert_eq!(settings.analysis_capability.status, "verified");
         assert!(!object.contains_key("initialTimeoutSeconds"));
         assert!(!object.contains_key("modelCallDeadlineSeconds"));
     }

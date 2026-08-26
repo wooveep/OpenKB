@@ -9,6 +9,9 @@ import pytest
 from openkb import desktop_workspace
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_import_store import DesktopImportStore
+from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
+from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseNotFoundError,
     DesktopKnowledgeBaseRuntime,
@@ -22,6 +25,7 @@ LATEST_SCHEMA_VERSION = desktop_workspace._MIGRATIONS[-1][0]
 def _drop_post_v37_schema(connection: sqlite3.Connection) -> None:
     """Return a fixture to the schema before explicit-terminal model migrations."""
     for table in (
+        "model_capability_checks",
         "knowledge_graph_extraction_tasks",
         "legacy_model_recovery_audit",
         "model_usage_records",
@@ -41,6 +45,11 @@ def _drop_post_v37_schema(connection: sqlite3.Connection) -> None:
         for column in columns:
             if column in existing:
                 connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    for table, column, _definition in MODEL_RESULT_OBSERVATION_COLUMNS:
+        if connection.execute(
+            "SELECT 1 FROM pragma_table_info(?) WHERE name = ?", (table, column)
+        ).fetchone():
+            connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
     connection.execute("DELETE FROM schema_migrations WHERE version >= 38")
 
 
@@ -203,6 +212,89 @@ def test_open_accepts_preledger_knowledge_analysis_entity_subtype(tmp_path):
             "SELECT 1 FROM sqlite_master "
             "WHERE type = 'table' AND name = 'knowledge_reconciliation_candidate_sources'"
         ).fetchone() == (1,)
+
+
+def test_result_and_capability_migrations_preserve_published_knowledge_idempotently(
+    tmp_path,
+) -> None:
+    kb_dir = tmp_path / "pre-result-observations"
+    source = tmp_path / "published-source.txt"
+    source.write_text("Published knowledge survives model metadata upgrades.", encoding="utf-8")
+    runtime = DesktopKnowledgeBaseRuntime()
+    runtime.create(kb_dir, name="Migration fixture")
+    imported = DesktopTextImportService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(
+            lambda *_args: (
+                '{"schema_version":"openkb.knowledge-analysis.v1",'
+                '"analysis_scope":"document","document_description":"Fixture",'
+                '"concepts":[],"entities":[]}'
+            )
+        ),
+    ).import_text(source)
+    pages = DesktopKnowledgePageService(kb_dir)
+    draft = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Migration Safety",
+        content_markdown="# Published authority",
+    )
+    published = pages.publish(draft.page_id)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE model_calls
+            SET status = 'failed', lifecycle_status = 'provider_failure'
+            WHERE job_id = ?
+            """,
+            (imported.job.job_id,),
+        )
+        connection.execute(
+            """
+            UPDATE model_attempts
+            SET status = 'failed', lifecycle_status = 'provider_failure'
+            WHERE call_id IN (SELECT call_id FROM model_calls WHERE job_id = ?)
+            """,
+            (imported.job.job_id,),
+        )
+        connection.execute("DROP TABLE model_capability_checks")
+        for table, column, _definition in MODEL_RESULT_OBSERVATION_COLUMNS:
+            connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        connection.execute("DELETE FROM schema_migrations WHERE version IN (43, 44)")
+        connection.commit()
+
+    first = DesktopKnowledgeBaseRuntime().open(kb_dir)
+    second = DesktopKnowledgeBaseRuntime().open(kb_dir)
+
+    assert first.knowledge_base.schema_version == LATEST_SCHEMA_VERSION
+    assert second.knowledge_base.schema_version == LATEST_SCHEMA_VERSION
+    restored = DesktopKnowledgePageService(kb_dir).get_page(published.page_id)
+    assert restored.published_revision == published.published_revision
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            """
+            SELECT version, COUNT(*) FROM schema_migrations
+            WHERE version IN (43, 44) GROUP BY version
+            """
+        ).fetchall() == [(43, 1), (44, 1)]
+        assert connection.execute(
+            "SELECT status, lifecycle_status FROM model_calls WHERE job_id = ?",
+            (imported.job.job_id,),
+        ).fetchone() == ("failed", "provider_failure")
+        for table, column, _definition in MODEL_RESULT_OBSERVATION_COLUMNS:
+            columns = connection.execute(f"PRAGMA table_info({table})").fetchall()
+            assert [str(row[1]) for row in columns].count(column) == 1
+            assert connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {column} IS NOT NULL"
+            ).fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM model_capability_checks").fetchone() == (
+            0,
+        )
+        assert connection.execute(
+            "SELECT availability FROM source_documents WHERE document_id = ?",
+            (imported.document.document_id,),
+        ).fetchone() == ("available",)
 
 
 def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):

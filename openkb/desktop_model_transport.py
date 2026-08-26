@@ -15,6 +15,8 @@ from openkb.config import LlmCredentialBundle, resolve_credential_bundle
 from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_model_active_streams import DesktopActiveModelStreams
 from openkb.desktop_model_active_streams import once as _once
+from openkb.desktop_model_analysis_gate import DesktopAnalysisCapabilityGate
+from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
 from openkb.desktop_model_dispatch import (
     _concurrency_gate_for,
     _ConcurrentDesktopModelTransport,
@@ -22,15 +24,19 @@ from openkb.desktop_model_dispatch import (
     _DesktopModelRateLimiter,
     _rate_limiter_for,
 )
+from openkb.desktop_model_execution_profile import DesktopModelExecutionProfile
 from openkb.desktop_model_gateway import (
     DesktopModelGateway,
+    DesktopModelOutputObservations,
     DesktopModelProviderResponse,
     DesktopModelRequest,
     DesktopModelTransportError,
+    DesktopProviderStreamEvent,
     DesktopProviderTokenUsage,
     ExecutionLane,
 )
 from openkb.desktop_model_http_lifecycle import terminal_completion_client
+from openkb.desktop_model_provider_adapter import provider_adapter_for
 from openkb.desktop_model_roles import DesktopRoleModelGateway
 from openkb.desktop_model_settings import (
     DEFAULT_MAX_CONCURRENT_MODEL_CALLS,
@@ -133,11 +139,14 @@ def _gateway_for(
             max_concurrent_model_calls=concurrency,
             analysis_model=analysis_model if analysis_model != default_model else None,
             answer_model=answer_model if answer_model != default_model else None,
+            analysis_reasoning=override.reasoning if override is not None else None,
         )
     elif (
         analysis_model != settings.analysis_model_name
         or override is not None
         and override.context_capacity is not None
+        or override is not None
+        and override.reasoning is not None
     ):
         from dataclasses import replace
 
@@ -148,6 +157,11 @@ def _gateway_for(
                 override.context_capacity
                 if override is not None and override.context_capacity is not None
                 else settings.analysis_context_capacity
+            ),
+            analysis_reasoning=(
+                override.reasoning
+                if override is not None and override.reasoning is not None
+                else settings.analysis_reasoning
             ),
         )
 
@@ -177,6 +191,18 @@ def _gateway_for(
         gateways[selected_model] = gateway
         return gateway
 
+    capability_store = DesktopModelCapabilityStore(kb_dir)
+
+    def invalidate_analysis_capability(
+        profile: DesktopModelExecutionProfile,
+        failure_code: str,
+        reason: str,
+    ) -> None:
+        DesktopAnalysisCapabilityGate(kb_dir, profile, True).invalidate_failure(
+            failure_code,
+            reason=reason,
+        )
+
     return DesktopRoleModelGateway(
         settings=settings,
         default_gateway=terminal_gateway(default_model),
@@ -184,6 +210,8 @@ def _gateway_for(
         answer_gateway=terminal_gateway(answer_model),
         gateway_factory=terminal_gateway,
         usage_store=DesktopModelUsageStore(kb_dir),
+        analysis_capability_verifier=capability_store.is_verified,
+        analysis_capability_invalidator=invalidate_analysis_capability,
     )
 
 
@@ -229,7 +257,7 @@ class DesktopLiteLLMTransport:
         self,
         request: DesktopModelRequest,
         connect_timeout_seconds: float,
-        on_delta: Callable[[str], None],
+        on_delta: Callable[[object], None],
     ) -> object:
         """Stream with no first-byte, read, reasoning, generation, or total deadline."""
         return self.stream_until_terminal_with_lifecycle(
@@ -246,7 +274,7 @@ class DesktopLiteLLMTransport:
         self,
         request: DesktopModelRequest,
         connect_timeout_seconds: float,
-        on_delta: Callable[[str], None],
+        on_delta: Callable[[object], None],
         on_request_sent: Callable[[], None],
     ) -> object:
         response, close = self._terminal_completion(
@@ -279,21 +307,49 @@ class DesktopLiteLLMTransport:
         self,
         request: DesktopModelRequest,
         response: object,
-        on_delta: Callable[[str], None],
+        on_delta: Callable[[object], None],
     ) -> str:
         if not hasattr(response, "__iter__"):
             raise DesktopModelTransportError("response_format")
         parts: list[str] = []
         usage: DesktopProviderTokenUsage | None = None
         provider_request_id: str | None = None
+        finish_reason: str | None = None
+        reasoning_chunk_count = 0
+        final_chunk_count = 0
+        reasoning_character_count = 0
+        final_character_count = 0
+        output_limit_reached = False
+        adapter = (
+            provider_adapter_for(request.provider_adapter)
+            if request.provider_adapter is not None
+            else None
+        )
         try:
             for chunk in response:
                 usage = _provider_token_usage(chunk) or usage
                 provider_request_id = _provider_request_id(chunk) or provider_request_id
-                delta = _stream_delta(chunk)
-                if delta:
-                    parts.append(delta)
-                    on_delta(delta)
+                event = (
+                    adapter.stream_event(chunk)
+                    if adapter is not None
+                    else _legacy_stream_event(chunk)
+                )
+                if event.finish_reason is not None:
+                    finish_reason = event.finish_reason
+                output_limit_reached = output_limit_reached or event.output_limit_reached
+                if event.reasoning_character_count:
+                    reasoning_chunk_count += 1
+                    reasoning_character_count += event.reasoning_character_count
+                if event.final_content:
+                    final_chunk_count += 1
+                    final_character_count += len(event.final_content)
+                    parts.append(event.final_content)
+                if (
+                    event.final_content
+                    or event.reasoning_character_count
+                    or event.finish_reason is not None
+                ):
+                    on_delta(event)
         except DesktopModelTransportError:
             raise
         except Exception as error:
@@ -308,6 +364,16 @@ class DesktopLiteLLMTransport:
             "".join(parts),
             usage=usage,
             provider_request_id=provider_request_id,
+            observations=DesktopModelOutputObservations(
+                finish_reason=finish_reason,
+                reasoning_observed=reasoning_chunk_count > 0,
+                final_content_observed=bool("".join(parts).strip()),
+                reasoning_chunk_count=reasoning_chunk_count,
+                final_chunk_count=final_chunk_count,
+                reasoning_character_count=reasoning_character_count,
+                final_character_count=final_character_count,
+                output_limit_reached=output_limit_reached,
+            ),
         )
 
     def _terminal_completion(
@@ -388,25 +454,7 @@ class DesktopLiteLLMTransport:
                 **({"stream": True} if stream else {}),
                 **({"stream_options": {"include_usage": True}} if stream else {}),
                 max_retries=0,
-                **(
-                    {"reasoning_effort": request.reasoning_effort}
-                    if request.reasoning_effort is not None
-                    else {}
-                ),
-                **(
-                    {
-                        "response_format": {
-                            "type": "json_schema",
-                            "json_schema": {
-                                "name": request.response_schema_name or "openkb_structured_output",
-                                "strict": True,
-                                "schema": request.response_schema,
-                            },
-                        }
-                    }
-                    if request.response_schema is not None
-                    else {}
-                ),
+                **_provider_request_parameters(request),
                 **({"client": completion_client} if completion_client is not None else {}),
                 **(
                     {"extra_headers": self._bundle.extra_headers}
@@ -479,17 +527,69 @@ def _messages_for(request: DesktopModelRequest) -> list[dict[str, str]]:
     ]
 
 
+def _provider_request_parameters(request: DesktopModelRequest) -> dict[str, object]:
+    """Translate pinned request semantics through the selected provider adapter."""
+    if request.provider_adapter is not None:
+        adapter = provider_adapter_for(request.provider_adapter)
+        if (
+            request.provider_adapter_version is not None
+            and request.provider_adapter_version != adapter.version
+        ):
+            raise DesktopModelTransportError("configuration")
+        return adapter.request_parameters(
+            structured_output_mode=request.structured_output_mode,
+            response_schema=request.response_schema,
+            response_schema_name=request.response_schema_name,
+            reasoning=request.reasoning_effort,
+        )
+
+    # Compatibility for direct callers created before provider adapters were pinned.
+    parameters: dict[str, object] = {}
+    if request.reasoning_effort is not None:
+        parameters["reasoning_effort"] = request.reasoning_effort
+    if request.response_schema is not None:
+        parameters["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": request.response_schema_name or "openkb_structured_output",
+                "strict": True,
+                "schema": request.response_schema,
+            },
+        }
+    return parameters
+
+
 def _response_content(response: object) -> str:
     choices = _value(response, "choices")
     if not isinstance(choices, list) or not choices:
         raise DesktopModelTransportError("response_format")
-    content = _value(_value(choices[0], "message"), "content")
-    if not isinstance(content, str) or not content.strip():
+    choice = choices[0]
+    message = _value(choice, "message")
+    content = _value(message, "content")
+    if content is None:
+        content = ""
+    if not isinstance(content, str):
         raise DesktopModelTransportError("response_format")
+    reasoning = _value(message, "reasoning_content") or _value(message, "reasoning")
+    reasoning_characters = len(reasoning) if isinstance(reasoning, str) else 0
+    finish_reason = _value(choice, "finish_reason")
+    if not isinstance(finish_reason, str) or not finish_reason:
+        finish_reason = None
     return DesktopModelProviderResponse(
         content,
         usage=_provider_token_usage(response),
         provider_request_id=_provider_request_id(response),
+        observations=DesktopModelOutputObservations(
+            finish_reason=finish_reason,
+            reasoning_observed=reasoning_characters > 0,
+            final_content_observed=bool(content.strip()),
+            reasoning_chunk_count=1 if reasoning_characters else 0,
+            final_chunk_count=1 if content else 0,
+            reasoning_character_count=reasoning_characters,
+            final_character_count=len(content),
+            output_limit_reached=finish_reason
+            in {"length", "max_tokens", "max_output_tokens"},
+        ),
     )
 
 
@@ -530,6 +630,19 @@ def _stream_delta(chunk: object) -> str:
         return ""
     content = _value(_value(choices[0], "delta"), "content")
     return content if isinstance(content, str) else ""
+
+
+def _legacy_stream_event(chunk: object) -> DesktopProviderStreamEvent:
+    choices = _value(chunk, "choices")
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    finish_reason = _value(choice, "finish_reason")
+    if not isinstance(finish_reason, str) or not finish_reason:
+        finish_reason = None
+    return DesktopProviderStreamEvent(
+        final_content=_stream_delta(chunk),
+        finish_reason=finish_reason,
+        output_limit_reached=finish_reason in {"length", "max_tokens", "max_output_tokens"},
+    )
 
 
 def _terminal_provider_error_category(error: Exception) -> str | None:

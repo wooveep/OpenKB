@@ -15,7 +15,7 @@ from openkb.desktop_page_tree_enrichment import DesktopPageTreeEnrichmentService
 
 if TYPE_CHECKING:
     from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
-    from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_model_gateway import DesktopModelGateway, gateway_analysis_capability_verified
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,11 @@ def start_page_tree_enrichments(
                 service.recover_interrupted()
             except (OSError, sqlite3.Error):
                 logger.warning("Could not recover interrupted PageTree enrichment work.")
-        if gateway is None or not _page_tree_enrichment_enabled(resolved):
+        if (
+            gateway is None
+            or not gateway_analysis_capability_verified(gateway)
+            or not _page_tree_enrichment_enabled(resolved)
+        ):
             return
         with server._workers_lock:
             server._page_tree_enrichment_gateways[resolved] = gateway
@@ -96,6 +100,11 @@ def _run_worker(server: DesktopEngineServer, kb_dir: Path, lease: int) -> None:
         with server._workers_lock:
             return (kb_dir, document_id) in server._page_tree_enrichment_cancelled
 
+    def gateway_is_current(gateway: DesktopModelGateway) -> bool:
+        with server._workers_lock:
+            current = server._page_tree_enrichment_gateways.get(kb_dir) is gateway
+        return current and gateway_analysis_capability_verified(gateway)
+
     try:
         service = DesktopPageTreeEnrichmentService(kb_dir)
         while not should_stop():
@@ -114,7 +123,11 @@ def _run_worker(server: DesktopEngineServer, kb_dir: Path, lease: int) -> None:
                 server._page_tree_enrichment_retries.discard(kb_dir)
             service.queue_eligible(gateway, retry_failed=retry_failed)
             for document_id in service.pending_document_ids(gateway):
-                if should_stop() or service.deterministic_work_active():
+                if (
+                    should_stop()
+                    or not gateway_is_current(gateway)
+                    or service.deterministic_work_active()
+                ):
                     break
                 if document_cancelled(document_id):
                     continue
@@ -128,6 +141,8 @@ def _run_worker(server: DesktopEngineServer, kb_dir: Path, lease: int) -> None:
                     should_stop=should_stop_document,
                 )
             if should_stop():
+                break
+            if not gateway_is_current(gateway):
                 break
             if service.deterministic_work_active():
                 server._shutdown.wait(0.2)
@@ -208,3 +223,15 @@ def invalidate_page_tree_enrichment_workers(server: DesktopEngineServer) -> None
     """Invalidate workers before changing the active Knowledge Base."""
     with server._workers_lock:
         server._page_tree_enrichment_lease += 1
+
+
+def retire_page_tree_enrichment_gateway(
+    server: DesktopEngineServer,
+    kb_dir: Path,
+) -> None:
+    """Let an active attempt finish, but prevent its captured gateway dispatching again."""
+    resolved = kb_dir.expanduser().resolve()
+    with server._workers_lock:
+        server._page_tree_enrichment_gateways.pop(resolved, None)
+        server._page_tree_enrichment_reruns.discard(resolved)
+        server._page_tree_enrichment_retries.discard(resolved)

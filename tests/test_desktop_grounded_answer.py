@@ -5,11 +5,17 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from openkb.desktop_grounded_answer import (
     DesktopGroundedAnswerService,
 )
 from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_model_gateway import (
+    DesktopModelGateway,
+    DesktopModelOutputObservations,
+    DesktopModelProviderResponse,
+)
 from openkb.desktop_retrieval import _source_image_matches_evidence
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
@@ -173,6 +179,119 @@ def test_grounded_answer_persists_an_interruption_when_the_answer_model_fails(tm
     assert answer.interruption_code == "model_response_invalid"
     assert answer.answer_text == ""
     assert DesktopGroundedAnswerService(kb_dir).list() == (answer,)
+
+
+@pytest.mark.parametrize(
+    ("observations", "expected_code"),
+    (
+        (DesktopModelOutputObservations(finish_reason="stop"), "empty_final_result"),
+        (
+            DesktopModelOutputObservations(
+                finish_reason="stop",
+                reasoning_observed=True,
+                reasoning_chunk_count=1,
+                reasoning_character_count=91,
+            ),
+            "reasoning_only_result",
+        ),
+        (
+            DesktopModelOutputObservations(
+                finish_reason="length",
+                reasoning_observed=True,
+                reasoning_chunk_count=2,
+                reasoning_character_count=182,
+                output_limit_reached=True,
+            ),
+            "reasoning_output_exhausted",
+        ),
+    ),
+)
+def test_answer_result_failures_are_explicit_interrupted_cards_without_retry(
+    tmp_path, observations, expected_code
+) -> None:
+    kb_dir = tmp_path / expected_code
+    source = tmp_path / f"{expected_code}.txt"
+    source.write_text("OpenKB keeps grounded evidence available.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+    grounded_calls = 0
+
+    class ResultFailureTransport:
+        def __call__(self, _request, _timeout_seconds):
+            return '{"terms":["evidence"]}'
+
+        def stream_until_terminal(self, request, _timeout_seconds, _on_delta):
+            nonlocal grounded_calls
+            if request.operation == "retrieval_plan":
+                return '{"terms":["evidence"]}'
+            grounded_calls += 1
+            return DesktopModelProviderResponse("", observations=observations)
+
+    answer = DesktopGroundedAnswerService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(ResultFailureTransport()),
+    ).answer("What does OpenKB keep available?")
+
+    assert grounded_calls == 1
+    assert answer.status == "interrupted"
+    assert answer.interruption_code == expected_code
+    assert answer.answer_text == ""
+    assert answer.citations
+    assert DesktopGroundedAnswerService(kb_dir).list() == (answer,)
+
+
+def test_reasoning_only_answer_is_replaced_only_after_an_explicit_successful_retry(
+    tmp_path,
+) -> None:
+    kb_dir = tmp_path / "reasoning-retry"
+    source = tmp_path / "reasoning-retry.txt"
+    source.write_text("OpenKB keeps retryable grounded evidence.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+
+    class ReasoningThenFinalTransport:
+        def __init__(self) -> None:
+            self.grounded_calls = 0
+
+        def __call__(self, _request, _timeout_seconds):
+            return '{"terms":["evidence"]}'
+
+        def stream_until_terminal(self, request, _timeout_seconds, on_delta):
+            if request.operation == "retrieval_plan":
+                return '{"terms":["evidence"]}'
+            self.grounded_calls += 1
+            if self.grounded_calls == 1:
+                return DesktopModelProviderResponse(
+                    "",
+                    observations=DesktopModelOutputObservations(
+                        finish_reason="stop",
+                        reasoning_observed=True,
+                        reasoning_chunk_count=1,
+                        reasoning_character_count=73,
+                    ),
+                )
+            on_delta("Recovered cited answer [1].")
+            return "Recovered cited answer [1]."
+
+    transport = ReasoningThenFinalTransport()
+    service = DesktopGroundedAnswerService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(transport),
+    )
+    interrupted = service.answer("What evidence is retryable?")
+
+    assert interrupted.status == "interrupted"
+    assert interrupted.interruption_code == "reasoning_only_result"
+    assert service.list() == (interrupted,)
+
+    replacement = service.retry(interrupted.answer_id)
+
+    assert transport.grounded_calls == 2
+    assert replacement.answer_id == interrupted.answer_id
+    assert replacement.created_at == interrupted.created_at
+    assert replacement.status == "completed"
+    assert replacement.answer_text == "Recovered cited answer [1]."
+    assert service.list() == (replacement,)
 
 
 def test_grounded_answer_streams_model_deltas_without_losing_baseline_terms(tmp_path):

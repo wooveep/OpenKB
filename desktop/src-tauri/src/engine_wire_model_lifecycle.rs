@@ -32,6 +32,28 @@ pub struct ModelCallLifecycleEventData {
     pub attempt_id: String,
     #[serde(alias = "long_wait_threshold_seconds")]
     pub long_wait_threshold_seconds: f64,
+    #[serde(default, alias = "finish_reason")]
+    pub finish_reason: Option<String>,
+    #[serde(default, alias = "reasoning_observed")]
+    pub reasoning_observed: Option<bool>,
+    #[serde(default, alias = "final_content_observed")]
+    pub final_content_observed: Option<bool>,
+    #[serde(default, alias = "reasoning_chunk_count")]
+    pub reasoning_chunk_count: Option<u64>,
+    #[serde(default, alias = "final_chunk_count")]
+    pub final_chunk_count: Option<u64>,
+    #[serde(default, alias = "reasoning_character_count")]
+    pub reasoning_character_count: Option<u64>,
+    #[serde(default, alias = "final_character_count")]
+    pub final_character_count: Option<u64>,
+    #[serde(default, alias = "input_tokens")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, alias = "output_tokens")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, alias = "total_tokens")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, alias = "provider_request_id")]
+    pub provider_request_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -40,6 +62,7 @@ pub enum ModelCallLifecycleStatus {
     Queued,
     Connecting,
     AwaitingModelResult,
+    ReasoningOutputActivity,
     ModelOutputActivity,
     Validating,
     Completed,
@@ -47,4 +70,5 @@ pub enum ModelCallLifecycleStatus {
     Cancelled,
     ProviderFailure,
     NetworkFailure,
+    ModelResultFailure,
 }

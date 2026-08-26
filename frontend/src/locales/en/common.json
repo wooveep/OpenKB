@@ -169,6 +169,18 @@
         "failed": "Failed"
       },
       "modelRetrying": "Retrying after an explicit failure: {{reason}}",
+      "modelResultDetails": {
+        "title": "Model result details",
+        "finishReason": "Finish reason",
+        "reasoningObserved": "Reasoning observed",
+        "finalContentObserved": "Final content observed",
+        "reasoningChunks": "Reasoning chunks",
+        "finalChunks": "Final-content chunks",
+        "reasoningCharacters": "Reasoning characters",
+        "finalCharacters": "Final-content characters",
+        "tokens": "Provider tokens",
+        "providerRequestId": "Provider request ID"
+      },
       "quarantinedTitle": "Document isolated from Available Knowledge",
       "quarantinedAttempts": "Automatic attempts: {{attempts}}",
       "failedDocuments": "Failed documents",
@@ -183,10 +195,14 @@
       "recoveryModelPlaceholder": "Use the configured model",
       "recoveryContext": "Context capacity (tokens, optional)",
       "recoveryContextPlaceholder": "Use detected model capacity",
+      "recoveryReasoning": "Reasoning for this recovery",
+      "recoveryReasoningConfigured": "Use configured Analysis reasoning",
       "recoveryInvalidContext": "Enter a context capacity of at least 4,096 tokens.",
       "recoveryChoiceTitle": "Historical deadline recovery",
+      "recoveryProfileChoiceTitle": "Analysis profile Replan",
       "recoveryChoiceRequired": "Choose how to recover this historical model-deadline task.",
       "recoveryRecommended": "Recommended",
+      "recoveryProfileReplanNotice": "The saved Analysis profile is incompatible or failed. Check the replacement profile first, then keep Raw Asset, Document IR, and Evidence while discarding {{checkpoints}} model checkpoint(s).",
       "recoveryChoices": {
         "continue_compatible": {
           "title": "Continue compatible work",
@@ -197,7 +213,8 @@
           "description": "Keep parser, document structure, and evidence; about {{calls}} calls and {{tokens}} input tokens remain."
         }
       },
-      "recoverImport": "Recover document",
+      "checkAndRecover": "Check and recover",
+      "checkingAndRecovering": "Checking and recovering…",
       "schemaVersion": "SQLite schema",
       "checkpoint": "Latest checkpoint",
       "notYet": "Not created yet",
@@ -340,6 +357,13 @@
           "medium": "Medium",
           "high": "High"
         },
+        "noStructuredMode": "Answer-only adapter",
+        "effectiveSources": {
+          "explicit_role": "Explicit role setting",
+          "inherited_default": "Inherited from Default",
+          "analysis_safe_default": "Analysis safe default",
+          "provider_default": "Provider default"
+        },
         "pricingTitle": "Optional user pricing",
         "pricingDescription": "Prices are per one million tokens and are used only for local cost estimates. OpenKB never guesses prices.",
         "inputPrice": "Input price",
@@ -361,16 +385,26 @@
           "queued": "Waiting for an available model-call slot…",
           "connecting": "Connecting to the model (up to 30 seconds)…",
           "awaiting_model_result": "Request sent; waiting for the model result. Thinking and generation time do not time out.",
+          "reasoning_output_activity": "The model is returning private reasoning activity…",
           "model_output_activity": "The model is returning output…",
           "validating": "Validating the model result…",
           "completed": "Model check completed.",
           "retrying": "An explicit retryable failure was received; retrying…",
           "cancelled": "Local model wait cancelled. The provider may still continue computing or billing.",
           "provider_failure": "The model provider returned an explicit failure.",
-          "network_failure": "The model connection encountered a network failure."
+          "network_failure": "The model connection encountered a network failure.",
+          "model_result_failure": "The model returned no usable final result."
         },
         "testSucceeded": "Connected in {{latency}} ms ({{attempts}} attempt).",
         "testRejected": "The model provider did not accept the connection test.",
+        "analysisCapability": "Analysis capability",
+        "capabilityStates": {
+          "unchecked": "Unchecked",
+          "checking": "Checking",
+          "verified": "Verified",
+          "failed": "Check failed",
+          "cancelled": "Check cancelled"
+        },
         "appearanceTitle": "Appearance & language",
         "appearanceDescription": "These preferences apply to the desktop workbench on this device.",
         "theme": "Theme",
@@ -568,13 +602,15 @@
         "queued": "Waiting for a model slot",
         "connecting": "Connecting",
         "awaiting_first_result": "Waiting for the first model result",
+        "receiving_reasoning": "Receiving private reasoning activity",
         "receiving_output": "Receiving model output",
         "validating": "Validating model output",
         "retrying": "Retrying after an explicit failure",
         "completed": "Model call completed",
         "interrupted": "Model call interrupted",
         "provider_failure": "Provider failure",
-        "network_failure": "Network failure"
+        "network_failure": "Network failure",
+        "model_result_failure": "No usable final model result"
       },
       "knowledgeAnalysisPhases": {
         "batches": "Analyzing sections",

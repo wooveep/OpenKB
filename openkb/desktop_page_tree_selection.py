@@ -21,6 +21,8 @@ from openkb.desktop_model_gateway import (
     DesktopModelCancelledError,
     DesktopModelGateway,
     DesktopModelRequest,
+    gateway_analysis_capability_verified,
+    invalidate_analysis_capability,
 )
 from openkb.desktop_page_tree import PageTreeGeneration
 from openkb.desktop_page_tree_store import lease_current_page_tree
@@ -96,6 +98,12 @@ def select_page_tree_evidence(
                     trigger_reasons=triggers,
                     degradation_reasons=("page_tree_selection_unavailable",),
                 )
+            if not gateway_analysis_capability_verified(model_gateway):
+                return PageTreeSelectionResult(
+                    generation_ids=generation_ids,
+                    trigger_reasons=triggers,
+                    degradation_reasons=("page_tree_selection_unverified",),
+                )
             prompt = _selection_prompt(question, trees)
             attempts = 0
             response_characters = 0
@@ -151,14 +159,31 @@ def select_page_tree_evidence(
                     degradation_reasons=("page_tree_selection_cancelled",),
                     model_cost=_selection_cost(prompt, attempts),
                 )
-            except DesktopModelCallError:
+            except DesktopModelCallError as error:
+                invalidate_analysis_capability(
+                    model_gateway,
+                    error.failure.code,
+                    error.failure.reason,
+                )
                 return PageTreeSelectionResult(
                     generation_ids=generation_ids,
                     trigger_reasons=triggers,
                     degradation_reasons=("page_tree_selection_failed",),
                     model_cost=_selection_cost(prompt, attempts),
                 )
-            except (DesktopStructuredOutputInvalidError, ValueError, json.JSONDecodeError):
+            except DesktopStructuredOutputInvalidError as error:
+                invalidate_analysis_capability(
+                    model_gateway,
+                    "model_response_invalid",
+                    str(error),
+                )
+                return PageTreeSelectionResult(
+                    generation_ids=generation_ids,
+                    trigger_reasons=triggers,
+                    degradation_reasons=("page_tree_selection_invalid",),
+                    model_cost=_selection_cost(prompt, attempts, response_characters),
+                )
+            except (ValueError, json.JSONDecodeError):
                 return PageTreeSelectionResult(
                     generation_ids=generation_ids,
                     trigger_reasons=triggers,

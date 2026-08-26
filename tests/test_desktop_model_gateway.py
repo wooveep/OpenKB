@@ -119,7 +119,13 @@ def test_recovery_override_is_ephemeral_and_carries_model_context(tmp_path, monk
     kb_dir = tmp_path / "desktop-kb"
     DesktopKnowledgeBaseRuntime().create(kb_dir, name="Recovery KB")
     config_path = kb_dir / ".openkb" / "config.yaml"
-    config_path.write_text("model: default/model\n", encoding="utf-8")
+    config_path.write_text(
+        "model: default/model\n"
+        "desktop:\n"
+        "  provider: deepseek\n"
+        "  api_base_url: https://api.deepseek.com\n",
+        encoding="utf-8",
+    )
     models: list[object] = []
     requests: list[DesktopModelRequest] = []
 
@@ -152,10 +158,15 @@ def test_recovery_override_is_ephemeral_and_carries_model_context(tmp_path, monk
     )
 
     assert result.content == "Recovered"
-    assert "openai/recovery/model" in models
+    assert "deepseek/recovery/model" in models
     assert requests[0].model_name == "recovery/model"
     assert requests[0].context_capacity == 32_768
-    assert config_path.read_text(encoding="utf-8") == "model: default/model\n"
+    assert config_path.read_text(encoding="utf-8") == (
+        "model: default/model\n"
+        "desktop:\n"
+        "  provider: deepseek\n"
+        "  api_base_url: https://api.deepseek.com\n"
+    )
 
 
 def test_non_retryable_errors_end_after_one_explicit_attempt() -> None:

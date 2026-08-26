@@ -7,13 +7,13 @@ import logging
 import sqlite3
 import uuid
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from openkb import __version__
 from openkb.desktop_catalog_store import queue_catalog_rebuild_in, start_catalog_rebuilds
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
+from openkb.desktop_import_clock import timestamp
 from openkb.desktop_knowledge_analysis import (
     KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
     KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
@@ -47,6 +47,10 @@ from openkb.desktop_knowledge_reanalysis_recovery import (
 )
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
 from openkb.desktop_missing_sources import record_missing_source_candidates_in
+from openkb.desktop_model_analysis_gate import (
+    DesktopAnalysisCapabilityGate,
+    DesktopImportAnalysisExecution,
+)
 from openkb.desktop_model_event import normalize_model_event
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
@@ -106,7 +110,7 @@ class DesktopKnowledgeReanalysisService:
                 "knowledge_reanalysis_documents_invalid",
                 f"Choose between 1 and {_MAX_DOCUMENTS_PER_RUN} Available documents.",
             )
-        now = _timestamp()
+        now = timestamp()
         run_id = uuid.uuid4().hex
         with kb_ingest_lock(self._state_dir):
             connection = _connect(self._database_path)
@@ -227,7 +231,7 @@ class DesktopKnowledgeReanalysisService:
                         "knowledge_reanalysis_already_running",
                         "This document content already has active Knowledge Reanalysis work.",
                     )
-                now = _timestamp()
+                now = timestamp()
                 connection.execute(
                     """
                     UPDATE knowledge_reanalysis_jobs SET status = 'pending', phase = 'pending',
@@ -293,7 +297,20 @@ class DesktopKnowledgeReanalysisService:
         should_stop: Callable[[], bool] = lambda: False,
     ) -> None:
         execution_token: str | None = None
+        analysis_gate = DesktopAnalysisCapabilityGate(self._kb_dir, None, False)
         try:
+            persisted_plan = DesktopKnowledgeAnalysisBatchStore(
+                self._kb_dir,
+                reanalysis=True,
+            ).persisted_plan(job_id)
+            analysis_execution = DesktopImportAnalysisExecution.resolve(
+                self._kb_dir,
+                gateway,
+                persisted_plan,
+            )
+            analysis_gate = analysis_execution.gate
+            if not analysis_gate.verified:
+                return
             document_id, document_name, expected_digest, execution_token = self._begin_job(
                 job_id, gateway
             )
@@ -314,6 +331,11 @@ class DesktopKnowledgeReanalysisService:
                         raise DesktopImportError(
                             "knowledge_reanalysis_interrupted",
                             "Knowledge Reanalysis stopped with the Desktop Runtime.",
+                        )
+                    if not analysis_gate.verified:
+                        raise DesktopImportError(
+                            "awaiting_model_configuration",
+                            "Knowledge Reanalysis is waiting for Model Capability Check.",
                         )
 
                 def analyze(request: DesktopModelRequest):
@@ -342,8 +364,8 @@ class DesktopKnowledgeReanalysisService:
                     document_name=document_name,
                     evidence=evidence,
                     page_tree=page_tree,
-                    provider=gateway.provider_name,
-                    model=gateway.model_name,
+                    provider=analysis_execution.provider,
+                    model=analysis_execution.model,
                     engine_version=__version__,
                     analyze=analyze,
                     honor_control=honor_control,
@@ -351,17 +373,8 @@ class DesktopKnowledgeReanalysisService:
                         job_id, execution_token, completed, total
                     ),
                     max_parallel_batches=getattr(gateway, "analysis_concurrency", 1),
-                    capability_profile=(
-                        capability("knowledge_analysis")
-                        if callable(
-                            capability := getattr(
-                                gateway,
-                                "capability_for_operation",
-                                None,
-                            )
-                        )
-                        else None
-                    ),
+                    capability_profile=analysis_execution.capability,
+                    execution_profile=analysis_gate.profile,
                 )
                 honor_control()
                 self._apply_result(
@@ -374,9 +387,11 @@ class DesktopKnowledgeReanalysisService:
                     execution_token,
                 )
         except DesktopModelCallError as error:
+            analysis_gate.invalidate_result_failure(error)
             if execution_token is not None:
                 self._fail_job(job_id, execution_token, error.failure.code, error.failure.reason)
         except DesktopImportError as error:
+            analysis_gate.invalidate_failure(error.code, reason=str(error))
             if execution_token is not None:
                 self._fail_job(job_id, execution_token, error.code, str(error))
         except Exception as error:
@@ -389,7 +404,7 @@ class DesktopKnowledgeReanalysisService:
             connection = _connect(self._database_path)
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                now = _timestamp()
+                now = timestamp()
                 execution_token = uuid.uuid4().hex
                 row = connection.execute(
                     """
@@ -569,7 +584,7 @@ class DesktopKnowledgeReanalysisService:
                 queue_catalog_rebuild_in(connection, "successful_reanalysis")
                 if current_generation_id_in(connection) != initial_generation:
                     staged_projection = stage_okf_projection_in(connection, self._kb_dir)
-                now = _timestamp()
+                now = timestamp()
                 cursor = connection.execute(
                     """
                     UPDATE knowledge_reanalysis_jobs
@@ -604,7 +619,7 @@ class DesktopKnowledgeReanalysisService:
             connection = _connect(self._database_path)
             try:
                 with connection:
-                    now = _timestamp()
+                    now = timestamp()
                     run_id = _run_id_for_job_in(connection, job_id)
                     cursor = connection.execute(
                         """
@@ -782,7 +797,3 @@ def _json(value: object) -> str:
 
 def _optional_string(value: object) -> str | None:
     return str(value) if isinstance(value, str) and value else None
-
-
-def _timestamp() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()

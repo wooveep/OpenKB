@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import sqlite3
-import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable
@@ -36,6 +35,11 @@ from openkb.desktop_import_artifacts import (
     source_media_type,
     validate_text_source,
 )
+from openkb.desktop_import_checkpoint_validation import (
+    matches_preflight_checkpoint,
+    stage_completed,
+)
+from openkb.desktop_import_control import DesktopImportControl
 from openkb.desktop_import_deduplication import DuplicateImportSignal, normalized_body_sha256
 from openkb.desktop_import_failures import DIRECT_IMPORT_QUARANTINE_CODES
 from openkb.desktop_import_model_call import run_import_model_call
@@ -73,6 +77,11 @@ from openkb.desktop_knowledge_graph import (
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
 from openkb.desktop_legacy_model_recovery import DesktopLegacyModelRecoveryService
 from openkb.desktop_missing_sources import record_missing_source_candidates_in
+from openkb.desktop_model_analysis_gate import (
+    DesktopAnalysisCapabilityGate,
+    DesktopImportAnalysisExecution,
+)
+from openkb.desktop_model_execution_profile import DesktopModelCapacityError
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -89,28 +98,6 @@ from openkb.locks import kb_import_activity_lock
 StageProgressCallback = Callable[[dict[str, object]], None]
 _CONTROL_CODES = {"import_paused", "import_cancelled", "awaiting_model_configuration"}
 logger = logging.getLogger(__name__)
-
-
-class DesktopImportControl:
-    """In-memory worker signals; durable state changes occur at stage boundaries."""
-
-    def __init__(self) -> None:
-        self._pause = threading.Event()
-        self._cancel = threading.Event()
-
-    def request_pause(self) -> None:
-        self._pause.set()
-
-    def request_cancel(self) -> None:
-        self._cancel.set()
-
-    @property
-    def action(self) -> str | None:
-        if self._cancel.is_set():
-            return "cancelled"
-        if self._pause.is_set():
-            return "paused"
-        return None
 
 
 class DesktopTextImportService:
@@ -248,15 +235,16 @@ class DesktopTextImportService:
     def _run(self, state: ImportJobState) -> DesktopTextImportResult:
         stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
         active_stage = (
-            "raw_asset" if self._completed(stages, "raw_asset") else self._next_stage(state, stages)
+            "raw_asset" if stage_completed(stages, "raw_asset") else self._next_stage(state, stages)
         )
         terminal_state_committed = False
+        analysis_gate = DesktopAnalysisCapabilityGate(self._store.kb_dir, None, False)
         parser_warmup = begin_parser_warmup(state.source)
         try:
             raw_bytes, text, source_format, asset_sha256, raw_path = self._raw_input(state, stages)
             stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
 
-            if not self._completed(stages, "document_ir"):
+            if not stage_completed(stages, "document_ir"):
                 active_stage = "document_ir"
                 self._honor_control(state, active_stage)
                 self._store.set_stage(state, active_stage, "running", 40)
@@ -292,7 +280,7 @@ class DesktopTextImportService:
             stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
             normalized_body_hash = normalized_body_sha256(blocks)
             content_duplicate: DesktopImportedDocument | None = None
-            if not self._completed(stages, "evidence"):
+            if not stage_completed(stages, "evidence"):
                 content_duplicate = self._store.find_available_document_by_normalized_body(
                     normalized_body_hash
                 )
@@ -362,7 +350,7 @@ class DesktopTextImportService:
             stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
             knowledge_analysis: DesktopKnowledgeAnalysis | None = None
             analysis_provenance_json: str | None = None
-            if not self._completed(stages, "model_analysis"):
+            if not stage_completed(stages, "model_analysis"):
                 active_stage = "model_analysis"
                 self._honor_control(state, active_stage)
                 self._store.set_stage(state, active_stage, "running", 80)
@@ -390,6 +378,42 @@ class DesktopTextImportService:
                     )
                 else:
                     gateway = self._model_gateway
+                    try:
+                        execution = DesktopImportAnalysisExecution.resolve(
+                            self._store.kb_dir,
+                            gateway,
+                            self._knowledge_analysis_batches.persisted_plan(state.job_id),
+                        )
+                        analysis_gate = execution.gate
+                    except DesktopModelCapacityError as error:
+                        self._store.await_model_configuration(state, active_stage)
+                        raise DesktopImportError(
+                            "awaiting_model_configuration",
+                            str(error),
+                            suggested_action=(
+                                "Choose a compatible Analysis profile, run Model Capability "
+                                "Check, then explicitly continue this import."
+                            ),
+                        ) from error
+                    if not analysis_gate.verified:
+                        self._store.await_model_configuration(state, active_stage)
+                        raise DesktopImportError(
+                            "awaiting_model_configuration",
+                            "The parsed document is waiting for an explicit Model Capability "
+                            "Check for its exact Analysis profile.",
+                            suggested_action=(
+                                "Run Model Capability Check, then explicitly continue this import."
+                            ),
+                        )
+
+                    def honor_analysis_control() -> None:
+                        self._honor_control(state, active_stage)
+                        if analysis_gate is not None and not analysis_gate.verified:
+                            raise DesktopImportError(
+                                "awaiting_model_configuration",
+                                "The Analysis profile changed or became unverified.",
+                            )
+
                     run = run_knowledge_analysis(
                         store=self._knowledge_analysis_batches,
                         job_id=state.job_id,
@@ -397,8 +421,8 @@ class DesktopTextImportService:
                         document_name=state.source.name,
                         evidence=evidence,
                         page_tree=page_tree.generation,
-                        provider=self._model_gateway.provider_name,
-                        model=self._model_gateway.model_name,
+                        provider=execution.provider,
+                        model=execution.model,
                         engine_version=__version__,
                         analyze=lambda request: run_import_model_call(
                             gateway=gateway,
@@ -409,7 +433,7 @@ class DesktopTextImportService:
                             request=request,
                             is_cancelled=lambda: self._control.action is not None,
                         ),
-                        honor_control=lambda: self._honor_control(state, active_stage),
+                        honor_control=honor_analysis_control,
                         on_batch_completed=lambda completed, total: self._store.emit_stage(
                             state,
                             active_stage,
@@ -417,17 +441,8 @@ class DesktopTextImportService:
                             80 + min(4, round((completed / total) * 4)),
                         ),
                         max_parallel_batches=getattr(gateway, "analysis_concurrency", 1),
-                        capability_profile=(
-                            capability("knowledge_analysis")
-                            if callable(
-                                capability := getattr(
-                                    gateway,
-                                    "capability_for_operation",
-                                    None,
-                                )
-                            )
-                            else None
-                        ),
+                        capability_profile=execution.capability,
+                        execution_profile=analysis_gate.profile,
                     )
                     knowledge_analysis = run.analysis
                     analysis_provenance_json = run.provenance_json
@@ -523,6 +538,7 @@ class DesktopTextImportService:
                 suggested_action="Continue the import to reuse completed checkpoints.",
             ) from error
         except DesktopModelCallError as error:
+            analysis_gate.invalidate_result_failure(error)
             logger.warning(
                 "import_model_analysis_quarantined job_id=%s document=%r stage=%s "
                 "call_id=%s attempts=%s category=%s",
@@ -551,6 +567,7 @@ class DesktopTextImportService:
             )
             raise DesktopImportError("document_quarantined", error.failure.reason) from error
         except DesktopImportError as error:
+            analysis_gate.invalidate_failure(error.code, reason=str(error))
             if error.code in DIRECT_IMPORT_QUARANTINE_CODES:
                 self._quarantine.quarantine(
                     job_id=state.job_id,
@@ -591,7 +608,7 @@ class DesktopTextImportService:
     ) -> tuple[bytes, str, str, str, str]:
         source_format = source_format_for_path(state.source)
         raw_suffix = state.source.suffix.lower()
-        if self._completed(stages, "raw_asset"):
+        if stage_completed(stages, "raw_asset"):
             checkpoint = self._checkpoint(state, "raw_asset")
             if not isinstance(checkpoint, dict):
                 raise DesktopImportError(
@@ -625,7 +642,7 @@ class DesktopTextImportService:
             return raw_bytes, text, source_format, actual_hash, raw_path
 
         active_stage = "preflight"
-        preflight_completed = self._completed(stages, active_stage)
+        preflight_completed = stage_completed(stages, active_stage)
         if not preflight_completed:
             self._honor_control(state, active_stage)
         raw_bytes = state.source.read_bytes()
@@ -634,7 +651,7 @@ class DesktopTextImportService:
         else:
             text = ""
         asset_sha256 = hashlib.sha256(raw_bytes).hexdigest()
-        if not preflight_completed or not self._matches_preflight_checkpoint(
+        if not preflight_completed or not matches_preflight_checkpoint(
             self._checkpoint(state, active_stage), asset_sha256, len(raw_bytes)
         ):
             if preflight_completed:
@@ -780,16 +797,3 @@ class DesktopTextImportService:
             if values[stage].status not in {"completed", "skipped"}:
                 return stage
         return "search"
-
-    @staticmethod
-    def _completed(stages: Mapping[str, DesktopStageRun], stage: str) -> bool:
-        return stages[stage].status in {"completed", "skipped"}
-
-    @staticmethod
-    def _matches_preflight_checkpoint(checkpoint: object, asset_sha256: str, raw_size: int) -> bool:
-        return (
-            isinstance(checkpoint, dict)
-            and checkpoint.get("asset_sha256") == asset_sha256
-            and type(checkpoint.get("raw_size")) is int
-            and checkpoint["raw_size"] == raw_size
-        )

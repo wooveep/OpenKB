@@ -13,6 +13,19 @@ const frontendDir = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const translations = JSON.parse(
   await readFile(resolve(frontendDir, "src/locales/en/common.json"), "utf8"),
 )
+const failedDocumentsSource = await readFile(
+  resolve(frontendDir, "src/desktop/FailedDocumentsDialog.tsx"),
+  "utf8",
+)
+for (const expected of [
+  "checkAndRecover: true",
+  "reasoning:",
+  "discardedModelCheckpoints",
+  "recoveryProfileReplanNotice",
+  "checkAndRecover",
+]) {
+  assert.match(failedDocumentsSource, new RegExp(expected))
+}
 await i18next.use(initReactI18next).init({
   lng: "en",
   fallbackLng: "en",
@@ -36,6 +49,12 @@ try {
   )
   const { DesktopKnowledgeGraphExtractionTasks } = await vite.ssrLoadModule(
     "/src/desktop/DesktopKnowledgeGraphExtractionTasks.tsx",
+  )
+  const { EffectiveModelRoleSettings } = await vite.ssrLoadModule(
+    "/src/desktop/DesktopModelSettingsPanel.tsx",
+  )
+  const { DesktopModelResultDetails } = await vite.ssrLoadModule(
+    "/src/desktop/DesktopModelResultDetails.tsx",
   )
   const { runDocumentImportBatch } = await vite.ssrLoadModule(
     "/src/desktop/desktop-import-batch.ts",
@@ -113,6 +132,53 @@ try {
   assert.match(graphMarkup, /guide\.docx/)
   assert.match(graphMarkup, /graph-call-1:1/)
   assert.match(graphMarkup, /Resume extraction/)
+  const effectiveSettingsMarkup = render(
+    React.createElement(EffectiveModelRoleSettings, {
+      adapter: {
+        identity: "deepseek",
+        version: "deepseek.v1",
+        structuredOutputMode: "json_object",
+        supportsStructuredAnalysis: true,
+        supportedReasoning: ["high", "low", "medium", "off"],
+        analysisUnavailableReason: null,
+      },
+      roles: {
+        default: { model: "deepseek-v4-pro", contextCapacity: 64000, reasoning: null, reasoningSource: "provider_default" },
+        analysis: { model: "deepseek-v4-pro", contextCapacity: 64000, reasoning: "off", reasoningSource: "analysis_safe_default" },
+        answer: { model: "deepseek-v4-pro", contextCapacity: 64000, reasoning: null, reasoningSource: "provider_default" },
+      },
+      capability: {
+        profileIdentity: "profile-1",
+        status: "verified",
+        failureCode: null,
+        reason: null,
+        checkedAt: "2026-08-26T00:00:00+00:00",
+      },
+    }),
+  )
+  for (const expected of ["DeepSeek", "json_object", "Analysis", "Off", "Provider default", "Verified"]) {
+    assert.match(effectiveSettingsMarkup, new RegExp(expected))
+  }
+  const resultDetailsMarkup = render(
+    React.createElement(DesktopModelResultDetails, {
+      result: {
+        finishReason: "length",
+        reasoningObserved: true,
+        finalContentObserved: false,
+        reasoningChunkCount: 3,
+        finalChunkCount: 0,
+        reasoningCharacterCount: 240,
+        finalCharacterCount: 0,
+        inputTokens: 10,
+        outputTokens: 90,
+        totalTokens: 100,
+        providerRequestId: "safe-request-id",
+      },
+    }),
+  )
+  for (const expected of ["Model result details", "length", "3", "240", "100", "safe-request-id"]) {
+    assert.match(resultDetailsMarkup, new RegExp(expected))
+  }
   let activeImports = 0
   let peakImports = 0
   await runDocumentImportBatch([0, 1, 2, 3, 4, 5], async () => {

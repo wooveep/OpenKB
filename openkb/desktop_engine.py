@@ -624,6 +624,16 @@ def _recovery_override_param(request: DesktopRequest) -> DesktopRecoveryOverride
         raise DesktopRequestError(
             "invalid_params", "Recovery context capacity must be at least 4096 tokens."
         )
+    reasoning_value = value.get("reasoning")
+    if reasoning_value is not None and reasoning_value not in {
+        "off",
+        "low",
+        "medium",
+        "high",
+    }:
+        raise DesktopRequestError(
+            "invalid_params", "Choose a supported one-time Recovery reasoning level."
+        )
     choice_value = value.get(
         "legacy_recovery_choice",
         value.get("legacyRecoveryChoice"),
@@ -633,10 +643,20 @@ def _recovery_override_param(request: DesktopRequest) -> DesktopRecoveryOverride
         "restart_current_plan",
     }:
         raise DesktopRequestError("invalid_params", "Choose a supported legacy recovery path.")
+    check_and_recover = value.get(
+        "check_and_recover",
+        value.get("checkAndRecover", False),
+    )
+    if type(check_and_recover) is not bool:
+        raise DesktopRequestError(
+            "invalid_params", "check_and_recover must be a boolean."
+        )
     return DesktopRecoveryOverride(
         model=model_value.strip() if isinstance(model_value, str) else None,
         context_capacity=context_value,
+        reasoning=reasoning_value,
         legacy_recovery_choice=choice_value,
+        check_and_recover=check_and_recover,
     )
 
 

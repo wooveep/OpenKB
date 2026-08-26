@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import type { DesktopImportTask, DesktopRecoveryOverride } from "./contracts"
+import { DesktopModelResultDetails } from "./DesktopModelResultDetails"
 
 interface FailedDocumentsDialogProps {
   open: boolean
@@ -36,6 +37,7 @@ export function FailedDocumentsDialog({
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
   const [model, setModel] = useState("")
   const [contextCapacity, setContextCapacity] = useState("")
+  const [reasoning, setReasoning] = useState<"" | "off" | "low" | "medium" | "high">("")
   const [legacyChoice, setLegacyChoice] = useState<"continue_compatible" | "restart_current_plan" | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
 
@@ -46,6 +48,7 @@ export function FailedDocumentsDialog({
     setSelectedJobId(jobId)
     setModel("")
     setContextCapacity("")
+    setReasoning("")
     setLegacyChoice(failedTasks.find((task) => task.job.jobId === jobId)?.legacyModelRecovery?.recommendedChoice ?? null)
     setFormError(null)
   }
@@ -70,7 +73,9 @@ export function FailedDocumentsDialog({
     onRecover(selected.job.jobId, {
       model: model.trim() || undefined,
       contextCapacity: parsedContext,
+      reasoning: reasoning || undefined,
       legacyRecoveryChoice: selectedChoice,
+      checkAndRecover: true,
     })
   }
 
@@ -144,6 +149,7 @@ export function FailedDocumentsDialog({
                         {attempt.reason ? (
                           <p className="mt-1 text-xs text-muted-foreground">{attempt.reason}</p>
                         ) : null}
+                        <DesktopModelResultDetails result={attempt} />
                       </div>
                     ))}
                   </div>
@@ -154,7 +160,7 @@ export function FailedDocumentsDialog({
                   <p className="mt-1 text-sm leading-6 text-muted-foreground">
                     {t("desktop.knowledgeBases.recoveryDescription")}
                   </p>
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <div className="mt-4 grid gap-3 sm:grid-cols-3">
                     <label className="text-sm font-medium" htmlFor="desktop-recovery-model">
                       {t("desktop.knowledgeBases.recoveryModel")}
                       <input
@@ -178,10 +184,37 @@ export function FailedDocumentsDialog({
                         className="mt-2 h-10 w-full rounded-md border border-input bg-background px-3 text-sm font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       />
                     </label>
+                    <label className="text-sm font-medium" htmlFor="desktop-recovery-reasoning">
+                      {t("desktop.knowledgeBases.recoveryReasoning")}
+                      <select
+                        id="desktop-recovery-reasoning"
+                        value={reasoning}
+                        onChange={(event) => setReasoning(event.target.value as typeof reasoning)}
+                        className="mt-2 h-10 w-full rounded-md border border-input bg-background px-3 text-sm font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <option value="">{t("desktop.knowledgeBases.recoveryReasoningConfigured")}</option>
+                        {(["off", "low", "medium", "high"] as const).map((value) => (
+                          <option key={value} value={value}>
+                            {t(`desktop.knowledgeBases.modelSettings.reasoning.${value}`)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                   </div>
                   {selected.legacyModelRecovery ? (
                     <fieldset className="mt-4 space-y-2">
-                      <legend className="text-sm font-medium">{t("desktop.knowledgeBases.recoveryChoiceTitle")}</legend>
+                      <legend className="text-sm font-medium">
+                        {t(selected.legacyModelRecovery.kind === "model_execution_profile_replan"
+                          ? "desktop.knowledgeBases.recoveryProfileChoiceTitle"
+                          : "desktop.knowledgeBases.recoveryChoiceTitle")}
+                      </legend>
+                      {selected.legacyModelRecovery.kind === "model_execution_profile_replan" ? (
+                        <p className="rounded-md border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                          {t("desktop.knowledgeBases.recoveryProfileReplanNotice", {
+                            checkpoints: selected.legacyModelRecovery.discardedModelCheckpoints,
+                          })}
+                        </p>
+                      ) : null}
                       {(["continue_compatible", "restart_current_plan"] as const).map((choice) => {
                         const estimate = selected.legacyModelRecovery!.choices[choice]
                         const checked = (legacyChoice ?? selected.legacyModelRecovery!.recommendedChoice) === choice
@@ -215,7 +248,9 @@ export function FailedDocumentsDialog({
                       onClick={recover}
                     >
                       {recoveringJobId === selected.job.jobId ? <Loader2 className="size-4 animate-spin" /> : null}
-                      {t("desktop.knowledgeBases.recoverImport")}
+                      {t(recoveringJobId === selected.job.jobId
+                        ? "desktop.knowledgeBases.checkingAndRecovering"
+                        : "desktop.knowledgeBases.checkAndRecover")}
                     </Button>
                   </DialogFooter>
                 </div>

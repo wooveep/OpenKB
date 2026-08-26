@@ -4,6 +4,7 @@ export type DesktopModelCallLifecycleStatus =
   | "queued"
   | "connecting"
   | "awaiting_model_result"
+  | "reasoning_output_activity"
   | "model_output_activity"
   | "validating"
   | "completed"
@@ -11,6 +12,7 @@ export type DesktopModelCallLifecycleStatus =
   | "cancelled"
   | "provider_failure"
   | "network_failure"
+  | "model_result_failure"
 
 export interface DesktopModelCallLifecycleEvent {
   sequence: number
@@ -31,5 +33,16 @@ export interface DesktopModelCallLifecycleEvent {
     executionLane: "background" | "interactive"
     attemptId: string
     longWaitThresholdSeconds: number
+    finishReason: string | null
+    reasoningObserved: boolean | null
+    finalContentObserved: boolean | null
+    reasoningChunkCount: number | null
+    finalChunkCount: number | null
+    reasoningCharacterCount: number | null
+    finalCharacterCount: number | null
+    inputTokens: number | null
+    outputTokens: number | null
+    totalTokens: number | null
+    providerRequestId: string | null
   }
 }

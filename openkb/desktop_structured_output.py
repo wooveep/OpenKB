@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from openkb.desktop_model_gateway import DesktopModelRequest, DesktopModelResult
-from openkb.desktop_prompt_contracts import prompt_contract_for
+from openkb.desktop_prompt_contracts import minimal_json_example, prompt_contract_for
 
 ValidatedValue = TypeVar("ValidatedValue")
 StructuredInvoker = Callable[[DesktopModelRequest], DesktopModelResult]
@@ -47,6 +47,12 @@ def run_structured_output(
     output_schema = active_snapshot.get("output_schema")
     if output_schema is not None and not isinstance(output_schema, dict):
         raise ValueError("Prompt Contract output schema is invalid.")
+    output_example = active_snapshot.get("output_example")
+    if output_example is not None and not isinstance(output_example, dict):
+        raise ValueError("Prompt Contract output example is invalid.")
+    if output_example is None and output_schema is not None:
+        generated_example = minimal_json_example(output_schema)
+        output_example = generated_example if isinstance(generated_example, dict) else None
     generation_parameters = active_snapshot.get("generation_parameters")
     if not isinstance(generation_parameters, dict):
         raise ValueError("Prompt Contract generation parameters are invalid.")
@@ -58,6 +64,7 @@ def run_structured_output(
         document_name,
         source_material,
         response_schema=output_schema,
+        response_example=output_example,
         response_schema_name=_schema_name(contract_version),
         generation_parameters=dict(generation_parameters),
         prompt_contract_digest=_snapshot_digest(active_snapshot),
@@ -80,11 +87,13 @@ def run_structured_output(
             _repair_input(
                 operation=operation,
                 schema=output_schema,
+                output_example=output_example,
                 validation_error=first_error,
                 invalid_result=initial.content,
                 source_material=source_material,
             ),
             response_schema=output_schema,
+            response_example=output_example,
             response_schema_name=_schema_name(contract_version),
             generation_parameters=dict(repair_generation),
             prompt_contract_digest=_snapshot_digest(repair_snapshot),
@@ -117,6 +126,7 @@ def _repair_input(
     *,
     operation: str,
     schema: dict[str, object] | None,
+    output_example: dict[str, object] | None,
     validation_error: Exception,
     invalid_result: str,
     source_material: str,
@@ -125,6 +135,7 @@ def _repair_input(
         {
             "operation": operation,
             "output_schema": schema,
+            "output_example": output_example,
             "validation_errors": [_safe_validation_error(validation_error)],
             "invalid_result": invalid_result,
             "evidence_bound_source_material": source_material,

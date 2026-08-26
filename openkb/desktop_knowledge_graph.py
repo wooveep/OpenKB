@@ -34,8 +34,13 @@ from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
     DesktopModelGateway,
+    gateway_analysis_capability_verified,
+    invalidate_analysis_capability,
 )
-from openkb.desktop_structured_output import run_structured_output
+from openkb.desktop_structured_output import (
+    DesktopStructuredOutputInvalidError,
+    run_structured_output,
+)
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock, try_kb_ingest_lock
 
@@ -114,6 +119,11 @@ class DesktopKnowledgeGraphService:
         publish_transaction: PublishTransaction | None = None,
     ) -> bool:
         """Best-effort extraction; a failure never changes the document's availability."""
+        if (
+            self._model_gateway is not None
+            and not gateway_analysis_capability_verified(self._model_gateway)
+        ):
+            return False
         try:
             evidence = self._unextracted_evidence(document_id)
         except (OSError, sqlite3.Error):
@@ -136,8 +146,24 @@ class DesktopKnowledgeGraphService:
         except DesktopModelCancelledError:
             return False
         except DesktopModelCallError as error:
+            if self._model_gateway is not None:
+                invalidate_analysis_capability(
+                    self._model_gateway,
+                    error.failure.code,
+                    error.failure.reason,
+                )
             _report_failure(on_failure, error.failure.code, error.failure.reason)
             self._record_diagnostic("extraction", error.failure.code, document_id)
+            return False
+        except DesktopStructuredOutputInvalidError as error:
+            if self._model_gateway is not None:
+                invalidate_analysis_capability(
+                    self._model_gateway,
+                    "model_response_invalid",
+                    str(error),
+                )
+            _report_failure(on_failure, "knowledge_graph_response_invalid")
+            self._record_diagnostic("extraction", "knowledge_graph_response_invalid", document_id)
             return False
         except (ValueError, json.JSONDecodeError):
             _report_failure(on_failure, "knowledge_graph_response_invalid")

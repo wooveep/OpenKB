@@ -1,11 +1,25 @@
 /** Content-free import progress, model usage, and explicit recovery contracts. */
 
+import type { DesktopModelCallLifecycleStatus } from "./model-call-lifecycle-contracts"
+
 export interface DesktopModelAttempt {
   attempt: number
   status: "running" | "retry_wait" | "completed" | "failed"
+  lifecycleStatus: DesktopModelCallLifecycleStatus | null
   elapsedSeconds: number
   errorCode: string | null
   reason: string | null
+  finishReason: string | null
+  reasoningObserved: boolean | null
+  finalContentObserved: boolean | null
+  reasoningChunkCount: number | null
+  finalChunkCount: number | null
+  reasoningCharacterCount: number | null
+  finalCharacterCount: number | null
+  inputTokens: number | null
+  outputTokens: number | null
+  totalTokens: number | null
+  providerRequestId: string | null
 }
 
 export interface DesktopModelCall {
@@ -13,11 +27,23 @@ export interface DesktopModelCall {
   stageRunId: string
   operation: string
   status: DesktopModelAttempt["status"]
+  lifecycleStatus: DesktopModelCallLifecycleStatus | null
   attemptCount: number
   elapsedSeconds: number
   errorCode: string | null
   reason: string | null
   suggestedAction: string | null
+  finishReason: string | null
+  reasoningObserved: boolean | null
+  finalContentObserved: boolean | null
+  reasoningChunkCount: number | null
+  finalChunkCount: number | null
+  reasoningCharacterCount: number | null
+  finalCharacterCount: number | null
+  inputTokens: number | null
+  outputTokens: number | null
+  totalTokens: number | null
+  providerRequestId: string | null
   attempts: DesktopModelAttempt[]
 }
 
@@ -34,7 +60,9 @@ export interface DesktopKnowledgeAnalysisProgress {
 export interface DesktopRecoveryOverride {
   model?: string
   contextCapacity?: number
+  reasoning?: "off" | "low" | "medium" | "high"
   legacyRecoveryChoice?: "continue_compatible" | "restart_current_plan"
+  checkAndRecover?: boolean
 }
 
 export type DesktopImportProgressStage =
@@ -122,7 +150,7 @@ export interface DesktopModelActivity {
   attemptId: string
   batchId: string | null
   executionLane: "background" | "interactive"
-  status: "queued" | "connecting" | "awaiting_first_result" | "receiving_output" | "validating" | "retrying" | "completed" | "interrupted" | "provider_failure" | "network_failure"
+  status: "queued" | "connecting" | "awaiting_first_result" | "receiving_reasoning" | "receiving_output" | "validating" | "retrying" | "completed" | "interrupted" | "provider_failure" | "network_failure" | "model_result_failure"
   failureCode: string | null
   elapsedSeconds: number
   longWaitAdvisory: boolean
@@ -136,10 +164,11 @@ export interface DesktopLegacyRecoveryChoice {
   estimatedInputTokens: number
   reusesCompletedBatches?: number
   reusesParserDocumentIrEvidence?: boolean
+  discardedModelCheckpoints?: number
 }
 
 export interface DesktopLegacyModelRecovery {
-  kind: "legacy_model_deadline"
+  kind: "legacy_model_deadline" | "model_execution_profile_replan"
   compatible: boolean
   compatibilityReason: string
   previousPromptDigest: string | null
@@ -150,5 +179,6 @@ export interface DesktopLegacyModelRecovery {
   choices: Record<"continue_compatible" | "restart_current_plan", DesktopLegacyRecoveryChoice>
   recommendedChoice: "continue_compatible" | "restart_current_plan"
   selectedChoice: "continue_compatible" | "restart_current_plan" | null
+  discardedModelCheckpoints: number
   startsAutomatically: false
 }

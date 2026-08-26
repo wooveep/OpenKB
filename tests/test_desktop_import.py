@@ -19,7 +19,12 @@ from openkb.desktop_import import (
 )
 from openkb.desktop_import_store import DesktopImportStore
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
-from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_model_gateway import (
+    DesktopModelGateway,
+    DesktopModelOutputObservations,
+    DesktopModelProviderResponse,
+    DesktopProviderTokenUsage,
+)
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
@@ -342,14 +347,67 @@ def test_model_failure_is_quarantined_with_safe_attempt_history(tmp_path):
     }
     assert len(task["model_calls"]) == 1
     model_call = task["model_calls"][0]
-    assert model_call["status"] == "network_failure"
+    assert model_call["status"] == "failed"
+    assert model_call["lifecycle_status"] == "network_failure"
     assert model_call["attempt_count"] == 3
+    assert {attempt["status"] for attempt in model_call["attempts"]}.issubset(
+        {"running", "retry_wait", "completed", "failed"}
+    )
+    assert model_call["attempts"][-1]["status"] == "failed"
+    assert model_call["attempts"][-1]["lifecycle_status"] == "network_failure"
     assert all("timeout_seconds" not in attempt for attempt in model_call["attempts"])
     assert "api_key" not in str(task)
 
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM evidence_fts").fetchone() == (0,)
+
+
+def test_reasoning_exhaustion_is_a_single_safe_model_result_failure(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "analysis.txt"
+    source.write_text("Structured Analysis must produce final JSON.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+
+    def reasoning_only(*_args, **_kwargs):
+        return DesktopModelProviderResponse(
+            "",
+            usage=DesktopProviderTokenUsage(20, 80, 100),
+            observations=DesktopModelOutputObservations(
+                finish_reason="length",
+                reasoning_observed=True,
+                final_content_observed=False,
+                reasoning_chunk_count=4,
+                final_chunk_count=0,
+                reasoning_character_count=512,
+                final_character_count=0,
+                output_limit_reached=True,
+            ),
+        )
+
+    importer = DesktopTextImportService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(reasoning_only),
+    )
+    with pytest.raises(DesktopImportError) as captured:
+        importer.import_text(source)
+
+    assert captured.value.code == "document_quarantined"
+    task = importer.list_import_jobs()["jobs"][0]
+    call = task["model_calls"][0]
+    assert call["status"] == "failed"
+    assert call["lifecycle_status"] == "model_result_failure"
+    assert call["error_code"] == "reasoning_output_exhausted"
+    assert call["attempt_count"] == 1
+    assert call["finish_reason"] == "length"
+    assert call["reasoning_observed"] is True
+    assert call["final_content_observed"] is False
+    assert call["reasoning_chunk_count"] == 4
+    assert call["reasoning_character_count"] == 512
+    assert call["input_tokens"] == 20
+    assert call["output_tokens"] == 80
+    assert call["total_tokens"] == 100
+    assert "Structured Analysis" not in json.dumps(task)
 
 
 def test_manual_recovery_reuses_verified_stages_and_records_its_override(tmp_path, monkeypatch):
@@ -398,6 +456,10 @@ def test_manual_recovery_reuses_verified_stages_and_records_its_override(tmp_pat
     assert recovered.quarantine is None
     assert recovered.document.availability == "available"
     assert [call.status for call in recovered.model_calls] == [
+        "failed",
+        "completed",
+    ]
+    assert [call.lifecycle_status for call in recovered.model_calls] == [
         "network_failure",
         "completed",
     ]

@@ -17,6 +17,7 @@ from openkb.desktop_knowledge_pages import (
     DesktopKnowledgePageService,
 )
 from openkb.desktop_knowledge_source_retrieval import knowledge_source_rows_in
+from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
@@ -27,6 +28,7 @@ def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
     connection.execute("DROP TABLE conversation_answer_retrieval_traces")
     _drop_catalog_schema(connection)
     for table in (
+        "model_capability_checks",
         "document_page_tree_provider_current",
         "document_page_tree_enrichment_current",
         "document_page_tree_enrichment_summaries",
@@ -58,7 +60,12 @@ def _drop_current_model_schema(connection: sqlite3.Connection) -> None:
     for table in ("model_calls", "model_attempts"):
         for column in ("lifecycle_status", "elapsed_seconds", "retry_after_seconds"):
             connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
-    connection.execute("DELETE FROM schema_migrations WHERE version IN (38, 39, 40, 41, 42)")
+    for table, column, _definition in MODEL_RESULT_OBSERVATION_COLUMNS:
+        if connection.execute(
+            "SELECT 1 FROM pragma_table_info(?) WHERE name = ?", (table, column)
+        ).fetchone():
+            connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    connection.execute("DELETE FROM schema_migrations WHERE version >= 38")
 
 
 def _drop_catalog_schema(connection: sqlite3.Connection) -> None:

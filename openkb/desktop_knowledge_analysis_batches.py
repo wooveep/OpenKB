@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
 from openkb.desktop_import_types import (
@@ -15,7 +15,6 @@ from openkb.desktop_import_types import (
 )
 from openkb.desktop_knowledge_analysis import (
     KNOWLEDGE_ANALYSIS_BATCH_SCOPE,
-    KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
     KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
     DesktopKnowledgeAnalysis,
     KnowledgeAnalysisCandidate,
@@ -42,11 +41,24 @@ from openkb.desktop_knowledge_analysis_plan import (
     knowledge_analysis_input_budget,
     prompt_snapshot_for_operation,
 )
+from openkb.desktop_knowledge_analysis_requests import (
+    analysis_pipeline_digest as _analysis_pipeline_digest,
+)
+from openkb.desktop_knowledge_analysis_requests import (
+    plan_prompt_digest as _prompt_contract_digest,
+)
+from openkb.desktop_knowledge_analysis_requests import (
+    prompt_snapshot_digest as _snapshot_digest,
+)
+from openkb.desktop_knowledge_analysis_requests import (
+    request_pinned_to_plan as _request_pinned_to_plan,
+)
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
 from openkb.desktop_model_capabilities import (
     DesktopModelCapabilityProfile,
     model_capability_profile,
 )
+from openkb.desktop_model_execution_profile import DesktopModelExecutionProfile
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelRequest,
@@ -100,6 +112,7 @@ def run_knowledge_analysis(
     on_batch_completed: Callable[[int, int], None],
     max_parallel_batches: int = 1,
     capability_profile: DesktopModelCapabilityProfile | None = None,
+    execution_profile: DesktopModelExecutionProfile | None = None,
 ) -> KnowledgeAnalysisRun:
     """Execute a direct analysis or resume a persisted long-document batch plan."""
     natural_sections = (
@@ -107,7 +120,11 @@ def run_knowledge_analysis(
     )
     capability = capability_profile or model_capability_profile(model)
     contract = prompt_contract_for("knowledge_analysis_batch")
-    input_budget_tokens = knowledge_analysis_input_budget(capability, contract)
+    input_budget_tokens = (
+        execution_profile.document_input_budget_tokens
+        if execution_profile is not None
+        else knowledge_analysis_input_budget(capability, contract)
+    )
     planned_batches = plan_knowledge_analysis_batches(
         evidence,
         natural_sections=natural_sections or None,
@@ -131,6 +148,7 @@ def run_knowledge_analysis(
         capability=capability,
         contract=contract,
         estimated_batch_tokens=estimated_batch_tokens,
+        execution_profile=execution_profile,
     )
     plan, batches = store.load_or_create(
         job_id=job_id,
@@ -154,9 +172,9 @@ def run_knowledge_analysis(
         checkpoint = _result_checkpoint(
             analysis,
             result,
+            plan=plan,
             provider=provider,
             model=model,
-            prompt_digest=KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
             prompt_operation="knowledge_analysis",
             engine_version=engine_version,
         )
@@ -165,7 +183,7 @@ def run_knowledge_analysis(
             knowledge_analysis_provenance_json(
                 provider=provider,
                 model=model,
-                prompt_digest=KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
+                prompt_digest=_prompt_contract_digest(plan, "knowledge_analysis"),
                 engine_version=engine_version,
             ),
             checkpoint,
@@ -214,9 +232,9 @@ def run_knowledge_analysis(
         checkpoint = _result_checkpoint(
             analysis,
             result,
+            plan=plan,
             provider=provider,
             model=model,
-            prompt_digest=KNOWLEDGE_ANALYSIS_BATCH_PROMPT_DIGEST,
             prompt_operation="knowledge_analysis_batch",
             engine_version=engine_version,
             extra={
@@ -283,14 +301,14 @@ def run_knowledge_analysis(
         merged_checkpoint = _result_checkpoint(
             merged,
             result,
+            plan=plan,
             provider=provider,
             model=model,
-            prompt_digest=KNOWLEDGE_ANALYSIS_MERGE_PROMPT_DIGEST,
             prompt_operation="knowledge_analysis_merge",
             engine_version=engine_version,
             extra={
                 "batch_count": len(batches),
-                "analysis_prompt_digest": KNOWLEDGE_ANALYSIS_BATCH_PIPELINE_DIGEST,
+                "analysis_prompt_digest": _analysis_pipeline_digest(plan),
                 "batch_checkpoint_sha256s": [
                     hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
                     for value in batch_checkpoints
@@ -433,7 +451,7 @@ def _run_hierarchical_description_merge(
         except DesktopImportError as error:
             store.fail_merge_node(job_id, node.node_id, error.code)
             raise
-        checkpoint = _merge_node_checkpoint(node, result, description)
+        checkpoint = _merge_node_checkpoint(node, result, description, plan=plan)
         store.complete_merge_node(job_id, node.node_id, checkpoint)
         return description, result, checkpoint
 
@@ -500,24 +518,6 @@ def _validated_description_merge_call(
         invalid.attempt_count = error.attempt_count
         raise invalid from error
     return output.result, output.value
-
-
-def _request_pinned_to_plan(
-    request: DesktopModelRequest,
-    plan: KnowledgeAnalysisPlan,
-    *,
-    batch_id: str,
-) -> DesktopModelRequest:
-    generation_parameters = dict(request.generation_parameters or {})
-    generation_parameters.setdefault("max_tokens", plan.output_budget_tokens)
-    return replace(
-        request,
-        model_name=plan.analysis_model,
-        context_capacity=plan.capability_profile.context_capacity,
-        document_input_capacity=plan.capability_profile.document_input_capacity,
-        generation_parameters=generation_parameters,
-        batch_id=batch_id,
-    )
 
 
 def _parse_merged_description(content: str) -> str:
@@ -634,16 +634,18 @@ def _merge_node_checkpoint(
     node: KnowledgeAnalysisMergeNodePlan,
     result: DesktopModelResult,
     description: str,
+    *,
+    plan: KnowledgeAnalysisPlan,
 ) -> dict[str, object]:
-    contract = prompt_contract_for("knowledge_analysis_merge")
+    snapshot = prompt_snapshot_for_operation(plan, "knowledge_analysis_merge")
     return {
         "node_id": node.node_id,
         "level": node.level,
         "node_ordinal": node.ordinal,
         "child_ids": list(node.child_ids),
         "document_description": description,
-        "prompt_contract_snapshot": contract.snapshot(),
-        "prompt_digest": contract.digest,
+        "prompt_contract_snapshot": snapshot,
+        "prompt_digest": _snapshot_digest(snapshot),
         "attempt_metadata": {
             "call_id": result.call_id,
             "attempt_count": result.attempt_count,
@@ -720,20 +722,21 @@ def _result_checkpoint(
     analysis: DesktopKnowledgeAnalysis,
     result: DesktopModelResult,
     *,
+    plan: KnowledgeAnalysisPlan,
     provider: str,
     model: str,
-    prompt_digest: str,
     prompt_operation: str,
     engine_version: str,
     extra: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    prompt_snapshot = prompt_snapshot_for_operation(plan, prompt_operation)
     checkpoint: dict[str, object] = {
         "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
         "analysis_scope": analysis.analysis_scope,
         "provider": provider,
         "model": model,
-        "prompt_digest": prompt_digest,
-        "prompt_contract_snapshot": prompt_contract_for(prompt_operation).snapshot(),
+        "prompt_digest": _snapshot_digest(prompt_snapshot),
+        "prompt_contract_snapshot": prompt_snapshot,
         "engine_version": engine_version,
         "attempt_metadata": {
             "call_id": result.call_id,

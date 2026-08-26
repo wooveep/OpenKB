@@ -14,8 +14,10 @@ from openkb.desktop_model_active_streams import DesktopActiveModelStreams
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
+    DesktopModelProviderResponse,
     DesktopModelRequest,
     DesktopModelTransportError,
+    DesktopProviderTokenUsage,
 )
 from openkb.desktop_model_settings import DesktopModelSettings
 from openkb.desktop_model_terminal import (
@@ -63,7 +65,11 @@ def test_terminal_gateway_accepts_a_result_after_180_seconds_of_virtual_silence(
             clock.value += 1
             on_request_sent()
             clock.value += 180
-            return "OK"
+            return DesktopModelProviderResponse(
+                "OK",
+                usage=DesktopProviderTokenUsage(11, 7, 18),
+                provider_request_id="request-success-1",
+            )
 
     result = DesktopTerminalModelGateway(SilentProvider(), clock=clock).analyze(
         DesktopModelRequest("connection_test", "Model settings", "Reply with OK."),
@@ -81,6 +87,13 @@ def test_terminal_gateway_accepts_a_result_after_180_seconds_of_virtual_silence(
         "completed",
     ]
     assert [event.elapsed_seconds for event in events] == [0, 0, 1, 181, 181]
+    completed = events[-1]
+    assert (completed.input_tokens, completed.output_tokens, completed.total_tokens) == (
+        11,
+        7,
+        18,
+    )
+    assert completed.provider_request_id == "request-success-1"
 
 
 @pytest.mark.parametrize("model", ("openai/test-model", "deepseek/test-model"))

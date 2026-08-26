@@ -620,17 +620,27 @@ def test_page_tree_control_serializes_with_active_workspace_switch(tmp_path, mon
     )
 
 
-def test_settings_save_rejects_old_result_and_restarts_with_live_gateway(tmp_path):
+def test_settings_save_does_not_dispatch_a_replacement_provider_call(tmp_path):
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "settings.md"
+    second_source = tmp_path / "settings-second.md"
     source.write_text("# Settings\n\nOnly the current provider may publish.", encoding="utf-8")
+    second_source.write_text(
+        "# Settings two\n\nThe retired provider must not start this document.",
+        encoding="utf-8",
+    )
     workspace = DesktopKnowledgeBaseRuntime()
     workspace.create(kb_dir)
     imported = DesktopTextImportService(kb_dir).import_text(source)
+    second_imported = DesktopTextImportService(kb_dir).import_text(second_source)
     started = threading.Event()
     release = threading.Event()
+    factory_calls: list[str] = []
+    old_calls = 0
 
     def old_transport(request, _timeout):
+        nonlocal old_calls
+        old_calls += 1
         payload = json.loads(request.content)
         target = next(node for node in payload["nodes"] if node["evidence"])
         started.set()
@@ -644,6 +654,7 @@ def test_settings_save_rejects_old_result_and_restarts_with_live_gateway(tmp_pat
 
     def live_factory(path, _override):
         settings = read_desktop_model_settings(path)
+        factory_calls.append(settings.model)
         return _gateway(settings.provider, settings.model, "New summary.")
 
     server = DesktopEngineServer(
@@ -682,20 +693,28 @@ def test_settings_save_rejects_old_result_and_restarts_with_live_gateway(tmp_pat
                 "SELECT provider, model FROM document_page_tree_enrichment_generations "
                 "WHERE status = 'current'"
             ).fetchone()
-        if current == ("deepseek", "model-new"):
+        if current == ("provider-old", "model-old"):
             break
         time.sleep(0.01)
     server._shutdown.set()
     server._join_workers()
-    assert current == ("deepseek", "model-new")
+    assert current == ("provider-old", "model-old")
+    assert factory_calls == []
+    assert old_calls == 1
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM document_page_tree_enrichment_generations "
             "WHERE provider = 'provider-old'"
-        ).fetchone() == (0,)
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM document_page_tree_enrichment_current"
+        ).fetchone() == (1,)
         assert connection.execute(
             "SELECT document_id FROM document_page_tree_enrichment_current"
-        ).fetchone() == (imported.document.document_id,)
+        ).fetchone()[0] in {
+            imported.document.document_id,
+            second_imported.document.document_id,
+        }
 
 
 def test_enrichment_worker_waits_for_deterministic_rebuild(tmp_path):

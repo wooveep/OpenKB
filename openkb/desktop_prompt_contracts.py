@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from typing import cast
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,7 @@ class DesktopPromptContract:
     instructions: str
     input_shape: dict[str, object]
     output_schema: dict[str, object] | None
+    output_example: dict[str, object] | None
     validation_rules: tuple[str, ...]
     generation_parameters: dict[str, object]
     reasoning_policy: str
@@ -36,6 +38,7 @@ class DesktopPromptContract:
                 "input_shape": self.input_shape,
                 "instructions": self.instructions,
                 "operation": self.operation,
+                "output_example": self.output_example,
                 "output_schema": self.output_schema,
                 "reasoning_policy": self.reasoning_policy,
                 "token_budget_policy": self.token_budget_policy,
@@ -108,18 +111,69 @@ def _contract(
     generation_parameters: dict[str, object] | None = None,
     token_budget_policy: dict[str, object] | None = None,
 ) -> DesktopPromptContract:
+    output_example = (
+        cast(dict[str, object], minimal_json_example(output_schema))
+        if output_schema is not None
+        else None
+    )
+    if output_example is not None:
+        serialized_example = json.dumps(
+            output_example,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        instructions = (
+            f"{instructions.rstrip()}\n\nEXAMPLE JSON OUTPUT:\n"
+            f"{serialized_example}"
+        )
     return DesktopPromptContract(
         operation=operation,
         version=f"openkb.prompt.{operation}.v{version}",
         instructions=instructions,
         input_shape=input_shape or {"type": "text", "evidence_bound": False},
         output_schema=output_schema,
+        output_example=output_example,
         validation_rules=validation_rules,
         generation_parameters=generation_parameters or {"temperature": 0},
         reasoning_policy="provider_default_or_supported_role_setting",
         token_budget_policy=token_budget_policy
         or {"reserve_output_tokens": 2_048, "document_input_share": 0.5},
     )
+
+
+def minimal_json_example(schema: dict[str, object]) -> object:
+    """Derive a deterministic minimal value from a code-owned JSON schema."""
+    if "const" in schema:
+        return schema["const"]
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        return enum[0]
+    schema_type = schema.get("type")
+    if schema_type == "object":
+        properties = schema.get("properties")
+        required = schema.get("required")
+        if not isinstance(properties, dict) or not isinstance(required, list):
+            return {}
+        return {
+            name: minimal_json_example(property_schema)
+            for name in required
+            if isinstance(name, str)
+            and isinstance((property_schema := properties.get(name)), dict)
+        }
+    if schema_type == "array":
+        return []
+    if schema_type == "string":
+        return ""
+    if schema_type == "integer":
+        minimum = schema.get("minimum")
+        return minimum if isinstance(minimum, int) else 0
+    if schema_type == "number":
+        minimum = schema.get("minimum")
+        return minimum if isinstance(minimum, (int, float)) else 0
+    if schema_type == "boolean":
+        return False
+    return None
 
 
 _KNOWLEDGE_INSTRUCTIONS = """Analyze one document into evidence-bound knowledge.
@@ -136,7 +190,7 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
     "knowledge_analysis": _contract(
         "knowledge_analysis",
         _KNOWLEDGE_INSTRUCTIONS,
-        version=2,
+        version=3,
         output_schema=_knowledge_schema("document"),
         input_shape={"type": "knowledge_evidence", "evidence_bound": True},
         validation_rules=("known_evidence_ids_only", "unique_candidate_identities"),
@@ -145,7 +199,7 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
     "knowledge_analysis_batch": _contract(
         "knowledge_analysis_batch",
         _KNOWLEDGE_INSTRUCTIONS.replace("one document", "one ordered natural section batch"),
-        version=2,
+        version=3,
         output_schema=_knowledge_schema("batch"),
         input_shape={"type": "knowledge_evidence_batch", "evidence_bound": True},
         validation_rules=("batch_evidence_ids_only", "unique_candidate_identities"),
@@ -158,7 +212,7 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
         "Resolve only listed semantic conflicts, do not introduce facts, claims, or Evidence "
         "links, keep document_description within 2,000 characters, and return only the required "
         "JSON object.",
-        version=2,
+        version=3,
         output_schema={
             "type": "object",
             "properties": {"document_description": {"type": "string"}},
@@ -175,6 +229,7 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
         "object with schema_version 'openkb.page-tree-enrichment.v1' and summaries. Each item "
         "contains only node_id and summary. Use only supplied node IDs and evidence; summaries "
         "are routing metadata, not evidence.",
+        version=2,
         output_schema={
             "type": "object",
             "properties": {
@@ -202,6 +257,7 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
         "retrieval_plan",
         "Build a bounded retrieval plan. Return exactly one JSON object with a terms array of "
         "at most eight short search terms. Do not write SQL, tool calls, or an answer.",
+        version=2,
         output_schema={
             "type": "object",
             "properties": {"terms": {"type": "array", "items": {"type": "string"}}},
@@ -214,6 +270,7 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
         "page_tree_selection",
         "Select only supplied PageTree node IDs useful for the question. Return one JSON object "
         "with selections containing document_id and node_ids. Do not answer the question.",
+        version=2,
         output_schema={
             "type": "object",
             "properties": {
@@ -241,6 +298,7 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
         "Extract a small evidence-bound graph. Return one JSON object with nodes and edges. "
         "Every node and edge uses only supplied Evidence IDs; both edge endpoints cite the "
         "same evidence. Do not merge same-named entities or invent facts.",
+        version=2,
         output_schema={
             "type": "object",
             "properties": {

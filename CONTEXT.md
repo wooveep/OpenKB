@@ -86,9 +86,10 @@ _Avoid_: failed import, automatic startup resume
 
 **Awaiting Model Configuration**:
 The recoverable Import Job state reached after usable DocumentIR is available
-but mandatory Knowledge Analysis cannot start because its Analysis Model is not
-configured or available. The document remains unpublished until explicit
-resume succeeds.
+but mandatory Knowledge Analysis cannot start because its Model Execution
+Profile is missing, unavailable, or has not passed its explicit Model
+Capability Check. The document remains unpublished until explicit resume
+succeeds.
 _Avoid_: Quarantined Document, Available Knowledge
 
 **Import Batch**:
@@ -244,6 +245,26 @@ optional role-specific model selections and capability overrides used for its
 Model Calls. It contains no model response-timeout setting.
 _Avoid_: environment configuration, credential reference
 
+**Effective Model Role Settings**:
+The resolved model, context capacity, reasoning mode, and adapter constraints
+after default-role inheritance. Model Configuration shows both selected and
+effective values so absence, inheritance, and provider default remain distinct.
+_Avoid_: saved fields, Model Execution Profile
+
+**Custom Model Provider**:
+A user-supplied model endpoint without a code-owned Model Provider Adapter. It
+may serve as an Answer Model after a successful streaming capability check but
+cannot serve as an Analysis Model because OpenKB cannot guarantee its structured
+output, reasoning controls, or stream semantics.
+_Avoid_: named model provider, arbitrary provider parameters
+
+**Model Provider Adapter**:
+The code-owned protocol contract for one named provider, including structured-
+output modes and request encoding, reasoning-control encoding, streaming fields,
+finish reasons, and capability version. OpenKB never selects one by guessing
+from a Custom Model Provider's model name.
+_Avoid_: Model Capability Profile, raw provider options
+
 **Analysis Model**:
 The optional Model Configuration selection for `knowledge_analysis`,
 `knowledge_analysis_batch`, `knowledge_analysis_merge`,
@@ -264,17 +285,56 @@ when absent, Grounded Answer generation uses the default model.
 _Avoid_: chat provider, answer credential
 
 **Model Capability Profile**:
-The context capacity, native structured-output support, and optional reasoning
-setting resolved for a configured model from known metadata and advanced user
-overrides. Unknown models use a 16K-token context assumption; reasoning defaults
-to provider behavior and unsupported reasoning settings are omitted.
+The provider- and model-aware context capacity, supported Structured Output
+Modes, streaming semantics, and reasoning-control format resolved from known
+metadata and advanced user overrides. Unknown models use a 16K-token context
+assumption, and unsupported controls are omitted.
 _Avoid_: Prompt Contract, provider promise
 
+**Model Execution Profile**:
+The immutable, fully resolved Model Provider Adapter and version, provider,
+model, exact Structured Output Mode, streaming controls, reasoning mode, and
+token budgets used by one Knowledge Analysis Plan. Recovery uses the pinned
+profile rather than current Model Configuration.
+_Avoid_: Model Configuration, Model Capability Profile
+
+**Structured Output Mode**:
+The exact provider request strategy pinned for one structured Analysis Model
+Call: native `json_schema`, native `json_object`, or a Prompt Contract without
+native response formatting. It never applies to `grounded_answer`, whose Answer
+Model result remains streamed natural language. A Model Provider Adapter selects
+the strongest mode it explicitly supports and never changes mode after a failed
+call.
+_Avoid_: local schema validation, silent provider fallback
+
+**Structured Analysis Reasoning**:
+The provider-side reasoning mode used by structured Analysis Model operations.
+It resolves from the explicit Analysis setting, then an explicit default-role
+setting, and finally `off`; `low`, `medium`, or `high` opts in through the Model
+Provider Adapter's supported control format.
+_Avoid_: provider-default reasoning, Prompt Contract reasoning
+
+**Reasoning Token Allowance**:
+The bounded generation capacity added beside the final structured-output
+reserve when Structured Analysis Reasoning is enabled: `low`, `medium`, and
+`high` receive `0.5×`, `1×`, and `2×` the final reserve. The selected level is
+never silently reduced when the model context cannot contain it.
+_Avoid_: final output reserve, unlimited reasoning budget
+
 **Model Capability Check**:
-A cancellable, user-initiated check of each distinct configured model. Analysis
-Models must demonstrate schema-valid structured output and Answer Models must
-demonstrate streaming; generated check content is not persisted.
+A cancellable, user-initiated check cached for one complete Model Execution
+Profile. A small bounded request exercises its actual streaming, reasoning
+control, finish reason, final content, and schema behavior; saving settings
+never starts the check, and generated check content is not persisted.
 _Avoid_: TCP probe, document analysis, health telemetry
+
+**Model Capability Check Cache**:
+The knowledge-base-local successful check for one exact Model Execution
+Profile. It has no time expiry but is invalidated by profile or adapter changes
+and by later protocol-shaped Model Result Failures. Invalidation returns the
+profile to an unverified state; it is not a permanent ban and an explicit
+successful Model Capability Check can verify it again.
+_Avoid_: permanent provider guarantee, global capability registry
 
 **Interactive Model Lane**:
 At least one high-priority model execution slot reserved for an interactive
@@ -285,14 +345,17 @@ _Avoid_: background Analysis Concurrency, unlimited answer concurrency
 **Prompt Contract**:
 The code-owned, versioned combination of model instructions, input shape,
 output schema, validation rules, and bounded generation policy for one operation.
-Knowledge Analysis Plans retain its canonical snapshot and digest for recovery.
+Every structured contract explicitly asks for JSON and carries a code-owned
+minimal JSON output example consistent with its schema. Knowledge Analysis Plans
+retain the complete canonical snapshot and digest for recovery.
 _Avoid_: AGENTS.md prompt, user prompt override
 
 **Structured Output Repair**:
 The single Analysis Model call allowed after deterministic normalization and
-local schema validation cannot make a structured result valid. It receives the
-validation errors and evidence-bound source material; a second invalid result
-ends automatic recovery.
+local schema validation cannot make a nonempty structured result valid. It
+receives the original schema, its canonical JSON example, the validation errors,
+and evidence-bound source material; an empty final result, Reasoning Output
+Exhaustion, or a second invalid result ends automatic recovery.
 _Avoid_: transport retry, unbounded self-correction
 
 **Model Call**:
@@ -301,11 +364,24 @@ fulfilled by several Model Attempts. It has no OpenKB-imposed total, read,
 thinking, or generation deadline; elapsed time alone never ends it.
 _Avoid_: API request
 
+**Model Call Status**:
+The task-history summary of a Model Call or Model Attempt: `running`,
+`retry_wait`, `completed`, or `failed`. Detailed lifecycle states and failure
+causes never replace this summary value.
+_Avoid_: Model Call Lifecycle Status, Provider Failure
+
+**Model Call Lifecycle Status**:
+The detailed event state of a live or completed Model Attempt, including queue,
+connection, response, validation, retry, cancellation, and terminal failure
+states. It may explain a Model Call Status but is not interchangeable with it.
+_Avoid_: task status, Import Job status
+
 **Model Attempt**:
 One provider request issued in pursuit of a Model Call. It ends only with a
-valid provider response, an explicit Provider Failure, a Network Failure, user
-cancellation, or application shutdown. Cancellation is best effort and does
-not guarantee that a provider without cancellation support stops computing.
+valid provider response, an explicit Provider Failure, a Network Failure, a
+Model Result Failure, user cancellation, or application shutdown. Cancellation
+is best effort and does not guarantee that a provider without cancellation
+support stops computing.
 _Avoid_: retry
 
 **Model Retry Policy**:
@@ -316,18 +392,32 @@ permission, and other permanent failures stop immediately.
 _Avoid_: deadline retry, retry forever
 
 **Awaiting Model Result**:
-The nonterminal Model Attempt state after request dispatch and before a terminal
-provider, transport, cancellation, or shutdown event. It means OpenKB is still
-waiting, not that it can observe provider-side reasoning or token generation.
-The UI reports this state with elapsed wait, batch progress, attempt count, and
-a cancellation action.
+The nonterminal Model Attempt state after request dispatch and before any
+compatible reasoning or final-content response activity or a terminal provider,
+transport, cancellation, or shutdown event. It means OpenKB is still waiting
+and does not claim that the provider is thinking or making progress. The UI
+reports elapsed wait, batch progress, attempt count, and a cancellation action.
 _Avoid_: model thinking, hung model, model timeout
 
 **Model Output Activity**:
-An observed response chunk from a streaming Model Attempt. Structured output is
-buffered for final validation while the UI may report that output is arriving;
-raw chunks are not displayed or persisted, and activity never controls timeout.
+An observed final-content chunk from a streaming Model Attempt. Structured
+output is buffered for final validation while the UI may report that output is
+arriving; raw chunks are not displayed or persisted, and activity never
+controls timeout.
 _Avoid_: reasoning progress, validated result, heartbeat deadline
+
+**Reasoning Output Activity**:
+An observed provider-labeled reasoning chunk from a streaming Model Attempt,
+reported only as sanitized activity while its Model Call Status remains
+`running`. It proves transport activity, not valid output or semantic progress;
+raw reasoning is never displayed, persisted, or used as the result.
+_Avoid_: Model Output Activity, model thinking, chain-of-thought display
+
+**Reasoning Output Exhaustion**:
+A Model Result Failure in which the provider reaches its output limit after
+emitting reasoning but before returning final content. OpenKB never uses raw
+reasoning as the result or silently retries with different reasoning settings.
+_Avoid_: Provider Failure, invalid structured output, model timeout
 
 **Long Wait Advisory**:
 A nonterminal notice shown after a Model Attempt has waited longer than the
@@ -338,9 +428,18 @@ _Avoid_: warning timeout, model deadline
 **Model Usage Record**:
 The local per-call record of role, model, IDs, batch, queue/connect/first-output
 and total timing, classified result, call count, and provider-reported tokens.
-Missing token counts are visibly estimated, and currency is shown only when the
-user configures pricing.
+It also retains finish reason and content-free reasoning/final-output presence,
+chunk-count, and character-count metadata. Missing token counts are visibly
+estimated, and currency is shown only when the user configures pricing.
 _Avoid_: source telemetry, inferred provider bill
+
+**Model Result Failure**:
+A non-retryable terminal response for any Model Call role in which the provider
+request succeeds but does not yield a usable final model result. Its specific
+failure code explains whether output was absent, contained reasoning without a
+final result, exhausted its budget in reasoning, was truncated, or remained
+structurally invalid after permitted repair.
+_Avoid_: Provider Failure, Network Failure, completed Model Call
 
 **Provider Failure**:
 An explicit error returned by the model API, including a provider-declared
@@ -369,12 +468,21 @@ _Avoid_: Import Batch, whole-document retry
 
 **Knowledge Analysis Plan**:
 The immutable execution manifest created when a Knowledge Analysis starts. It
-pins the DocumentIR digest, Analysis Model, Prompt Contract, input and output
-budgets, natural-section batch boundaries, and merge topology so recovery does
-not mix incompatible results. For a model with unknown capacity, it assumes a
-16K-token context and allows approximately 8K tokens of document input per
-batch, reserving the remainder for instructions and output.
+pins the DocumentIR digest, Model Execution Profile, exact Structured Output
+Mode, Prompt Contract including its JSON example, final structured-output
+reserve, bounded reasoning allowance, natural-section batch boundaries, and
+merge topology so recovery does not mix incompatible results.
+For a model with unknown capacity, it assumes a 16K-token context and allows
+approximately 8K tokens of document input per batch, reserving the remainder
+for instructions and output.
 _Avoid_: latest model settings, mutable batch queue
+
+**Knowledge Analysis Replan**:
+The explicit recovery that supersedes a legacy or incompatible Knowledge
+Analysis Plan within the same Import Job. It preserves deterministic Raw Asset,
+DocumentIR, and Evidence work but never reuses analysis batches or merge
+checkpoints from the superseded plan.
+_Avoid_: plan mutation, document reimport, mixed-plan recovery
 
 **Knowledge Analysis Merge**:
 The checkpointed document-level reduction of completed Knowledge Analysis
@@ -427,12 +535,13 @@ _Avoid_: AI response, chat result
 
 **Interrupted Answer**:
 A partial streamed response retained in a conversation with a visible stopped
-state after its Model Call fails, until a successful Answer Retry replaces it.
+state after its Model Call fails, including when the provider emits only
+reasoning and no final content, until a successful Answer Retry replaces it.
 _Avoid_: completed answer
 
 **Answer Retry**:
-A renewed Model Call for an Interrupted Answer that replaces that answer in
-place only once a completed response is available.
+An explicit user-initiated renewed Model Call for an Interrupted Answer that
+replaces that answer in place only once a completed response is available.
 _Avoid_: duplicate message
 
 **Answer Version**:
@@ -655,8 +764,9 @@ results are excluded from the available knowledge base.
 _Avoid_: skipped document
 
 **Recovery Override**:
-A configuration snapshot selected for one manual recovery of a Quarantined
-Document that does not modify the knowledge base's default configuration. It
-may select model capabilities or a Parser Route Override but cannot introduce a
-model response deadline.
+A user-confirmed configuration snapshot selected for one manual recovery of a
+Quarantined Document that does not modify the knowledge base's default
+configuration. It may select model capabilities, reasoning, a Knowledge
+Analysis Replan, or a Parser Route Override but cannot introduce a model
+response deadline.
 _Avoid_: knowledge-base setting

@@ -55,6 +55,15 @@ class DesktopKnowledgeAnalysisBatchStore:
         )
         self._execution_token = execution_token
 
+    def persisted_plan(self, job_id: str) -> KnowledgeAnalysisPlan | None:
+        """Return the immutable plan that a resumed job must continue exactly."""
+        with kb_ingest_lock(self._state_dir):
+            connection = _connect(self._database_path)
+            try:
+                return self._plan_in(connection, job_id)
+            finally:
+                connection.close()
+
     def load_or_create(
         self,
         *,
@@ -74,6 +83,18 @@ class DesktopKnowledgeAnalysisBatchStore:
                     if persisted_plan.document_ir_digest != proposed_plan.document_ir_digest:
                         raise _state_error(
                             "Knowledge Analysis Plan no longer matches the pinned DocumentIR."
+                        )
+                    persisted_profile = persisted_plan.execution_profile
+                    proposed_profile = proposed_plan.execution_profile
+                    if persisted_profile is None and proposed_profile is not None:
+                        raise DesktopImportError(
+                            "knowledge_analysis_replan_required",
+                            "The stored Knowledge Analysis Plan is incompatible with the "
+                            "verified Model Execution Profile.",
+                            suggested_action=(
+                                "Use Check and Recover to preserve parsed work and create a "
+                                "replacement Analysis plan."
+                            ),
                         )
                     if len(persisted_plan.batches) <= 1:
                         if rows:

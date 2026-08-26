@@ -8,9 +8,17 @@ from dataclasses import dataclass
 
 from openkb.desktop_import_artifacts import DocumentIRBlock
 from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
-from openkb.desktop_prompt_contracts import DesktopPromptContract, prompt_contract_for
+from openkb.desktop_model_execution_profile import (
+    DesktopModelExecutionProfile,
+    analysis_prompt_contract_bundle,
+)
+from openkb.desktop_model_execution_profile import (
+    estimate_model_tokens as _estimate_model_tokens,
+)
+from openkb.desktop_prompt_contracts import DesktopPromptContract
 
 MAX_KNOWLEDGE_ANALYSIS_INPUT_TOKENS = 12_000
+estimate_model_tokens = _estimate_model_tokens
 
 
 @dataclass(frozen=True)
@@ -55,10 +63,20 @@ class KnowledgeAnalysisPlan:
     prompt_contract_digest: str
     input_budget_tokens: int
     output_budget_tokens: int
+    final_output_reserve_tokens: int
+    reasoning_allowance_tokens: int
+    execution_profile: DesktopModelExecutionProfile | None
     batches: tuple[KnowledgeAnalysisBatchPlan, ...]
     merge_topology: tuple[KnowledgeAnalysisMergeNodePlan, ...]
 
+    @property
+    def plan_identity(self) -> str:
+        return hashlib.sha256(_json(self._identity_payload()).encode("utf-8")).hexdigest()
+
     def as_dict(self) -> dict[str, object]:
+        return {**self._identity_payload(), "plan_identity": self.plan_identity}
+
+    def _identity_payload(self) -> dict[str, object]:
         return {
             "document_ir_digest": self.document_ir_digest,
             "provider": self.provider,
@@ -76,6 +94,13 @@ class KnowledgeAnalysisPlan:
             "prompt_contract_digest": self.prompt_contract_digest,
             "input_budget_tokens": self.input_budget_tokens,
             "output_budget_tokens": self.output_budget_tokens,
+            "final_output_reserve_tokens": self.final_output_reserve_tokens,
+            "reasoning_allowance_tokens": self.reasoning_allowance_tokens,
+            "execution_profile": (
+                self.execution_profile.as_dict()
+                if self.execution_profile is not None
+                else None
+            ),
             "batches": [batch.as_dict() for batch in self.batches],
             "merge_topology": [node.as_dict() for node in self.merge_topology],
         }
@@ -88,7 +113,8 @@ class KnowledgeAnalysisPlan:
         batches = _list(value.get("batches"), "batches")
         topology = _list(value.get("merge_topology"), "merge_topology")
         snapshot = _mapping(value.get("prompt_contract_snapshot"), "prompt_contract_snapshot")
-        return cls(
+        raw_profile = value.get("execution_profile")
+        plan = cls(
             document_ir_digest=_string(value, "document_ir_digest"),
             provider=_string(value, "provider"),
             analysis_model=_string(value, "analysis_model"),
@@ -103,9 +129,26 @@ class KnowledgeAnalysisPlan:
             prompt_contract_digest=_string(value, "prompt_contract_digest"),
             input_budget_tokens=_integer(value, "input_budget_tokens"),
             output_budget_tokens=_integer(value, "output_budget_tokens"),
+            final_output_reserve_tokens=_optional_integer(
+                value,
+                "final_output_reserve_tokens",
+                _integer(value, "output_budget_tokens"),
+            ),
+            reasoning_allowance_tokens=_optional_integer(
+                value, "reasoning_allowance_tokens", 0
+            ),
+            execution_profile=(
+                DesktopModelExecutionProfile.from_dict(raw_profile)
+                if raw_profile is not None
+                else None
+            ),
             batches=tuple(_batch_from_dict(item) for item in batches),
             merge_topology=tuple(_merge_node_from_dict(item) for item in topology),
         )
+        stored_identity = value.get("plan_identity")
+        if stored_identity is not None and stored_identity != plan.plan_identity:
+            raise ValueError("Knowledge Analysis Plan identity does not match its fields.")
+        return plan
 
 
 def knowledge_analysis_input_budget(
@@ -129,9 +172,21 @@ def build_knowledge_analysis_plan(
     capability: DesktopModelCapabilityProfile,
     contract: DesktopPromptContract,
     estimated_batch_tokens: tuple[int, ...],
+    execution_profile: DesktopModelExecutionProfile | None = None,
 ) -> KnowledgeAnalysisPlan:
-    output_budget = _positive_int(contract.token_budget_policy.get("reserve_output_tokens"), 4_096)
+    final_output_reserve = _positive_int(
+        contract.token_budget_policy.get("reserve_output_tokens"), 4_096
+    )
+    reasoning_allowance = 0
+    output_budget = final_output_reserve
     input_budget = knowledge_analysis_input_budget(capability, contract)
+    if execution_profile is not None:
+        if (execution_profile.provider, execution_profile.model) != (provider, model):
+            raise ValueError("Model Execution Profile does not match the Analysis selection.")
+        final_output_reserve = execution_profile.final_output_reserve_tokens
+        reasoning_allowance = execution_profile.reasoning_allowance_tokens
+        output_budget = execution_profile.provider_output_ceiling_tokens
+        input_budget = execution_profile.document_input_budget_tokens
     batch_plans = tuple(
         KnowledgeAnalysisBatchPlan(
             ordinal=ordinal,
@@ -141,20 +196,13 @@ def build_knowledge_analysis_plan(
         )
         for ordinal, batch in enumerate(planned_batches)
     )
-    contract_snapshots = {
-        operation: prompt_contract_for(operation).snapshot()
-        for operation in (
-            "knowledge_analysis",
-            "knowledge_analysis_batch",
-            "knowledge_analysis_merge",
-            "structured_output_repair",
-        )
-    }
-    snapshot_bundle: dict[str, object] = {
-        "primary_operation": contract.operation,
-        "contracts": contract_snapshots,
-    }
+    snapshot_bundle = analysis_prompt_contract_bundle()
     bundle_digest = hashlib.sha256(_json(snapshot_bundle).encode("utf-8")).hexdigest()
+    if (
+        execution_profile is not None
+        and execution_profile.prompt_contract_digest != bundle_digest
+    ):
+        raise ValueError("Model Execution Profile does not match the Prompt Contract bundle.")
     return KnowledgeAnalysisPlan(
         document_ir_digest=document_ir_digest(evidence),
         provider=provider,
@@ -164,6 +212,9 @@ def build_knowledge_analysis_plan(
         prompt_contract_digest=bundle_digest,
         input_budget_tokens=input_budget,
         output_budget_tokens=output_budget,
+        final_output_reserve_tokens=final_output_reserve,
+        reasoning_allowance_tokens=reasoning_allowance,
+        execution_profile=execution_profile,
         batches=batch_plans,
         merge_topology=hierarchical_merge_topology(len(batch_plans)),
     )
@@ -198,13 +249,6 @@ def prompt_snapshot_for_operation(
     if not isinstance(snapshot, dict):
         raise ValueError(f"Knowledge Analysis Plan does not pin {operation}.")
     return snapshot
-
-
-def estimate_model_tokens(value: str) -> int:
-    """A deterministic conservative estimator: CJK chars count one, other text four-to-one."""
-    cjk = sum(1 for char in value if "\u3400" <= char <= "\u9fff")
-    other = len(value) - cjk
-    return max(1, cjk + (other + 3) // 4)
 
 
 def hierarchical_merge_topology(
@@ -301,6 +345,10 @@ def _integer(mapping: dict[str, object], field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"Knowledge Analysis Plan {field} is invalid.")
     return value
+
+
+def _optional_integer(mapping: dict[str, object], field: str, default: int) -> int:
+    return default if field not in mapping else _integer(mapping, field)
 
 
 def _boolean(mapping: dict[str, object], field: str) -> bool:

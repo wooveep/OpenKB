@@ -37,7 +37,8 @@ pub use model_lifecycle::{ModelCallLifecycleEventData, ModelCallLifecycleStatus}
 #[path = "engine_wire_import_observability.rs"]
 mod import_observability;
 pub use import_observability::{
-    ImportProgressStep, ImportUsageAggregate, LegacyModelRecovery, ModelActivity, ModelUsageRecord,
+    ImportProgressStep, ImportUsageAggregate, LegacyModelRecovery, ModelActivity, ModelCall,
+    ModelUsageRecord,
 };
 #[path = "engine_wire_page_tree.rs"]
 mod page_tree;
@@ -478,40 +479,6 @@ pub struct ImportStageRun {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ModelAttempt {
-    pub attempt: u32,
-    pub status: ModelCallStatus,
-    #[serde(default, alias = "elapsed_seconds")]
-    pub elapsed_seconds: f64,
-    #[serde(alias = "error_code")]
-    pub error_code: Option<String>,
-    pub reason: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelCall {
-    #[serde(alias = "call_id")]
-    pub call_id: String,
-    #[serde(alias = "stage_run_id")]
-    pub stage_run_id: String,
-    pub operation: String,
-    pub status: ModelCallStatus,
-    #[serde(alias = "attempt_count")]
-    pub attempt_count: u32,
-    #[serde(default, alias = "elapsed_seconds")]
-    pub elapsed_seconds: f64,
-    #[serde(alias = "error_code")]
-    pub error_code: Option<String>,
-    pub reason: Option<String>,
-    #[serde(alias = "suggested_action")]
-    pub suggested_action: Option<String>,
-    #[serde(default)]
-    pub attempts: Vec<ModelAttempt>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct QuarantinedDocument {
     #[serde(alias = "stage_run_id")]
     pub stage_run_id: String,
@@ -551,8 +518,12 @@ pub struct RecoveryOverride {
     pub model: Option<String>,
     #[serde(default, alias = "context_capacity")]
     pub context_capacity: Option<u64>,
+    #[serde(default)]
+    pub reasoning: Option<String>,
     #[serde(default, alias = "legacy_recovery_choice")]
     pub legacy_recovery_choice: Option<String>,
+    #[serde(default, alias = "check_and_recover")]
+    pub check_and_recover: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

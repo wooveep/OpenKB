@@ -31,6 +31,15 @@ from openkb.locks import kb_ingest_lock
 CONTINUE_COMPATIBLE = "continue_compatible"
 RESTART_CURRENT_PLAN = "restart_current_plan"
 _CHOICES = frozenset({CONTINUE_COMPATIBLE, RESTART_CURRENT_PLAN})
+_PROFILE_REPLAN_ERROR_CODES = frozenset(
+    {
+        "empty_final_result",
+        "reasoning_only_result",
+        "reasoning_output_exhausted",
+        "model_response_invalid",
+        "knowledge_analysis_replan_required",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -48,10 +57,12 @@ class LegacyModelRecoveryAssessment:
     restart_input_tokens: int
     recommended_choice: str
     selected_choice: str | None = None
+    kind: str = "legacy_model_deadline"
+    discarded_model_checkpoints: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "kind": "legacy_model_deadline",
+            "kind": self.kind,
             "compatible": self.compatible,
             "compatibility_reason": self.compatibility_reason,
             "previous_prompt_digest": self.previous_prompt_digest,
@@ -71,10 +82,12 @@ class LegacyModelRecoveryAssessment:
                     "estimated_remaining_calls": self.restart_remaining_calls,
                     "estimated_input_tokens": self.restart_input_tokens,
                     "reuses_parser_document_ir_evidence": True,
+                    "discarded_model_checkpoints": self.discarded_model_checkpoints,
                 },
             },
             "recommended_choice": self.recommended_choice,
             "selected_choice": self.selected_choice,
+            "discarded_model_checkpoints": self.discarded_model_checkpoints,
             "starts_automatically": False,
         }
 
@@ -282,10 +295,18 @@ def legacy_model_recovery_assessment_in(
     job_id: str,
 ) -> LegacyModelRecoveryAssessment | None:
     quarantine = connection.execute(
-        "SELECT error_code FROM quarantined_documents WHERE job_id = ?", (job_id,)
+        "SELECT error_code, stage FROM quarantined_documents WHERE job_id = ?", (job_id,)
     ).fetchone()
-    if quarantine is None or str(quarantine[0]) != "model_deadline_exceeded":
+    if quarantine is None:
         return None
+    error_code = str(quarantine[0])
+    if error_code != "model_deadline_exceeded":
+        return (
+            _model_profile_replan_assessment_in(connection, job_id)
+            if str(quarantine[1]) == "model_analysis"
+            and error_code in _PROFILE_REPLAN_ERROR_CODES
+            else None
+        )
     evidence = _evidence_in(connection, job_id)
     rows = _batch_rows(connection, job_id)
     evidence_ids = {item[0] for item in evidence}
@@ -369,6 +390,90 @@ def legacy_model_recovery_assessment_in(
         restart_input_tokens=total_input,
         recommended_choice=recommendation,
         selected_choice=str(selected[0]) if selected is not None else None,
+    )
+
+
+def _model_profile_replan_assessment_in(
+    connection: sqlite3.Connection,
+    job_id: str,
+) -> LegacyModelRecoveryAssessment:
+    evidence = _evidence_in(connection, job_id)
+    rows = _batch_rows(connection, job_id)
+    plan_row = connection.execute(
+        "SELECT plan_json, prompt_contract_digest FROM knowledge_analysis_plans WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+    plan: KnowledgeAnalysisPlan | None = None
+    if plan_row is not None:
+        try:
+            plan = KnowledgeAnalysisPlan.from_dict(json.loads(str(plan_row[0])))
+        except (json.JSONDecodeError, ValueError):
+            plan = None
+    provider = plan.provider if plan is not None else None
+    model = plan.analysis_model if plan is not None else None
+    if provider is None or model is None:
+        for row in rows:
+            checkpoint = _mapping_json(row[4])
+            provider_value = checkpoint.get("provider")
+            model_value = checkpoint.get("model")
+            if provider is None and isinstance(provider_value, str):
+                provider = provider_value
+            if model is None and isinstance(model_value, str):
+                model = model_value
+    completed_batches = sum(1 for row in rows if str(row[2]) == "completed")
+    discarded = sum(1 for row in rows if row[4] is not None)
+    discarded += int(
+        connection.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1 FROM knowledge_analysis_merges
+                WHERE job_id = ? AND checkpoint_json IS NOT NULL
+            )
+            """,
+            (job_id,),
+        ).fetchone()[0]
+    )
+    discarded += int(
+        connection.execute(
+            """
+            SELECT COUNT(*) FROM knowledge_analysis_merge_nodes
+            WHERE job_id = ? AND checkpoint_json IS NOT NULL
+            """,
+            (job_id,),
+        ).fetchone()[0]
+    )
+    total_batches = (
+        len(plan.batches)
+        if plan is not None and plan.batches
+        else len(rows)
+        if rows
+        else 1
+    )
+    replacement_calls = total_batches + len(hierarchical_merge_topology(total_batches))
+    replacement_input = sum(estimate_model_tokens(block.text) for _, block in evidence)
+    selected = connection.execute(
+        """
+        SELECT recovery_choice FROM legacy_model_recovery_audit
+        WHERE job_id = ? ORDER BY selected_at DESC LIMIT 1
+        """,
+        (job_id,),
+    ).fetchone()
+    return LegacyModelRecoveryAssessment(
+        compatible=False,
+        compatibility_reason="incompatible_or_failed_model_execution_profile",
+        previous_prompt_digest=(str(plan_row[1]) if plan_row is not None else None),
+        provider=provider,
+        model=model,
+        completed_batches=completed_batches,
+        total_batches=total_batches,
+        continue_remaining_calls=replacement_calls,
+        continue_input_tokens=replacement_input,
+        restart_remaining_calls=replacement_calls,
+        restart_input_tokens=replacement_input,
+        recommended_choice=RESTART_CURRENT_PLAN,
+        selected_choice=str(selected[0]) if selected is not None else None,
+        kind="model_execution_profile_replan",
+        discarded_model_checkpoints=discarded,
     )
 
 
@@ -462,7 +567,15 @@ def _plan_identity_in(connection: sqlite3.Connection, job_id: str) -> str | None
     row = connection.execute(
         "SELECT plan_json FROM knowledge_analysis_plans WHERE job_id = ?", (job_id,)
     ).fetchone()
-    return hashlib.sha256(str(row[0]).encode("utf-8")).hexdigest() if row else None
+    if row is None:
+        return None
+    serialized = str(row[0])
+    try:
+        return KnowledgeAnalysisPlan.from_dict(json.loads(serialized)).plan_identity
+    except (json.JSONDecodeError, ValueError):
+        # Historical plans predate the embedded identity; retain their stable
+        # raw snapshot digest for audit readability without making them resumable.
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _string_list(value: object) -> tuple[str, ...]:

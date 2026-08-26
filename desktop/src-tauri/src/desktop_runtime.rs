@@ -22,6 +22,8 @@ use tauri::{
 };
 
 const ACTIVE_KNOWLEDGE_BASE_FILE: &str = "active-knowledge-base.txt";
+// Packaging harnesses set this explicitly so shell smoke tests cannot restore a real user KB.
+const RUNTIME_DIRECTORY_OVERRIDE: &str = "OPENKB_DESKTOP_RUNTIME_DIR";
 const OPEN_MENU_ID: &str = "desktop.open";
 const TASKS_MENU_ID: &str = "desktop.tasks";
 const QUIT_MENU_ID: &str = "desktop.quit";
@@ -360,9 +362,18 @@ fn is_desktop_knowledge_base(path: &Path) -> bool {
 }
 
 fn active_knowledge_base_file(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_data_dir()
-        .ok()
+    let override_directory = env::var_os(RUNTIME_DIRECTORY_OVERRIDE)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    active_knowledge_base_file_for(override_directory, app.path().app_data_dir().ok())
+}
+
+fn active_knowledge_base_file_for(
+    override_directory: Option<PathBuf>,
+    app_data_directory: Option<PathBuf>,
+) -> Option<PathBuf> {
+    override_directory
+        .or(app_data_directory)
         .map(|directory| directory.join(ACTIVE_KNOWLEDGE_BASE_FILE))
 }
 
@@ -479,7 +490,7 @@ fn rotate_shell_log(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::launch_paths;
+    use super::{active_knowledge_base_file_for, launch_paths, ACTIVE_KNOWLEDGE_BASE_FILE};
     use serde_json::Value;
     use std::{fs, time::SystemTime};
 
@@ -497,6 +508,22 @@ mod tests {
                 .any(|permission| permission == "dialog:allow-save"),
             "diagnostic bundle export requires dialog:allow-save"
         );
+    }
+
+    #[test]
+    fn explicit_runtime_directory_isolates_active_knowledge_base_state() {
+        let persistent = std::path::PathBuf::from("persistent-runtime");
+        let isolated = std::path::PathBuf::from("isolated-runtime");
+
+        assert_eq!(
+            active_knowledge_base_file_for(Some(isolated.clone()), Some(persistent.clone())),
+            Some(isolated.join(ACTIVE_KNOWLEDGE_BASE_FILE))
+        );
+        assert_eq!(
+            active_knowledge_base_file_for(None, Some(persistent.clone())),
+            Some(persistent.join(ACTIVE_KNOWLEDGE_BASE_FILE))
+        );
+        assert_eq!(active_knowledge_base_file_for(None, None), None);
     }
 
     #[test]

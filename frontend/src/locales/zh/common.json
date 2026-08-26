@@ -169,6 +169,18 @@
         "failed": "失败"
       },
       "modelRetrying": "收到明确失败后重试：{{reason}}",
+      "modelResultDetails": {
+        "title": "模型结果技术详情",
+        "finishReason": "结束原因",
+        "reasoningObserved": "检测到推理输出",
+        "finalContentObserved": "检测到最终内容",
+        "reasoningChunks": "推理分块数",
+        "finalChunks": "最终内容分块数",
+        "reasoningCharacters": "推理字符数",
+        "finalCharacters": "最终内容字符数",
+        "tokens": "提供商 Token",
+        "providerRequestId": "提供商请求 ID"
+      },
       "quarantinedTitle": "文档已从可用知识中隔离",
       "quarantinedAttempts": "自动尝试次数：{{attempts}}",
       "failedDocuments": "失败文档",
@@ -183,10 +195,14 @@
       "recoveryModelPlaceholder": "使用已配置模型",
       "recoveryContext": "上下文容量（Token，可选）",
       "recoveryContextPlaceholder": "使用检测到的模型容量",
+      "recoveryReasoning": "本次恢复的推理级别",
+      "recoveryReasoningConfigured": "使用已配置的分析推理级别",
       "recoveryInvalidContext": "上下文容量至少应为 4,096 Token 的整数。",
       "recoveryChoiceTitle": "历史截止时间任务恢复",
+      "recoveryProfileChoiceTitle": "分析执行档案重新规划",
       "recoveryChoiceRequired": "请选择如何恢复这个历史模型截止时间任务。",
       "recoveryRecommended": "推荐",
+      "recoveryProfileReplanNotice": "已保存的分析执行档案不兼容或执行失败。OpenKB 会先检查替代档案；检查通过后保留原始资产、文档结构和证据，并丢弃 {{checkpoints}} 个模型检查点。",
       "recoveryChoices": {
         "continue_compatible": {
           "title": "继续兼容的已有结果",
@@ -197,7 +213,8 @@
           "description": "保留解析器、文档结构和证据；预计还需 {{calls}} 次调用、{{tokens}} 个输入 Token。"
         }
       },
-      "recoverImport": "恢复文档",
+      "checkAndRecover": "检查并恢复",
+      "checkingAndRecovering": "正在检查并恢复…",
       "schemaVersion": "SQLite schema",
       "checkpoint": "最近检查点",
       "notYet": "尚未创建",
@@ -340,6 +357,13 @@
           "medium": "中",
           "high": "高"
         },
+        "noStructuredMode": "仅支持问答的适配器",
+        "effectiveSources": {
+          "explicit_role": "角色显式设置",
+          "inherited_default": "继承默认角色",
+          "analysis_safe_default": "分析安全默认值",
+          "provider_default": "提供商默认行为"
+        },
         "pricingTitle": "可选的用户定价",
         "pricingDescription": "价格单位为每百万 Token，仅用于本地费用估算；OpenKB 不会猜测价格。",
         "inputPrice": "输入价格",
@@ -361,16 +385,26 @@
           "queued": "正在等待可用的模型调用槽位…",
           "connecting": "正在建立模型连接（最多 30 秒）…",
           "awaiting_model_result": "请求已发送，正在等待模型结果；思考和生成时间不计为超时。",
+          "reasoning_output_activity": "模型正在返回私有推理活动…",
           "model_output_activity": "模型正在返回内容…",
           "validating": "正在校验模型结果…",
           "completed": "模型检查已完成。",
           "retrying": "收到可重试的明确失败，正在重试…",
           "cancelled": "已取消本地模型等待；提供商仍可能继续计算或计费。",
           "provider_failure": "模型提供商明确返回了失败。",
-          "network_failure": "模型连接发生网络故障。"
+          "network_failure": "模型连接发生网络故障。",
+          "model_result_failure": "模型未返回可用的最终结果。"
         },
         "testSucceeded": "连接成功，用时 {{latency}} 毫秒（{{attempts}} 次尝试）。",
         "testRejected": "模型提供商未通过连接测试。",
+        "analysisCapability": "分析能力",
+        "capabilityStates": {
+          "unchecked": "未检查",
+          "checking": "检查中",
+          "verified": "已验证",
+          "failed": "检查失败",
+          "cancelled": "检查已取消"
+        },
         "appearanceTitle": "外观与语言",
         "appearanceDescription": "这些偏好只应用于此设备上的桌面工作台。",
         "theme": "主题",
@@ -568,13 +602,15 @@
         "queued": "等待模型调用槽位",
         "connecting": "正在连接",
         "awaiting_first_result": "等待模型首次返回",
+        "receiving_reasoning": "正在接收私有推理活动",
         "receiving_output": "正在接收模型输出",
         "validating": "正在校验模型输出",
         "retrying": "明确失败后正在重试",
         "completed": "模型调用已完成",
         "interrupted": "模型调用已中断",
         "provider_failure": "提供商失败",
-        "network_failure": "网络失败"
+        "network_failure": "网络失败",
+        "model_result_failure": "模型未返回可用最终结果"
       },
       "knowledgeAnalysisPhases": {
         "batches": "分析自然章节",

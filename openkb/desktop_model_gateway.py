@@ -34,7 +34,11 @@ class DesktopModelRequest:
     context_capacity: int | None = None
     document_input_capacity: int | None = None
     reasoning_effort: str | None = None
+    provider_adapter: str | None = None
+    provider_adapter_version: str | None = None
+    structured_output_mode: str | None = None
     response_schema: dict[str, object] | None = None
+    response_example: dict[str, object] | None = None
     response_schema_name: str | None = None
     generation_parameters: dict[str, object] | None = None
     prompt_contract_digest: str | None = None
@@ -57,11 +61,36 @@ class DesktopProviderTokenUsage:
     total_tokens: int
 
 
+@dataclass(frozen=True)
+class DesktopModelOutputObservations:
+    """Content-free facts observed while receiving one provider result."""
+
+    finish_reason: str | None = None
+    reasoning_observed: bool = False
+    final_content_observed: bool = False
+    reasoning_chunk_count: int = 0
+    final_chunk_count: int = 0
+    reasoning_character_count: int = 0
+    final_character_count: int = 0
+    output_limit_reached: bool = False
+
+
+@dataclass(frozen=True)
+class DesktopProviderStreamEvent:
+    """Provider stream signal with final text but no raw reasoning text."""
+
+    final_content: str = ""
+    reasoning_character_count: int = 0
+    finish_reason: str | None = None
+    output_limit_reached: bool = False
+
+
 class DesktopModelProviderResponse(str):
     """String-compatible output carrying only safe provider metadata."""
 
     usage: DesktopProviderTokenUsage | None
     provider_request_id: str | None
+    observations: DesktopModelOutputObservations
 
     def __new__(
         cls,
@@ -69,10 +98,16 @@ class DesktopModelProviderResponse(str):
         *,
         usage: DesktopProviderTokenUsage | None = None,
         provider_request_id: str | None = None,
+        observations: DesktopModelOutputObservations | None = None,
     ) -> DesktopModelProviderResponse:
         value = super().__new__(cls, content)
         value.usage = usage
         value.provider_request_id = provider_request_id
+        value.observations = observations or DesktopModelOutputObservations(
+            final_content_observed=bool(content.strip()),
+            final_chunk_count=1 if content.strip() else 0,
+            final_character_count=len(content) if content.strip() else 0,
+        )
         return value
 
 
@@ -85,6 +120,7 @@ class DesktopModelResult:
     attempt_count: int
     usage: DesktopProviderTokenUsage | None = None
     provider_request_id: str | None = None
+    observations: DesktopModelOutputObservations | None = None
 
 
 @dataclass(frozen=True)
@@ -118,18 +154,65 @@ class DesktopModelTransportError(RuntimeError):
 class DesktopModelCallError(RuntimeError):
     """Raised only after an explicit provider, network, or validation terminal event."""
 
-    def __init__(self, call_id: str, failure: DesktopModelFailure, attempt_count: int) -> None:
+    def __init__(
+        self,
+        call_id: str,
+        failure: DesktopModelFailure,
+        attempt_count: int,
+        *,
+        observations: DesktopModelOutputObservations | None = None,
+        usage: DesktopProviderTokenUsage | None = None,
+        provider_request_id: str | None = None,
+    ) -> None:
         super().__init__(failure.reason)
         self.call_id = call_id
         self.failure = failure
         self.attempt_count = attempt_count
+        self.observations = observations
+        self.usage = usage
+        self.provider_request_id = provider_request_id
 
 
 class DesktopModelCancelledError(RuntimeError):
     """User or application interruption, never a provider failure or elapsed timeout."""
 
 
+class DesktopModelResultError(RuntimeError):
+    """A provider request ended successfully but yielded no usable final result."""
+
+    def __init__(self, observations: DesktopModelOutputObservations) -> None:
+        if observations.reasoning_observed:
+            code = (
+                "reasoning_output_exhausted"
+                if observations.output_limit_reached
+                else "reasoning_only_result"
+            )
+        else:
+            code = "empty_final_result"
+        super().__init__(code)
+        self.code = code
+        self.observations = observations
+
+
 _FAILURES: dict[str, DesktopModelFailure] = {
+    "empty_final_result": DesktopModelFailure(
+        "empty_final_result",
+        "The model returned no usable final result.",
+        "Run the model capability check before trying again.",
+        False,
+    ),
+    "reasoning_only_result": DesktopModelFailure(
+        "reasoning_only_result",
+        "The model returned reasoning but no usable final result.",
+        "Run the model capability check before trying again.",
+        False,
+    ),
+    "reasoning_output_exhausted": DesktopModelFailure(
+        "reasoning_output_exhausted",
+        "The model exhausted its output limit in reasoning before returning a final result.",
+        "Use a compatible Analysis profile and run the model capability check.",
+        False,
+    ),
     "model_rate_limited": DesktopModelFailure(
         "model_rate_limited",
         "The model provider is temporarily rate limiting requests.",
@@ -227,6 +310,14 @@ class DesktopModelGateway:
     def for_lane(self, lane: ExecutionLane) -> DesktopModelGateway:
         raise NotImplementedError
 
+    def analysis_capability_verified(self) -> bool:
+        """Return whether this gateway's current Analysis profile may dispatch work."""
+        return True
+
+    def invalidate_analysis_capability(self, failure_code: str, reason: str) -> None:
+        """Invalidate current-profile evidence when the gateway owns such a cache."""
+        del failure_code, reason
+
     def analyze(
         self,
         request: DesktopModelRequest,
@@ -257,8 +348,27 @@ class DesktopModelGateway:
         raise NotImplementedError
 
 
+def gateway_analysis_capability_verified(gateway: object) -> bool:
+    """Preserve compatibility for simple gateways without a capability cache."""
+    verifier = getattr(gateway, "analysis_capability_verified", None)
+    return bool(verifier()) if callable(verifier) else True
+
+
+def invalidate_analysis_capability(
+    gateway: object,
+    failure_code: str,
+    reason: str,
+) -> None:
+    """Invalidate cache-backed gateways while keeping test/local gateways structural."""
+    invalidator = getattr(gateway, "invalidate_analysis_capability", None)
+    if callable(invalidator):
+        invalidator(failure_code, reason)
+
+
 def classify_model_error(error: Exception) -> DesktopModelFailure:
     """Map an explicit terminal cause without inventing an elapsed-time failure."""
+    if isinstance(error, DesktopModelResultError):
+        return _FAILURES[error.code]
     if isinstance(error, DesktopModelTransportError):
         code = _TRANSPORT_CATEGORIES.get(error.category, "model_service_unavailable")
         return _FAILURES[code]

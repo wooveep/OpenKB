@@ -22,6 +22,9 @@ import {
   type DesktopModelCallLifecycleStatus,
   type DesktopModelSettingsDraft as SettingsDraft,
   type DesktopModelSettings,
+  type DesktopModelProviderAdapter,
+  type DesktopEffectiveModelRoles,
+  type DesktopModelCapabilityState,
   type DesktopReasoningEffort,
 } from "./contracts"
 
@@ -67,6 +70,54 @@ const roleFields = [
 ] as const
 
 const reasoningOptions = ["", "off", "low", "medium", "high"] as const
+
+export function EffectiveModelRoleSettings({
+  adapter,
+  roles,
+  capability,
+}: {
+  adapter: DesktopModelProviderAdapter
+  roles: DesktopEffectiveModelRoles
+  capability: DesktopModelCapabilityState
+}) {
+  const { t } = useTranslation("common")
+  return (
+    <div className="mt-4 rounded-xl border border-border/70 bg-muted/20 p-4" data-testid="effective-model-roles">
+      <p className="text-sm font-medium">
+        {adapter.identity === "deepseek"
+          ? t("desktop.knowledgeBases.modelSettings.providerDeepSeek")
+          : t("desktop.knowledgeBases.modelSettings.providerCustom")}
+        {" · "}{adapter.version}{" · "}{adapter.structuredOutputMode ?? t("desktop.knowledgeBases.modelSettings.noStructuredMode")}
+      </p>
+      <div className="mt-3 grid gap-3 md:grid-cols-3">
+        {(["default", "analysis", "answer"] as const).map((role) => {
+          const effective = roles[role]
+          return (
+            <div className="rounded-lg bg-background p-3 text-sm" key={role}>
+              <p className="font-medium">{t(`desktop.knowledgeBases.modelSettings.roles.${role}.name`)}</p>
+              <p className="mt-1 text-muted-foreground">{effective.model} · {effective.contextCapacity.toLocaleString()}</p>
+              <p className="mt-1 text-muted-foreground">
+                {effective.reasoning
+                  ? t(`desktop.knowledgeBases.modelSettings.reasoning.${effective.reasoning}`)
+                  : t("desktop.knowledgeBases.modelSettings.effectiveSources.provider_default")}
+                {" · "}{t(`desktop.knowledgeBases.modelSettings.effectiveSources.${effective.reasoningSource}`)}
+              </p>
+            </div>
+          )
+        })}
+      </div>
+      {!adapter.supportsStructuredAnalysis && adapter.analysisUnavailableReason ? (
+        <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">{adapter.analysisUnavailableReason}</p>
+      ) : null}
+      <div className="mt-3 border-t border-border/60 pt-3 text-xs" data-testid="analysis-capability-state">
+        <span className="font-medium">
+          {t("desktop.knowledgeBases.modelSettings.analysisCapability")}: {t(`desktop.knowledgeBases.modelSettings.capabilityStates.${capability.status}`)}
+        </span>
+        {capability.reason ? <p className="mt-1 text-muted-foreground">{capability.reason}</p> : null}
+      </div>
+    </div>
+  )
+}
 
 function draftFrom(settings: DesktopModelSettings): ModelSettingsDraft {
   return {
@@ -387,6 +438,11 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
                   ...current,
                   provider,
                   apiBaseUrl: provider === "deepseek" ? "https://api.deepseek.com" : current.apiBaseUrl,
+                  ...(provider === "custom" ? {
+                    defaultReasoning: "",
+                    analysisReasoning: "",
+                    answerReasoning: "",
+                  } : {}),
                 }
               })}
             >
@@ -479,7 +535,17 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
                   } : current)}
                 >
                   {reasoningOptions.map((option) => (
-                    <option key={option || "provider"} value={option}>
+                    <option
+                      key={option || "provider"}
+                      value={option}
+                      disabled={option !== "" && (
+                        draft.provider === "custom"
+                        || (
+                          draft.provider === settings.providerAdapter.identity
+                          && !settings.providerAdapter.supportedReasoning.includes(option)
+                        )
+                      )}
+                    >
                       {t(`desktop.knowledgeBases.modelSettings.reasoning.${option || "provider"}`)}
                     </option>
                   ))}
@@ -487,6 +553,11 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
               </label>
             ))}
           </div>
+          <EffectiveModelRoleSettings
+            adapter={settings.providerAdapter}
+            roles={settings.effectiveRoles}
+            capability={settings.analysisCapability}
+          />
         </div>
 
         <div className="mt-6 border-t border-border/70 pt-5">

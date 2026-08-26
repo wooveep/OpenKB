@@ -28,6 +28,7 @@ import type {
 import { currentDocumentTasks, taskIsFailed } from "./desktop-document-tasks"
 import { DesktopKnowledgeAnalysisProgress } from "./DesktopKnowledgeAnalysisProgress"
 import { DesktopImportProgress } from "./DesktopImportProgress"
+import { DesktopModelResultDetails } from "./DesktopModelResultDetails"
 import type { KnowledgeReanalysisController } from "./useKnowledgeReanalysis"
 
 export interface DesktopImportBatchSummary {
@@ -532,6 +533,7 @@ function ImportTaskCard({
               })}
             </p>
           ) : null}
+          <DesktopModelResultDetails result={modelCall} />
         </div>
       ) : null}
       {quarantine ? (

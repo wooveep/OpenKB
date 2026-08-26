@@ -191,17 +191,41 @@ class DesktopModelAttempt:
 
     attempt: int
     status: str
+    lifecycle_status: str | None = None
     elapsed_seconds: float = 0.0
     error_code: str | None = None
     reason: str | None = None
+    finish_reason: str | None = None
+    reasoning_observed: bool | None = None
+    final_content_observed: bool | None = None
+    reasoning_chunk_count: int | None = None
+    final_chunk_count: int | None = None
+    reasoning_character_count: int | None = None
+    final_character_count: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    provider_request_id: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
             "attempt": self.attempt,
             "status": self.status,
+            "lifecycle_status": self.lifecycle_status,
             "elapsed_seconds": self.elapsed_seconds,
             "error_code": self.error_code,
             "reason": self.reason,
+            "finish_reason": self.finish_reason,
+            "reasoning_observed": self.reasoning_observed,
+            "final_content_observed": self.final_content_observed,
+            "reasoning_chunk_count": self.reasoning_chunk_count,
+            "final_chunk_count": self.final_chunk_count,
+            "reasoning_character_count": self.reasoning_character_count,
+            "final_character_count": self.final_character_count,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "provider_request_id": self.provider_request_id,
         }
 
 
@@ -214,10 +238,22 @@ class DesktopModelCall:
     operation: str
     status: str
     attempt_count: int
+    lifecycle_status: str | None = None
     elapsed_seconds: float = 0.0
     error_code: str | None = None
     reason: str | None = None
     suggested_action: str | None = None
+    finish_reason: str | None = None
+    reasoning_observed: bool | None = None
+    final_content_observed: bool | None = None
+    reasoning_chunk_count: int | None = None
+    final_chunk_count: int | None = None
+    reasoning_character_count: int | None = None
+    final_character_count: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    provider_request_id: str | None = None
     attempts: tuple[DesktopModelAttempt, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
@@ -226,11 +262,23 @@ class DesktopModelCall:
             "stage_run_id": self.stage_run_id,
             "operation": self.operation,
             "status": self.status,
+            "lifecycle_status": self.lifecycle_status,
             "attempt_count": self.attempt_count,
             "elapsed_seconds": self.elapsed_seconds,
             "error_code": self.error_code,
             "reason": self.reason,
             "suggested_action": self.suggested_action,
+            "finish_reason": self.finish_reason,
+            "reasoning_observed": self.reasoning_observed,
+            "final_content_observed": self.final_content_observed,
+            "reasoning_chunk_count": self.reasoning_chunk_count,
+            "final_chunk_count": self.final_chunk_count,
+            "reasoning_character_count": self.reasoning_character_count,
+            "final_character_count": self.final_character_count,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "provider_request_id": self.provider_request_id,
             "attempts": [attempt.as_dict() for attempt in self.attempts],
         }
 
@@ -285,7 +333,9 @@ class DesktopRecoveryOverride:
 
     model: str | None = None
     context_capacity: int | None = None
+    reasoning: str | None = None
     legacy_recovery_choice: str | None = None
+    check_and_recover: bool = False
 
 
 @dataclass(frozen=True)

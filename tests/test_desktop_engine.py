@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import sqlite3
 import struct
 import threading
 import time
@@ -287,7 +288,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-                "schema_version": 42,
+            "schema_version": 44,
             "last_checkpoint_at": None,
         },
         "events": [
@@ -541,6 +542,49 @@ def test_engine_reads_persisted_import_tasks_for_the_active_knowledge_base(tmp_p
 
     assert history["jobs"][0]["job"]["job_id"] == imported.job.job_id
     assert history["jobs"][0]["document"]["availability"] == "available"
+
+
+def test_engine_keeps_model_summary_status_separate_from_failure_lifecycle(tmp_path):
+    """Detailed provider failure never escapes through the four-state status field."""
+    desktop_kb = tmp_path / "desktop-kb"
+    source = tmp_path / "notes.txt"
+    source.write_text("One durable import task.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(desktop_kb)
+    imported = DesktopTextImportService(
+        desktop_kb,
+        model_gateway=DesktopModelGateway(lambda *_args: _empty_knowledge_analysis()),
+    ).import_text(source)
+    with sqlite3.connect(desktop_kb / ".openkb" / "state.sqlite3") as connection:
+        connection.execute(
+            """
+            UPDATE model_calls
+            SET status = 'failed', lifecycle_status = 'provider_failure'
+            WHERE job_id = ?
+            """,
+            (imported.job.job_id,),
+        )
+        connection.execute(
+            """
+            UPDATE model_attempts
+            SET status = 'failed', lifecycle_status = 'provider_failure'
+            WHERE call_id IN (SELECT call_id FROM model_calls WHERE job_id = ?)
+            """,
+            (imported.job.job_id,),
+        )
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    history = server._dispatch(
+        DesktopRequest(request_id="history", method="workbench.import_jobs", params={}),
+        cancel_event=None,
+    )
+
+    call = history["jobs"][0]["model_calls"][0]
+    assert call["status"] == "failed"
+    assert call["lifecycle_status"] == "provider_failure"
+    assert call["attempts"][0]["status"] == "failed"
+    assert call["attempts"][0]["lifecycle_status"] == "provider_failure"
 
 
 def test_engine_classifies_provider_timeout_as_a_network_failure(tmp_path):
