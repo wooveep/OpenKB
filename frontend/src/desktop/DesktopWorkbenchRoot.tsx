@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/sonner"
 import { DesktopBridgeProvider } from "./bridge-context"
 import DesktopKnowledgeBaseWorkspace from "./DesktopKnowledgeBaseWorkspace"
 import DesktopLocalSettingsPanel from "./DesktopLocalSettingsPanel"
+import DesktopSensitiveTraceBanner from "./DesktopSensitiveTraceBanner"
 import DesktopStartup from "./DesktopStartup"
 import type { EngineViewPhase } from "./DesktopStartup"
 import type { DesktopBridge } from "./contracts"
@@ -18,6 +19,7 @@ export default function DesktopWorkbenchRoot({ bridge }: { bridge?: DesktopBridg
   return (
     <DesktopBridgeProvider bridge={bridge}>
       <MotionConfig reducedMotion="user">
+        <DesktopSensitiveTraceBanner />
         <DesktopKnowledgeBaseWorkspace engineReady={engineReady} />
         {!engineReady ? (
           <aside className={engineFailed ? "fixed inset-0 z-50 overflow-y-auto bg-background p-6" : "fixed bottom-4 right-4 z-50 w-[min(32rem,calc(100vw-2rem))]"} aria-label={t("desktop.workbench.title")}>

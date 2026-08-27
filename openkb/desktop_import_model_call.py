@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from openkb.desktop_import_model_ledger import DesktopImportModelLedger
 from openkb.desktop_import_store import DesktopImportStore, ImportJobState
+from openkb.desktop_logging import trace_event
 from openkb.desktop_model_event import normalize_model_event
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
@@ -38,17 +39,21 @@ def run_import_model_call(
 
     def record_attempt(event: object) -> None:
         lifecycle = normalize_model_event(event)
-        logger.info(
-            "import_model_attempt job_id=%s document=%r stage=%s call_id=%s "
-            "attempt=%s status=%s elapsed_seconds=%.1f error_code=%s",
-            state.job_id,
-            state.source.name,
-            stage,
-            lifecycle.call_id,
-            lifecycle.attempt,
-            lifecycle.lifecycle_status,
-            lifecycle.elapsed_seconds,
-            lifecycle.error_code,
+        trace_event(
+            logger,
+            "model_attempt_transition",
+            "A Model Attempt changed lifecycle state.",
+            component="model",
+            fields={
+                "job_id": state.job_id,
+                "stage_run_id": state.stage_ids[stage],
+                "stage": stage,
+                "call_id": lifecycle.call_id,
+                "attempt": lifecycle.attempt,
+                "status": lifecycle.lifecycle_status,
+                "elapsed_ms": round(lifecycle.elapsed_seconds * 1000),
+                "error_code": lifecycle.error_code,
+            },
         )
         ledger.record_attempt(
             job_id=state.job_id,

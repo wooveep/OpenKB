@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
+from openkb.desktop_model_failure_logging import own_structured_model_failure
 from openkb.desktop_model_gateway import (
     DesktopModelRequest,
     DesktopModelResult,
@@ -29,11 +30,13 @@ class DesktopStructuredOutputInvalidError(ValueError):
         *,
         initial_result: DesktopModelResult,
         final_result: DesktopModelResult,
+        failure_event_id: str | None = None,
     ) -> None:
         super().__init__("The model returned invalid structured output after one automatic repair.")
         self.initial_result = initial_result
         self.final_result = final_result
         self.attempt_count = initial_result.attempt_count + final_result.attempt_count
+        self.failure_event_id = failure_event_id
 
 
 @dataclass(frozen=True)
@@ -128,9 +131,19 @@ def run_structured_output(
                 failure_code="model_response_invalid",
                 reason="Local schema validation rejected the model result.",
             )
+            failure_event_id = own_structured_model_failure(
+                operation=operation,
+                document_name=document_name,
+                source_material=source_material,
+                initial=initial,
+                repaired=repaired,
+                first_error=first_error,
+                second_error=second_error,
+            )
             raise DesktopStructuredOutputInvalidError(
                 initial_result=initial,
                 final_result=repaired,
+                failure_event_id=failure_event_id,
             ) from second_error
         complete_model_result(repaired)
         return DesktopValidatedStructuredOutput(repaired, value, True)

@@ -63,9 +63,59 @@ model outputs, raw reasoning, or credentials.
 _Avoid_: telemetry, automatic crash report
 
 **Application Log**:
-An automatically maintained, rotating diagnostic record kept in application
-state rather than in a Desktop Knowledge Base or the program directory.
-_Avoid_: console output, Diagnostic Bundle
+An automatically maintained, rotating, support-shareable diagnostic record for
+the Desktop Shell and Python Engine, kept in application state rather than in a
+Desktop Knowledge Base or the program directory. It excludes source content,
+Prompt Contract snapshots, model outputs, raw reasoning, credentials, and other
+unsanitized payloads at every verbosity level.
+_Avoid_: console output, Diagnostic Bundle, Sensitive Trace Capture
+
+**Sensitive Trace Capture**:
+An explicitly authorized, time-bounded local diagnostic artifact, separate from
+Application Logs and Diagnostic Bundles, that may retain unredacted paths,
+exceptions, prompts, failed model requests and responses, raw reasoning, and
+other sensitive failure evidence. It is never an automatic support export.
+_Avoid_: Application Log, Diagnostic Bundle, permanent trace archive
+
+**Portable Local Configuration**:
+The optional user-authored, application-wide configuration beside a Portable
+Desktop Package's executable. It is the sole mutable program-directory runtime
+file, is outside the signed release inventory, and applies before any Desktop
+Knowledge Base is opened.
+_Avoid_: Knowledge Base configuration, release manifest, Application Log
+
+**Diagnostic Event**:
+A correlated, support-safe record of a meaningful runtime boundary, state
+transition, decision, or terminal result. Repeated query snapshots, streaming
+chunks, and document-content units are not Diagnostic Events.
+_Avoid_: log line, telemetry, model payload
+
+**Diagnostic Component**:
+The stable Desktop Runtime subsystem label used for per-component verbosity and
+failure ownership: `shell`, `bridge`, `runtime`, `import`, `parser`, `model`,
+`page_tree`, `retrieval`, `knowledge`, `projection`, or `storage`.
+_Avoid_: Python module name, logger hierarchy, process name
+
+**Failure Attribution**:
+The support-safe classification attached to a terminal Diagnostic Event that
+identifies its pipeline stage, execution phase, responsible component, failure
+kind and code, retryability, outcome, and correlation identities. It preserves
+the distinction among Network Failure, Provider Failure, and Model Result
+Failure instead of collapsing them into a generic model-response problem.
+_Avoid_: error message, stack trace, model response problem
+
+**Failure Context**:
+The bounded, self-contained diagnostic snapshot attached to a terminal failure
+so the default Application Log can explain the last completed stage, failing
+phase, relevant safe observations, and next action without lower-verbosity log
+history.
+_Avoid_: preceding debug trace, exception dump, model payload
+
+**Failure Owner**:
+The Diagnostic Component with enough causal context to emit the one canonical
+terminal event for a failure. Upstream boundaries reference that event instead
+of restating the same failure.
+_Avoid_: every exception handler, Engine request boundary
 
 **Runtime Restoration**:
 The reopening of the previously Active Knowledge Base and its recoverable work

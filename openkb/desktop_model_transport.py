@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ import yaml
 
 from openkb.config import LlmCredentialBundle, resolve_credential_bundle
 from openkb.desktop_import_types import DesktopRecoveryOverride
+from openkb.desktop_logging import log_event, trace_event
 from openkb.desktop_model_active_streams import DesktopActiveModelStreams
 from openkb.desktop_model_active_streams import once as _once
 from openkb.desktop_model_analysis_gate import DesktopAnalysisCapabilityGate
@@ -48,6 +50,7 @@ from openkb.desktop_model_settings import (
 from openkb.desktop_model_terminal import DesktopTerminalModelGateway
 from openkb.desktop_model_usage import DesktopModelUsageStore
 from openkb.desktop_prompt_contracts import prompt_contract_for
+from openkb.desktop_sensitive_trace import sensitive_trace_component_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +230,18 @@ class DesktopLiteLLMTransport:
     def __call__(self, request: DesktopModelRequest, connect_timeout_seconds: float) -> object:
         return self.call_until_terminal(request, connect_timeout_seconds)
 
+    def sensitive_request_payload(self, request: DesktopModelRequest) -> str:
+        """Return the exact provider body minus separately supplied credentials/headers."""
+        payload: dict[str, object] = {
+            "model": self._model,
+            "messages": _messages_for(request),
+            "base_url": self._bundle.base_url,
+            "max_retries": 0,
+            **(request.generation_parameters or {}),
+            **_provider_request_parameters(request),
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=repr)
+
     def call_until_terminal(
         self, request: DesktopModelRequest, connect_timeout_seconds: float
     ) -> object:
@@ -311,8 +326,10 @@ class DesktopLiteLLMTransport:
         on_delta: Callable[[object], None],
     ) -> str:
         if not hasattr(response, "__iter__"):
-            raise DesktopModelTransportError("response_format")
+            raise DesktopModelTransportError("response_format", sensitive_detail=repr(response))
         parts: list[str] = []
+        reasoning_parts: list[str] = []
+        capture_reasoning = sensitive_trace_component_enabled("model")
         usage: DesktopProviderTokenUsage | None = None
         provider_request_id: str | None = None
         finish_reason: str | None = None
@@ -341,6 +358,8 @@ class DesktopLiteLLMTransport:
                 if event.reasoning_character_count:
                     reasoning_chunk_count += 1
                     reasoning_character_count += event.reasoning_character_count
+                    if capture_reasoning and event.sensitive_reasoning_content:
+                        reasoning_parts.append(event.sensitive_reasoning_content)
                 if event.final_content:
                     final_chunk_count += 1
                     final_character_count += len(event.final_content)
@@ -375,6 +394,7 @@ class DesktopLiteLLMTransport:
                 final_character_count=final_character_count,
                 output_limit_reached=output_limit_reached,
             ),
+            sensitive_reasoning_content="".join(reasoning_parts),
         )
 
     def _terminal_completion(
@@ -412,7 +432,6 @@ class DesktopLiteLLMTransport:
             response = self._request_completion(
                 request,
                 timeout,
-                timeout_description=f"{connect_timeout_seconds:.1f}s connect-only",
                 stream=stream,
                 completion_client=completion_client,
             )
@@ -426,21 +445,27 @@ class DesktopLiteLLMTransport:
         request: DesktopModelRequest,
         timeout: object,
         *,
-        timeout_description: str,
         stream: bool,
         completion_client: object | None = None,
     ) -> object:
         self._validated_model()
 
-        logger.info(
-            "model_provider_request operation=%s document=%r model=%r endpoint=%r "
-            "timeout=%r stream=%s",
-            request.operation,
-            request.document_name,
-            self._model,
-            _diagnostic_endpoint(self._bundle.base_url),
-            timeout_description,
-            stream,
+        log_event(
+            logger,
+            logging.DEBUG,
+            "model_provider_request",
+            "A model provider request was dispatched.",
+            component="model",
+            fields={
+                "operation": request.operation,
+                "model": self._model if isinstance(self._model, str) else "invalid",
+                "adapter": request.provider_adapter,
+                "endpoint": _diagnostic_endpoint(self._bundle.base_url),
+                "streaming": stream,
+                "job_id": request.job_id,
+                "stage_run_id": request.stage_run_id,
+                "batch_id": request.batch_id,
+            },
         )
         try:
             from litellm import completion
@@ -489,22 +514,29 @@ class DesktopLiteLLMTransport:
         if category is None:
             return None
         diagnostic_detail = _provider_error_detail(error, self._bundle.api_key)
-        logger.warning(
-            "model_provider_request_failed operation=%s document=%r model=%r "
-            "endpoint=%r category=%s exception_type=%s detail=%r",
-            request.operation,
-            request.document_name,
-            self._model,
-            _diagnostic_endpoint(self._bundle.base_url),
-            category,
-            type(error).__name__,
-            diagnostic_detail,
+        trace_event(
+            logger,
+            "model_transport_failure_classified",
+            "A provider transport failure was classified for its Failure Owner.",
+            component="model",
+            fields={
+                "operation": request.operation,
+                "model": self._model if isinstance(self._model, str) else "invalid",
+                "adapter": request.provider_adapter,
+                "endpoint": _diagnostic_endpoint(self._bundle.base_url),
+                "provider_error_code": category,
+                "error_type": type(error).__name__,
+                "job_id": request.job_id,
+                "stage_run_id": request.stage_run_id,
+                "batch_id": request.batch_id,
+            },
         )
         return DesktopModelTransportError(
             category,
             retry_after_seconds=_provider_retry_after_seconds(error),
             diagnostic_type=type(error).__name__,
             diagnostic_detail=diagnostic_detail,
+            sensitive_detail=str(error),
         )
 
 
@@ -563,14 +595,14 @@ def _provider_request_parameters(request: DesktopModelRequest) -> dict[str, obje
 def _response_content(response: object) -> str:
     choices = _value(response, "choices")
     if not isinstance(choices, list) or not choices:
-        raise DesktopModelTransportError("response_format")
+        raise DesktopModelTransportError("response_format", sensitive_detail=repr(response))
     choice = choices[0]
     message = _value(choice, "message")
     content = _value(message, "content")
     if content is None:
         content = ""
     if not isinstance(content, str):
-        raise DesktopModelTransportError("response_format")
+        raise DesktopModelTransportError("response_format", sensitive_detail=repr(response))
     reasoning = _value(message, "reasoning_content") or _value(message, "reasoning")
     reasoning_characters = len(reasoning) if isinstance(reasoning, str) else 0
     finish_reason = _value(choice, "finish_reason")
@@ -589,6 +621,11 @@ def _response_content(response: object) -> str:
             reasoning_character_count=reasoning_characters,
             final_character_count=len(content),
             output_limit_reached=finish_reason in {"length", "max_tokens", "max_output_tokens"},
+        ),
+        sensitive_reasoning_content=(
+            reasoning
+            if isinstance(reasoning, str) and sensitive_trace_component_enabled("model")
+            else ""
         ),
     )
 
@@ -697,9 +734,17 @@ def _diagnostic_endpoint(base_url: str | None) -> str | None:
     if not base_url:
         return None
     parsed = urlsplit(base_url)
-    if not parsed.scheme or not parsed.netloc:
+    if not parsed.scheme or parsed.hostname is None:
         return "<invalid-api-base-url>"
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    authority = f"{host}:{port}" if port is not None else host
+    return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
 
 
 def _provider_error_detail(error: Exception, api_key: str | None) -> str:

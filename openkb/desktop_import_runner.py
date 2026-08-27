@@ -12,6 +12,7 @@ from typing import Callable
 from portalocker import LockException
 
 from openkb import __version__
+from openkb import desktop_import_logging as importlog
 from openkb import desktop_page_tree as page_tree_runtime
 from openkb import desktop_page_tree_store as page_tree_store
 from openkb.desktop_document_parsers import parse_structured_document
@@ -116,13 +117,14 @@ class DesktopTextImportService:
         require_model_analysis: bool = False,
         parser_mode: str = "auto",
     ) -> None:
-        self._store = DesktopImportStore(kb_dir, on_stage_progress=on_stage_progress)
+        stage_progress = importlog.ImportStageDiagnostics(on_stage_progress)
+        self._store = DesktopImportStore(kb_dir, on_stage_progress=stage_progress)
         self._model_ledger = DesktopImportModelLedger(kb_dir)
         self._document_versions = DesktopDocumentVersionService(kb_dir)
         self._knowledge_reconciliation = DesktopKnowledgeReconciliationService(kb_dir)
         self._knowledge_analysis_batches = DesktopKnowledgeAnalysisBatchStore(kb_dir)
         self._quarantine = DesktopImportQuarantineStore(kb_dir)
-        self._recovery = DesktopImportRecoveryStore(kb_dir, on_stage_progress=on_stage_progress)
+        self._recovery = DesktopImportRecoveryStore(kb_dir, on_stage_progress=stage_progress)
         self._control = control or DesktopImportControl()
         self._model_gateway = model_gateway
         self._require_model_analysis = require_model_analysis
@@ -226,8 +228,7 @@ class DesktopTextImportService:
                 model_gateway=self._model_gateway,
             )
         except (OSError, RuntimeError):
-            # A document remains available through the baseline even if a local
-            # worker cannot be started.
+            # Keep optional graph work independent from the completed import result.
             record_graph_extraction_diagnostic(self._store.kb_dir, result.document.document_id)
             logger.warning("Could not start local knowledge graph extraction.")
 
@@ -538,16 +539,7 @@ class DesktopTextImportService:
             ) from error
         except DesktopModelCallError as error:
             analysis_gate.invalidate_result_failure(error)
-            logger.warning(
-                "import_model_analysis_quarantined job_id=%s document=%r stage=%s "
-                "call_id=%s attempts=%s category=%s",
-                state.job_id,
-                state.source.name,
-                active_stage,
-                error.call_id,
-                error.attempt_count,
-                error.failure.code,
-            )
+            importlog.log_model_analysis_quarantine(state, active_stage, error)
             public_code = quarantine_import_model_call(
                 ledger=self._model_ledger,
                 store=self._store,
@@ -563,7 +555,12 @@ class DesktopTextImportService:
                 100,
                 error_code=error.failure.code,
             )
-            raise DesktopImportError(public_code, error.failure.reason) from error
+            raise DesktopImportError(
+                public_code,
+                error.failure.reason,
+                failure_event_id=error.failure_event_id,
+                diagnostic_context=error.diagnostic_context,
+            ) from error
         except DesktopImportError as error:
             analysis_gate.invalidate_failure(error.code, reason=str(error))
             if error.code in DIRECT_IMPORT_QUARANTINE_CODES:
@@ -585,10 +582,12 @@ class DesktopTextImportService:
                     100,
                     error_code=error.code,
                 )
+                importlog.log_import_failure(state, active_stage, error, outcome="quarantined")
                 raise
             if error.code not in _CONTROL_CODES and not terminal_state_committed:
                 self._store.fail_job(state, active_stage, error.code)
                 self._recovery.mark_failed(state, active_stage, error.code)
+                importlog.log_import_failure(state, active_stage, error, outcome="failed")
             elif error.code == "import_cancelled":
                 self._recovery.mark_finished(state, "cancelled")
             raise
@@ -599,6 +598,9 @@ class DesktopTextImportService:
             if not terminal_state_committed:
                 self._store.fail_job(state, active_stage, wrapped.code)
                 self._recovery.mark_failed(state, active_stage, wrapped.code)
+                importlog.log_import_failure(
+                    state, active_stage, wrapped, outcome="failed", include_traceback=True
+                )
             raise wrapped from error
 
     def _raw_input(

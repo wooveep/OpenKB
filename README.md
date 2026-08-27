@@ -32,6 +32,60 @@ authoritative state in `.openkb/state.sqlite3`, and generated knowledge pages
 under `knowledge-pages/`. Closing the main window hides it to the tray while
 background work continues; choose **Quit OpenKB** from the tray to stop it.
 
+## Desktop diagnostics
+
+OpenKB writes separate, structured Shell and Engine Application Logs under
+`%LOCALAPPDATA%\OpenKB\logs`. The default level is `WARN`; each terminal import
+or model failure includes a safe Failure Context that identifies the failing
+stage and distinguishes connection, provider-response, and model-result
+problems without copying document content or model payloads into the log.
+
+To change verbosity, copy `openkb.local.example.json` to `openkb.local.json`
+beside `OpenKB.exe`, edit it, and restart OpenKB. For example, this keeps the
+global default quiet while enabling normal debugging for the import pipeline:
+
+```json
+{
+  "logging": {
+    "level": "WARN",
+    "components": {
+      "import": "DEBUG",
+      "parser": "DEBUG",
+      "model": "DEBUG"
+    },
+    "allow_sensitive_trace": false
+  }
+}
+```
+
+Levels are `TRACE`, `DEBUG`, `INFO`, `WARN`, and `ERROR`. Components are
+`shell`, `bridge`, `runtime`, `import`, `parser`, `model`, `page_tree`,
+`retrieval`, `knowledge`, `projection`, and `storage`. Unknown fields are
+ignored with a stable warning; invalid known values fail safely to all-`WARN`.
+
+`TRACE` is intentionally different: it can retain unredacted prompt, provider
+response/reasoning, path, and exception evidence for failed operations. It is
+accepted only when `allow_sensitive_trace` is `true` and
+`sensitive_trace_expires_at` is a future UTC timestamp no more than 24 hours
+away. Active capture is shown by a persistent red Workbench banner and can be
+stopped there. Captures live under
+`%LOCALAPPDATA%\OpenKB\sensitive-traces`, are never included in a Diagnostic
+Bundle, and are automatically bounded by age, count, and size.
+
+For example, a targeted model trace uses the following shape; replace the
+expiry placeholder with an actual future UTC value before starting OpenKB:
+
+```json
+{
+  "logging": {
+    "level": "WARN",
+    "components": { "model": "TRACE" },
+    "allow_sensitive_trace": true,
+    "sensitive_trace_expires_at": "<YYYY-MM-DDTHH:MM:SSZ within 24 hours>"
+  }
+}
+```
+
 ## Development
 
 The Desktop package is assembled from a Tauri 2 shell, the React/Vite frontend,

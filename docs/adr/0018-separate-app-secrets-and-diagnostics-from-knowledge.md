@@ -7,3 +7,6 @@ configuration stores references only. OpenKB sends no automatic telemetry and
 exports a Diagnostic Bundle only after user review, excluding source content,
 model payloads, and credentials; this keeps portable upgrades, knowledge
 backup, and support data as distinct trust boundaries.
+
+ADR-0043 later narrows the read-only program-directory boundary to permit one
+optional, mutable Portable Local Configuration outside the release inventory.

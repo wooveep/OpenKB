@@ -9,7 +9,6 @@ belong on stderr.
 from __future__ import annotations
 
 import json
-import logging
 import struct
 import sys
 import threading
@@ -24,6 +23,12 @@ from openkb import desktop_engine_imports as import_engine
 from openkb import desktop_engine_methods as engine_methods
 from openkb.desktop_answer_types import DesktopAnswerError
 from openkb.desktop_conversations import DesktopConversationError
+from openkb.desktop_engine_logging import (
+    EngineRequestDiagnostics,
+    initialize_engine_diagnostics,
+    log_engine_runtime_failure,
+    log_engine_stopped,
+)
 from openkb.desktop_grounded_answer import DesktopGroundedAnswerService
 from openkb.desktop_import import (
     DesktopImportControl,
@@ -34,7 +39,6 @@ from openkb.desktop_import_sources import inspect_import_sources
 from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageError
 from openkb.desktop_legacy_office_parsers import shutdown_legacy_office_runtime
-from openkb.desktop_logging import configure_desktop_engine_logging
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_model_transport import desktop_model_gateway_for
 from openkb.desktop_raw_assets import DesktopRawAssetService
@@ -46,7 +50,6 @@ from openkb.desktop_workspace_transition import DesktopWorkspaceTransitionCoordi
 
 PROTOCOL_VERSION = 1
 MAX_FRAME_BYTES = 16 * 1024 * 1024
-logger = logging.getLogger(__name__)
 
 
 class DesktopProtocolError(ValueError):
@@ -248,11 +251,7 @@ class DesktopEngineServer:
         worker.start()
 
     def _run_request(self, request: DesktopRequest, cancel_event: threading.Event | None) -> None:
-        logger.info(
-            "engine_request_started request_id=%s method=%s",
-            request.request_id,
-            request.method,
-        )
+        diagnostics = EngineRequestDiagnostics.begin(request.request_id, request.method)
         self._emit_event("engine.request_started", {"request_id": request.request_id})
         completed_data: dict[str, object] = {"request_id": request.request_id, "ok": False}
         try:
@@ -270,13 +269,7 @@ class DesktopEngineServer:
             completed_data["ok"] = True
         except DesktopRequestError as error:
             completed_data["error_code"] = error.code
-            logger.warning(
-                "engine_request_failed request_id=%s method=%s error_code=%s detail=%r",
-                request.request_id,
-                request.method,
-                error.code,
-                str(error),
-            )
+            diagnostics.typed_failure(error)
             self._write_error(request.request_id, error.code, str(error))
         except (
             DesktopAnswerError,
@@ -286,30 +279,15 @@ class DesktopEngineServer:
             DesktopImportError,
         ) as error:
             completed_data["error_code"] = error.code
-            logger.warning(
-                "engine_request_failed request_id=%s method=%s error_code=%s detail=%r",
-                request.request_id,
-                request.method,
-                error.code,
-                str(error),
-            )
+            diagnostics.typed_failure(error)
             self._write_error(request.request_id, error.code, str(error))
         except Exception as error:  # Keep unexpected Engine failures behind a stable boundary.
             completed_data["error_code"] = "engine_request_failed"
-            logger.exception(
-                "engine_request_failed request_id=%s method=%s error_code=engine_request_failed",
-                request.request_id,
-                request.method,
-            )
+            diagnostics.unexpected_failure(error)
             self._write_error(request.request_id, "engine_request_failed", str(error))
         finally:
-            logger.info(
-                "engine_request_completed request_id=%s method=%s ok=%s error_code=%s",
-                request.request_id,
-                request.method,
-                completed_data["ok"],
-                completed_data.get("error_code"),
-            )
+            if completed_data["ok"]:
+                diagnostics.completed()
             if cancel_event is not None:
                 with self._active_lock:
                     request_key = str(request.request_id)
@@ -689,15 +667,19 @@ def main() -> int:
         from openkb.desktop_pageindex_acceptance import run_cli
 
         return run_cli(sys.argv[1:])
-    configure_desktop_engine_logging()
-    logger.info("OpenKB Desktop Engine started.")
+    if not initialize_engine_diagnostics(app_version=__version__):
+        print("OPENKB_LOGGING_UNAVAILABLE", file=sys.stderr, flush=True)
     try:
         DesktopEngineServer(sys.stdin.buffer, sys.stdout.buffer).serve()
     except Exception as error:
-        logger.exception("OpenKB Desktop Engine failed.")
-        print(f"OpenKB Desktop Engine failed: {error}", file=sys.stderr, flush=True)
+        failure_event_id = log_engine_runtime_failure(error)
+        print(
+            f"OPENKB_ENGINE_RUNTIME_FAILED failure_event_id={failure_event_id}",
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
-    logger.info("OpenKB Desktop Engine stopped.")
+    log_engine_stopped()
     return 0
 
 

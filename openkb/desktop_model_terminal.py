@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from queue import Empty, SimpleQueue
 from typing import Literal
 
+from openkb.desktop_model_failure_logging import (
+    own_terminal_model_failure,
+    result_diagnostic_context,
+    sensitive_model_request_payload,
+)
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -28,11 +33,11 @@ from openkb.desktop_model_gateway import (
     classify_model_error,
     require_execution_lane,
 )
+from openkb.desktop_sensitive_trace import sensitive_trace_component_enabled
 
 MODEL_CONNECT_TIMEOUT_SECONDS = 30.0
 MAX_TERMINAL_MODEL_ATTEMPTS = 3
 _TERMINAL_RETRY_BACKOFF_SECONDS = (1.0, 2.0)
-
 TerminalModelCallStatus = Literal[
     "queued",
     "connecting",
@@ -51,7 +56,6 @@ TerminalModelTransport = Callable[[DesktopModelRequest, float], object]
 CancellationCallback = Callable[[], bool]
 RequestSentCallback = Callable[[], None]
 AttemptRelease = Callable[[], None]
-
 _NETWORK_FAILURE = DesktopModelFailure(
     "model_network_transient",
     "The connection to the model provider failed or was interrupted.",
@@ -455,6 +459,7 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
                         self._emit(context, "cancelled")
                         raise
                     continue
+                elapsed_seconds = max(0.0, self._clock() - context.started_at)
                 raise DesktopModelCallError(
                     call_id,
                     failure,
@@ -462,6 +467,17 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
                     observations=observations,
                     usage=getattr(response, "usage", None),
                     provider_request_id=getattr(response, "provider_request_id", None),
+                    elapsed_seconds=elapsed_seconds,
+                    diagnostic_context=own_terminal_model_failure(
+                        self._transport,
+                        request,
+                        error,
+                        failure,
+                        context,
+                        elapsed_seconds,
+                        response,
+                        retry_after,
+                    ),
                 ) from error
             self._raise_if_cancelled(is_cancelled, context)
             observations = getattr(response, "observations", None)
@@ -509,6 +525,17 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
                 usage=usage,
                 provider_request_id=provider_request_id,
                 observations=observations,
+                diagnostic_context=result_diagnostic_context(
+                    request,
+                    provider=self._provider_name,
+                    model=request.model_name or self._model_name,
+                ),
+                sensitive_request_payload=(
+                    sensitive_model_request_payload(self._transport, request)
+                    if sensitive_trace_component_enabled("model")
+                    else None
+                ),
+                sensitive_reasoning_content=getattr(response, "sensitive_reasoning_content", ""),
                 _lifecycle_finalizer=lifecycle_finalizer,
             )
         raise AssertionError("Terminal Model Call exhausted attempts without a result.")

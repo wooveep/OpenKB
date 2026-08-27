@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from litellm.utils import get_optional_params
 
 from openkb import desktop_model_transport
 from openkb.config import LlmCredentialBundle
@@ -122,8 +123,14 @@ def test_deepseek_structured_request_uses_json_object_and_disables_thinking(monk
     )
 
     assert captured[0]["response_format"] == {"type": "json_object"}
-    assert captured[0]["thinking"] == {"type": "disabled"}
+    assert captured[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "thinking" not in captured[0]
     assert "reasoning_effort" not in captured[0]
+    assert get_optional_params(
+        model="deepseek-v4-pro",
+        custom_llm_provider="deepseek",
+        extra_body=captured[0]["extra_body"],
+    )["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
 def test_deepseek_grounded_answer_omits_structured_format_and_provider_default_thinking(
@@ -241,6 +248,7 @@ def test_deepseek_stream_separates_private_reasoning_from_final_output(monkeypat
     assert result.observations.reasoning_chunk_count == 1
     assert result.observations.final_chunk_count == 1
     assert result.observations.reasoning_character_count == len(private_reasoning)
+    assert result.sensitive_reasoning_content == ""
     assert private_reasoning not in repr(events)
     assert private_reasoning not in repr(result.observations)
 

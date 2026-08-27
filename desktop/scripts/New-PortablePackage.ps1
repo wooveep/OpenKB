@@ -58,6 +58,7 @@ function Write-ReleaseManifest {
 
     $files = @(
         Get-ChildItem -LiteralPath $PackageRoot -Recurse -File |
+            Where-Object { $_.FullName -ne (Join-Path $PackageRoot "openkb.local.json") } |
             Sort-Object -Property FullName |
             ForEach-Object {
                 $relativePath = $_.FullName.Substring($PackageRoot.Length).TrimStart([char[]]@('\', '/')).Replace('\', '/')
@@ -329,6 +330,7 @@ foreach ($corpusFile in @($pageIndexIdentity.corpusFiles)) {
 }
 Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $packageRoot -Force
 Copy-Item -LiteralPath (Join-Path $desktopRoot "THIRD_PARTY_NOTICES.md") -Destination $packageRoot -Force
+Copy-Item -LiteralPath (Join-Path $desktopRoot "openkb.local.example.json") -Destination $packageRoot -Force
 Write-ReleaseManifest `
     -PackageRoot $packageRoot `
     -PackageVersion $Version `

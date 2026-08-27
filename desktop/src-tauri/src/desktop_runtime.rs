@@ -1,11 +1,10 @@
 //! Desktop Shell lifecycle: tray behavior, single-instance intents, and Engine recovery.
 
-use crate::DesktopState;
+use crate::{desktop_logging, desktop_logging_config::LogLevel, DesktopState};
 use serde::Serialize;
+use serde_json::json;
 use std::{
     env, fs,
-    fs::OpenOptions,
-    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -13,7 +12,7 @@ use std::{
         Mutex,
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tauri::{
     menu::{Menu, MenuItem},
@@ -31,8 +30,6 @@ const LAUNCH_INTENTS_READY_EVENT: &str = "desktop://launch-intents-ready";
 const TASK_CENTER_EVENT: &str = "desktop://task-center";
 const TRAY_RESTORED_EVENT: &str = "desktop://tray-restored";
 const ACTIVE_KNOWLEDGE_BASE_RESTORED_EVENT: &str = "desktop://active-knowledge-base-restored";
-const SHELL_LOG_FILE: &str = "openkb-shell.log";
-const MAX_SHELL_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
 pub(crate) fn allow_source_image_directory(
     app: &AppHandle,
@@ -116,6 +113,7 @@ pub(crate) enum DesktopLaunchIntent {
 
 pub(crate) fn initialize(app: &App) -> tauri::Result<()> {
     let app_handle = app.handle().clone();
+    let _ = desktop_logging::initialize(&app_handle);
     let state = app.state::<DesktopState>();
     if let Some(kb_dir) = load_active_knowledge_base(&app_handle) {
         if is_desktop_knowledge_base(Path::new(&kb_dir)) {
@@ -127,7 +125,6 @@ pub(crate) fn initialize(app: &App) -> tauri::Result<()> {
             ]);
         }
     }
-    append_application_log(&app_handle, "OpenKB Desktop Shell started.");
     install_tray(app)?;
     start_engine_supervision(app_handle);
     Ok(())
@@ -138,11 +135,13 @@ pub(crate) fn remember_active_knowledge_base(app: &AppHandle, kb_dir: &str) {
         .engine
         .remember_active_knowledge_base(kb_dir.to_owned());
     if let Err(error) = persist_active_knowledge_base(app, kb_dir) {
-        append_application_log(
-            app,
-            &format!("Could not remember active OpenKB Desktop Knowledge Base: {error}"),
+        desktop_logging::event(
+            LogLevel::Warn,
+            "storage",
+            "active_knowledge_base_persist_failed",
+            "The active knowledge-base pointer could not be persisted.",
+            json!({"error_code": "active_knowledge_base_persist_failed", "error_type": error.kind().to_string()}),
         );
-        eprintln!("Could not remember active OpenKB Desktop Knowledge Base: {error}");
     }
 }
 
@@ -235,27 +234,29 @@ fn start_engine_supervision(app: AppHandle) {
     thread::spawn(move || {
         let state = startup_handle.state::<DesktopState>();
         let started_at = Instant::now();
-        append_application_log(&startup_handle, "OpenKB Desktop Engine startup initiated.");
+        desktop_logging::event(
+            LogLevel::Debug,
+            "runtime",
+            "engine_start_initiated",
+            "Desktop Shell initiated Engine startup.",
+            json!({}),
+        );
         if let Err(error) = state.engine.start() {
-            append_application_log(
-                &startup_handle,
-                &format!(
-                    "OpenKB Desktop Engine did not start during shell setup: {}",
-                    error.message
-                ),
-            );
-            eprintln!(
-                "OpenKB Desktop Engine did not start during shell setup: {}",
-                error.message
+            desktop_logging::event(
+                LogLevel::Error,
+                "runtime",
+                "engine_start_failed",
+                "Desktop Engine did not start during Shell setup.",
+                json!({"error_code": error.code, "outcome": "failed"}),
             );
             return;
         }
-        append_application_log(
-            &startup_handle,
-            &format!(
-                "OpenKB Desktop Engine handshake completed in {} ms.",
-                started_at.elapsed().as_millis()
-            ),
+        desktop_logging::event(
+            LogLevel::Info,
+            "runtime",
+            "engine_handshake_completed",
+            "Desktop Engine handshake completed.",
+            json!({"elapsed_ms": started_at.elapsed().as_millis(), "outcome": "succeeded"}),
         );
         restore_active_knowledge_base(&startup_handle, "startup");
     });
@@ -269,9 +270,12 @@ fn start_engine_supervision(app: AppHandle) {
             state.engine.restart_after_unexpected_exit()
         };
         if restarted {
-            append_application_log(
-                &app,
-                "OpenKB Desktop Engine restarted after an unexpected exit.",
+            desktop_logging::event(
+                LogLevel::Warn,
+                "runtime",
+                "engine_restarted",
+                "Desktop Engine restarted after an unexpected exit.",
+                json!({"outcome": "restarted"}),
             );
             restore_active_knowledge_base(&app, "restart");
             let _ = app.emit("desktop://engine-restarted", ());
@@ -292,19 +296,22 @@ fn restore_active_knowledge_base(app: &AppHandle, reason: &str) {
                 .engine
                 .remembered_active_knowledge_base()
             {
-                if let Err(error) = allow_source_image_directory(app, &kb_dir) {
-                    append_application_log(
-                        app,
-                        &format!("OpenKB source image restoration failed: {error}"),
+                if allow_source_image_directory(app, &kb_dir).is_err() {
+                    desktop_logging::event(
+                        LogLevel::Warn,
+                        "runtime",
+                        "source_image_scope_restore_failed",
+                        "The source-image scope could not be restored.",
+                        json!({"error_code": "source_image_scope_restore_failed"}),
                     );
                 }
             }
-            append_application_log(
-                app,
-                &format!(
-                    "OpenKB active knowledge base restored after {reason} in {} ms.",
-                    started_at.elapsed().as_millis()
-                ),
+            desktop_logging::event(
+                LogLevel::Info,
+                "runtime",
+                "active_knowledge_base_restored",
+                "The active knowledge base was restored.",
+                json!({"phase": reason, "elapsed_ms": started_at.elapsed().as_millis(), "outcome": "succeeded"}),
             );
             app.state::<DesktopState>()
                 .runtime
@@ -312,19 +319,21 @@ fn restore_active_knowledge_base(app: &AppHandle, reason: &str) {
             let _ = app.emit(ACTIVE_KNOWLEDGE_BASE_RESTORED_EVENT, ());
         }
         Ok(false) => {
-            append_application_log(app, "No active knowledge base needs restoration.");
+            desktop_logging::event(
+                LogLevel::Debug,
+                "runtime",
+                "active_knowledge_base_restore_skipped",
+                "No active knowledge base required restoration.",
+                json!({"phase": reason, "outcome": "skipped"}),
+            );
         }
         Err(error) => {
-            append_application_log(
-                app,
-                &format!(
-                    "OpenKB active knowledge base restoration failed after {reason}: {}",
-                    error.message
-                ),
-            );
-            eprintln!(
-                "OpenKB active knowledge base restoration failed after {reason}: {}",
-                error.message
+            desktop_logging::event(
+                LogLevel::Warn,
+                "runtime",
+                "active_knowledge_base_restore_failed",
+                "The active knowledge base could not be restored.",
+                json!({"phase": reason, "error_code": error.code, "outcome": "failed"}),
             );
         }
     }
@@ -400,9 +409,12 @@ fn clear_active_knowledge_base(app: &AppHandle) {
     };
     if let Err(error) = fs::remove_file(path) {
         if error.kind() != std::io::ErrorKind::NotFound {
-            append_application_log(
-                app,
-                &format!("Could not clear unavailable knowledge base: {error}"),
+            desktop_logging::event(
+                LogLevel::Warn,
+                "storage",
+                "active_knowledge_base_clear_failed",
+                "An unavailable active knowledge-base pointer could not be cleared.",
+                json!({"error_code": "active_knowledge_base_clear_failed", "error_type": error.kind().to_string()}),
             );
         }
     }
@@ -442,50 +454,11 @@ pub(crate) fn reveal_directory(directory: &Path) -> Result<(), String> {
     }
 }
 
-pub(crate) fn reveal_application_log_directory(app: &AppHandle) -> Result<(), String> {
-    let directory = application_log_directory(app)
-        .ok_or_else(|| "OpenKB application log location is unavailable.".to_owned())?;
+pub(crate) fn reveal_application_log_directory(_app: &AppHandle) -> Result<(), String> {
+    let directory = desktop_logging::application_log_directory()?;
     fs::create_dir_all(&directory)
         .map_err(|error| format!("Could not create OpenKB log directory: {error}"))?;
     reveal_directory(&directory)
-}
-
-pub(crate) fn append_application_log(app: &AppHandle, message: &str) {
-    let Some(directory) = application_log_directory(app) else {
-        return;
-    };
-    if fs::create_dir_all(&directory).is_err() {
-        return;
-    }
-    let path = directory.join(SHELL_LOG_FILE);
-    let _ = rotate_shell_log(&path);
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{timestamp} {message}");
-    }
-}
-
-fn application_log_directory(app: &AppHandle) -> Option<PathBuf> {
-    env::var_os("LOCALAPPDATA")
-        .map(|directory| PathBuf::from(directory).join("OpenKB").join("logs"))
-        .or_else(|| {
-            app.path()
-                .app_data_dir()
-                .ok()
-                .map(|directory| directory.join("logs"))
-        })
-}
-
-fn rotate_shell_log(path: &Path) -> std::io::Result<()> {
-    if path.metadata()?.len() < MAX_SHELL_LOG_BYTES {
-        return Ok(());
-    }
-    let backup = path.with_extension("log.1");
-    let _ = fs::remove_file(&backup);
-    fs::rename(path, backup)
 }
 
 #[cfg(test)]

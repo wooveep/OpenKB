@@ -298,7 +298,9 @@ def test_d3_rejection_keeps_a_document_as_an_independent_source(tmp_path):
         ).fetchone() == (second.document.document_id,)
 
 
-def test_failed_prepublication_stage_never_exposes_a_partial_document(tmp_path, monkeypatch):
+def test_failed_prepublication_stage_never_exposes_a_partial_document(
+    tmp_path, monkeypatch, caplog
+):
     """A crash-like stage failure can leave raw recovery input but not Available Knowledge."""
     kb_dir = tmp_path / "desktop-kb"
     source = tmp_path / "broken.txt"
@@ -317,6 +319,15 @@ def test_failed_prepublication_stage_never_exposes_a_partial_document(tmp_path, 
         assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM evidence_fts").fetchone() == (0,)
         assert connection.execute("SELECT status FROM import_jobs").fetchone() == ("failed",)
+    terminal_log = next(record for record in caplog.records if record.msg == "import_failed")
+    fields = terminal_log.openkb_fields
+    assert fields["stage"] == "document_ir"
+    assert fields["last_completed_stage"] == "raw_asset"
+    assert fields["error_code"] == "simulated_document_ir_failure"
+    assert fields["next_action"] == "inspect_source_or_convert_format"
+    assert fields["source_extension"] == ".txt"
+    assert "broken.txt" not in str(fields)
+    assert fields["failure_event_id"]
 
 
 def test_model_failure_is_quarantined_with_safe_attempt_history(tmp_path):
@@ -363,7 +374,7 @@ def test_model_failure_is_quarantined_with_safe_attempt_history(tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM evidence_fts").fetchone() == (0,)
 
 
-def test_reasoning_exhaustion_is_a_single_safe_model_result_failure(tmp_path):
+def test_reasoning_exhaustion_is_a_single_safe_model_result_failure(tmp_path, caplog):
     kb_dir = tmp_path / "desktop-kb"
     source = tmp_path / "analysis.txt"
     source.write_text("Structured Analysis must produce final JSON.", encoding="utf-8")
@@ -408,6 +419,22 @@ def test_reasoning_exhaustion_is_a_single_safe_model_result_failure(tmp_path):
     assert call["output_tokens"] == 80
     assert call["total_tokens"] == 100
     assert "Structured Analysis" not in json.dumps(task)
+    terminal_log = next(record for record in caplog.records if record.msg == "model_call_failed")
+    fields = terminal_log.openkb_fields
+    assert fields["error_code"] == "reasoning_output_exhausted"
+    assert fields["failure_kind"] == "model_result_failure"
+    assert fields["finish_reason"] == "length"
+    assert fields["reasoning_observed"] is True
+    assert fields["final_content_observed"] is False
+    assert fields["reasoning_chunk_count"] == 4
+    assert fields["final_chunk_count"] == 0
+    assert fields["reasoning_character_count"] == 512
+    assert fields["final_character_count"] == 0
+    assert fields["input_tokens"] == 20
+    assert fields["output_tokens"] == 80
+    assert fields["total_tokens"] == 100
+    assert fields["outcome"] == "failed"
+    assert fields["next_action"] == "run_model_capability_check"
 
 
 def test_manual_recovery_reuses_verified_stages_and_records_its_override(tmp_path, monkeypatch):

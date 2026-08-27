@@ -21,6 +21,14 @@
       "title": "Desktop Workbench",
       "detail": "OpenKB is starting its local Engine. Your documents and model settings remain on this computer."
     },
+    "sensitiveTrace": {
+      "title": "Sensitive Trace Capture is active",
+      "detail": "Capture {{captureId}} · expires {{expiry}} · {{size}} · TRACE: {{components}}. Failed operations may write document paths, prompts, model output, and raw reasoning in plaintext.",
+      "openDirectory": "Open sensitive files",
+      "stop": "Stop for this session",
+      "revealConfirmation": "Sensitive Trace files may contain document content, paths, prompts, model output, raw reasoning, or credentials. Open the directory on this computer?",
+      "unknownExpiry": "unknown expiry"
+    },
     "engine": {
       "starting": {
         "title": "Starting local Engine",
@@ -414,14 +422,14 @@
         "zoom": "Interface zoom",
         "zoomHelp": "80%–200%. Use Ctrl+Plus, Ctrl+Minus, or Ctrl+0.",
         "diagnosticsTitle": "Diagnostic bundle",
-        "diagnosticsDescription": "Export only when you choose to. The ZIP excludes source-file content, model request and response bodies, credentials, and headers.",
+        "diagnosticsDescription": "Export only when you choose to. The ZIP includes support-safe Application Log tails but excludes Sensitive Trace Captures, source-file content, model request and response bodies, credentials, and headers.",
         "exportDiagnostics": "Export diagnostic bundle",
         "exporting": "Exporting…",
         "diagnosticsExported": "Diagnostic bundle exported to {{path}}.",
         "diagnosticsReviewTitle": "Review diagnostic bundle",
         "diagnosticsReviewDescription": "Confirm the redacted bundle contents before choosing where to save it.",
         "diagnosticsIncludes": "This ZIP will include:",
-        "diagnosticsExcludes": "It excludes source-file content, model request and response bodies, credentials, and authorization headers.",
+        "diagnosticsExcludes": "It excludes every Sensitive Trace Capture, source-file content, model request and response bodies, credentials, and authorization headers.",
         "cancel": "Cancel",
         "confirmExport": "Choose location and export"
       },

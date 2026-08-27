@@ -62,6 +62,8 @@ const diagnosticFiles = [
   "graph-diagnostics.json",
   "page-tree-enrichment.json",
   "integrity.json",
+  "application-logs/openkb-engine.jsonl",
+  "application-logs/openkb-shell.jsonl",
 ]
 
 const roleFields = [

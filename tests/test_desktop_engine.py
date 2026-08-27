@@ -21,10 +21,12 @@ from openkb.desktop_engine import (
     FrameReader,
     encode_frame,
 )
+from openkb.desktop_engine_logging import EngineRequestDiagnostics
 from openkb.desktop_import import DesktopImportControl, DesktopImportError, DesktopTextImportService
 from openkb.desktop_import_store import DesktopImportStore
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
+from openkb.desktop_logging import TRACE_LEVEL
 from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelResult
 from openkb.desktop_model_terminal import DesktopTerminalModelEvent
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
@@ -84,6 +86,45 @@ def _decode_frames(payload: bytes) -> list[dict[str, object]]:
     while (frame := reader.read_frame()) is not None:
         frames.append(frame)
     return frames
+
+
+def test_import_job_polling_uses_one_deduplicated_trace_without_filling_info(caplog) -> None:
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO())
+    server._handshake_complete = True
+
+    with caplog.at_level(TRACE_LEVEL, logger="openkb.desktop_engine_logging"):
+        server._run_request(
+            DesktopRequest(
+                request_id="poll",
+                method="workbench.import_jobs",
+                params={},
+            ),
+            cancel_event=None,
+        )
+
+    records = [record for record in caplog.records if record.msg == "engine_poll_observed"]
+    assert [record.levelno for record in records] == [TRACE_LEVEL]
+    assert records[0].openkb_fields["method"] == "workbench.import_jobs"
+
+
+def test_engine_boundary_references_failure_owner_through_domain_wrappers(caplog) -> None:
+    owner = RuntimeError("provider failed")
+    owner.failure_event_id = "failure-owner-1"  # type: ignore[attr-defined]
+    try:
+        raise owner
+    except RuntimeError as cause:
+        try:
+            raise ValueError("capability check failed") from cause
+        except ValueError as wrapped:
+            with caplog.at_level(TRACE_LEVEL, logger="openkb.desktop_engine_logging"):
+                EngineRequestDiagnostics.begin("request-1", "workbench.check_model").typed_failure(
+                    wrapped
+                )
+
+    records = [record for record in caplog.records if record.msg == "failure_propagated"]
+    assert len(records) == 1
+    assert records[0].openkb_fields["failure_event_id"] == "failure-owner-1"
+    assert all(record.msg != "engine_request_failed" for record in caplog.records)
 
 
 def test_frame_reader_handles_fragmented_and_concatenated_frames():

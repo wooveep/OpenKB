@@ -37,6 +37,7 @@ def structured_model_result_failure(
         observations=result.observations,
         usage=result.usage,
         provider_request_id=result.provider_request_id,
+        failure_event_id=error.failure_event_id,
     )
 
 

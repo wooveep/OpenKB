@@ -518,6 +518,7 @@ function Assert-PackageLayout {
         (Join-Path $PackageRoot "OpenKB.exe"),
         (Join-Path $PackageRoot "LICENSE"),
         (Join-Path $PackageRoot "THIRD_PARTY_NOTICES.md"),
+        (Join-Path $PackageRoot "openkb.local.example.json"),
         (Join-Path $PackageRoot "runtime\engine\OpenKBEngine.exe"),
         (Join-Path $PackageRoot "runtime\pageindex\OpenKBPageIndex.exe"),
         (Join-Path $PackageRoot "runtime\pageindex\PageIndex-MIT.txt"),
@@ -621,7 +622,7 @@ function Assert-PackageLayout {
             ForEach-Object {
                 $_.FullName.Substring($packageRootPath.Length).TrimStart([char[]]@('\', '/')).Replace('\', '/')
             } |
-            Where-Object { $_ -ne "release-manifest.json" }
+            Where-Object { $_ -notin @("release-manifest.json", "openkb.local.json") }
     )
     Assert-That -Condition ($manifestPaths.Count -eq $inventoryPaths.Count) -Message "Portable package manifest does not cover the package inventory."
     foreach ($inventoryPath in $inventoryPaths) {

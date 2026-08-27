@@ -38,6 +38,20 @@ release.
    verify the task/document state is recovered.
 5. Choose **Quit OpenKB** from the tray. Verify `OpenKB.exe`, `OpenKBEngine.exe`,
    WebView2 children, and any private Tika Java child are gone.
+6. With no `openkb.local.json`, trigger a controlled import failure and confirm
+   the JSON Lines Shell and Engine logs under `%LOCALAPPDATA%\OpenKB\logs` contain
+   one self-contained terminal `WARN` without document content, credentials, raw
+   model payloads, or absolute paths. Copy `openkb.local.example.json` to
+   `openkb.local.json`, enable `DEBUG` for `import`, `parser`, and `model`, restart,
+   and confirm bounded lifecycle/timing records explain the failing stage without
+   one-second polling noise.
+7. On a disposable test document, enable `TRACE` with
+   `allow_sensitive_trace: true` and a UTC expiry less than 24 hours away. Confirm
+   the persistent red banner, the failed-operation-only raw evidence under
+   `%LOCALAPPDATA%\OpenKB\sensitive-traces`, the confirmation before opening that
+   directory, and the **Stop trace** action. Confirm an expired or malformed
+   authorization falls back to all-`WARN`, and that a Diagnostic Bundle contains
+   only the support-safe Application Log tails.
 
 ## Release inventory
 
@@ -49,6 +63,8 @@ Python Engine, DeepDoc model bundle, RapidOCR resources, and private Tika/JRE,
 the isolated PageIndex onedir worker, fixed evaluation corpus, exact locks, and
 MIT license, along with `LICENSE` and `THIRD_PARTY_NOTICES.md`. Manifest schema 3 records the
 PageIndex package/source/provider identity and `defaultEnabled: false`.
+The package includes `openkb.local.example.json`; the mutable
+`openkb.local.json` override is deliberately excluded from the release inventory.
 
 ## PageIndex package decision
 

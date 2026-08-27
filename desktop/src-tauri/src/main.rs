@@ -2,8 +2,11 @@
 
 //! OpenKB Desktop Shell: native window ownership and typed Engine mediation.
 
+mod desktop_diagnostic_commands;
 mod desktop_knowledge_page_commands;
 mod desktop_knowledge_reanalysis_commands;
+mod desktop_logging;
+mod desktop_logging_config;
 mod desktop_missing_source_commands;
 mod desktop_runtime;
 mod engine_protocol;
@@ -12,6 +15,10 @@ mod engine_wire_knowledge_pages;
 mod external_url;
 mod process_tree;
 
+use desktop_diagnostic_commands::{
+    desktop_diagnostic_status, desktop_reveal_application_log_directory,
+    desktop_reveal_sensitive_trace_directory, desktop_stop_sensitive_trace,
+};
 use desktop_knowledge_page_commands::{
     desktop_bind_knowledge_page_source, desktop_deprecate_knowledge_page,
     desktop_export_knowledge_bundle, desktop_get_knowledge_page, desktop_knowledge_pages,
@@ -66,16 +73,16 @@ fn desktop_bridge_handshake(
 
 #[tauri::command]
 fn desktop_engine_health(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<EngineHealth, BridgeError> {
     state.engine.health().inspect_err(|error| {
-        desktop_runtime::append_application_log(
-            &app,
-            &format!(
-                "OpenKB Desktop Engine health check failed: {}: {}",
-                error.code, error.message
-            ),
+        desktop_logging::event(
+            desktop_logging_config::LogLevel::Warn,
+            "bridge",
+            "engine_health_check_failed",
+            "Desktop Engine health check failed.",
+            serde_json::json!({"error_code": error.code, "outcome": "failed"}),
         );
     })
 }
@@ -146,14 +153,6 @@ async fn desktop_active_knowledge_base(
 #[tauri::command(rename_all = "camelCase")]
 fn desktop_reveal_knowledge_base_directory(kb_dir: String) -> Result<(), BridgeError> {
     desktop_runtime::reveal_directory(Path::new(&kb_dir)).map_err(|message| BridgeError {
-        code: "desktop_directory_open_failed".to_owned(),
-        message,
-    })
-}
-
-#[tauri::command]
-fn desktop_reveal_application_log_directory(app: tauri::AppHandle) -> Result<(), BridgeError> {
-    desktop_runtime::reveal_application_log_directory(&app).map_err(|message| BridgeError {
         code: "desktop_directory_open_failed".to_owned(),
         message,
     })
@@ -703,11 +702,13 @@ fn main() {
                 if state.runtime.should_hide_main_window() {
                     api.prevent_close();
                     if let Err(error) = window.hide() {
-                        desktop_runtime::append_application_log(
-                            window.app_handle(),
-                            &format!("Could not hide OpenKB Desktop window to the tray: {error}"),
+                        desktop_logging::event(
+                            desktop_logging_config::LogLevel::Warn,
+                            "shell",
+                            "window_hide_failed",
+                            "The main window could not be hidden to the tray.",
+                            serde_json::json!({"error_code": "window_hide_failed", "error_type": std::any::type_name_of_val(&error)}),
                         );
-                        eprintln!("Could not hide OpenKB Desktop window to the tray: {error}");
                     } else {
                         state.runtime.note_main_window_hidden();
                     }
@@ -723,6 +724,9 @@ fn main() {
             desktop_active_knowledge_base,
             desktop_reveal_knowledge_base_directory,
             desktop_reveal_application_log_directory,
+            desktop_diagnostic_status,
+            desktop_stop_sensitive_trace,
+            desktop_reveal_sensitive_trace_directory,
             desktop_quit_application,
             desktop_open_external_url,
             desktop_inspect_import_sources,

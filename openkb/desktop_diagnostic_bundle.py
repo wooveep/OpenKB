@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from openkb import __version__
+from openkb.desktop_diagnostic_logs import diagnostic_log_payloads
 from openkb.desktop_model_settings import read_desktop_model_settings
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
@@ -67,7 +68,9 @@ class DesktopDiagnosticBundleService:
                 for name, payload in payloads.items():
                     archive.writestr(
                         name,
-                        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+                        payload
+                        if isinstance(payload, bytes)
+                        else json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
                     )
             os.replace(temporary_path, target)
         except (OSError, sqlite3.Error, zipfile.BadZipFile) as error:
@@ -79,7 +82,7 @@ class DesktopDiagnosticBundleService:
                 temporary_path.unlink(missing_ok=True)
         return DesktopDiagnosticBundle(path=str(target), files=tuple(payloads))
 
-    def _payloads(self) -> dict[str, object]:
+    def _payloads(self) -> dict[str, object | bytes]:
         if not self._database_path.is_file():
             raise DesktopDiagnosticBundleError(
                 "The active Desktop Knowledge Base state is unavailable."
@@ -88,9 +91,9 @@ class DesktopDiagnosticBundleService:
             connection = sqlite3.connect(self._database_path)
             try:
                 schema_version = _scalar(connection, "SELECT MAX(version) FROM schema_migrations")
-                payloads: dict[str, object] = {
+                payloads: dict[str, object | bytes] = {
                     "manifest.json": {
-                        "format": "openkb-desktop-diagnostic-bundle-v1",
+                        "format": "openkb-desktop-diagnostic-bundle-v2",
                         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                         "openkb_version": __version__,
                         "schema_version": schema_version,
@@ -98,6 +101,8 @@ class DesktopDiagnosticBundleService:
                             "source_file_content": "excluded",
                             "model_request_response_bodies": "excluded",
                             "credentials_and_headers": "excluded",
+                            "sensitive_trace_captures": "excluded",
+                            "application_logs": "support_safe_tail_only",
                         },
                     },
                     "model-settings.json": read_desktop_model_settings(
@@ -123,8 +128,7 @@ class DesktopDiagnosticBundleService:
                         "quarantines": _rows(
                             connection,
                             """
-                            SELECT job_id, stage, error_code, reason, suggested_action,
-                                attempt_count, created_at
+                            SELECT job_id, stage, error_code, attempt_count, created_at
                             FROM quarantined_documents ORDER BY created_at DESC
                             """,
                         ),
@@ -134,7 +138,7 @@ class DesktopDiagnosticBundleService:
                             connection,
                             """
                             SELECT call_id, job_id, stage_run_id, operation, status, attempt_count,
-                                error_code, reason, suggested_action, finish_reason,
+                                error_code, finish_reason,
                                 reasoning_observed, final_content_observed,
                                 reasoning_chunk_count, final_chunk_count,
                                 reasoning_character_count, final_character_count,
@@ -146,7 +150,7 @@ class DesktopDiagnosticBundleService:
                         "attempts": _rows(
                             connection,
                             """
-                            SELECT call_id, attempt, status, error_code, reason, finish_reason,
+                            SELECT call_id, attempt, status, error_code, finish_reason,
                                 reasoning_observed, final_content_observed,
                                 reasoning_chunk_count, final_chunk_count,
                                 reasoning_character_count, final_character_count,
@@ -210,9 +214,9 @@ class DesktopDiagnosticBundleService:
                         "tasks": _rows(
                             connection,
                             """
-                            SELECT document_id, base_generation_id, status, reason,
+                            SELECT document_id, base_generation_id, status,
                                 provider, model, attempt_count, model_attempt, call_id,
-                                error_code, error_reason, created_at, updated_at, completed_at
+                                error_code, created_at, updated_at, completed_at
                             FROM document_page_tree_enrichment_tasks
                             ORDER BY updated_at DESC
                             """,
@@ -252,6 +256,7 @@ class DesktopDiagnosticBundleService:
                 ) from error
             finally:
                 connection.close()
+        payloads.update(diagnostic_log_payloads())
         return payloads
 
 

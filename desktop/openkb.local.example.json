@@ -1,0 +1,7 @@
+{
+  "logging": {
+    "level": "WARN",
+    "components": {},
+    "allow_sensitive_trace": false
+  }
+}

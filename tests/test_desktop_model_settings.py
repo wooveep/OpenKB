@@ -501,12 +501,20 @@ def test_deepseek_endpoint_routes_an_unprefixed_model_through_litellm(tmp_path, 
     assert calls == ["deepseek/deepseek-v4-flash"]
 
 
-def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_content(tmp_path):
+def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_content(
+    tmp_path, monkeypatch
+):
     kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    log_dir = tmp_path / "local-app-data" / "OpenKB" / "logs"
+    log_dir.mkdir(parents=True)
+    monkeypatch.setenv("OPENKB_LOG_DIR", str(log_dir))
     save_desktop_model_settings(
         kb_dir,
         model="test/model",
-        api_base_url="https://models.example.test/v1",
+        api_base_url=(
+            "https://diagnostic-url-user:diagnostic-url-secret@models.example.test/"
+            "private-path?token=diagnostic-query-secret"
+        ),
         api_key="diagnostic-credential-secret",
         max_concurrent_model_calls=1,
         initial_timeout_seconds=20,
@@ -527,6 +535,35 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
             )
         ),
     ).import_text(source)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        connection.execute(
+            "UPDATE model_calls SET reason = ?, suggested_action = ?",
+            ("diagnostic-free-text-secret", "diagnostic-action-secret"),
+        )
+    common_log = {
+        "schema_version": 1,
+        "timestamp": "2026-08-27T00:00:00.000Z",
+        "level": "WARN",
+        "event": "test_failure",
+        "summary": "diagnostic-summary-secret",
+        "runtime_session_id": "session-test",
+        "pid": 1,
+        "thread": "main",
+        "component": "runtime",
+        "sequence": 1,
+        "error_code": "test_failure",
+        "prompt": "diagnostic-log-prompt-secret",
+    }
+    for process in ("engine", "shell"):
+        (log_dir / f"openkb-{process}.log").write_text(
+            json.dumps({**common_log, "process": process}) + "\n",
+            encoding="utf-8",
+        )
+    sensitive_dir = tmp_path / "local-app-data" / "OpenKB" / "sensitive-traces" / "capture"
+    sensitive_dir.mkdir(parents=True)
+    (sensitive_dir / "events.jsonl").write_text(
+        "diagnostic-sensitive-trace-secret", encoding="utf-8"
+    )
 
     destination = tmp_path / "desktop-diagnostics.zip"
     bundle = DesktopDiagnosticBundleService(kb_dir).export(destination)
@@ -541,12 +578,23 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
         "graph-diagnostics.json",
         "page-tree-enrichment.json",
         "integrity.json",
+        "application-logs/openkb-engine.jsonl",
+        "application-logs/openkb-shell.jsonl",
     }
     with zipfile.ZipFile(destination) as archive:
         content = "\n".join(archive.read(name).decode("utf-8") for name in archive.namelist())
     assert "private-source-content" not in content
     assert "private-model-response" not in content
     assert "diagnostic-credential-secret" not in content
+    assert "diagnostic-url-user" not in content
+    assert "diagnostic-url-secret" not in content
+    assert "diagnostic-query-secret" not in content
+    assert "diagnostic-free-text-secret" not in content
+    assert "diagnostic-action-secret" not in content
+    assert "diagnostic-summary-secret" not in content
+    assert "diagnostic-log-prompt-secret" not in content
+    assert "diagnostic-sensitive-trace-secret" not in content
+    assert "https://models.example.test" in content
     assert '"api_key_configured": true' in content
 
 

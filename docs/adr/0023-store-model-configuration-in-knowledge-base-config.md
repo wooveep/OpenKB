@@ -11,3 +11,6 @@ and Diagnostic Bundles continue to exclude credentials.
 Knowledge extraction, PageTree Enrichment, PageTree Selection, and answer
 generation reuse this Model Configuration and the same gateway, diagnostics,
 and provider routing; separate per-capability model settings remain deferred.
+
+ADR-0043 later permits one application-wide Portable Local Configuration beside
+the executable without moving model configuration or credentials into it.

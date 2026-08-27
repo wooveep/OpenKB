@@ -15,6 +15,7 @@ from openkb.desktop_model_capability_store import (
     DesktopCapabilityEvidenceProfile,
     DesktopModelCapabilityStore,
 )
+from openkb.desktop_model_failure_logging import own_capability_model_result_failure
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -28,11 +29,19 @@ from openkb.desktop_model_gateway import (
 class DesktopModelCapabilityVerificationError(RuntimeError):
     """A sanitized terminal outcome from one role-specific capability check."""
 
-    def __init__(self, role: ModelCapabilityRole, code: str, reason: str) -> None:
+    def __init__(
+        self,
+        role: ModelCapabilityRole,
+        code: str,
+        reason: str,
+        *,
+        failure_event_id: str | None = None,
+    ) -> None:
         super().__init__(reason)
         self.role = role
         self.code = code
         self.reason = reason
+        self.failure_event_id = failure_event_id
 
 
 @dataclass(frozen=True)
@@ -118,14 +127,21 @@ def verify_model_capability(
             role,
             error.failure.code,
             error.failure.reason,
+            failure_event_id=error.failure_event_id,
         ) from error
     except ValueError as error:
         reason = str(error)
+        failure_event_id = None
         if result is not None:
             reject_model_result(
                 result,
                 failure_code="model_response_invalid",
                 reason=reason,
+            )
+            failure_event_id = own_capability_model_result_failure(
+                request=request,
+                result=result,
+                error=error,
             )
         if profile is not None:
             store.mark_failed(
@@ -137,6 +153,7 @@ def verify_model_capability(
             role,
             "model_capability_check_failed",
             reason,
+            failure_event_id=failure_event_id,
         ) from error
     assert result is not None
     complete_model_result(result)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 
@@ -273,7 +274,7 @@ def test_protocol_failure_requires_replan_and_counts_discarded_model_checkpoints
 
 
 def test_check_and_recover_verifies_replacement_before_discarding_model_state(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, caplog
 ) -> None:
     kb_dir, job_id = _legacy_deadline_job(tmp_path)
     database_path = kb_dir / ".openkb" / "state.sqlite3"
@@ -349,16 +350,26 @@ def test_check_and_recover_verifies_replacement_before_discarding_model_state(
     assert recovery_gateway is not None
     recovery_profile = recovery_gateway.execution_profile_for_operation("knowledge_analysis")
 
-    with pytest.raises(DesktopRequestError, match="schema-valid structured output"):
-        run_import(
-            server,
-            kb_dir,
-            request_id="failed-check",
-            job_id=job_id,
-            recovery_override=override,
-        )
+    with caplog.at_level(logging.WARNING, logger="openkb.desktop_model_failure_logging"):
+        with pytest.raises(DesktopRequestError, match="schema-valid structured output"):
+            run_import(
+                server,
+                kb_dir,
+                request_id="failed-check",
+                job_id=job_id,
+                recovery_override=override,
+            )
 
     assert calls == ["model_capability_analysis"]
+    validation_logs = [
+        record for record in caplog.records if record.msg == "model_result_validation_failed"
+    ]
+    assert len(validation_logs) == 1
+    validation_fields = validation_logs[0].openkb_fields
+    assert validation_fields["failure_kind"] == "model_result_failure"
+    assert validation_fields["phase"] == "capability_validation"
+    assert validation_fields["error_code"] == "model_response_invalid"
+    assert validation_fields["failure_event_id"]
     failed_capability = DesktopModelCapabilityStore(kb_dir).state(recovery_profile)
     assert failed_capability.status == "failed"
     assert failed_capability.failure_code == "model_capability_check_failed"

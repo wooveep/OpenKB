@@ -21,6 +21,14 @@
       "title": "桌面工作台",
       "detail": "OpenKB 正在启动本地引擎。文档和模型设置始终保留在此电脑中。"
     },
+    "sensitiveTrace": {
+      "title": "敏感追踪正在运行",
+      "detail": "捕获 {{captureId}} · 到期 {{expiry}} · {{size}} · TRACE 组件：{{components}}。失败操作可能以明文写入文档路径、Prompt、模型输出和原始 reasoning。",
+      "openDirectory": "打开敏感文件",
+      "stop": "停止本次会话",
+      "revealConfirmation": "敏感追踪文件可能包含文档内容与路径、Prompt、模型输出、原始 reasoning 或凭据。是否在本机打开该目录？",
+      "unknownExpiry": "到期时间未知"
+    },
     "engine": {
       "starting": {
         "title": "正在启动本地引擎",
@@ -414,14 +422,14 @@
         "zoom": "界面缩放",
         "zoomHelp": "支持 80%–200%，也可使用 Ctrl+加号、Ctrl+减号或 Ctrl+0。",
         "diagnosticsTitle": "诊断包",
-        "diagnosticsDescription": "只有在你主动导出时才会生成。ZIP 不包含原文内容、模型请求与响应正文、凭据或请求头。",
+        "diagnosticsDescription": "只有在你主动导出时才会生成。ZIP 包含支持安全的应用日志尾部，但不包含敏感追踪、原文内容、模型请求与响应正文、凭据或请求头。",
         "exportDiagnostics": "导出诊断包",
         "exporting": "正在导出…",
         "diagnosticsExported": "诊断包已导出到 {{path}}。",
         "diagnosticsReviewTitle": "审阅诊断包",
         "diagnosticsReviewDescription": "请先确认脱敏后的内容，再选择保存位置。",
         "diagnosticsIncludes": "此 ZIP 将包含：",
-        "diagnosticsExcludes": "不包含原文内容、模型请求与响应正文、凭据或授权请求头。",
+        "diagnosticsExcludes": "不包含任何敏感追踪、原文内容、模型请求与响应正文、凭据或授权请求头。",
         "cancel": "取消",
         "confirmExport": "选择位置并导出"
       },

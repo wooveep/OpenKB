@@ -89,20 +89,22 @@ class DesktopModelOutputObservations:
 
 @dataclass(frozen=True)
 class DesktopProviderStreamEvent:
-    """Provider stream signal with final text but no raw reasoning text."""
+    """Provider stream signal; reasoning text is retained only in memory for TRACE."""
 
     final_content: str = ""
+    sensitive_reasoning_content: str = field(default="", repr=False, compare=False)
     reasoning_character_count: int = 0
     finish_reason: str | None = None
     output_limit_reached: bool = False
 
 
 class DesktopModelProviderResponse(str):
-    """String-compatible output carrying only safe provider metadata."""
+    """String-compatible output plus ephemeral evidence for failed TRACE captures."""
 
     usage: DesktopProviderTokenUsage | None
     provider_request_id: str | None
     observations: DesktopModelOutputObservations
+    sensitive_reasoning_content: str
 
     def __new__(
         cls,
@@ -111,6 +113,7 @@ class DesktopModelProviderResponse(str):
         usage: DesktopProviderTokenUsage | None = None,
         provider_request_id: str | None = None,
         observations: DesktopModelOutputObservations | None = None,
+        sensitive_reasoning_content: str = "",
     ) -> DesktopModelProviderResponse:
         value = super().__new__(cls, content)
         value.usage = usage
@@ -120,6 +123,7 @@ class DesktopModelProviderResponse(str):
             final_chunk_count=1 if content.strip() else 0,
             final_character_count=len(content) if content.strip() else 0,
         )
+        value.sensitive_reasoning_content = sensitive_reasoning_content
         return value
 
 
@@ -133,6 +137,9 @@ class DesktopModelResult:
     usage: DesktopProviderTokenUsage | None = None
     provider_request_id: str | None = None
     observations: DesktopModelOutputObservations | None = None
+    diagnostic_context: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
+    sensitive_request_payload: str | None = field(default=None, repr=False, compare=False)
+    sensitive_reasoning_content: str = field(default="", repr=False, compare=False)
     _lifecycle_finalizer: ModelResultLifecycleFinalizer | None = field(
         default=None,
         repr=False,
@@ -184,12 +191,14 @@ class DesktopModelTransportError(RuntimeError):
         retry_after_seconds: float | None = None,
         diagnostic_type: str | None = None,
         diagnostic_detail: str | None = None,
+        sensitive_detail: str | None = None,
     ) -> None:
         super().__init__(category)
         self.category = category
         self.retry_after_seconds = retry_after_seconds
         self.diagnostic_type = diagnostic_type
         self.diagnostic_detail = diagnostic_detail
+        self.sensitive_detail = sensitive_detail
 
 
 class DesktopModelCallError(RuntimeError):
@@ -204,6 +213,9 @@ class DesktopModelCallError(RuntimeError):
         observations: DesktopModelOutputObservations | None = None,
         usage: DesktopProviderTokenUsage | None = None,
         provider_request_id: str | None = None,
+        failure_event_id: str | None = None,
+        elapsed_seconds: float | None = None,
+        diagnostic_context: dict[str, object] | None = None,
     ) -> None:
         super().__init__(failure.reason)
         self.call_id = call_id
@@ -212,6 +224,13 @@ class DesktopModelCallError(RuntimeError):
         self.observations = observations
         self.usage = usage
         self.provider_request_id = provider_request_id
+        self.diagnostic_context = dict(diagnostic_context or {})
+        context_failure_id = self.diagnostic_context.get("failure_event_id")
+        self.failure_event_id = (
+            failure_event_id
+            or (context_failure_id if isinstance(context_failure_id, str) else None)
+        )
+        self.elapsed_seconds = elapsed_seconds
 
 
 class DesktopModelCancelledError(RuntimeError):

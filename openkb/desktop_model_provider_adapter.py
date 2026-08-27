@@ -86,7 +86,7 @@ class DeepSeekModelProviderAdapter:
             parameters["response_format"] = {"type": "json_object"}
 
         if reasoning == "off":
-            parameters["thinking"] = {"type": "disabled"}
+            parameters["extra_body"] = {"thinking": {"type": "disabled"}}
         elif reasoning in {"low", "medium", "high"}:
             parameters["thinking"] = {"type": "enabled"}
         return parameters
@@ -107,6 +107,7 @@ class DeepSeekModelProviderAdapter:
             finish_reason = None
         return DesktopProviderStreamEvent(
             final_content=final_content,
+            sensitive_reasoning_content=reasoning_content,
             reasoning_character_count=len(reasoning_content),
             finish_reason=finish_reason,
             output_limit_reached=self.finish_reason_is_output_limit(finish_reason),

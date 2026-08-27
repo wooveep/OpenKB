@@ -251,6 +251,7 @@ class DesktopModelSettings:
         """Return settings metadata without including the directly stored API Key."""
         payload = self.as_dict()
         payload.pop("api_key", None)
+        payload["api_base_url"] = _diagnostic_api_origin(self.api_base_url)
         return payload
 
 
@@ -610,6 +611,22 @@ def _optional_price(value: object) -> float | None:
 
 def _is_deepseek_api_base_url(api_base_url: str) -> bool:
     return urlsplit(api_base_url).hostname == _DEEPSEEK_API_HOST
+
+
+def _diagnostic_api_origin(api_base_url: str) -> str:
+    """Keep provider routing useful without URL userinfo, path, query, or fragment."""
+    try:
+        parsed = urlsplit(api_base_url)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return "<invalid-api-base-url>"
+    if not parsed.scheme or host is None:
+        return "<invalid-api-base-url>"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    authority = f"{host}:{port}" if port is not None else host
+    return f"{parsed.scheme.lower()}://{authority}"
 
 
 def _required_api_base_url(value: object) -> str:

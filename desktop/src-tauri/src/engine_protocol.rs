@@ -3,6 +3,7 @@
 //! The protocol is deliberately local to the child-process stdio pair. The
 //! React workbench reaches it only through typed Tauri commands and channels.
 
+use crate::desktop_logging;
 use crate::engine_wire::{
     parse_response, read_frame, write_frame, EngineHandshake, EngineHealthWire,
 };
@@ -28,8 +29,7 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     env,
-    io::Read,
-    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Mutex,
@@ -503,6 +503,7 @@ impl EngineSupervisor {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("PYTHONUNBUFFERED", "1");
+        desktop_logging::configure_engine_command(&mut command);
         let mut child = command.spawn().map_err(|error| {
             BridgeError::new(
                 "engine_start_failed",
@@ -533,7 +534,7 @@ impl EngineSupervisor {
             *managed_child = Some(child);
         }
         spawn_stdout_reader(Arc::clone(&self.transport), stdout);
-        spawn_stderr_reporter(stderr);
+        desktop_logging::spawn_engine_stderr_reporter(stderr);
         Ok(())
     }
 
@@ -735,15 +736,6 @@ fn spawn_stdout_reader(transport: Arc<SharedTransport>, mut stdout: ChildStdout)
                 mark_transport_failed(&transport, error);
                 return;
             }
-        }
-    });
-}
-
-fn spawn_stderr_reporter(mut stderr: ChildStderr) {
-    thread::spawn(move || {
-        let mut text = String::new();
-        if stderr.read_to_string(&mut text).is_ok() && !text.trim().is_empty() {
-            eprintln!("OpenKB Python Engine: {}", text.trim());
         }
     });
 }

@@ -56,12 +56,24 @@ class DesktopImportError(RuntimeError):
     code: str
     suggested_action: str | None
     attempt_count: int
+    failure_event_id: str | None
+    diagnostic_context: dict[str, object]
 
-    def __init__(self, code: str, message: str, *, suggested_action: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        suggested_action: str | None = None,
+        failure_event_id: str | None = None,
+        diagnostic_context: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.suggested_action = suggested_action
         self.attempt_count = 1
+        self.failure_event_id = failure_event_id
+        self.diagnostic_context = dict(diagnostic_context or {})
 
 
 @dataclass(frozen=True)
