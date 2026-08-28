@@ -35,32 +35,64 @@ class GraphPayload:
     edges: tuple[GraphEdge, ...]
 
 
-def persist_graph_payload_in(connection: sqlite3.Connection, payload: GraphPayload) -> bool:
-    """Insert a payload into the caller-owned transaction without committing it."""
+def persist_graph_payload_in(
+    connection: sqlite3.Connection,
+    document_id: str,
+    payload: GraphPayload,
+    *,
+    capability_identity: str | None,
+    prompt_contract_digest: str | None,
+    extraction_method: str,
+) -> bool:
+    """Publish one immutable result and atomically advance its document pointer."""
+    result_id = uuid.uuid4().hex
+    created_at = _timestamp()
+    connection.execute(
+        """
+        INSERT INTO knowledge_graph_results (
+            result_id, document_id, status, capability_identity,
+            prompt_contract_digest, extraction_method, node_count, edge_count, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            result_id,
+            document_id,
+            "completed" if payload.nodes else "completed_empty",
+            capability_identity,
+            prompt_contract_digest,
+            extraction_method,
+            len(payload.nodes),
+            len(payload.edges),
+            created_at,
+        ),
+    )
     if not payload.nodes:
-        return False
-    evidence_ids = tuple(dict.fromkeys(node.evidence_id for node in payload.nodes))
-    existing = _existing_evidence_ids(connection, evidence_ids)
-    nodes = tuple(node for node in payload.nodes if node.evidence_id not in existing)
-    if not nodes:
-        return False
-    local_to_persisted = _insert_nodes(connection, nodes)
-    _insert_edges(connection, payload.edges, local_to_persisted)
+        _select_current_result(connection, document_id, result_id)
+        return True
+    local_to_persisted = _insert_nodes(connection, payload.nodes)
+    connection.executemany(
+        "INSERT INTO knowledge_graph_result_nodes (result_id, node_id) VALUES (?, ?)",
+        [(result_id, node_id) for node_id in local_to_persisted.values()],
+    )
+    edge_ids = _insert_edges(connection, payload.edges, local_to_persisted)
+    connection.executemany(
+        "INSERT INTO knowledge_graph_result_edges (result_id, edge_id) VALUES (?, ?)",
+        [(result_id, edge_id) for edge_id in edge_ids],
+    )
+    _select_current_result(connection, document_id, result_id)
     return True
 
 
-def _existing_evidence_ids(
-    connection: sqlite3.Connection, evidence_ids: tuple[str, ...]
-) -> set[str]:
-    rows = connection.execute(
-        f"""
-        SELECT DISTINCT evidence_id
-        FROM knowledge_graph_nodes
-        WHERE evidence_id IN ({_placeholders(evidence_ids)})
+def _select_current_result(
+    connection: sqlite3.Connection, document_id: str, result_id: str
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO knowledge_graph_current (document_id, result_id)
+        VALUES (?, ?) ON CONFLICT(document_id) DO UPDATE SET result_id = excluded.result_id
         """,
-        evidence_ids,
-    ).fetchall()
-    return {str(row[0]) for row in rows}
+        (document_id, result_id),
+    )
 
 
 def _insert_nodes(connection: sqlite3.Connection, nodes: tuple[GraphNode, ...]) -> dict[str, str]:
@@ -92,7 +124,7 @@ def _insert_edges(
     connection: sqlite3.Connection,
     edges: tuple[GraphEdge, ...],
     local_to_persisted: dict[str, str],
-) -> None:
+) -> tuple[str, ...]:
     values = [
         (
             uuid.uuid4().hex,
@@ -117,10 +149,7 @@ def _insert_edges(
             """,
             values,
         )
-
-
-def _placeholders(values: tuple[object, ...]) -> str:
-    return ", ".join("?" for _value in values)
+    return tuple(str(value[0]) for value in values)
 
 
 def _timestamp() -> str:

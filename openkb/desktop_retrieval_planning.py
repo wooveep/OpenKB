@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from openkb.desktop_answer_types import DesktopRetrievalModelCost, DesktopRetrievalPlan
 from openkb.desktop_model_gateway import (
@@ -13,9 +14,18 @@ from openkb.desktop_model_gateway import (
     DesktopModelGateway,
     DesktopModelRequest,
     gateway_analysis_capability_verified,
-    invalidate_analysis_capability,
 )
-from openkb.desktop_model_result_failure import invalidate_structured_model_result
+from openkb.desktop_model_result_failure import (
+    DesktopModelOperationSuspendedError,
+    authorize_model_operation_retry,
+    mark_structured_output_operations_ready,
+    model_operation_dispatch_possible,
+    record_structured_model_result_failure,
+    require_model_operation_dispatch,
+    suspend_analysis_operation_failure,
+    suspend_model_operation_contract,
+    suspend_structured_model_operation,
+)
 from openkb.desktop_retrieval_plan import deterministic_plan, model_plan, with_baseline_terms
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
@@ -36,8 +46,10 @@ def build_retrieval_plan(
     question: str,
     model_gateway: DesktopModelGateway | None,
     *,
+    kb_dir: Path | None = None,
     is_cancelled: Callable[[], bool] | None = None,
     on_model_event: Callable[[object], None] | None = None,
+    retry_scope: str | None = None,
 ) -> DesktopRetrievalPlanningResult:
     """Build one plan while retaining every physical retry in its cost."""
     fallback = deterministic_plan(question)
@@ -45,6 +57,13 @@ def build_retrieval_plan(
         return DesktopRetrievalPlanningResult(fallback, ("retrieval_plan_unavailable",))
     if not gateway_analysis_capability_verified(model_gateway):
         return DesktopRetrievalPlanningResult(fallback, ("retrieval_plan_unverified",))
+    if kb_dir is not None and not model_operation_dispatch_possible(
+        kb_dir,
+        model_gateway,
+        operation="retrieval_plan",
+        retry_scope=retry_scope,
+    ):
+        return DesktopRetrievalPlanningResult(fallback, ("retrieval_plan_suspended",))
     attempts = 0
     response = ""
 
@@ -52,6 +71,22 @@ def build_retrieval_plan(
 
         def invoke(request: DesktopModelRequest):
             nonlocal attempts, response
+            if kb_dir is not None:
+                if retry_scope is not None:
+                    authorize_model_operation_retry(
+                        kb_dir,
+                        model_gateway,
+                        operation=request.operation,
+                        retry_scope=retry_scope,
+                        capability_identity=request.capability_identity,
+                        prompt_contract_digest=request.prompt_contract_digest,
+                    )
+                require_model_operation_dispatch(
+                    kb_dir,
+                    model_gateway,
+                    request,
+                    retry_scope=retry_scope,
+                )
             call_attempts = 0
 
             def observe(event) -> None:
@@ -86,6 +121,8 @@ def build_retrieval_plan(
             invoke=invoke,
             validate=lambda content: model_plan(question, content),
         )
+        if kb_dir is not None:
+            mark_structured_output_operations_ready(kb_dir, model_gateway, output)
         return DesktopRetrievalPlanningResult(
             with_baseline_terms(fallback, output.value),
             (),
@@ -97,25 +134,46 @@ def build_retrieval_plan(
             ("retrieval_plan_cancelled",),
             _planning_cost(question, response, attempts),
         )
-    except DesktopModelCallError as error:
-        invalidate_analysis_capability(
-            model_gateway,
-            error.failure.code,
-            error.failure.reason,
+    except DesktopModelOperationSuspendedError:
+        return DesktopRetrievalPlanningResult(
+            fallback,
+            ("retrieval_plan_suspended",),
+            _planning_cost(question, response, attempts),
         )
+    except DesktopModelCallError as error:
+        if kb_dir is not None:
+            suspend_analysis_operation_failure(kb_dir, model_gateway, error)
         return DesktopRetrievalPlanningResult(
             fallback,
             ("retrieval_plan_fallback",),
             _planning_cost(question, response, attempts),
         )
     except DesktopStructuredOutputInvalidError as error:
-        invalidate_structured_model_result(model_gateway, error)
+        if kb_dir is not None:
+            suspend_structured_model_operation(
+                kb_dir,
+                model_gateway,
+                error,
+                operation="retrieval_plan",
+                failure_code="model_response_invalid",
+                reason="The Retrieval Plan response could not be validated.",
+            )
+        else:
+            record_structured_model_result_failure(model_gateway, error)
         return DesktopRetrievalPlanningResult(
             fallback,
             ("retrieval_plan_fallback",),
             _planning_cost(question, response, attempts),
         )
     except (ValueError, json.JSONDecodeError):
+        if kb_dir is not None:
+            suspend_model_operation_contract(
+                kb_dir,
+                model_gateway,
+                operation="retrieval_plan",
+                failure_code="model_response_invalid",
+                reason="The Retrieval Plan response could not be validated.",
+            )
         return DesktopRetrievalPlanningResult(
             fallback,
             ("retrieval_plan_fallback",),

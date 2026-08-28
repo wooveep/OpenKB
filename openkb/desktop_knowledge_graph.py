@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from openkb.desktop_knowledge_graph_contract import validate_knowledge_graph_response
 from openkb.desktop_knowledge_graph_store import (
     GraphEdge as _GraphEdge,
 )
@@ -34,40 +35,32 @@ from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
     DesktopModelGateway,
+    DesktopModelRequest,
     gateway_analysis_capability_verified,
-    invalidate_analysis_capability,
 )
-from openkb.desktop_model_result_failure import invalidate_structured_model_result
+from openkb.desktop_model_result_failure import (
+    DesktopModelOperationSuspendedError,
+    authorize_model_operation_retry,
+    mark_structured_output_operations_ready,
+    model_operation_dispatch_possible,
+    require_model_operation_dispatch,
+    suspend_analysis_operation_failure,
+    suspend_model_operation_contract,
+    suspend_structured_model_operation,
+)
+from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
+    DesktopValidatedStructuredOutput,
     run_structured_output,
 )
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock, try_kb_ingest_lock
 
-_NODE_TYPES = frozenset(("entity", "concept", "claim"))
-_EDGE_TYPES = frozenset(
-    (
-        "IS_A",
-        "PART_OF",
-        "RELATED_TO",
-        "DEPENDS_ON",
-        "USES",
-        "PRODUCES",
-        "LOCATED_IN",
-        "CREATED_BY",
-        "PRECEDES",
-        "REPLACES",
-        "SUPPORTS",
-        "CONTRADICTS",
-    )
-)
 _QUERY_DIAGNOSTIC_LOCK_TIMEOUT_SECONDS = 0.05
 _MAX_EXTRACTION_EVIDENCE = 12
 _MAX_MODEL_EVIDENCE_CHARS = 1_200
 _MAX_MODEL_INPUT_CHARS = 12_000
-_MAX_NODES_PER_EVIDENCE = 12
-_MAX_EDGES_PER_EVIDENCE = 16
 _MAX_LABEL_CHARS = 320
 _MAX_CLAIM_CHARS = 900
 _MAX_GRAPH_HOPS = 2
@@ -118,6 +111,7 @@ class DesktopKnowledgeGraphService:
         on_model_event: ModelEventCallback | None = None,
         on_failure: FailureCallback | None = None,
         publish_transaction: PublishTransaction | None = None,
+        retry_scope: str | None = None,
     ) -> bool:
         """Best-effort extraction; a failure never changes the document's availability."""
         if self._model_gateway is not None and not gateway_analysis_capability_verified(
@@ -132,44 +126,81 @@ class DesktopKnowledgeGraphService:
             return False
         if not evidence or _is_cancelled(is_cancelled):
             return False
+        if self._model_gateway is not None and not model_operation_dispatch_possible(
+            self._kb_dir,
+            self._model_gateway,
+            operation="knowledge_graph_extraction",
+            retry_scope=retry_scope,
+        ):
+            return False
 
+        model_output: DesktopValidatedStructuredOutput[_GraphPayload] | None = None
         try:
-            payload = (
-                self._model_payload(
+            if self._model_gateway is not None:
+                model_output = self._model_payload(
                     evidence,
                     is_cancelled=is_cancelled,
                     on_model_event=on_model_event,
+                    retry_scope=retry_scope,
                 )
-                if self._model_gateway is not None
-                else _deterministic_payload(evidence)
-            )
+                payload = model_output.value
+            else:
+                payload = _deterministic_payload(evidence)
         except DesktopModelCancelledError:
             return False
         except DesktopModelCallError as error:
             if self._model_gateway is not None:
-                invalidate_analysis_capability(
-                    self._model_gateway,
-                    error.failure.code,
-                    error.failure.reason,
-                )
+                suspend_analysis_operation_failure(self._kb_dir, self._model_gateway, error)
             _report_failure(on_failure, error.failure.code, error.failure.reason)
             self._record_diagnostic("extraction", error.failure.code, document_id)
             return False
+        except DesktopModelOperationSuspendedError:
+            _report_failure(on_failure, "model_operation_suspended")
+            return False
         except DesktopStructuredOutputInvalidError as error:
             if self._model_gateway is not None:
-                invalidate_structured_model_result(self._model_gateway, error)
+                suspend_structured_model_operation(
+                    self._kb_dir,
+                    self._model_gateway,
+                    error,
+                    operation="knowledge_graph_extraction",
+                    failure_code="knowledge_graph_response_invalid",
+                    reason=(
+                        "Knowledge Graph response did not satisfy its evidence-bound contract."
+                    ),
+                )
             _report_failure(on_failure, "knowledge_graph_response_invalid")
             self._record_diagnostic("extraction", "knowledge_graph_response_invalid", document_id)
             return False
         except (ValueError, json.JSONDecodeError):
+            if self._model_gateway is not None:
+                suspend_model_operation_contract(
+                    self._kb_dir,
+                    self._model_gateway,
+                    operation="knowledge_graph_extraction",
+                    failure_code="knowledge_graph_response_invalid",
+                    reason=(
+                        "Knowledge Graph response did not satisfy its evidence-bound contract."
+                    ),
+                )
             _report_failure(on_failure, "knowledge_graph_response_invalid")
             self._record_diagnostic("extraction", "knowledge_graph_response_invalid", document_id)
             return False
 
         if _is_cancelled(is_cancelled):
             return False
+        if self._model_gateway is not None and model_output is not None:
+            mark_structured_output_operations_ready(
+                self._kb_dir,
+                self._model_gateway,
+                model_output,
+            )
         try:
-            return self._persist(payload, publish_transaction=publish_transaction)
+            return self._persist(
+                document_id,
+                payload,
+                publish_transaction=publish_transaction,
+            )
         except (OSError, sqlite3.Error):
             _report_failure(on_failure, "knowledge_graph_extraction_failed")
             self._record_diagnostic("extraction", "knowledge_graph_extraction_failed", document_id)
@@ -190,10 +221,6 @@ class DesktopKnowledgeGraphService:
                     ON document_ir_blocks.block_id = evidence_occurrences.block_id
                 WHERE evidence_occurrences.document_id = ?
                     AND source_documents.availability = 'available'
-                    AND NOT EXISTS (
-                        SELECT 1 FROM knowledge_graph_nodes
-                        WHERE knowledge_graph_nodes.evidence_id = evidence_refs.evidence_id
-                    )
                 GROUP BY evidence_refs.evidence_id, evidence_refs.text,
                     source_documents.display_name,
                     document_ir_blocks.heading_path
@@ -220,39 +247,75 @@ class DesktopKnowledgeGraphService:
         *,
         is_cancelled: CancellationCallback | None,
         on_model_event: ModelEventCallback | None,
-    ) -> _GraphPayload:
+        retry_scope: str | None,
+    ) -> DesktopValidatedStructuredOutput[_GraphPayload]:
         if self._model_gateway is None:
             raise ValueError("Knowledge graph model is unavailable.")
         gateway = self._model_gateway
-        source_material = _model_input(evidence)
-        output = run_structured_output(
-            operation="knowledge_graph_extraction",
-            document_name=evidence[0].document_name,
-            source_material=source_material,
-            invoke=lambda request: gateway.analyze(
+        source_material, prompt_evidence = _model_input(evidence)
+
+        def invoke(request: DesktopModelRequest):
+            if retry_scope is not None:
+                authorize_model_operation_retry(
+                    self._kb_dir,
+                    gateway,
+                    operation=request.operation,
+                    retry_scope=retry_scope,
+                    capability_identity=request.capability_identity,
+                    prompt_contract_digest=request.prompt_contract_digest,
+                )
+            require_model_operation_dispatch(
+                self._kb_dir,
+                gateway,
+                request,
+                retry_scope=retry_scope,
+            )
+            return gateway.analyze(
                 request,
                 on_event=on_model_event or (lambda _event: None),
                 is_cancelled=is_cancelled,
-            ),
-            validate=lambda content: _model_payload_from_text(content, evidence),
+            )
+
+        return run_structured_output(
+            operation="knowledge_graph_extraction",
+            document_name=evidence[0].document_name,
+            source_material=source_material,
+            invoke=invoke,
+            validate=lambda content: _model_payload_from_text(content, prompt_evidence),
         )
-        return _fill_missing_evidence(output.value, evidence)
 
     def _persist(
         self,
+        document_id: str,
         payload: _GraphPayload,
         *,
         publish_transaction: PublishTransaction | None = None,
     ) -> bool:
-        if publish_transaction is not None:
-            return publish_transaction(
-                lambda connection: persist_graph_payload_in(connection, payload)
+        capability_identity = self._capability_identity()
+        prompt_digest = (
+            prompt_contract_for("knowledge_graph_extraction").digest
+            if self._model_gateway is not None
+            else None
+        )
+        extraction_method = "model" if self._model_gateway is not None else "deterministic"
+
+        def persist(connection: sqlite3.Connection) -> bool:
+            return persist_graph_payload_in(
+                connection,
+                document_id,
+                payload,
+                capability_identity=capability_identity,
+                prompt_contract_digest=prompt_digest,
+                extraction_method=extraction_method,
             )
+
+        if publish_transaction is not None:
+            return publish_transaction(persist)
         with kb_ingest_lock(self._state_dir):
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                changed = persist_graph_payload_in(connection, payload)
+                changed = persist(connection)
                 if not changed:
                     connection.rollback()
                     return False
@@ -263,6 +326,18 @@ class DesktopKnowledgeGraphService:
                 raise
             finally:
                 connection.close()
+
+    def _capability_identity(self) -> str | None:
+        if self._model_gateway is None:
+            return None
+        profile_factory = getattr(self._model_gateway, "execution_profile_for_operation", None)
+        if not callable(profile_factory):
+            return None
+        try:
+            profile = profile_factory("knowledge_graph_extraction")
+        except (TypeError, ValueError):
+            return None
+        return str(getattr(profile, "capability_evidence_profile", profile).identity)
 
     def record_query_diagnostic(self, error_code: str) -> None:
         """Record a query degradation without waiting behind a KB mutation."""
@@ -379,7 +454,7 @@ def local_graph_evidence_ids(
         connection,
         f"""
         SELECT node_id, evidence_id, normalized_label
-        FROM knowledge_graph_nodes
+        FROM current_knowledge_graph_nodes
         WHERE {" OR ".join(conditions)}
         ORDER BY evidence_id, node_id
         LIMIT ?
@@ -399,7 +474,7 @@ def local_graph_evidence_ids(
             connection,
             f"""
             SELECT node_id, evidence_id
-            FROM knowledge_graph_nodes
+            FROM current_knowledge_graph_nodes
             WHERE normalized_label IN ({_placeholders(labels)})
             ORDER BY evidence_id, node_id
             LIMIT ?
@@ -420,7 +495,7 @@ def local_graph_evidence_ids(
             connection,
             f"""
             SELECT evidence_id, source_node_id, target_node_id
-            FROM knowledge_graph_edges
+            FROM current_knowledge_graph_edges
             WHERE source_node_id IN ({_placeholders(tuple(frontier))})
                 OR target_node_id IN ({_placeholders(tuple(frontier))})
             ORDER BY edge_id
@@ -446,7 +521,7 @@ def local_graph_evidence_ids(
             connection,
             f"""
             SELECT node_id, evidence_id
-            FROM knowledge_graph_nodes
+            FROM current_knowledge_graph_nodes
             WHERE node_id IN ({_placeholders(tuple(next_ids))})
             ORDER BY node_id
             """,
@@ -463,13 +538,17 @@ def record_query_diagnostic(kb_dir: Path, error_code: str) -> None:
     DesktopKnowledgeGraphService(kb_dir).record_query_diagnostic(error_code)
 
 
-def _model_input(evidence: tuple[_EvidenceInput, ...]) -> str:
+def _model_input(
+    evidence: tuple[_EvidenceInput, ...],
+) -> tuple[str, tuple[_EvidenceInput, ...]]:
     remaining = _MAX_MODEL_INPUT_CHARS
     values: list[dict[str, str]] = []
+    included: list[_EvidenceInput] = []
     for item in evidence:
         if remaining <= 0:
             break
         text = item.text[: min(_MAX_MODEL_EVIDENCE_CHARS, remaining)]
+        included.append(item)
         values.append(
             {
                 "evidence_id": item.evidence_id,
@@ -478,88 +557,13 @@ def _model_input(evidence: tuple[_EvidenceInput, ...]) -> str:
             }
         )
         remaining -= len(text)
-    return json.dumps({"evidence": values}, ensure_ascii=False)
+    return json.dumps({"evidence": values}, ensure_ascii=False), tuple(included)
 
 
 def _model_payload_from_text(content: str, evidence: tuple[_EvidenceInput, ...]) -> _GraphPayload:
-    payload = json.loads(_json_object_text(content))
-    if not isinstance(payload, dict):
-        raise ValueError("Knowledge graph payload must be an object.")
-    raw_nodes = payload.get("nodes")
-    raw_edges = payload.get("edges")
-    if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
-        raise ValueError("Knowledge graph payload must include nodes and edges arrays.")
-    evidence_ids = {item.evidence_id for item in evidence}
-    nodes = _model_nodes(raw_nodes, evidence_ids)
-    if not nodes:
-        raise ValueError("Knowledge graph payload must include at least one node.")
-    edges = _model_edges(raw_edges, nodes)
-    return _GraphPayload(nodes=nodes, edges=edges)
-
-
-def _model_nodes(values: list[object], evidence_ids: set[str]) -> tuple[_GraphNode, ...]:
-    nodes: list[_GraphNode] = []
-    identifiers: set[str] = set()
-    by_evidence: dict[str, int] = {}
-    for value in values:
-        if not isinstance(value, dict):
-            raise ValueError("Knowledge graph node must be an object.")
-        local_id = _required_string(value, "id", max_chars=80)
-        evidence_id = _required_string(value, "evidence_id", max_chars=80)
-        node_type = _required_string(value, "type", max_chars=16).casefold()
-        label = _required_string(value, "label", max_chars=_MAX_LABEL_CHARS)
-        if (
-            local_id in identifiers
-            or evidence_id not in evidence_ids
-            or node_type not in _NODE_TYPES
-        ):
-            raise ValueError("Knowledge graph node is invalid.")
-        count = by_evidence.get(evidence_id, 0) + 1
-        if count > _MAX_NODES_PER_EVIDENCE:
-            raise ValueError("Knowledge graph node budget exceeded.")
-        identifiers.add(local_id)
-        by_evidence[evidence_id] = count
-        nodes.append(_GraphNode(local_id, evidence_id, node_type, label, "model"))
-    return tuple(nodes)
-
-
-def _model_edges(values: list[object], nodes: tuple[_GraphNode, ...]) -> tuple[_GraphEdge, ...]:
-    node_evidence = {node.local_id: node.evidence_id for node in nodes}
-    edges: list[_GraphEdge] = []
-    by_evidence: dict[str, int] = {}
-    for value in values:
-        if not isinstance(value, dict):
-            raise ValueError("Knowledge graph edge must be an object.")
-        evidence_id = _required_string(value, "evidence_id", max_chars=80)
-        source = _required_string(value, "source_id", max_chars=80)
-        target = _required_string(value, "target_id", max_chars=80)
-        edge_type = _required_string(value, "type", max_chars=24).upper()
-        if (
-            source == target
-            or edge_type not in _EDGE_TYPES
-            or node_evidence.get(source) != evidence_id
-            or node_evidence.get(target) != evidence_id
-        ):
-            raise ValueError("Knowledge graph edge is invalid.")
-        count = by_evidence.get(evidence_id, 0) + 1
-        if count > _MAX_EDGES_PER_EVIDENCE:
-            raise ValueError("Knowledge graph edge budget exceeded.")
-        by_evidence[evidence_id] = count
-        edges.append(_GraphEdge(evidence_id, source, target, edge_type, 0.75, "model"))
-    return tuple(edges)
-
-
-def _fill_missing_evidence(
-    payload: _GraphPayload, evidence: tuple[_EvidenceInput, ...]
-) -> _GraphPayload:
-    populated = {node.evidence_id for node in payload.nodes}
-    missing = tuple(item for item in evidence if item.evidence_id not in populated)
-    if not missing:
-        return payload
-    fallback = _deterministic_payload(missing)
-    return _GraphPayload(
-        nodes=(*payload.nodes, *fallback.nodes),
-        edges=(*payload.edges, *fallback.edges),
+    return validate_knowledge_graph_response(
+        content,
+        known_evidence_ids=(item.evidence_id for item in evidence),
     )
 
 
@@ -665,17 +669,6 @@ def _insert_diagnostic(
     )
 
 
-def _required_string(value: dict[object, object], key: str, *, max_chars: int) -> str:
-    candidate = value.get(key)
-    if (
-        not isinstance(candidate, str)
-        or not (normalized := candidate.strip())
-        or len(normalized) > max_chars
-    ):
-        raise ValueError(f"Knowledge graph {key} is invalid.")
-    return normalized
-
-
 def _section_label(value: str) -> str:
     try:
         parsed = json.loads(value)
@@ -710,13 +703,6 @@ def _claim_label(text: str) -> str:
 
 def _normalized_label(value: str) -> str:
     return " ".join(value.split()).casefold()[:_MAX_LABEL_CHARS]
-
-
-def _json_object_text(content: str) -> str:
-    normalized = content.strip()
-    if normalized.startswith("```") and normalized.endswith("```"):
-        normalized = normalized.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    return normalized
 
 
 def _append_unique(values: list[str], incoming: Iterable[str]) -> None:

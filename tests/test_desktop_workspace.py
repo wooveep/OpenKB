@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
-from openkb import desktop_workspace
+from openkb import desktop_workspace, desktop_workspace_backup
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_import_store import DesktopImportStore
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
+from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
+from openkb.desktop_model_execution_profile import build_analysis_execution_profile
 from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
 from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
+from openkb.desktop_model_settings import validate_desktop_model_settings
+from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseNotFoundError,
     DesktopKnowledgeBaseRuntime,
@@ -22,8 +29,29 @@ from openkb.desktop_workspace import (
 LATEST_SCHEMA_VERSION = desktop_workspace._MIGRATIONS[-1][0]
 
 
+def _drop_post_v44_schema(connection: sqlite3.Connection) -> None:
+    """Return a fixture to the schema before operation-scoped model state."""
+    connection.execute("DROP VIEW IF EXISTS current_knowledge_graph_edges")
+    connection.execute("DROP VIEW IF EXISTS current_knowledge_graph_nodes")
+    for table in (
+        "knowledge_graph_current",
+        "knowledge_graph_result_edges",
+        "knowledge_graph_result_nodes",
+        "knowledge_graph_results",
+        "knowledge_adoption_requests",
+        "knowledge_origin_references",
+        "model_capability_compatibility_audit",
+        "model_operation_contract_events",
+        "model_operation_retry_permits",
+        "model_operation_contract_states",
+    ):
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
+    connection.execute("DELETE FROM schema_migrations WHERE version >= 45")
+
+
 def _drop_post_v37_schema(connection: sqlite3.Connection) -> None:
     """Return a fixture to the schema before explicit-terminal model migrations."""
+    _drop_post_v44_schema(connection)
     for table in (
         "model_capability_checks",
         "knowledge_graph_extraction_tasks",
@@ -258,10 +286,11 @@ def test_result_and_capability_migrations_preserve_published_knowledge_idempoten
             """,
             (imported.job.job_id,),
         )
+        _drop_post_v44_schema(connection)
         connection.execute("DROP TABLE model_capability_checks")
         for table, column, _definition in MODEL_RESULT_OBSERVATION_COLUMNS:
             connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
-        connection.execute("DELETE FROM schema_migrations WHERE version IN (43, 44)")
+        connection.execute("DELETE FROM schema_migrations WHERE version >= 43")
         connection.commit()
 
     first = DesktopKnowledgeBaseRuntime().open(kb_dir)
@@ -295,6 +324,113 @@ def test_result_and_capability_migrations_preserve_published_knowledge_idempoten
         ).fetchone() == ("available",)
 
 
+def test_operation_state_migration_leaves_ambiguous_graph_invalidation_unverified(
+    tmp_path,
+) -> None:
+    kb_dir = tmp_path / "legacy-graph-invalidation"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    settings = validate_desktop_model_settings(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        analysis_model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+        analysis_reasoning="off",
+    )
+    legacy = build_analysis_execution_profile(
+        provider=settings.provider,
+        model=settings.analysis_model_name,
+        capability=settings.capability_for_role("analysis"),
+        reasoning_effort="off",
+        api_base_url=settings.api_base_url,
+    )
+    unknown_legacy = build_analysis_execution_profile(
+        provider=settings.provider,
+        model=settings.analysis_model_name,
+        capability=settings.capability_for_role("analysis"),
+        reasoning_effort="high",
+        api_base_url=settings.api_base_url,
+    )
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP VIEW current_knowledge_graph_edges")
+        connection.execute("DROP VIEW current_knowledge_graph_nodes")
+        for table in (
+            "knowledge_graph_current",
+            "knowledge_graph_result_edges",
+            "knowledge_graph_result_nodes",
+            "knowledge_graph_results",
+            "knowledge_adoption_requests",
+            "knowledge_origin_references",
+            "model_capability_compatibility_audit",
+            "model_operation_contract_states",
+        ):
+            connection.execute(f"DROP TABLE IF EXISTS {table}")
+        connection.execute("DELETE FROM schema_migrations WHERE version >= 45")
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO model_capability_checks (
+                profile_identity, profile_json, status, failure_code, reason,
+                checked_at, created_at, updated_at
+            ) VALUES (?, ?, 'unchecked', 'model_response_invalid', ?, NULL, ?, ?)
+            """,
+            (
+                legacy.identity,
+                json.dumps(legacy.as_dict(), sort_keys=True, separators=(",", ":")),
+                "Knowledge Graph response was invalid.",
+                "2026-08-27T10:00:00+00:00",
+                "2026-08-27T11:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO model_capability_checks (
+                profile_identity, profile_json, status, failure_code, reason,
+                checked_at, created_at, updated_at
+            ) VALUES (?, ?, 'unchecked', 'model_response_invalid', ?, NULL, ?, ?)
+            """,
+            (
+                unknown_legacy.identity,
+                json.dumps(
+                    unknown_legacy.as_dict(), sort_keys=True, separators=(",", ":")
+                ),
+                "Unknown legacy invalidation.",
+                "2026-08-27T10:00:00+00:00",
+                "2026-08-27T12:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_graph_diagnostics (
+                diagnostic_id, phase, error_code, document_id, created_at
+            ) VALUES ('legacy-graph-failure', 'extraction',
+                'knowledge_graph_response_invalid', NULL, '2026-08-27T11:00:00+00:00')
+            """
+        )
+        connection.commit()
+
+    DesktopKnowledgeBaseRuntime().open(kb_dir)
+
+    shared = legacy.capability_evidence_profile
+    capability = DesktopModelCapabilityStore(kb_dir).state(shared)
+    operation = DesktopModelOperationContractStore(kb_dir).state(
+        operation="knowledge_graph_extraction",
+        capability_identity=shared.identity,
+        prompt_contract_digest=prompt_contract_for("knowledge_graph_extraction").digest,
+    )
+    assert capability.status == "unchecked"
+    assert DesktopModelCapabilityStore(kb_dir).state(
+        unknown_legacy.capability_evidence_profile
+    ).status == "unchecked"
+    assert operation.status == "unverified"
+    assert operation.failure_stage is None
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT decision FROM model_capability_compatibility_audit ORDER BY decision"
+        ).fetchall() == [("left_unverified",), ("left_unverified",)]
+
+
 def test_open_repairs_partial_preledger_result_observation_migration(tmp_path) -> None:
     """A terminated pre-release v43 migration may expose only its first DDL columns."""
     kb_dir = tmp_path / "partial-result-observations"
@@ -313,11 +449,12 @@ def test_open_repairs_partial_preledger_result_observation_migration(tmp_path) -
         ("model_attempts", "final_content_observed"),
     }
     with sqlite3.connect(database_path) as connection:
+        _drop_post_v44_schema(connection)
         connection.execute("DROP TABLE model_capability_checks")
         for table, column, _definition in MODEL_RESULT_OBSERVATION_COLUMNS:
             if (table, column) not in retained:
                 connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
-        connection.execute("DELETE FROM schema_migrations WHERE version IN (43, 44)")
+        connection.execute("DELETE FROM schema_migrations WHERE version >= 43")
         connection.commit()
 
     activation = DesktopKnowledgeBaseRuntime().open(kb_dir)
@@ -339,8 +476,9 @@ def test_existing_database_migration_ddl_rolls_back_before_ledger_commit(
     DesktopKnowledgeBaseRuntime().create(kb_dir)
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
+        _drop_post_v44_schema(connection)
         connection.execute("DROP TABLE model_capability_checks")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 44")
+        connection.execute("DELETE FROM schema_migrations WHERE version >= 44")
         connection.commit()
 
     migrations = tuple(
@@ -364,6 +502,97 @@ def test_existing_database_migration_ddl_rolls_back_before_ledger_commit(
         columns = connection.execute("PRAGMA table_info(model_calls)").fetchall()
         assert "atomic_migration_probe" not in {str(row[1]) for row in columns}
         assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (43,)
+
+
+def test_existing_database_migration_creates_a_restorable_backup_before_ddl(
+    tmp_path, monkeypatch
+) -> None:
+    kb_dir = tmp_path / "backed-up-migration"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    migration_version = LATEST_SCHEMA_VERSION + 1
+    monkeypatch.setattr(
+        desktop_workspace,
+        "_MIGRATIONS",
+        (
+            *desktop_workspace._MIGRATIONS,
+            (
+                migration_version,
+                (
+                    "ALTER TABLE model_calls ADD COLUMN backup_probe TEXT",
+                    "THIS IS NOT VALID SQLITE",
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(DesktopKnowledgeBaseStateError):
+        DesktopKnowledgeBaseRuntime().open(kb_dir)
+
+    backups = sorted((kb_dir / ".openkb" / "migration-backups").glob("*.sqlite3"))
+    assert len(backups) == 1
+    with sqlite3.connect(backups[0]) as backup:
+        assert backup.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert backup.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (
+            LATEST_SCHEMA_VERSION,
+        )
+        assert "backup_probe" not in {
+            str(row[1]) for row in backup.execute("PRAGMA table_info(model_calls)")
+        }
+    with sqlite3.connect(database_path) as connection:
+        assert "backup_probe" not in {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(model_calls)")
+        }
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (
+            LATEST_SCHEMA_VERSION,
+        )
+
+
+def test_each_migration_attempt_backs_up_the_latest_source_state(tmp_path) -> None:
+    kb_dir = tmp_path / "fresh-backup-per-attempt"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        first = desktop_workspace_backup.create_migration_backup(
+            connection,
+            database_path=database_path,
+            current_version=LATEST_SCHEMA_VERSION,
+            target_version=LATEST_SCHEMA_VERSION + 1,
+        )
+        connection.execute("CREATE TABLE retry_marker (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO retry_marker (value) VALUES ('latest')")
+        connection.commit()
+        second = desktop_workspace_backup.create_migration_backup(
+            connection,
+            database_path=database_path,
+            current_version=LATEST_SCHEMA_VERSION,
+            target_version=LATEST_SCHEMA_VERSION + 1,
+        )
+
+    assert second != first
+    with sqlite3.connect(second) as backup:
+        assert backup.execute("SELECT value FROM retry_marker").fetchone() == ("latest",)
+
+
+def test_migration_backups_are_bounded_per_version_edge(tmp_path) -> None:
+    kb_dir = tmp_path / "bounded-migration-backups"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    created: list[Path] = []
+    with sqlite3.connect(database_path) as connection:
+        for _attempt in range(5):
+            created.append(
+                desktop_workspace_backup.create_migration_backup(
+                    connection,
+                    database_path=database_path,
+                    current_version=LATEST_SCHEMA_VERSION,
+                    target_version=LATEST_SCHEMA_VERSION + 1,
+                )
+            )
+
+    backups = tuple((database_path.parent / "migration-backups").glob("*.sqlite3"))
+    assert len(backups) == 3
+    assert created[-1] in backups
 
 
 def test_migration_resets_legacy_running_imports_without_checkpoints(tmp_path):

@@ -25,3 +25,7 @@ of new analysis batches; already active Model Attempts may reach their explicit
 terminal events and checkpoint only under their original pinned plan. It makes
 the profile unverified rather than permanently unsupported; a later explicit
 successful check can verify the same profile again.
+
+ADR-0046 supersedes blanket profile invalidation for operation-specific invalid
+results. ADR-0048 supersedes the save-only workflow while retaining explicit
+user consent before any provider call.

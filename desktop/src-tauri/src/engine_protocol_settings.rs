@@ -2,7 +2,7 @@
 
 use super::{
     BridgeError, BridgeResult, DiagnosticBundleResult, EngineSupervisor, ModelConnectionTest,
-    ModelSettings, ModelSettingsDraft,
+    ModelSettings, ModelSettingsDraft, SaveAndVerifyModelConfiguration,
 };
 use serde_json::{json, Value};
 
@@ -39,6 +39,28 @@ impl EngineSupervisor {
             BridgeError::new(
                 "invalid_engine_response",
                 format!("Engine model-connection response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn save_and_verify_model_settings(
+        &self,
+        settings: ModelSettingsDraft,
+        request_id: String,
+    ) -> BridgeResult<SaveAndVerifyModelConfiguration> {
+        self.ensure_started()?;
+        let mut params = model_settings_params(&settings);
+        params["verification_cost_accepted"] = json!(true);
+        let value = self.request_started_with_wait(
+            "workbench.save_and_verify_model_settings",
+            params,
+            Some(request_id),
+            None,
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine Save and Verify response has an invalid shape: {error}"),
             )
         })
     }

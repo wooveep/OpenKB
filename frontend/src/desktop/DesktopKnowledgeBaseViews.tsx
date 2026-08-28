@@ -131,7 +131,7 @@ export function ActiveKnowledgeBaseView({
         </div>
       ) : null}
       <div className={section === "conversations" ? "block" : "hidden"}>
-        <DesktopConversationPanel key={knowledgeBase.kbDir} requestKey={navigationRequestSequence} requestedConversationId={requestedConversationId} requestedMessageId={requestedConversationMessageId} onOpenOriginal={onOpenRawDocument} />
+        <DesktopConversationPanel key={knowledgeBase.kbDir} requestKey={navigationRequestSequence} requestedConversationId={requestedConversationId} requestedMessageId={requestedConversationMessageId} onOpenOriginal={onOpenRawDocument} onOpenModelSettings={() => onNavigate("settings")} />
       </div>
       {section === "knowledge" ? (
         <DesktopKnowledgeWorkspace

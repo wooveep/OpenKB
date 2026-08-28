@@ -27,6 +27,9 @@ from openkb.desktop_knowledge_generations import (
 )
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
+from openkb.desktop_knowledge_reconciliation_adoption import (
+    candidate_has_durable_adoption_origin_in,
+)
 from openkb.desktop_knowledge_sources import prune_obsolete_draft_sources_in
 from openkb.desktop_knowledge_three_way_merge import apply_incoming_to_draft
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
@@ -355,7 +358,9 @@ def _stage_candidate_in(
             "knowledge_reconciliation_candidate_not_found",
             "The selected knowledge conflict is no longer available for review.",
         )
-    if str(row[0]) != "available":
+    if str(row[0]) != "available" and not candidate_has_durable_adoption_origin_in(
+        connection, candidate_id
+    ):
         raise DesktopImportError(
             "knowledge_reconciliation_candidate_unavailable",
             "The source document must remain available before choosing a knowledge conflict.",
@@ -484,7 +489,12 @@ def _staged_candidates_in(connection: sqlite3.Connection) -> tuple[_StagedCandid
                 "knowledge_reconciliation_stage_invalid",
                 "A staged knowledge conflict has an invalid decision.",
             )
-        if not candidate.document_available:
+        if (
+            not candidate.document_available
+            and not candidate_has_durable_adoption_origin_in(
+                connection, candidate.candidate_id
+            )
+        ):
             raise DesktopImportError(
                 "knowledge_reconciliation_candidate_unavailable",
                 "The source document must remain available before committing review choices.",
@@ -508,9 +518,18 @@ def _candidate_sources_in(
 ) -> tuple[KnowledgeGenerationSource, ...]:
     rows = connection.execute(
         """
-        SELECT source_id, evidence_id, claim_text
-        FROM knowledge_reconciliation_candidate_sources
-        WHERE candidate_id = ? ORDER BY source_id
+        SELECT sources.source_id, sources.evidence_id, sources.claim_text
+        FROM knowledge_reconciliation_candidate_sources AS sources
+        WHERE sources.candidate_id = ?
+            AND EXISTS (
+                SELECT 1
+                FROM evidence_occurrences AS occurrences
+                JOIN source_documents AS documents
+                    ON documents.document_id = occurrences.document_id
+                WHERE occurrences.evidence_id = sources.evidence_id
+                    AND documents.availability = 'available'
+            )
+        ORDER BY sources.source_id
         """,
         (candidate_id,),
     ).fetchall()

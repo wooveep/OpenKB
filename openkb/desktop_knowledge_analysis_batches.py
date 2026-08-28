@@ -4,15 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
-from openkb.desktop_import_types import (
-    DesktopKnowledgeAnalysisProgress,
-    DesktopModelCall,
-)
 from openkb.desktop_knowledge_analysis import (
     KNOWLEDGE_ANALYSIS_BATCH_SCOPE,
     KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
@@ -41,6 +36,7 @@ from openkb.desktop_knowledge_analysis_plan import (
     knowledge_analysis_input_budget,
     prompt_snapshot_for_operation,
 )
+from openkb.desktop_knowledge_analysis_progress import knowledge_analysis_progress_in
 from openkb.desktop_knowledge_analysis_requests import (
     analysis_pipeline_digest as _analysis_pipeline_digest,
 )
@@ -73,7 +69,7 @@ from openkb.desktop_structured_output import (
     run_structured_output,
 )
 
-__all__ = ["DesktopKnowledgeAnalysisBatchStore"]
+__all__ = ["DesktopKnowledgeAnalysisBatchStore", "knowledge_analysis_progress_in"]
 
 _BATCH_CONTRACT = prompt_contract_for("knowledge_analysis_batch")
 _MERGE_CONTRACT = prompt_contract_for("knowledge_analysis_merge")
@@ -115,6 +111,7 @@ def run_knowledge_analysis(
     max_parallel_batches: int = 1,
     capability_profile: DesktopModelCapabilityProfile | None = None,
     execution_profile: DesktopModelExecutionProfile | None = None,
+    on_operation_validated: Callable[[DesktopModelRequest], None] = lambda _request: None,
 ) -> KnowledgeAnalysisRun:
     """Execute a direct analysis or resume a persisted long-document batch plan."""
     natural_sections = (
@@ -169,6 +166,7 @@ def run_knowledge_analysis(
             validate=lambda content: _validated_document_analysis(content, evidence),
             plan=plan,
             batch_id="document",
+            on_operation_validated=on_operation_validated,
         )
         result, analysis = validated
         checkpoint = _result_checkpoint(
@@ -224,6 +222,7 @@ def run_knowledge_analysis(
                 validate=lambda content: _validated_batch_analysis(content, batch),
                 plan=plan,
                 batch_id=batch.batch_id,
+                on_operation_validated=on_operation_validated,
             )
         except DesktopModelCallError as error:
             store.fail_batch(batch.batch_id, error.failure.code)
@@ -287,6 +286,7 @@ def run_knowledge_analysis(
                 analyses=tuple(analyses),
                 honor_control=honor_control,
                 max_parallel_batches=max_parallel_batches,
+                on_operation_validated=on_operation_validated,
             )
             merged = DesktopKnowledgeAnalysis(
                 description,
@@ -357,15 +357,21 @@ def _validated_analysis_call(
     validate: Callable[[str], DesktopKnowledgeAnalysis],
     plan: KnowledgeAnalysisPlan,
     batch_id: str,
+    on_operation_validated: Callable[[DesktopModelRequest], None],
 ) -> tuple[DesktopModelResult, DesktopKnowledgeAnalysis]:
+    dispatched_requests: list[DesktopModelRequest] = []
+
+    def invoke(request: DesktopModelRequest) -> DesktopModelResult:
+        dispatched_request = _request_pinned_to_plan(request, plan, batch_id=batch_id)
+        dispatched_requests.append(dispatched_request)
+        return analyze(dispatched_request)
+
     try:
         output = run_structured_output(
             operation=operation,
             document_name=document_name,
             source_material=prompt,
-            invoke=lambda request: analyze(
-                _request_pinned_to_plan(request, plan, batch_id=batch_id)
-            ),
+            invoke=invoke,
             validate=validate,
             contract_snapshot=prompt_snapshot_for_operation(plan, operation),
             repair_contract_snapshot=prompt_snapshot_for_operation(
@@ -375,6 +381,8 @@ def _validated_analysis_call(
         )
     except DesktopStructuredOutputInvalidError as error:
         raise result_failure(error, suggested_action=_INVALID_RESULT_ACTION) from error
+    for dispatched_request in dispatched_requests:
+        on_operation_validated(dispatched_request)
     return output.result, output.value
 
 
@@ -410,6 +418,7 @@ def _run_hierarchical_description_merge(
     analyses: tuple[DesktopKnowledgeAnalysis, ...],
     honor_control: Callable[[], None],
     max_parallel_batches: int,
+    on_operation_validated: Callable[[DesktopModelRequest], None] = lambda _request: None,
 ) -> tuple[str, DesktopModelResult, tuple[dict[str, object], ...]]:
     if not plan.merge_topology:
         description = _deterministic_description(analyses)
@@ -444,6 +453,7 @@ def _run_hierarchical_description_merge(
                 analyze=analyze,
                 plan=plan,
                 batch_id=node.node_id,
+                on_operation_validated=on_operation_validated,
             )
         except DesktopModelCallError as error:
             store.fail_merge_node(job_id, node.node_id, error.failure.code)
@@ -494,15 +504,21 @@ def _validated_description_merge_call(
     analyze: Callable[[DesktopModelRequest], DesktopModelResult],
     plan: KnowledgeAnalysisPlan,
     batch_id: str,
+    on_operation_validated: Callable[[DesktopModelRequest], None],
 ) -> tuple[DesktopModelResult, str]:
+    dispatched_requests: list[DesktopModelRequest] = []
+
+    def invoke(request: DesktopModelRequest) -> DesktopModelResult:
+        dispatched_request = _request_pinned_to_plan(request, plan, batch_id=batch_id)
+        dispatched_requests.append(dispatched_request)
+        return analyze(dispatched_request)
+
     try:
         output = run_structured_output(
             operation="knowledge_analysis_merge",
             document_name=document_name,
             source_material=prompt,
-            invoke=lambda request: analyze(
-                _request_pinned_to_plan(request, plan, batch_id=batch_id)
-            ),
+            invoke=invoke,
             validate=_parse_merged_description,
             contract_snapshot=prompt_snapshot_for_operation(
                 plan,
@@ -515,6 +531,8 @@ def _validated_description_merge_call(
         )
     except DesktopStructuredOutputInvalidError as error:
         raise result_failure(error, suggested_action=_INVALID_RESULT_ACTION) from error
+    for dispatched_request in dispatched_requests:
+        on_operation_validated(dispatched_request)
     return output.result, output.value
 
 
@@ -746,46 +764,6 @@ def _result_checkpoint(
     if extra:
         checkpoint.update(extra)
     return checkpoint
-
-
-def knowledge_analysis_progress_in(
-    connection: sqlite3.Connection,
-    job_id: str,
-    model_calls: tuple[DesktopModelCall, ...],
-) -> DesktopKnowledgeAnalysisProgress | None:
-    rows = connection.execute(
-        """
-        SELECT batch_ordinal, status
-        FROM knowledge_analysis_batches
-        WHERE job_id = ?
-        ORDER BY batch_ordinal
-        """,
-        (job_id,),
-    ).fetchall()
-    if not rows:
-        return None
-    statuses = [str(row[1]) for row in rows]
-    merge_row = connection.execute(
-        "SELECT status FROM knowledge_analysis_merges WHERE job_id = ?", (job_id,)
-    ).fetchone()
-    merge_status = str(merge_row[0]) if merge_row is not None else "pending"
-    current = next(
-        (int(row[0]) + 1 for row in rows if str(row[1]) in {"running", "failed", "pending"}),
-        None,
-    )
-    phase = (
-        "completed"
-        if merge_status == "completed"
-        else ("merge" if all(status == "completed" for status in statuses) else "batches")
-    )
-    return DesktopKnowledgeAnalysisProgress(
-        total=len(rows),
-        completed=statuses.count("completed"),
-        active=statuses.count("running"),
-        failed=statuses.count("failed"),
-        current_batch=current,
-        phase=phase,
-    )
 
 
 def _json(value: object) -> str:

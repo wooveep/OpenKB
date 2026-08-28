@@ -15,6 +15,7 @@ from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
 from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelRequest
+from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
 from openkb.desktop_model_settings import (
     read_desktop_model_settings,
     save_desktop_model_settings,
@@ -24,6 +25,7 @@ from openkb.desktop_model_usage import DesktopModelUsageStore
 from openkb.desktop_page_tree_enrichment import DesktopPageTreeEnrichmentService
 from openkb.desktop_page_tree_rebuild_state import queue_page_tree_rebuild_in
 from openkb.desktop_page_tree_store import load_current_page_tree_in
+from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
@@ -227,7 +229,21 @@ def test_invalid_enrichment_repair_marks_final_usage_as_model_result_failure(tmp
     ]
     assert {record["lifecycle_status"] for record in failed} == {"model_result_failure"}
     assert {record["failure_code"] for record in failed} == {"model_response_invalid"}
-    assert capability_store.state(profile).status == "unchecked"
+    assert capability_store.state(profile).status == "verified"
+    operation_state = DesktopModelOperationContractStore(kb_dir).state(
+        operation="page_tree_enrichment",
+        capability_identity=profile.capability_evidence_profile.identity,
+        prompt_contract_digest=prompt_contract_for("page_tree_enrichment").digest,
+    )
+    assert operation_state.status == "suspended"
+    assert service.pending_document_ids(gateway) == ()
+    assert service.retry_document(imported.document.document_id, gateway)
+    assert service.pending_document_ids(gateway) == (imported.document.document_id,)
+    assert DesktopModelOperationContractStore(kb_dir).state(
+        operation="page_tree_enrichment",
+        capability_identity=profile.capability_evidence_profile.identity,
+        prompt_contract_digest=prompt_contract_for("page_tree_enrichment").digest,
+    ).status == "suspended"
 
 
 def test_model_change_creates_a_new_enrichment_generation_without_overwriting_base(tmp_path):

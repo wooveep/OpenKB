@@ -4,18 +4,25 @@ from __future__ import annotations
 
 import sqlite3
 
+from openkb.desktop_knowledge_adoption_migrations import (
+    KNOWLEDGE_ADOPTION_REQUEST_INPUT_COLUMNS,
+)
 from openkb.desktop_knowledge_analysis_migrations import (
     KNOWLEDGE_ANALYSIS_ENTITY_SUBTYPE_MIGRATION_STATEMENT,
 )
 from openkb.desktop_model_observability_migrations import MODEL_LIFECYCLE_COLUMNS
 from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
 from openkb.desktop_workspace_feature_migrations import (
+    KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_VERSION,
     KNOWLEDGE_ANALYSIS_MIGRATION_VERSION,
     MODEL_LIFECYCLE_MIGRATION_VERSION,
     MODEL_RESULT_OBSERVATION_MIGRATION_VERSION,
 )
 
 _REPAIRABLE_COLUMN_MIGRATIONS = {
+    KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_VERSION: (
+        KNOWLEDGE_ADOPTION_REQUEST_INPUT_COLUMNS
+    ),
     MODEL_LIFECYCLE_MIGRATION_VERSION: MODEL_LIFECYCLE_COLUMNS,
     MODEL_RESULT_OBSERVATION_MIGRATION_VERSION: MODEL_RESULT_OBSERVATION_COLUMNS,
 }

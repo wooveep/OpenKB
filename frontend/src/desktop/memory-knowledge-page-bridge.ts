@@ -6,6 +6,12 @@ import type {
   DesktopKnowledgeExport,
   DesktopKnowledgeExportMode,
   DesktopKnowledgeSourceCandidate,
+  DesktopKnowledgeWorkspace,
+  DesktopKnowledgeWorkspaceHistory,
+  DesktopKnowledgeWorkspaceItem,
+  DesktopKnowledgeWorkspaceItemRequest,
+  DesktopKnowledgeAdoptionResult,
+  DesktopKnowledgeAdoptionDecision,
 } from "./contracts"
 import { MemoryKnowledgePageStore } from "./memory-knowledge-pages"
 
@@ -21,6 +27,67 @@ export abstract class MemoryKnowledgePageBridge {
 
   async knowledgePages(): Promise<DesktopKnowledgePages> {
     return this.knowledgePagesStore.list()
+  }
+
+  async knowledgeWorkspace(query = ""): Promise<DesktopKnowledgeWorkspace> {
+    const needle = query.trim().toLocaleLowerCase()
+    const pages = this.knowledgePagesStore.list().pages
+    return {
+      currentGenerationId: null,
+      items: pages
+        .filter((page) => !needle || page.title.toLocaleLowerCase().includes(needle))
+        .map((page) => ({
+          authority: "user" as const,
+          identity: `user:${page.pageId}`,
+          kind: page.kind,
+          title: page.title,
+          updatedAt: page.updatedAt,
+          current: true,
+          pageId: page.pageId,
+          publicationState: page.publicationState,
+          lifecycleState: page.lifecycleState,
+        })),
+    }
+  }
+
+  async getKnowledgeWorkspaceItem(
+    item: DesktopKnowledgeWorkspaceItemRequest,
+  ): Promise<DesktopKnowledgeWorkspaceItem> {
+    if (item.authority !== "user") {
+      throw new Error("The renderer-only bridge has no generated Knowledge snapshot.")
+    }
+    return {
+      authority: "user",
+      identity: `user:${item.pageId}`,
+      editable: true,
+      ...this.knowledgePagesStore.get(item.pageId),
+    }
+  }
+
+  async knowledgeWorkspaceHistory(
+    generationId?: number,
+  ): Promise<DesktopKnowledgeWorkspaceHistory> {
+    if (generationId !== undefined) {
+      throw new Error("The renderer-only bridge has no generated Knowledge history.")
+    }
+    return { currentGenerationId: null, generations: [] }
+  }
+
+  async adoptKnowledgeItem(
+    generationId: number,
+    itemKey: string,
+    adoptionRequestId: string,
+    requestId: string,
+    decision?: DesktopKnowledgeAdoptionDecision,
+    candidatePageId?: string,
+  ): Promise<DesktopKnowledgeAdoptionResult> {
+    void generationId
+    void itemKey
+    void adoptionRequestId
+    void requestId
+    void decision
+    void candidatePageId
+    throw new Error("The renderer-only bridge has no generated Knowledge item to adopt.")
   }
 
   async getKnowledgePage(pageId: string): Promise<DesktopKnowledgePage> {

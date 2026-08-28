@@ -433,7 +433,7 @@ class DesktopEngineServer:
             )
 
             return dispatch_knowledge_reconciliation_request(self, request, cancel_event)
-        if request.method in self._INTERRUPTION_PRESERVING_METHODS:
+        if request.method in engine_methods.ANSWER_METHODS:
             from openkb.desktop_engine_answers import dispatch_grounded_answer_request
 
             return dispatch_grounded_answer_request(self, request, cancel_event)

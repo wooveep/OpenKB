@@ -53,6 +53,14 @@ export function DesktopKnowledgeGraphExtractionTasks({
                 {t(`desktop.tasks.knowledgeGraph.statuses.${task.status}`)}
                 {" · "}{task.provider} / {task.model}
               </p>
+              {task.status === "completed" || task.status === "completed_empty" ? (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t("desktop.tasks.knowledgeGraph.counts", {
+                    nodes: task.nodeCount,
+                    edges: task.edgeCount,
+                  })}
+                </p>
+              ) : null}
             </div>
             <span className="text-xs text-muted-foreground">
               {t("desktop.tasks.knowledgeGraph.attempts", { count: task.attemptCount })}
@@ -72,6 +80,11 @@ export function DesktopKnowledgeGraphExtractionTasks({
           ) : null}
           {task.errorReason || task.errorCode ? (
             <p className="mt-2 text-xs text-destructive">{task.errorReason ?? task.errorCode}</p>
+          ) : null}
+          {task.errorCode === "knowledge_graph_response_invalid" ? (
+            <p className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-800 dark:text-amber-200">
+              {t("desktop.tasks.knowledgeGraph.invalidRecovery")}
+            </p>
           ) : null}
           {task.status === "running" ? (
             <Button className="mt-3" size="sm" variant="outline" disabled={controllingDocumentId === task.documentId} onClick={() => void control(task, true)}>

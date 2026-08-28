@@ -405,6 +405,14 @@
         },
         "testSucceeded": "连接成功，用时 {{latency}} 毫秒（{{attempts}} 次尝试）。",
         "testRejected": "模型提供商未通过连接测试。",
+        "saveAndVerify": "保存并验证",
+        "saveAndVerifyReviewTitle": "保存设置并验证模型能力",
+        "saveAndVerifyReviewDescription": "设置会先保存到当前知识库，然后分别调用分析模型和问答模型进行能力检查。调用可能产生提供商费用；单个角色失败不会撤销已保存设置或其他角色的结果。",
+        "saveAndVerifyCost": "我确认本次能力检查可能产生模型提供商费用。",
+        "confirmSaveAndVerify": "确认保存并开始验证",
+        "saveAndVerifySucceeded": "设置已保存，所需模型角色均已验证（{{attempts}} 次尝试）。",
+        "saveAndVerifyPartial": "设置已保存；部分模型角色未通过验证，请查看各角色状态后重试。",
+        "saveAndVerifyCancelled": "设置已保存；验证已停止，尚未派发的角色保持未检查。",
         "analysisCapability": "分析能力",
         "answerCapability": "问答能力",
         "capabilityStates": {
@@ -413,7 +421,9 @@
           "verified": "已验证",
           "failed": "检查失败",
           "cancelled": "检查已取消",
-          "unavailable": "不可用"
+          "unavailable": "不可用",
+          "unverified": "未验证",
+          "not_required": "无需验证"
         },
         "appearanceTitle": "外观与语言",
         "appearanceDescription": "这些偏好只应用于此设备上的桌面工作台。",
@@ -519,7 +529,77 @@
       "stopAnswer": "停止",
       "answerCancellationWarning": "OpenKB 已停止本地等待，并在可行时关闭活动流；无法保证提供商侧已取消，远端仍可能继续计算或计费。",
       "capabilityDegradationTitle": "能力降级",
-      "capabilityDegradationDescription": "由于可选能力不可用，OpenKB 已使用安全的确定性检索回退。",
+      "capabilityDegradationDescription": "以下能力在本次操作中不可用；OpenKB 已保留可用结果并使用安全回退。",
+      "capabilityDegradationTechnicalDetails": "技术详情",
+      "capabilityDegradationOpenSettings": "打开模型设置",
+      "capabilityDegradationRetry": "重试此回答",
+      "capabilityDegradations": {
+        "retrievalPlan": {
+          "title": "检索规划未验证",
+          "impact": "本次问答使用确定性检索，未使用模型生成的检索计划；引用仍来自本地证据。",
+          "recovery": "如需恢复模型规划，请在模型设置中执行“保存并验证”分析角色，然后重试问答。"
+        },
+        "retrievalPlanUnavailable": {
+          "title": "检索规划未配置",
+          "impact": "当前没有可用的分析模型，因此本次回答使用带本地引用的确定性检索。",
+          "recovery": "请配置分析角色，并在模型设置中执行“保存并验证”。"
+        },
+        "retrievalPlanCancelled": {
+          "title": "检索规划已取消",
+          "impact": "可选规划调用已停止，确定性检索仍安全地完成了回答。",
+          "recovery": "准备好后重试此回答，即可再次运行检索规划。"
+        },
+        "retrievalPlanSuspended": {
+          "title": "检索规划已暂停",
+          "impact": "当前检索规划契约返回不可用结果后，本次问答改用确定性检索。",
+          "recovery": "修正模型配置后，请重新生成此回答，以显式重试同一契约。"
+        },
+        "pageTreeSelection": {
+          "title": "页面树选择未验证",
+          "impact": "本次检索使用确定性页面选择，可能扩大候选范围，但不会伪造知识。",
+          "recovery": "在模型设置中执行“保存并验证”分析角色，然后重试问答。"
+        },
+        "pageTreeSelectionUnavailable": {
+          "title": "页面树选择未配置",
+          "impact": "当前没有可用的分析模型，因此保留了确定性证据选择。",
+          "recovery": "请配置分析角色，并在模型设置中执行“保存并验证”。"
+        },
+        "pageTreeSelectionCancelled": {
+          "title": "页面树选择已取消",
+          "impact": "可选选择调用已停止；确定性证据选择仍可用。",
+          "recovery": "重试此回答即可再次运行页面树选择。"
+        },
+        "pageTreeSelectionSuspended": {
+          "title": "页面树选择已暂停",
+          "impact": "当前页面树契约验证失败后，本次问答保留了确定性证据选择。",
+          "recovery": "修正模型配置后，请重新生成此回答，以显式重试同一契约。"
+        },
+        "answerModel": {
+          "title": "问答模型未验证",
+          "impact": "模型回答能力未通过当前配置的能力检查；本地检索结果仍被保留。",
+          "recovery": "检查问答模型、API 地址和凭据，再执行“保存并验证”问答角色。"
+        },
+        "answerModelUnavailable": {
+          "title": "问答模型未配置",
+          "impact": "OpenKB 已保留检索证据，但当前无法使用问答角色。",
+          "recovery": "请配置问答角色，并在模型设置中执行“保存并验证”。"
+        },
+        "answerModelFallback": {
+          "title": "问答模型已使用回退",
+          "impact": "问答调用失败，因此 OpenKB 返回了安全的、基于证据的回退结果。",
+          "recovery": "检查提供商失败原因后，显式重试此回答。"
+        },
+        "knowledgeGraph": {
+          "title": "知识图谱提取已暂停",
+          "impact": "仅本次图谱提取契约受影响；问答和其他已验证能力不会因此被一并禁用。",
+          "recovery": "在任务页查看失败原因，修正分析模型后显式重试图谱提取。"
+        },
+        "generic": {
+          "title": "可选能力不可用",
+          "impact": "OpenKB 已使用确定性回退并保留可验证证据。",
+          "recovery": "展开技术详情定位能力，再从对应任务或模型设置中重试。"
+        }
+      },
       "answerStreaming": "正在生成回答…",
       "answerRetrying": "正在重试回答…",
       "answerInterrupted": "回答已中断",
@@ -551,6 +631,37 @@
         "missingSources": "缺少来源",
         "conflicts": "知识冲突",
         "versions": "文档版本"
+      },
+      "workspace": {
+        "search": "搜索标题、正文、别名或标签",
+        "history": "生成历史",
+        "current": "返回当前知识",
+        "generation": "第 {{id}} 代",
+        "itemCount": "{{count}} 项",
+        "currentBadge": "当前",
+        "historyBadge": "历史",
+        "historical": "正在查看不可变的第 {{id}} 代快照。",
+        "noHistory": "尚无生成历史。",
+        "loading": "正在加载知识工作区…",
+        "loadingItem": "正在加载知识详情…",
+        "empty": "当前没有匹配的生成知识或用户知识页。你仍可在右侧创建工作草稿。",
+        "createOrSelect": "选择一项知识，或创建用户拥有的工作草稿。",
+        "authority": { "generated": "生成快照", "user": "用户知识页" },
+        "generatedSnapshot": "生成知识快照",
+        "readOnly": "此内容来自不可变的生成快照，只读显示。采用后会创建新的用户工作草稿，不会改写原快照。",
+        "adopt": "采用为工作草稿",
+        "adopted": "已创建用户拥有的工作草稿。",
+        "reconciliationQueued": "生成内容已加入 Review Queue。",
+        "reconcileCandidate": "与 {{title}} 核对合并",
+        "openCandidate": "打开 {{title}}",
+        "candidateUnavailable": "该候选知识页已不可用。请刷新采用选项后重试。",
+        "createSeparate": "另建工作草稿",
+        "adoption": {
+          "reconciliation_required": "生成内容已针对该现有页面加入 Review Queue；OpenKB 未覆盖任何内容。",
+          "choice_required": "发现可能相似的用户知识页。请选择与现有页核对合并，或另建工作草稿。"
+        },
+        "sources": "可解析来源",
+        "noSources": "此快照没有可解析的来源映射。"
       },
       "export": {
         "action": "导出",
@@ -674,17 +785,20 @@
         "title": "知识图谱提取",
         "description": "生成可选且绑定证据的图谱记录；即使任务失败，文档仍保持可用。",
         "attempts": "已尝试 {{count}} 次",
+        "counts": "{{nodes}} 个节点 · {{edges}} 条边",
         "callIdentity": "调用 {{callId}} · 尝试 {{attemptId}}",
         "cancel": "取消提取",
         "resume": "继续提取",
         "retry": "重试提取",
         "actionRejected": "操作提交前该知识图谱任务已发生变化，请刷新后重试。",
         "cancelWarning": "OpenKB 已停止本地等待，并在可行时关闭活动流；无法保证提供商侧已取消，远端仍可能继续计算或计费。",
+        "invalidRecovery": "仅此图谱提取契约已暂停，其他已验证能力不受影响。请检查分析模型后点击“重试提取”；若文档没有可支持的关系，模型返回严格空结果也会被正常接受。",
         "statuses": {
           "pending": "等待中",
           "running": "进行中",
           "failed": "失败",
-          "completed": "已完成"
+          "completed": "已完成",
+          "completed_empty": "已完成（无可支持关系）"
         }
       },
       "catalog": {

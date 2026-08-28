@@ -23,9 +23,6 @@ import type {
   DesktopKnowledgeReanalysisOverview,
   DesktopKnowledgeReanalysisRun,
   DesktopGlobalSearchResults,
-  DesktopModelSettings,
-  DesktopModelSettingsDraft,
-  DesktopModelConnectionTest,
   DesktopPageTreeEnrichmentControlResult,
   DesktopKnowledgeGraphExtractionControlResult,
   DesktopDocumentVersionCandidate,
@@ -43,8 +40,7 @@ import {
   sourceName,
   updateImportTasks,
 } from "./memory-bridge-helpers"
-import { MemoryKnowledgeReviewBridge } from "./memory-knowledge-review-bridge"
-import { createMemoryModelSettings } from "./memory-model-settings"
+import { MemoryModelSettingsBridge } from "./memory-model-settings"
 
 function emptyRetrievalTrace(canonicalEvidenceIds: string[] = []) {
   return {
@@ -70,7 +66,7 @@ function emptyImportTelemetry() {
 }
 
 /** In-memory Bridge for React component tests; it never touches Tauri or Python. */
-export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements DesktopBridge {
+export class MemoryDesktopBridge extends MemoryModelSettingsBridge implements DesktopBridge {
   private readonly listeners = new Set<(event: DesktopBridgeEvent) => void>()
   private readonly handshakeResult: DesktopBridgeHandshake
   private readonly healthResult: DesktopEngineHealth
@@ -80,7 +76,6 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
   private conversationResults: DesktopConversation[] = []
   private lastConversationId: string | null = null
   private documentVersionCandidateResults: DesktopDocumentVersionCandidate[] = []
-  private modelSettingsResult: DesktopModelSettings = createMemoryModelSettings()
 
   constructor(
     handshakeResult: DesktopBridgeHandshake = {
@@ -136,63 +131,6 @@ export class MemoryDesktopBridge extends MemoryKnowledgeReviewBridge implements 
 
   async revealApplicationLogDirectory(): Promise<void> {
     return undefined
-  }
-
-  async modelSettings(): Promise<DesktopModelSettings> {
-    return this.modelSettingsResult
-  }
-
-  async saveModelSettings(
-    settings: DesktopModelSettingsDraft,
-    requestId: string,
-  ): Promise<DesktopModelSettings> {
-    void requestId
-    this.modelSettingsResult = {
-      ...this.modelSettingsResult,
-      ...settings,
-      apiKeyConfigured: Boolean(settings.apiKey),
-      analysisConcurrency: settings.maxConcurrentModelCalls,
-    }
-    return this.modelSettingsResult
-  }
-
-  async testModelConnection(
-    settings: DesktopModelSettingsDraft,
-    requestId: string,
-  ): Promise<DesktopModelConnectionTest> {
-    void requestId
-    return {
-      ok: true,
-      model: settings.model,
-      models: [settings.model],
-      latencyMs: 42,
-      attemptCount: 1,
-      profileIdentity: "memory-answer-profile",
-      capabilityStatus: "answer_verified",
-      roleResults: {
-        default: { role: "default", model: settings.model, status: "verified", reason: null, attemptCount: 1, profileIdentity: "memory-answer-profile", cached: false, coveredBy: "answer" },
-        analysis: {
-          role: "analysis",
-          model: null,
-          status: "unavailable",
-          reason: "The memory Custom provider has no structured Analysis adapter.",
-          attemptCount: 0,
-          profileIdentity: null,
-          cached: false,
-          coveredBy: null,
-        },
-        answer: {
-          role: "answer",
-          model: settings.model,
-          status: "verified",
-          reason: null,
-          attemptCount: 1,
-          profileIdentity: "memory-answer-profile",
-          cached: false,
-          coveredBy: null,
-        },
-      },
-    }
   }
 
   async exportDiagnosticBundle(

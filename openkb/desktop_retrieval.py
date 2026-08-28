@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -110,6 +110,7 @@ class DesktopEvidenceRetriever:
         *,
         is_cancelled: Callable[[], bool] | None = None,
         on_model_event: Callable[[object], None] | None = None,
+        operation_retry_scopes: Mapping[str, str] | None = None,
     ) -> DesktopEvidencePack:
         """Plan and retrieve without ever allowing optional model work to block a reply."""
         variant: DesktopEvaluationVariant = (
@@ -120,6 +121,7 @@ class DesktopEvidenceRetriever:
             variant=variant,
             is_cancelled=is_cancelled,
             on_model_event=on_model_event,
+            operation_retry_scopes=operation_retry_scopes,
             _enable_page_tree_selection=True,
         )
 
@@ -141,6 +143,7 @@ class DesktopEvidenceRetriever:
         return build_retrieval_plan(
             validate_question(question),
             self._model_gateway,
+            kb_dir=self._kb_dir,
             is_cancelled=is_cancelled,
             on_model_event=on_model_event,
         )
@@ -154,6 +157,7 @@ class DesktopEvidenceRetriever:
         degradations: tuple[str, ...] = (),
         is_cancelled: Callable[[], bool] | None = None,
         on_model_event: Callable[[object], None] | None = None,
+        operation_retry_scopes: Mapping[str, str] | None = None,
         _enable_page_tree_selection: bool = False,
     ) -> DesktopEvidencePack:
         """Retrieve one named vectorless channel for a fixed evaluation plan."""
@@ -164,8 +168,10 @@ class DesktopEvidenceRetriever:
             planning = build_retrieval_plan(
                 normalized_question,
                 self._model_gateway,
+                kb_dir=self._kb_dir,
                 is_cancelled=is_cancelled,
                 on_model_event=on_model_event,
+                retry_scope=(operation_retry_scopes or {}).get("retrieval_plan"),
             )
             plan = planning.plan
             planning_cost = planning.model_cost
@@ -220,6 +226,7 @@ class DesktopEvidenceRetriever:
                     is_cancelled=is_cancelled,
                     on_model_event=on_model_event,
                     lease_tree=self._page_tree_lease,
+                    retry_scope=(operation_retry_scopes or {}).get("page_tree_selection"),
                 )
             connection = _connect(self._database_path)
             try:

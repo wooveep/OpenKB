@@ -6,7 +6,9 @@ import json
 
 import pytest
 from jsonschema import validate as validate_json_schema
+from jsonschema.exceptions import ValidationError
 
+from openkb.desktop_knowledge_graph import validate_knowledge_graph_response
 from openkb.desktop_model_gateway import DesktopModelRequest, DesktopModelResult
 from openkb.desktop_prompt_contracts import (
     canonical_prompt_contract_snapshot,
@@ -72,6 +74,153 @@ def test_every_structured_contract_has_a_canonical_schema_valid_json_example() -
         validate_json_schema(contract.output_example, contract.output_schema)
         snapshot = contract.snapshot()
         assert snapshot["output_example"] == contract.output_example
+
+
+def test_knowledge_graph_canonical_example_passes_the_operation_validator() -> None:
+    contract = prompt_contract_for("knowledge_graph_extraction")
+
+    schema = contract.output_schema
+    assert schema is not None
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    nodes = properties["nodes"]
+    edges = properties["edges"]
+    assert isinstance(nodes, dict)
+    assert isinstance(edges, dict)
+    assert nodes["maxItems"] == 144
+    assert edges["maxItems"] == 192
+
+    node_schema = nodes["items"]
+    assert isinstance(node_schema, dict)
+    node_properties = node_schema["properties"]
+    assert isinstance(node_properties, dict)
+    identifier = node_properties["id"]
+    label = node_properties["label"]
+    assert isinstance(identifier, dict)
+    assert isinstance(label, dict)
+    assert identifier["maxLength"] == 80
+    assert label["maxLength"] == 320
+
+    assert contract.output_example is not None
+    payload = validate_knowledge_graph_response(
+        json.dumps(contract.output_example),
+        known_evidence_ids=("evidence-1",),
+    )
+
+    assert len(payload.nodes) == 2
+    assert len(payload.edges) == 1
+
+
+def test_knowledge_graph_operation_validator_accepts_an_empty_result() -> None:
+    payload = validate_knowledge_graph_response(
+        json.dumps({"nodes": [], "edges": []}),
+        known_evidence_ids=("evidence-1",),
+    )
+
+    assert payload.nodes == ()
+    assert payload.edges == ()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"nodes": [], "edges": [], "summary": "unexpected"},
+        {
+            "nodes": [
+                {
+                    "id": "entity-1",
+                    "evidence_id": "evidence-1",
+                    "type": "entity",
+                    "label": "OpenKB",
+                    "properties": {},
+                }
+            ],
+            "edges": [],
+        },
+    ),
+)
+def test_knowledge_graph_operation_validator_rejects_unknown_fields(payload: object) -> None:
+    with pytest.raises(ValueError, match="unexpected fields"):
+        validate_knowledge_graph_response(
+            json.dumps(payload),
+            known_evidence_ids=("evidence-1",),
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            "nodes": [
+                {
+                    "id": "entity-1",
+                    "evidence_id": "evidence-1",
+                    "type": "ENTITY",
+                    "label": "OpenKB",
+                }
+            ],
+            "edges": [],
+        },
+        {
+            "nodes": [
+                {
+                    "id": " entity-1 ",
+                    "evidence_id": "evidence-1",
+                    "type": "entity",
+                    "label": "OpenKB",
+                }
+            ],
+            "edges": [],
+        },
+        {
+            "nodes": [
+                {
+                    "id": "entity-1",
+                    "evidence_id": "evidence-1",
+                    "type": "entity",
+                    "label": " OpenKB ",
+                }
+            ],
+            "edges": [],
+        },
+        {
+            "nodes": [
+                {
+                    "id": "entity-1",
+                    "evidence_id": "evidence-1",
+                    "type": "entity",
+                    "label": "OpenKB",
+                },
+                {
+                    "id": "concept-1",
+                    "evidence_id": "evidence-1",
+                    "type": "concept",
+                    "label": "Knowledge base",
+                },
+            ],
+            "edges": [
+                {
+                    "evidence_id": "evidence-1",
+                    "source_id": "entity-1",
+                    "target_id": "concept-1",
+                    "type": "uses",
+                }
+            ],
+        },
+    ),
+)
+def test_knowledge_graph_schema_and_operation_validator_reject_same_shapes(
+    payload: object,
+) -> None:
+    schema = prompt_contract_for("knowledge_graph_extraction").output_schema
+    assert schema is not None
+    with pytest.raises(ValidationError):
+        validate_json_schema(payload, schema)
+    with pytest.raises(ValueError):
+        validate_knowledge_graph_response(
+            json.dumps(payload),
+            known_evidence_ids=("evidence-1",),
+        )
 
 
 def test_normalization_removes_only_one_transport_fence() -> None:

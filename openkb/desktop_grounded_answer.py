@@ -22,6 +22,10 @@ from openkb.desktop_model_gateway import (
     DesktopModelRequest,
     gateway_answer_capability_verified,
 )
+from openkb.desktop_model_result_failure import (
+    authorize_model_operation_retry,
+    revoke_model_operation_retry_scope,
+)
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 
 AnswerDeltaCallback = Callable[[str, str, bool, int], None]
@@ -49,6 +53,7 @@ class DesktopGroundedAnswerService:
 
     def __init__(self, kb_dir: Path, *, model_gateway: DesktopModelGateway | None = None) -> None:
         interactive_gateway = _interactive_gateway(model_gateway)
+        self._kb_dir = kb_dir.expanduser().resolve()
         self._retriever = DesktopEvidenceRetriever(
             kb_dir,
             model_gateway=interactive_gateway,
@@ -93,6 +98,7 @@ class DesktopGroundedAnswerService:
             is_cancelled=is_cancelled,
             on_model_event=on_model_event,
             conversation_context=(),
+            retry_suspended_operations=True,
         )
         if replacement.status == "interrupted":
             return interrupted
@@ -106,6 +112,7 @@ class DesktopGroundedAnswerService:
         on_delta: AnswerDeltaCallback | None = None,
         is_cancelled: AnswerCancellationCallback | None = None,
         on_model_event: AnswerModelEventCallback | None = None,
+        retry_suspended_operations: bool = False,
     ) -> DesktopGroundedAnswer:
         """Generate an auditable answer without writing the legacy flat-answer tables."""
         return self._attempt(
@@ -115,6 +122,7 @@ class DesktopGroundedAnswerService:
             is_cancelled=is_cancelled,
             on_model_event=on_model_event,
             conversation_context=conversation_context,
+            retry_suspended_operations=retry_suspended_operations,
         )
 
     def _attempt(
@@ -127,14 +135,39 @@ class DesktopGroundedAnswerService:
         is_cancelled: AnswerCancellationCallback | None,
         on_model_event: AnswerModelEventCallback | None,
         conversation_context: tuple[tuple[str, str], ...],
+        retry_suspended_operations: bool = False,
     ) -> DesktopGroundedAnswer:
-        pack = prepare_grounded_evidence_pack(
-            self._retriever.retrieve(
-                question,
-                is_cancelled=is_cancelled,
-                on_model_event=on_model_event,
+        operation_retry_scopes: dict[str, str] = {}
+        retry_scope: str | None = None
+        if retry_suspended_operations and self._model_gateway is not None:
+            retry_scope = f"grounded_answer:{answer_id}"
+            for operation in (
+                "retrieval_plan",
+                "page_tree_selection",
+                "structured_output_repair",
+            ):
+                authorize_model_operation_retry(
+                    self._kb_dir,
+                    self._model_gateway,
+                    operation=operation,
+                    retry_scope=retry_scope,
+                )
+            operation_retry_scopes = {
+                "retrieval_plan": retry_scope,
+                "page_tree_selection": retry_scope,
+            }
+        try:
+            pack = prepare_grounded_evidence_pack(
+                self._retriever.retrieve(
+                    question,
+                    is_cancelled=is_cancelled,
+                    on_model_event=on_model_event,
+                    operation_retry_scopes=operation_retry_scopes,
+                )
             )
-        )
+        finally:
+            if retry_scope is not None:
+                revoke_model_operation_retry_scope(self._kb_dir, retry_scope)
         emitted = False
         visible_attempt = 0
         replace_pending = False

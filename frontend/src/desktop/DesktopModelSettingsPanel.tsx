@@ -254,6 +254,7 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
   const [testRoleResults, setTestRoleResults] = useState<DesktopModelCapabilityCheckRoleResults | null>(null)
   const [exporting, setExporting] = useState(false)
   const [diagnosticReviewOpen, setDiagnosticReviewOpen] = useState(false)
+  const [verificationReviewOpen, setVerificationReviewOpen] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const testRequestIdRef = useRef<string | null>(null)
@@ -295,57 +296,43 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
     }
   }, [bridge])
 
-  const save = async () => {
-    if (!draft || saving) return
-    const validation = validatedDraft(draft)
-    if (validation.error) {
-      setError(t(`desktop.knowledgeBases.modelSettings.${validation.error}`))
-      return
-    }
-    setSaving(true)
-    setError(null)
-    try {
-      const result = await bridge.saveModelSettings(
-        validation.settings,
-        nextDesktopRequestId("model-settings"),
-      )
-      setSettings(result)
-      setDraft(draftFrom(result))
-      toast.success(t("desktop.knowledgeBases.modelSettings.saved"))
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const testConnection = async () => {
+  const saveAndVerify = async () => {
     if (!draft || testing) return
     const validation = validatedDraft(draft)
     if (validation.error) {
       setError(t(`desktop.knowledgeBases.modelSettings.${validation.error}`))
       return
     }
+    setSaving(true)
     setTesting(true)
+    setVerificationReviewOpen(false)
     setError(null)
     setTestResult(null)
     setTestRoleResults(null)
     setTestStatus("queued")
-    const requestId = nextDesktopRequestId("model-connection-test")
+    const requestId = nextDesktopRequestId("model-save-and-verify")
     testRequestIdRef.current = requestId
     try {
-      const result = await bridge.testModelConnection(
+      const result = await bridge.saveAndVerifyModelSettings(
         validation.settings,
         requestId,
       )
-      if (!result.ok) throw new Error(t("desktop.knowledgeBases.modelSettings.testRejected"))
-      const message = t("desktop.knowledgeBases.modelSettings.testSucceeded", {
-        latency: result.latencyMs,
-        attempts: result.attemptCount,
-      })
-      setTestResult(message)
+      setSettings(result.settings)
+      setDraft(draftFrom(result.settings))
       setTestRoleResults(result.roleResults)
-      toast.success(message)
+      const message = t(
+        result.cancelled
+          ? "desktop.knowledgeBases.modelSettings.saveAndVerifyCancelled"
+          : result.allRequiredRolesVerified
+            ? "desktop.knowledgeBases.modelSettings.saveAndVerifySucceeded"
+            : "desktop.knowledgeBases.modelSettings.saveAndVerifyPartial",
+        {
+        attempts: result.attemptCount,
+        },
+      )
+      setTestResult(message)
+      if (result.cancelled || !result.allRequiredRolesVerified) toast.info(message)
+      else toast.success(message)
     } catch (reason) {
       if (reason instanceof DesktopBridgeError && reason.code === "request_cancelled") {
         setTestStatus("cancelled")
@@ -355,12 +342,15 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
       }
     } finally {
       try {
-        setSettings(await bridge.modelSettings())
+        const refreshed = await bridge.modelSettings()
+        setSettings(refreshed)
+        setDraft(draftFrom(refreshed))
       } catch {
         // Keep the explicit check result visible if refreshing the persisted projection fails.
       }
       if (testRequestIdRef.current === requestId) testRequestIdRef.current = null
       setTesting(false)
+      setSaving(false)
     }
   }
 
@@ -621,8 +611,8 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
         </div>
         <p className="mt-3 text-xs leading-5 text-muted-foreground">{t("desktop.knowledgeBases.modelSettings.testPolicy")}</p>
         <div className="mt-5 flex justify-end gap-2">
-          <Button variant="outline" disabled={saving} onClick={() => void (testing ? stopConnectionTest() : testConnection())}>{testing ? <Square className="size-4" /> : <CheckCircle2 className="size-4" />}{testing ? t("desktop.knowledgeBases.modelSettings.stopTesting") : t("desktop.knowledgeBases.modelSettings.testConnection")}</Button>
-          <Button disabled={saving || testing} onClick={() => void save()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}{saving ? t("desktop.knowledgeBases.modelSettings.saving") : t("desktop.knowledgeBases.modelSettings.save")}</Button>
+          {testing ? <Button variant="outline" onClick={() => void stopConnectionTest()}><Square className="size-4" />{t("desktop.knowledgeBases.modelSettings.stopTesting")}</Button> : null}
+          <Button disabled={saving || testing} onClick={() => setVerificationReviewOpen(true)}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}{saving ? t("desktop.knowledgeBases.modelSettings.saving") : t("desktop.knowledgeBases.modelSettings.saveAndVerify")}</Button>
         </div>
       </section>
 
@@ -675,6 +665,22 @@ export function DesktopModelSettingsPanel({ kbDir }: { kbDir: string }) {
           </Button>
         </div>
       </section>
+
+      <Dialog open={verificationReviewOpen} onOpenChange={setVerificationReviewOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("desktop.knowledgeBases.modelSettings.saveAndVerifyReviewTitle")}</DialogTitle>
+            <DialogDescription>{t("desktop.knowledgeBases.modelSettings.saveAndVerifyReviewDescription")}</DialogDescription>
+          </DialogHeader>
+          <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-100">
+            {t("desktop.knowledgeBases.modelSettings.saveAndVerifyCost")}
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setVerificationReviewOpen(false)}>{t("desktop.knowledgeBases.modelSettings.cancel")}</Button>
+            <Button onClick={() => void saveAndVerify()}><CheckCircle2 className="size-4" />{t("desktop.knowledgeBases.modelSettings.confirmSaveAndVerify")}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={diagnosticReviewOpen} onOpenChange={setDiagnosticReviewOpen}>
         <DialogContent>

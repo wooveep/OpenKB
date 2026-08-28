@@ -29,6 +29,11 @@ _ANALYSIS_PLAN_OPERATIONS = (
     "structured_output_repair",
 )
 _REASONING_ALLOWANCE_NUMERATORS = {"off": 0, "low": 1, "medium": 2, "high": 4}
+ANALYSIS_CAPABILITY_VERSION = "openkb.analysis-structured-streaming.v2"
+ANALYSIS_CAPABILITY_INSTRUCTIONS = (
+    "Return this exact JSON object and no other text: " '{"status":"ok"}'
+)
+ANALYSIS_CAPABILITY_FINAL_OUTPUT_TOKENS = 64
 ANSWER_CAPABILITY_SYSTEM_PROMPT = "Stream the requested short answer capability value."
 ANSWER_CAPABILITY_USER_PROMPT = "Reply with the single word OK."
 _ANSWER_CAPABILITY_CHAT_FRAMING_RESERVE_TOKENS = 32
@@ -43,6 +48,74 @@ _ANSWER_CAPABILITY_REASONING_ALLOWANCE_TOKENS: dict[str, int] = {
 
 class DesktopModelCapacityError(ValueError):
     """The selected immutable model controls cannot fit a useful request."""
+
+
+@dataclass(frozen=True)
+class DesktopAnalysisCapabilityProfile:
+    """Shared Analysis-role behavior proven independently of operation prompts."""
+
+    provider: str
+    model: str
+    endpoint_digest: str
+    adapter_identity: str
+    adapter_version: str
+    structured_output_mode: StructuredOutputMode
+    streaming: bool
+    reasoning_effort: str
+    context_capacity: int
+    document_input_capacity: int
+    reasoning_allowance_tokens: int
+    capability_version: str = ANALYSIS_CAPABILITY_VERSION
+    role: str = "analysis"
+
+    @property
+    def provider_output_ceiling_tokens(self) -> int:
+        return ANALYSIS_CAPABILITY_FINAL_OUTPUT_TOKENS + self.reasoning_allowance_tokens
+
+    @property
+    def prompt_contract_digest(self) -> str:
+        return _digest(
+            {
+                "instructions": ANALYSIS_CAPABILITY_INSTRUCTIONS,
+                "output_schema": {
+                    "type": "object",
+                    "properties": {"status": {"const": "ok"}},
+                    "required": ["status"],
+                    "additionalProperties": False,
+                },
+                "output_example": {"status": "ok"},
+                "generation_parameters": {
+                    "temperature": 0,
+                    "max_tokens": self.provider_output_ceiling_tokens,
+                },
+            }
+        )
+
+    @property
+    def identity(self) -> str:
+        return hashlib.sha256(_json(self._identity_payload()).encode("utf-8")).hexdigest()
+
+    def as_dict(self) -> dict[str, object]:
+        return {**self._identity_payload(), "identity": self.identity}
+
+    def _identity_payload(self) -> dict[str, object]:
+        return {
+            "role": self.role,
+            "provider": self.provider,
+            "model": self.model,
+            "endpoint_digest": self.endpoint_digest,
+            "adapter_identity": self.adapter_identity,
+            "adapter_version": self.adapter_version,
+            "structured_output_mode": self.structured_output_mode,
+            "streaming": self.streaming,
+            "reasoning_effort": self.reasoning_effort,
+            "context_capacity": self.context_capacity,
+            "document_input_capacity": self.document_input_capacity,
+            "reasoning_allowance_tokens": self.reasoning_allowance_tokens,
+            "provider_output_ceiling_tokens": self.provider_output_ceiling_tokens,
+            "prompt_contract_digest": self.prompt_contract_digest,
+            "capability_version": self.capability_version,
+        }
 
 
 @dataclass(frozen=True)
@@ -70,6 +143,29 @@ class DesktopModelExecutionProfile:
     @property
     def identity(self) -> str:
         return hashlib.sha256(_json(self._identity_payload()).encode("utf-8")).hexdigest()
+
+    @property
+    def capability_evidence_profile(self) -> DesktopAnalysisCapabilityProfile:
+        """Return the shared probe identity, excluding operation Prompt Contracts."""
+        adapter = model_protocol_for(self.provider)
+        reasoning_allowance = (
+            0
+            if self.reasoning_effort == "off"
+            else adapter.minimum_capability_reasoning_allowance_tokens
+        )
+        return DesktopAnalysisCapabilityProfile(
+            provider=self.provider,
+            model=self.model,
+            endpoint_digest=self.endpoint_digest,
+            adapter_identity=self.adapter_identity,
+            adapter_version=self.adapter_version,
+            structured_output_mode=self.structured_output_mode,
+            streaming=self.streaming,
+            reasoning_effort=self.reasoning_effort,
+            context_capacity=self.context_capacity,
+            document_input_capacity=self.document_input_capacity,
+            reasoning_allowance_tokens=reasoning_allowance,
+        )
 
     def as_dict(self) -> dict[str, object]:
         return {**self._identity_payload(), "identity": self.identity}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 import yaml
 
 import openkb.desktop_okf_projection as okf_projection_module
+from openkb import desktop_engine_workspace_activation as workspace_activation_engine
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_generations import (
     KnowledgeGenerationChange,
@@ -168,6 +170,27 @@ def test_okf_projection_rebuilds_the_current_published_snapshot(tmp_path: Path) 
     shutil.rmtree(projection)
     materialize_okf_projection(kb_dir)
     assert _projection_snapshot(projection) == snapshot
+
+
+def test_valid_existing_okf_projection_is_not_regenerated_on_workspace_open(
+    tmp_path: Path,
+) -> None:
+    kb_dir = tmp_path / "knowledge"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    materialize_okf_projection(kb_dir)
+    projection = kb_dir / "knowledge-pages"
+    probe = projection / "index.md"
+    preserved = probe.read_bytes() + b"\n<!-- preserve existing valid projection -->\n"
+    probe.write_bytes(preserved)
+    fixed_timestamp_ns = 1_700_000_000_123_456_789
+    os.utime(probe, ns=(fixed_timestamp_ns, fixed_timestamp_ns))
+    before = _projection_snapshot(projection)
+
+    workspace_activation_engine._materialize_okf_projection_on_open(kb_dir)
+
+    assert _projection_snapshot(projection) == before
+    assert probe.read_bytes() == preserved
+    assert probe.stat().st_mtime_ns == fixed_timestamp_ns
 
 
 def test_okf_compatibility_is_permissive_and_resolves_both_link_forms(

@@ -36,6 +36,10 @@ _RECOVERY_FAILURE_DETAILS = {
         "A configured model is required to resume model analysis.",
         "Choose a model for this retry or update the knowledge-base settings.",
     ),
+    "model_operation_suspended": (
+        "This exact Analysis operation contract remains suspended after an unusable result.",
+        "Correct the model configuration, then explicitly recover this import.",
+    ),
 }
 
 

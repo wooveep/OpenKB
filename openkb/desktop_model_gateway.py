@@ -21,9 +21,7 @@ ModelResultFailureCode = Literal[
     "model_response_invalid",
 ]
 MODEL_RESULT_FAILURE_CODES: frozenset[str] = frozenset(get_args(ModelResultFailureCode))
-ModelResultLifecycleFinalizer = Callable[
-    [ModelResultLifecycleStatus, str | None, str | None], None
-]
+ModelResultLifecycleFinalizer = Callable[[ModelResultLifecycleStatus, str | None, str | None], None]
 
 
 def require_execution_lane(value: str) -> ExecutionLane:
@@ -53,7 +51,10 @@ class DesktopModelRequest:
     response_example: dict[str, object] | None = None
     response_schema_name: str | None = None
     generation_parameters: dict[str, object] | None = None
+    capability_identity: str | None = None
     prompt_contract_digest: str | None = None
+    parent_operation: str | None = None
+    parent_prompt_contract_digest: str | None = None
     prompt_contract_version: str | None = None
     prompt_contract_snapshot: dict[str, object] | None = None
     supports_streaming: bool | None = None
@@ -226,9 +227,8 @@ class DesktopModelCallError(RuntimeError):
         self.provider_request_id = provider_request_id
         self.diagnostic_context = dict(diagnostic_context or {})
         context_failure_id = self.diagnostic_context.get("failure_event_id")
-        self.failure_event_id = (
-            failure_event_id
-            or (context_failure_id if isinstance(context_failure_id, str) else None)
+        self.failure_event_id = failure_event_id or (
+            context_failure_id if isinstance(context_failure_id, str) else None
         )
         self.elapsed_seconds = elapsed_seconds
 
@@ -378,6 +378,10 @@ class DesktopModelGateway:
         """Invalidate current-profile evidence when the gateway owns such a cache."""
         del failure_code, reason
 
+    def invalidate_corroborated_analysis_capability(self, failure_code: str, reason: str) -> None:
+        """Invalidate shared evidence after independent operations corroborate a breach."""
+        del failure_code, reason
+
     def answer_capability_verified(self) -> bool:
         """Return whether this gateway's exact streamed Answer identity was checked."""
         return True
@@ -435,6 +439,17 @@ def invalidate_analysis_capability(
 ) -> None:
     """Invalidate cache-backed gateways while keeping test/local gateways structural."""
     invalidator = getattr(gateway, "invalidate_analysis_capability", None)
+    if callable(invalidator):
+        invalidator(failure_code, reason)
+
+
+def invalidate_corroborated_analysis_capability(
+    gateway: object,
+    failure_code: str,
+    reason: str,
+) -> None:
+    """Invalidate cache-backed gateways only after operation-level corroboration."""
+    invalidator = getattr(gateway, "invalidate_corroborated_analysis_capability", None)
     if callable(invalidator):
         invalidator(failure_code, reason)
 

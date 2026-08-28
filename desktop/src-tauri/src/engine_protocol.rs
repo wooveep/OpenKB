@@ -17,11 +17,14 @@ pub use crate::engine_wire::{
     KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
     KnowledgeReconciliationDecision, MissingSourceBindingResult, MissingSourceCandidatesResult,
     MissingSourceDismissalResult, ModelConnectionTest, ModelSettings, ModelSettingsDraft,
-    PageTreeEnrichmentControlResult, RawDocument, RecoveryOverride, TextDocumentImportResult,
+    PageTreeEnrichmentControlResult, RawDocument, RecoveryOverride,
+    SaveAndVerifyModelConfiguration, TextDocumentImportResult,
 };
 pub use crate::engine_wire_knowledge_pages::{
-    KnowledgeExportMode, KnowledgeExportResult, KnowledgePage, KnowledgePageDeletionResult,
-    KnowledgePagesResult, KnowledgeSourcesResult,
+    KnowledgeAdoptionDecision, KnowledgeAdoptionResult, KnowledgeExportMode, KnowledgeExportResult,
+    KnowledgePage, KnowledgePageDeletionResult, KnowledgePagesResult, KnowledgeSourcesResult,
+    KnowledgeWorkspaceHistory, KnowledgeWorkspaceItemDetail, KnowledgeWorkspaceItemRequest,
+    KnowledgeWorkspaceResult,
 };
 use engine_response_wait::{receive_response, ResponseWaitError};
 use serde::de::DeserializeOwned;

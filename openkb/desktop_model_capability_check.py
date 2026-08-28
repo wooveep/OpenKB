@@ -8,8 +8,11 @@ from typing import Literal
 
 from openkb.desktop_model_capability_store import DesktopCapabilityEvidenceProfile
 from openkb.desktop_model_execution_profile import (
+    ANALYSIS_CAPABILITY_INSTRUCTIONS,
+    ANALYSIS_CAPABILITY_VERSION,
     ANSWER_CAPABILITY_SYSTEM_PROMPT,
     ANSWER_CAPABILITY_USER_PROMPT,
+    DesktopAnalysisCapabilityProfile,
     DesktopAnswerCapabilityProfile,
     DesktopModelExecutionProfile,
 )
@@ -41,11 +44,12 @@ def model_capability_check_plans(
     settings: DesktopModelSettings,
     *,
     analysis_profile: DesktopModelExecutionProfile | None,
-    answer_profile: DesktopAnswerCapabilityProfile,
+    answer_profile: DesktopAnswerCapabilityProfile | None,
+    include_default: bool = True,
 ) -> tuple[DesktopModelCapabilityCheckPlan, ...]:
     """Build the single ordered check plan used by the Model Configuration route."""
     checks: list[DesktopModelCapabilityCheckPlan] = []
-    if settings.model != settings.answer_model_name:
+    if include_default and settings.model != settings.answer_model_name:
         checks.append(
             DesktopModelCapabilityCheckPlan(
                 role="default",
@@ -60,71 +64,75 @@ def model_capability_check_plans(
             )
         )
     if analysis_profile is not None:
+        shared_analysis_profile = analysis_profile.capability_evidence_profile
         checks.append(
             DesktopModelCapabilityCheckPlan(
                 role="analysis",
                 model=analysis_profile.model,
-                evidence_profile=analysis_profile,
+                evidence_profile=shared_analysis_profile,
                 settings=replace(settings, model=analysis_profile.model),
                 request=capability_check_request(settings, profile=analysis_profile),
             )
         )
-    checks.append(
-        DesktopModelCapabilityCheckPlan(
-            role="answer",
-            model=answer_profile.model,
-            evidence_profile=answer_profile,
-            settings=replace(
-                settings,
+    if answer_profile is not None:
+        checks.append(
+            DesktopModelCapabilityCheckPlan(
+                role="answer",
                 model=answer_profile.model,
-                analysis_model=None,
-                answer_model=None,
-            ),
-            request=answer_capability_check_request(settings, profile=answer_profile),
+                evidence_profile=answer_profile,
+                settings=replace(
+                    settings,
+                    model=answer_profile.model,
+                    analysis_model=None,
+                    answer_model=None,
+                ),
+                request=answer_capability_check_request(settings, profile=answer_profile),
+            )
         )
-    )
     return tuple(checks)
 
 
 def capability_check_request(
     settings: DesktopModelSettings,
     *,
-    profile: DesktopModelExecutionProfile | None = None,
+    profile: DesktopModelExecutionProfile | DesktopAnalysisCapabilityProfile | None = None,
     model: str | None = None,
     operation: str | None = None,
 ) -> DesktopModelRequest:
     if profile is not None:
-        content = (
-            "Return this exact JSON object and no other text.\n\n"
-            'EXAMPLE JSON OUTPUT:\n{"status":"ok"}'
+        shared_profile = (
+            profile.capability_evidence_profile
+            if isinstance(profile, DesktopModelExecutionProfile)
+            else profile
         )
+        content = ANALYSIS_CAPABILITY_INSTRUCTIONS
         return DesktopModelRequest(
             operation="model_capability_analysis",
             document_name="OpenKB model capability check",
             content=content,
-            model_name=profile.model,
-            context_capacity=profile.context_capacity,
-            document_input_capacity=profile.document_input_capacity,
-            reasoning_effort=profile.reasoning_effort,
-            provider_adapter=profile.adapter_identity,
-            provider_adapter_version=profile.adapter_version,
-            structured_output_mode=profile.structured_output_mode,
+            model_name=shared_profile.model,
+            context_capacity=shared_profile.context_capacity,
+            document_input_capacity=shared_profile.document_input_capacity,
+            reasoning_effort=shared_profile.reasoning_effort,
+            provider_adapter=shared_profile.adapter_identity,
+            provider_adapter_version=shared_profile.adapter_version,
+            structured_output_mode=shared_profile.structured_output_mode,
             response_schema=CAPABILITY_CHECK_SCHEMA,
             local_validation_required=True,
             response_example={"status": "ok"},
             response_schema_name="openkb_model_capability_check",
             generation_parameters={
                 "temperature": 0,
-                "max_tokens": profile.provider_output_ceiling_tokens,
+                "max_tokens": shared_profile.provider_output_ceiling_tokens,
             },
-            prompt_contract_digest=profile.prompt_contract_digest,
-            prompt_contract_version="openkb.model-capability-check.v1",
+            prompt_contract_digest=shared_profile.prompt_contract_digest,
+            prompt_contract_version=ANALYSIS_CAPABILITY_VERSION,
             prompt_contract_snapshot={
                 "instructions": content,
                 "output_schema": CAPABILITY_CHECK_SCHEMA,
                 "output_example": {"status": "ok"},
             },
-            supports_streaming=profile.streaming,
+            supports_streaming=shared_profile.streaming,
         )
     if model is None or operation is None:
         raise ValueError("A legacy capability check requires model and operation.")

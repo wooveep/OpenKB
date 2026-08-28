@@ -1,12 +1,72 @@
 //! Tauri commands for SQLite-authoritative user Knowledge Pages.
 
 use crate::engine_protocol::{
-    BridgeError, KnowledgeExportMode, KnowledgeExportResult, KnowledgePage,
-    KnowledgePageDeletionResult, KnowledgePageKind, KnowledgePagesResult, KnowledgeSourcesResult,
+    BridgeError, KnowledgeAdoptionDecision, KnowledgeAdoptionResult, KnowledgeExportMode,
+    KnowledgeExportResult, KnowledgePage, KnowledgePageDeletionResult, KnowledgePageKind,
+    KnowledgePagesResult, KnowledgeSourcesResult, KnowledgeWorkspaceHistory,
+    KnowledgeWorkspaceItemDetail, KnowledgeWorkspaceItemRequest, KnowledgeWorkspaceResult,
 };
 use crate::DesktopState;
 use std::sync::Arc;
 use tauri::State;
+
+#[tauri::command]
+pub(crate) async fn desktop_knowledge_workspace(
+    state: State<'_, DesktopState>,
+    query: String,
+) -> Result<KnowledgeWorkspaceResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.knowledge_workspace(query))
+        .await
+        .map_err(join_error("workspace lookup"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn desktop_get_knowledge_workspace_item(
+    state: State<'_, DesktopState>,
+    item: KnowledgeWorkspaceItemRequest,
+) -> Result<KnowledgeWorkspaceItemDetail, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.knowledge_workspace_item(item))
+        .await
+        .map_err(join_error("workspace item read"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn desktop_knowledge_workspace_history(
+    state: State<'_, DesktopState>,
+    generation_id: Option<u64>,
+) -> Result<KnowledgeWorkspaceHistory, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.knowledge_workspace_history(generation_id))
+        .await
+        .map_err(join_error("workspace history lookup"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn desktop_adopt_knowledge_item(
+    state: State<'_, DesktopState>,
+    generation_id: u64,
+    item_key: String,
+    adoption_request_id: String,
+    request_id: String,
+    decision: Option<KnowledgeAdoptionDecision>,
+    candidate_page_id: Option<String>,
+) -> Result<KnowledgeAdoptionResult, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.adopt_knowledge_item(
+            generation_id,
+            item_key,
+            adoption_request_id,
+            request_id,
+            decision,
+            candidate_page_id,
+        )
+    })
+    .await
+    .map_err(join_error("adoption"))?
+}
 
 #[tauri::command]
 pub(crate) async fn desktop_knowledge_pages(

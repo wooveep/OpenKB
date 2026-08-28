@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
@@ -371,6 +372,33 @@ def test_analysis_profile_identity_covers_every_structured_prompt_contract() -> 
             )
         ).hexdigest()
         assert changed_digest != baseline_digest
+
+
+def test_analysis_capability_identity_excludes_operation_prompt_contracts() -> None:
+    capability = DesktopModelCapabilityProfile(
+        context_capacity=64_000,
+        document_input_capacity=48_000,
+        supports_native_json_schema=False,
+        supports_streaming=True,
+        supports_reasoning=True,
+    )
+    baseline = build_analysis_execution_profile(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        capability=capability,
+        reasoning_effort="off",
+    )
+    changed_contract = replace(
+        baseline,
+        prompt_contract_digest="changed-operation-contract",
+        generation_policy_digest="changed-generation-policy",
+    )
+
+    assert changed_contract.identity != baseline.identity
+    assert (
+        changed_contract.capability_evidence_profile.identity
+        == baseline.capability_evidence_profile.identity
+    )
 
 
 def test_exact_knowledge_is_deduplicated_before_description_merge() -> None:

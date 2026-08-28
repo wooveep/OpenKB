@@ -79,6 +79,7 @@ class DesktopRoleModelGateway(DesktopModelGateway):
         usage_store: DesktopModelUsageStore | None = None,
         analysis_capability_verifier: AnalysisCapabilityVerifier | None = None,
         analysis_capability_invalidator: AnalysisCapabilityInvalidator | None = None,
+        analysis_capability_corroborated_invalidator: AnalysisCapabilityInvalidator | None = None,
         answer_capability_verifier: AnswerCapabilityVerifier | None = None,
         execution_lane: ExecutionLane = "background",
     ) -> None:
@@ -90,6 +91,9 @@ class DesktopRoleModelGateway(DesktopModelGateway):
         self._usage_store = usage_store
         self._analysis_capability_verifier = analysis_capability_verifier
         self._analysis_capability_invalidator = analysis_capability_invalidator
+        self._analysis_capability_corroborated_invalidator = (
+            analysis_capability_corroborated_invalidator
+        )
         self._answer_capability_verifier = answer_capability_verifier
         self._execution_lane = require_execution_lane(execution_lane)
 
@@ -127,6 +131,9 @@ class DesktopRoleModelGateway(DesktopModelGateway):
             usage_store=self._usage_store,
             analysis_capability_verifier=self._analysis_capability_verifier,
             analysis_capability_invalidator=self._analysis_capability_invalidator,
+            analysis_capability_corroborated_invalidator=(
+                self._analysis_capability_corroborated_invalidator
+            ),
             answer_capability_verifier=self._answer_capability_verifier,
             execution_lane=lane,
         )
@@ -153,6 +160,15 @@ class DesktopRoleModelGateway(DesktopModelGateway):
 
     def invalidate_analysis_capability(self, failure_code: str, reason: str) -> None:
         invalidator = self._analysis_capability_invalidator
+        if invalidator is not None:
+            invalidator(
+                self.execution_profile_for_operation("knowledge_analysis"),
+                failure_code,
+                reason,
+            )
+
+    def invalidate_corroborated_analysis_capability(self, failure_code: str, reason: str) -> None:
+        invalidator = self._analysis_capability_corroborated_invalidator
         if invalidator is not None:
             invalidator(
                 self.execution_profile_for_operation("knowledge_analysis"),
@@ -286,6 +302,15 @@ class DesktopRoleModelGateway(DesktopModelGateway):
                 reasoning_effort=reasoning or "off",
                 api_base_url=self._settings.api_base_url,
             ).provider_output_ceiling_tokens
+        capability_identity = request.capability_identity
+        if role == "analysis" and capability_identity is None:
+            capability_identity = build_analysis_execution_profile(
+                provider=self._settings.provider,
+                model=selected_model,
+                capability=capability,
+                reasoning_effort=reasoning or "off",
+                api_base_url=self._settings.api_base_url,
+            ).capability_evidence_profile.identity
         return replace(
             request,
             model_role=role,
@@ -308,6 +333,7 @@ class DesktopRoleModelGateway(DesktopModelGateway):
             response_schema_name=request.response_schema_name
             or contract.version.replace(".", "_").replace("-", "_")[:64],
             generation_parameters=generation_parameters,
+            capability_identity=capability_identity,
             prompt_contract_digest=request.prompt_contract_digest or contract.digest,
             prompt_contract_version=request.prompt_contract_version or contract.version,
             prompt_contract_snapshot=request.prompt_contract_snapshot,

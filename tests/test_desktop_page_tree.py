@@ -41,6 +41,19 @@ def _drop_catalog_schema(connection: sqlite3.Connection) -> None:
 
 
 def _drop_post_v37_schema(connection: sqlite3.Connection) -> None:
+    connection.execute("DROP VIEW IF EXISTS current_knowledge_graph_edges")
+    connection.execute("DROP VIEW IF EXISTS current_knowledge_graph_nodes")
+    for table in (
+        "knowledge_graph_current",
+        "knowledge_graph_result_edges",
+        "knowledge_graph_result_nodes",
+        "knowledge_graph_results",
+        "knowledge_adoption_requests",
+        "knowledge_origin_references",
+        "model_capability_compatibility_audit",
+        "model_operation_contract_states",
+    ):
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
     for table in (
         "knowledge_graph_extraction_tasks",
         "legacy_model_recovery_audit",

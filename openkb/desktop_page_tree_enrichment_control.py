@@ -21,7 +21,7 @@ def recover_interrupted_in(state_dir: Path, database_path: Path) -> int:
                 cursor = connection.execute(
                     """
                     UPDATE document_page_tree_enrichment_tasks
-                    SET status = 'pending', execution_token = NULL,
+                    SET status = 'pending', reason = 'explicit_retry', execution_token = NULL,
                         error_code = ?, error_reason = ?, updated_at = ?, completed_at = NULL
                     WHERE status = 'running'
                     """,
@@ -76,7 +76,7 @@ def retry_document_in(
                 cursor = connection.execute(
                     """
                     UPDATE document_page_tree_enrichment_tasks
-                    SET status = 'pending', execution_token = NULL,
+                    SET status = 'pending', reason = 'explicit_retry', execution_token = NULL,
                         error_code = NULL, error_reason = NULL,
                         updated_at = ?, completed_at = NULL
                     WHERE document_id = ? AND status IN ('pending', 'failed')

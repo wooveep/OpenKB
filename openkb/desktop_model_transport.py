@@ -215,6 +215,13 @@ def _gateway_for(
         usage_store=DesktopModelUsageStore(kb_dir),
         analysis_capability_verifier=capability_store.is_verified,
         analysis_capability_invalidator=invalidate_analysis_capability,
+        analysis_capability_corroborated_invalidator=(
+            lambda profile, failure_code, reason: capability_store.invalidate(
+                profile,
+                failure_code=failure_code,
+                reason=reason,
+            )
+        ),
         answer_capability_verifier=capability_store.is_verified,
     )
 

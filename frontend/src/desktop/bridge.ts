@@ -23,15 +23,11 @@ import {
   type DesktopModelSettings,
   type DesktopModelSettingsDraft,
   type DesktopModelConnectionTest,
+  type DesktopSaveAndVerifyModelConfiguration,
   type DesktopPageTreeEnrichmentControlResult,
   type DesktopKnowledgeGraphExtractionControlResult,
-  type DesktopKnowledgePage,
-  type DesktopKnowledgePageDeletion,
   type DesktopKnowledgeExport,
   type DesktopKnowledgeExportMode,
-  type DesktopKnowledgePages,
-  type DesktopKnowledgePageKind,
-  type DesktopKnowledgeSourceCandidate,
   type DesktopKnowledgeReconciliationCommit,
   type DesktopKnowledgeReconciliationConflicts,
   type DesktopKnowledgeReconciliationDecision,
@@ -51,11 +47,11 @@ import {
   runtimeLaunchIntents,
   toDesktopBridgeError,
 } from "./bridge-normalizers"
-import { TauriKnowledgeReanalysisBridge } from "./tauri-knowledge-reanalysis-bridge"
+import { TauriKnowledgePageBridge } from "./tauri-knowledge-page-bridge"
 import { UnavailableKnowledgeReanalysisBridge } from "./unavailable-knowledge-reanalysis-bridge"
 
 /** Production Bridge: the sole React caller of Tauri commands and channels. */
-export class TauriDesktopBridge extends TauriKnowledgeReanalysisBridge implements DesktopBridge {
+export class TauriDesktopBridge extends TauriKnowledgePageBridge implements DesktopBridge {
   async handshake(): Promise<DesktopBridgeHandshake> {
     return this.call<DesktopBridgeHandshake>("desktop_bridge_handshake")
   }
@@ -113,6 +109,16 @@ export class TauriDesktopBridge extends TauriKnowledgeReanalysisBridge implement
       settings,
       requestId,
     })
+  }
+
+  async saveAndVerifyModelSettings(
+    settings: DesktopModelSettingsDraft,
+    requestId: string,
+  ): Promise<DesktopSaveAndVerifyModelConfiguration> {
+    return this.call<DesktopSaveAndVerifyModelConfiguration>(
+      "desktop_save_and_verify_model_settings",
+      { settings, requestId },
+    )
   }
 
   async testModelConnection(
@@ -282,80 +288,6 @@ export class TauriDesktopBridge extends TauriKnowledgeReanalysisBridge implement
     return conversation(await this.call<unknown>("desktop_select_answer_version", { conversationId, assistantMessageId, answerVersionId, requestId }))
   }
 
-  async knowledgePages(): Promise<DesktopKnowledgePages> {
-    return this.call<DesktopKnowledgePages>("desktop_knowledge_pages")
-  }
-
-  async getKnowledgePage(pageId: string): Promise<DesktopKnowledgePage> {
-    return this.call<DesktopKnowledgePage>("desktop_get_knowledge_page", { pageId })
-  }
-
-  async saveKnowledgePage(
-    pageId: string | undefined,
-    kind: DesktopKnowledgePageKind,
-    title: string,
-    contentMarkdown: string,
-    requestId: string,
-  ): Promise<DesktopKnowledgePage> {
-    return this.call<DesktopKnowledgePage>("desktop_save_knowledge_page", {
-      pageId,
-      kind,
-      title,
-      contentMarkdown,
-      requestId,
-    })
-  }
-
-  async publishKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
-    return this.call<DesktopKnowledgePage>("desktop_publish_knowledge_page", { pageId, requestId })
-  }
-
-  async verifyKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
-    return this.call<DesktopKnowledgePage>("desktop_verify_knowledge_page", { pageId, requestId })
-  }
-
-  async setKnowledgePageStaleAfter(pageId: string, staleAfter: string | null, requestId: string): Promise<DesktopKnowledgePage> {
-    return this.call<DesktopKnowledgePage>("desktop_set_knowledge_page_stale_after", { pageId, staleAfter, requestId })
-  }
-
-  async deprecateKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
-    return this.call<DesktopKnowledgePage>("desktop_deprecate_knowledge_page", { pageId, requestId })
-  }
-
-  async restoreKnowledgePage(pageId: string, requestId: string): Promise<DesktopKnowledgePage> {
-    return this.call<DesktopKnowledgePage>("desktop_restore_knowledge_page", { pageId, requestId })
-  }
-
-  async permanentlyDeleteKnowledgePage(pageId: string, confirmationPageId: string, requestId: string): Promise<DesktopKnowledgePageDeletion> {
-    return this.call<DesktopKnowledgePageDeletion>("desktop_permanently_delete_knowledge_page", {
-      pageId,
-      confirmationPageId,
-      requestId,
-    })
-  }
-
-  async searchKnowledgeSources(query: string): Promise<DesktopKnowledgeSourceCandidate[]> {
-    const result = await this.call<{ sources: DesktopKnowledgeSourceCandidate[] }>(
-      "desktop_search_knowledge_sources",
-      { query },
-    )
-    return result.sources
-  }
-
-  async bindKnowledgePageSource(
-    pageId: string,
-    claimText: string,
-    evidenceId: string,
-    requestId: string,
-  ): Promise<DesktopKnowledgePage> {
-    return this.call<DesktopKnowledgePage>("desktop_bind_knowledge_page_source", {
-      pageId,
-      claimText,
-      evidenceId,
-      requestId,
-    })
-  }
-
   async documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates> {
     return this.call<DesktopDocumentVersionCandidates>("desktop_document_version_candidates")
   }
@@ -511,6 +443,15 @@ class UnavailableDesktopBridge extends UnavailableKnowledgeReanalysisBridge impl
     settings: DesktopModelSettingsDraft,
     requestId: string,
   ): Promise<DesktopModelSettings> {
+    void settings
+    void requestId
+    return this.unavailable()
+  }
+
+  saveAndVerifyModelSettings(
+    settings: DesktopModelSettingsDraft,
+    requestId: string,
+  ): Promise<DesktopSaveAndVerifyModelConfiguration> {
     void settings
     void requestId
     return this.unavailable()

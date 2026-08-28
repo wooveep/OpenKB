@@ -50,6 +50,10 @@ pub enum ModelCapabilityCheckStatus {
 pub enum ModelCapabilityCheckRoleStatus {
     Verified,
     Unavailable,
+    Failed,
+    Cancelled,
+    Unverified,
+    NotRequired,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -181,6 +185,8 @@ pub struct ModelCapabilityCheckRoleResult {
     pub model: Option<String>,
     pub status: ModelCapabilityCheckRoleStatus,
     pub reason: Option<String>,
+    #[serde(default, alias = "failure_code")]
+    pub failure_code: Option<String>,
     #[serde(alias = "attempt_count")]
     pub attempt_count: u64,
     #[serde(alias = "profile_identity")]
@@ -256,6 +262,26 @@ pub struct ModelConnectionTest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SaveAndVerifyModelConfiguration {
+    pub saved: bool,
+    #[serde(alias = "verification_cost_accepted")]
+    pub verification_cost_accepted: bool,
+    #[serde(alias = "all_required_roles_verified")]
+    pub all_required_roles_verified: bool,
+    pub cancelled: bool,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(alias = "attempt_count")]
+    pub attempt_count: u64,
+    #[serde(alias = "latency_ms")]
+    pub latency_ms: u64,
+    #[serde(alias = "role_results")]
+    pub role_results: ModelCapabilityCheckRoleResults,
+    pub settings: ModelSettings,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelUsageAggregate {
     #[serde(alias = "call_count")]
     pub call_count: u64,
@@ -296,7 +322,10 @@ pub struct DiagnosticBundleResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelConnectionTest, ModelSettings};
+    use super::{
+        ModelCapabilityCheckRoleStatus, ModelConnectionTest, ModelSettings,
+        SaveAndVerifyModelConfiguration,
+    };
     use serde_json::{json, Value};
 
     #[test]
@@ -545,6 +574,91 @@ mod tests {
         assert!(
             serde_json::from_value::<ModelConnectionTest>(missing_role).is_err(),
             "all three role-result entries are required"
+        );
+    }
+
+    #[test]
+    fn save_and_verify_requires_complete_independent_role_results() {
+        let settings = json!({
+            "provider": "custom", "model": "default-model",
+            "api_base_url": "https://models.example.test/v1", "api_key": "",
+            "api_key_configured": true, "max_concurrent_model_calls": 2,
+            "requests_per_minute": null, "tokens_per_minute": null,
+            "analysis_model": "analysis-model", "answer_model": "answer-model",
+            "default_context_capacity": 65536, "analysis_context_capacity": 32768,
+            "answer_context_capacity": 65536, "default_reasoning": null,
+            "analysis_reasoning": "off", "answer_reasoning": "off",
+            "default_input_price_per_million": null, "default_output_price_per_million": null,
+            "analysis_input_price_per_million": null, "analysis_output_price_per_million": null,
+            "answer_input_price_per_million": null, "answer_output_price_per_million": null,
+            "analysis_concurrency": 2,
+            "provider_adapter": {
+                "identity": "custom", "version": "custom.v1",
+                "structured_output_mode": "json_object", "supports_structured_analysis": true,
+                "supported_reasoning": ["off"], "analysis_unavailable_reason": null
+            },
+            "effective_roles": {
+                "default": {"model": "default-model", "context_capacity": 65536, "reasoning": null, "reasoning_source": "provider_default"},
+                "analysis": {"model": "analysis-model", "context_capacity": 32768, "reasoning": "off", "reasoning_source": "explicit_role"},
+                "answer": {"model": "answer-model", "context_capacity": 65536, "reasoning": "off", "reasoning_source": "explicit_role"}
+            },
+            "analysis_capability": {"profile_identity": "analysis-profile", "status": "failed", "failure_code": "model_capability_check_failed", "reason": "Invalid structured result.", "checked_at": "2026-08-28T00:00:00Z"},
+            "answer_capability": {"profile_identity": "answer-profile", "status": "verified", "failure_code": null, "reason": null, "checked_at": "2026-08-28T00:00:01Z"},
+            "usage_aggregate": {"call_count": 2, "attempt_count": 2, "failure_count": 1, "input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "total_cost": null}
+        });
+        let result: SaveAndVerifyModelConfiguration = serde_json::from_value(json!({
+            "saved": true,
+            "verification_cost_accepted": true,
+            "all_required_roles_verified": false,
+            "cancelled": false,
+            "models": ["analysis-model", "answer-model"],
+            "attempt_count": 2,
+            "latency_ms": 18,
+            "role_results": {
+                "default": {
+                    "role": "default", "model": "default-model", "status": "not_required",
+                    "reason": "Default is not a required runtime role.", "failure_code": null,
+                    "attempt_count": 0, "profile_identity": null, "cached": false
+                },
+                "analysis": {
+                    "role": "analysis", "model": "analysis-model", "status": "failed",
+                    "reason": "Invalid structured result.", "failure_code": "model_capability_check_failed",
+                    "attempt_count": 1, "profile_identity": "analysis-profile", "cached": false
+                },
+                "answer": {
+                    "role": "answer", "model": "answer-model", "status": "verified",
+                    "reason": null, "failure_code": null, "attempt_count": 1,
+                    "profile_identity": "answer-profile", "cached": false
+                }
+            },
+            "settings": settings
+        }))
+        .expect("complete Save and Verify response should cross the typed Bridge");
+
+        assert!(result.saved);
+        assert!(!result.all_required_roles_verified);
+        assert!(matches!(
+            result.role_results.analysis.status,
+            ModelCapabilityCheckRoleStatus::Failed
+        ));
+        assert!(matches!(
+            result.role_results.answer.status,
+            ModelCapabilityCheckRoleStatus::Verified
+        ));
+
+        let mut missing_role =
+            serde_json::to_value(&result).expect("Save and Verify result should serialize");
+        missing_role["roleResults"]
+            .as_object_mut()
+            .expect("roleResults is an object")
+            .remove("default");
+        assert!(serde_json::from_value::<SaveAndVerifyModelConfiguration>(missing_role).is_err());
+
+        let mut mismatched_role =
+            serde_json::to_value(&result).expect("Save and Verify result should serialize");
+        mismatched_role["roleResults"]["analysis"]["role"] = json!("answer");
+        assert!(
+            serde_json::from_value::<SaveAndVerifyModelConfiguration>(mismatched_role).is_err()
         );
     }
 }

@@ -26,8 +26,10 @@ type StreamingAnswer = {
 /** Ask over the persisted Available Knowledge evidence pack, never browser state. */
 export function DesktopGroundedAnswerPanel({
   onOpenOriginal,
+  onOpenModelSettings,
 }: {
   onOpenOriginal: (documentId: string, locator: Record<string, unknown>) => void
+  onOpenModelSettings?: () => void
 }) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
@@ -222,6 +224,7 @@ export function DesktopGroundedAnswerPanel({
           key={answer.answerId}
           answer={answer}
           onOpenOriginal={onOpenOriginal}
+          onOpenModelSettings={onOpenModelSettings}
           onRetry={() => void retryAnswer(answer)}
           retrying={answering}
         />
@@ -237,18 +240,24 @@ export function DesktopGroundedAnswerPanel({
 function CompletedAnswerCard({
   answer,
   onOpenOriginal,
+  onOpenModelSettings,
   onRetry,
   retrying,
 }: {
   answer: DesktopGroundedAnswer
   onOpenOriginal: (documentId: string, locator: Record<string, unknown>) => void
+  onOpenModelSettings?: () => void
   onRetry: () => void
   retrying: boolean
 }) {
   const { t } = useTranslation("common")
   return (
     <AnswerCard answerText={answer.answerText} title={answer.question}>
-      <DesktopCapabilityDegradationNotice codes={answer.degradations} />
+      <DesktopCapabilityDegradationNotice
+        codes={answer.degradations}
+        onOpenModelSettings={onOpenModelSettings}
+        onRetry={answer.status === "interrupted" ? onRetry : undefined}
+      />
       {answer.status === "interrupted" ? (
         <section className="mt-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
           <p className="font-medium">{t("desktop.knowledgeBases.answerInterrupted")}</p>

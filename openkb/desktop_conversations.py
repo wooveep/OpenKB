@@ -220,6 +220,7 @@ class DesktopConversationService:
                 on_delta=emit,
                 is_cancelled=is_cancelled,
                 on_model_event=on_model_event,
+                retry_suspended_operations=True,
             )
         except BaseException:
             self._restore_selected_answer_status(assistant_message_id)

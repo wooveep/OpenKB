@@ -30,6 +30,11 @@ def request_pinned_to_plan(
         document_input_capacity=plan.capability_profile.document_input_capacity,
         generation_parameters=generation_parameters,
         batch_id=batch_id,
+        capability_identity=(
+            profile.capability_evidence_profile.identity
+            if profile is not None
+            else request.capability_identity
+        ),
         reasoning_effort=(
             profile.reasoning_effort if profile is not None else request.reasoning_effort
         ),

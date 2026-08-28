@@ -13,7 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useDesktopBridge } from "./bridge-context"
 import type { DesktopKnowledgeExportMode } from "./contracts"
 import { DesktopDocumentVersionCandidatePanel } from "./DesktopDocumentVersionCandidatePanel"
-import { DesktopKnowledgePagePanel } from "./DesktopKnowledgePagePanel"
+import { DesktopKnowledgeWorkspacePanel } from "./DesktopKnowledgeWorkspacePanel"
 import { DesktopKnowledgeReconciliationPanel } from "./DesktopKnowledgeReconciliationPanel"
 import { DesktopMissingSourcePanel } from "./DesktopMissingSourcePanel"
 import { nextDesktopRequestId } from "./request-id"
@@ -115,7 +115,7 @@ export function DesktopKnowledgeWorkspace({
           </DropdownMenu>
         </div>
         <TabsContent value="pages">
-          <DesktopKnowledgePagePanel requestedPageId={requestedPageId} />
+          <DesktopKnowledgeWorkspacePanel requestedPageId={requestedPageId} />
         </TabsContent>
         <TabsContent value="review">
           <Tabs defaultValue="missing_sources" className="mt-5">

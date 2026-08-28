@@ -9,6 +9,10 @@ from threading import Event
 from typing import TYPE_CHECKING
 
 from openkb.desktop_knowledge_reanalysis import DesktopKnowledgeReanalysisService
+from openkb.desktop_model_result_failure import (
+    authorize_model_operation_retry,
+    revoke_model_operation_retry_scope,
+)
 
 if TYPE_CHECKING:
     from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
@@ -104,6 +108,27 @@ def _run_jobs(
     lease: int,
 ) -> None:
     service = DesktopKnowledgeReanalysisService(kb_dir)
+    authorized_contracts: set[tuple[str, str, str]] = set()
+    authorization_lock = threading.Lock()
+
+    def authorize_retry(request) -> str:
+        key = (
+            request.operation,
+            request.capability_identity or "",
+            request.prompt_contract_digest or "",
+        )
+        with authorization_lock:
+            if key not in authorized_contracts:
+                authorize_model_operation_retry(
+                    kb_dir,
+                    gateway,
+                    operation=request.operation,
+                    retry_scope=run_id,
+                    capability_identity=request.capability_identity,
+                    prompt_contract_digest=request.prompt_contract_digest,
+                )
+                authorized_contracts.add(key)
+        return run_id
 
     def should_stop() -> bool:
         return server._shutdown.is_set() or server._knowledge_reanalysis_lease != lease
@@ -112,11 +137,17 @@ def _run_jobs(
         for job_id in service.pending_job_ids(run_id):
             if should_stop():
                 break
-            service.run_job(job_id, gateway, should_stop=should_stop)
+            service.run_job(
+                job_id,
+                gateway,
+                should_stop=should_stop,
+                authorize_retry=authorize_retry,
+            )
             server._emit_event("knowledge_reanalysis.updated", {"run_id": run_id, "job_id": job_id})
     except Exception:
         logger.exception("Knowledge Reanalysis worker failed for run %s", run_id)
     finally:
+        revoke_model_operation_retry_scope(kb_dir, run_id)
         with server._workers_lock:
             server._workers.discard(threading.current_thread())
 

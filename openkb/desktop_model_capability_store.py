@@ -51,6 +51,7 @@ class DesktopModelCapabilityStore:
         self._database_path = desktop_state_database_path(resolved)
 
     def state(self, profile: DesktopCapabilityEvidenceProfile) -> DesktopModelCapabilityState:
+        profile = _shared_evidence_profile(profile)
         with kb_ingest_lock(self._state_dir):
             connection = _connect(self._database_path)
             try:
@@ -120,6 +121,31 @@ class DesktopModelCapabilityStore:
             reason=reason,
         )
 
+    def invalidate_identity(
+        self,
+        profile_identity: str,
+        *,
+        failure_code: str,
+        reason: str,
+    ) -> bool:
+        """Invalidate only durable evidence for an already-known exact identity."""
+        with kb_ingest_lock(self._state_dir):
+            connection = _connect(self._database_path)
+            try:
+                with connection:
+                    cursor = connection.execute(
+                        """
+                        UPDATE model_capability_checks
+                        SET status = 'unchecked', failure_code = ?, reason = ?,
+                            checked_at = NULL, updated_at = ?
+                        WHERE profile_identity = ?
+                        """,
+                        (failure_code, reason, _timestamp(), profile_identity),
+                    )
+                    return cursor.rowcount == 1
+            finally:
+                connection.close()
+
     def _write(
         self,
         profile: DesktopCapabilityEvidenceProfile,
@@ -129,6 +155,7 @@ class DesktopModelCapabilityStore:
         reason: str | None = None,
         checked: bool = False,
     ) -> None:
+        profile = _shared_evidence_profile(profile)
         now = _timestamp()
         checked_at = now if checked else None
         with kb_ingest_lock(self._state_dir):
@@ -162,6 +189,16 @@ class DesktopModelCapabilityStore:
                     )
             finally:
                 connection.close()
+
+
+def _shared_evidence_profile(
+    profile: DesktopCapabilityEvidenceProfile,
+) -> DesktopCapabilityEvidenceProfile:
+    """Normalize legacy callers that pass a complete Analysis execution profile."""
+    shared = getattr(profile, "capability_evidence_profile", None)
+    if shared is not None and hasattr(shared, "identity") and hasattr(shared, "as_dict"):
+        return shared
+    return profile
 
 
 def _status(value: str) -> CapabilityStatus:

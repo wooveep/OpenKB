@@ -45,6 +45,21 @@ from openkb.desktop_knowledge_reanalysis_models import (
 from openkb.desktop_knowledge_reanalysis_recovery import (
     recover_interrupted_knowledge_reanalysis,
 )
+from openkb.desktop_knowledge_reanalysis_store import (
+    active_canonical_documents_in as _active_canonical_documents_in,
+)
+from openkb.desktop_knowledge_reanalysis_store import (
+    available_documents_in as _available_documents_in,
+)
+from openkb.desktop_knowledge_reanalysis_store import (
+    refresh_run_in as _refresh_run_in,
+)
+from openkb.desktop_knowledge_reanalysis_store import (
+    require_execution_update as _require_execution_update,
+)
+from openkb.desktop_knowledge_reanalysis_store import (
+    run_id_for_job_in as _run_id_for_job_in,
+)
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
 from openkb.desktop_missing_sources import record_missing_source_candidates_in
 from openkb.desktop_model_analysis_gate import (
@@ -56,6 +71,10 @@ from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelGateway,
     DesktopModelRequest,
+)
+from openkb.desktop_model_result_failure import (
+    mark_model_operation_ready,
+    model_operation_dispatch_allowed,
 )
 from openkb.desktop_okf_projection import (
     activate_okf_projection,
@@ -71,6 +90,12 @@ __all__ = ["DesktopKnowledgeReanalysisService", "recover_interrupted_knowledge_r
 
 logger = logging.getLogger(__name__)
 _MAX_DOCUMENTS_PER_RUN = 200
+_ANALYSIS_OPERATIONS = (
+    "knowledge_analysis",
+    "knowledge_analysis_batch",
+    "knowledge_analysis_merge",
+    "structured_output_repair",
+)
 
 
 class DesktopKnowledgeReanalysisService:
@@ -295,6 +320,7 @@ class DesktopKnowledgeReanalysisService:
         gateway: DesktopModelGateway,
         *,
         should_stop: Callable[[], bool] = lambda: False,
+        authorize_retry: Callable[[DesktopModelRequest], str | None] = lambda _request: None,
     ) -> None:
         execution_token: str | None = None
         analysis_gate = DesktopAnalysisCapabilityGate(self._kb_dir, None, False)
@@ -340,6 +366,22 @@ class DesktopKnowledgeReanalysisService:
 
                 def analyze(request: DesktopModelRequest):
                     honor_control()
+                    retry_scope = authorize_retry(request)
+                    if request.operation in _ANALYSIS_OPERATIONS and not (
+                        model_operation_dispatch_allowed(
+                            self._kb_dir,
+                            gateway,
+                            operation=request.operation,
+                            retry_scope=retry_scope,
+                            capability_identity=request.capability_identity,
+                            prompt_contract_digest=request.prompt_contract_digest,
+                        )
+                    ):
+                        raise DesktopImportError(
+                            "model_operation_suspended",
+                            f"The {request.operation} contract is suspended for this exact "
+                            "Analysis profile.",
+                        )
                     self._set_phase(job_id, execution_token, request.operation)
                     return gateway.analyze(
                         replace(
@@ -375,6 +417,13 @@ class DesktopKnowledgeReanalysisService:
                     max_parallel_batches=getattr(gateway, "analysis_concurrency", 1),
                     capability_profile=analysis_execution.capability,
                     execution_profile=analysis_gate.profile,
+                    on_operation_validated=lambda request: mark_model_operation_ready(
+                        self._kb_dir,
+                        gateway,
+                        operation=request.operation,
+                        capability_identity=request.capability_identity,
+                        prompt_contract_digest=request.prompt_contract_digest,
+                    ),
                 )
                 honor_control()
                 self._apply_result(
@@ -387,7 +436,7 @@ class DesktopKnowledgeReanalysisService:
                     execution_token,
                 )
         except DesktopModelCallError as error:
-            analysis_gate.invalidate_result_failure(error)
+            analysis_gate.suspend_result_failure(gateway, error)
             if execution_token is not None:
                 self._fail_job(job_id, execution_token, error.failure.code, error.failure.reason)
         except DesktopImportError as error:
@@ -691,98 +740,6 @@ def expected_prompt_digest(
         if len(batches) <= 1
         else KNOWLEDGE_ANALYSIS_BATCH_PIPELINE_DIGEST
     )
-
-
-def _available_documents_in(
-    connection: sqlite3.Connection, document_ids: tuple[str, ...]
-) -> dict[str, str]:
-    placeholders = ",".join("?" for _ in document_ids)
-    rows = connection.execute(
-        f"""
-        SELECT document_id, display_name FROM source_documents
-        WHERE availability = 'available' AND document_id IN ({placeholders})
-        """,
-        document_ids,
-    ).fetchall()
-    return {str(row[0]): str(row[1]) for row in rows}
-
-
-def _active_canonical_documents_in(
-    connection: sqlite3.Connection,
-    canonical_document_ids: tuple[str, ...],
-    *,
-    excluding_job_id: str | None = None,
-) -> set[str]:
-    placeholders = ",".join("?" for _ in canonical_document_ids)
-    exclusion = "AND jobs.job_id != ?" if excluding_job_id is not None else ""
-    params: tuple[object, ...] = (*canonical_document_ids,)
-    if excluding_job_id is not None:
-        params = (*params, excluding_job_id)
-    rows = connection.execute(
-        f"""
-        SELECT DISTINCT COALESCE(fingerprints.canonical_document_id, jobs.document_id)
-        FROM knowledge_reanalysis_jobs AS jobs
-        LEFT JOIN document_content_fingerprints AS fingerprints
-            ON fingerprints.document_id = jobs.document_id
-        WHERE COALESCE(fingerprints.canonical_document_id, jobs.document_id)
-            IN ({placeholders})
-            AND jobs.status IN ('pending', 'running') {exclusion}
-        """,
-        params,
-    ).fetchall()
-    return {str(row[0]) for row in rows}
-
-
-def _refresh_run_in(connection: sqlite3.Connection, run_id: str, now: str) -> None:
-    counts = dict(
-        connection.execute(
-            """
-            SELECT status, COUNT(*) FROM knowledge_reanalysis_jobs
-            WHERE run_id = ? GROUP BY status
-            """,
-            (run_id,),
-        ).fetchall()
-    )
-    active = int(counts.get("pending", 0)) + int(counts.get("running", 0))
-    failed = int(counts.get("failed", 0))
-    completed = int(counts.get("completed", 0))
-    if active:
-        status = "running"
-        completed_at = None
-    elif failed and completed:
-        status = "partial_failure"
-        completed_at = now
-    elif failed:
-        status = "failed"
-        completed_at = now
-    else:
-        status = "completed"
-        completed_at = now
-    connection.execute(
-        """
-        UPDATE knowledge_reanalysis_runs SET status = ?, completed_at = ? WHERE run_id = ?
-        """,
-        (status, completed_at, run_id),
-    )
-
-
-def _run_id_for_job_in(connection: sqlite3.Connection, job_id: str) -> str:
-    row = connection.execute(
-        "SELECT run_id FROM knowledge_reanalysis_jobs WHERE job_id = ?", (job_id,)
-    ).fetchone()
-    if row is None:
-        raise DesktopImportError(
-            "knowledge_reanalysis_job_not_found", "Knowledge Reanalysis job was not found."
-        )
-    return str(row[0])
-
-
-def _require_execution_update(cursor: sqlite3.Cursor) -> None:
-    if cursor.rowcount != 1:
-        raise DesktopImportError(
-            "knowledge_reanalysis_interrupted",
-            "Knowledge Reanalysis is no longer the active execution for this document.",
-        )
 
 
 def _connect(database_path: Path) -> sqlite3.Connection:

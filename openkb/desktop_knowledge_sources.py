@@ -267,6 +267,43 @@ def revision_source_map_in(
     )
 
 
+def generation_source_map_in(
+    connection: sqlite3.Connection,
+    generation_id: int,
+    item_key: str,
+) -> tuple[DesktopKnowledgeSourceMapEntry, ...]:
+    """Resolve immutable Generated Knowledge source bindings against current availability."""
+    rows = connection.execute(
+        """
+        SELECT source_id, evidence_id, claim_text
+        FROM knowledge_generation_item_sources
+        WHERE generation_id = ? AND item_key = ?
+        ORDER BY source_id, claim_text
+        """,
+        (generation_id, item_key),
+    ).fetchall()
+    evidence_ids = tuple(dict.fromkeys(str(row[1]) for row in rows))
+    available = _available_sources_in(connection, evidence_ids)
+    source_map: list[DesktopKnowledgeSourceMapEntry] = []
+    for row in rows:
+        source_id, evidence_id, claim_text = (str(row[0]), str(row[1]), str(row[2]))
+        candidate = available.get(evidence_id)
+        source_map.append(
+            DesktopKnowledgeSourceMapEntry(
+                source_id=source_id,
+                evidence_id=evidence_id,
+                claim_text=claim_text,
+                document_id=candidate.document_id if candidate is not None else "",
+                document_name=candidate.document_name if candidate is not None else "",
+                section=candidate.section if candidate is not None else "",
+                locator=candidate.locator if candidate is not None else {},
+                excerpt=candidate.excerpt if candidate is not None else "",
+                availability="available" if candidate is not None else "unavailable",
+            )
+        )
+    return tuple(source_map)
+
+
 def publication_diagnostics_in(
     connection: sqlite3.Connection,
     content_markdown: str,

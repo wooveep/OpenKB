@@ -50,7 +50,7 @@ pub use retrieval::{GroundedAnswer, GroundedAnswersResult, RetrievalTrace};
 mod settings;
 pub use settings::{
     DiagnosticBundleResult, ModelConnectionTest, ModelSettings, ModelSettingsDraft,
-    ModelUsageAggregate,
+    ModelUsageAggregate, SaveAndVerifyModelConfiguration,
 };
 
 #[cfg(test)]

@@ -7,6 +7,8 @@ import json
 from dataclasses import dataclass
 from typing import cast
 
+from openkb.desktop_knowledge_graph_contract import knowledge_graph_output_schema
+
 
 @dataclass(frozen=True)
 class DesktopPromptContract:
@@ -106,16 +108,14 @@ def _contract(
     *,
     version: int = 1,
     output_schema: dict[str, object] | None = None,
+    output_example: dict[str, object] | None = None,
     input_shape: dict[str, object] | None = None,
     validation_rules: tuple[str, ...] = (),
     generation_parameters: dict[str, object] | None = None,
     token_budget_policy: dict[str, object] | None = None,
 ) -> DesktopPromptContract:
-    output_example = (
-        cast(dict[str, object], minimal_json_example(output_schema))
-        if output_schema is not None
-        else None
-    )
+    if output_example is None and output_schema is not None:
+        output_example = cast(dict[str, object], minimal_json_example(output_schema))
     if output_example is not None:
         serialized_example = json.dumps(
             output_example,
@@ -298,15 +298,31 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
         "Extract a small evidence-bound graph. Return one JSON object with nodes and edges. "
         "Every node and edge uses only supplied Evidence IDs; both edge endpoints cite the "
         "same evidence. Do not merge same-named entities or invent facts.",
-        version=2,
-        output_schema={
-            "type": "object",
-            "properties": {
-                "nodes": {"type": "array", "items": {"type": "object"}},
-                "edges": {"type": "array", "items": {"type": "object"}},
-            },
-            "required": ["nodes", "edges"],
-            "additionalProperties": False,
+        version=4,
+        output_schema=knowledge_graph_output_schema(),
+        output_example={
+            "nodes": [
+                {
+                    "id": "entity-1",
+                    "evidence_id": "evidence-1",
+                    "type": "entity",
+                    "label": "OpenKB",
+                },
+                {
+                    "id": "concept-1",
+                    "evidence_id": "evidence-1",
+                    "type": "concept",
+                    "label": "Knowledge base",
+                },
+            ],
+            "edges": [
+                {
+                    "evidence_id": "evidence-1",
+                    "source_id": "entity-1",
+                    "target_id": "concept-1",
+                    "type": "IS_A",
+                }
+            ],
         },
         input_shape={"type": "graph_evidence", "evidence_bound": True},
         validation_rules=("known_evidence_ids_only", "same_evidence_edge_endpoints"),

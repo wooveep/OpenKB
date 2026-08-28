@@ -46,7 +46,13 @@ export interface DesktopModelCapabilityState {
 }
 
 export type DesktopModelCapabilityCheckStatus = "verified" | "answer_verified"
-export type DesktopModelCapabilityCheckRoleStatus = "verified" | "unavailable"
+export type DesktopModelCapabilityCheckRoleStatus =
+  | "verified"
+  | "unavailable"
+  | "failed"
+  | "cancelled"
+  | "unverified"
+  | "not_required"
 export type DesktopModelCapabilityCheckRole = "default" | "analysis" | "answer"
 
 export interface DesktopModelCapabilityCheckRoleResult {
@@ -54,6 +60,7 @@ export interface DesktopModelCapabilityCheckRoleResult {
   model: string | null
   status: DesktopModelCapabilityCheckRoleStatus
   reason: string | null
+  failureCode?: string | null
   attemptCount: number
   profileIdentity: string | null
   cached: boolean
@@ -75,6 +82,19 @@ export interface DesktopModelConnectionTest {
   profileIdentity: string
   capabilityStatus: DesktopModelCapabilityCheckStatus
   roleResults: DesktopModelCapabilityCheckRoleResults
+}
+
+/** Persisted configuration plus independent, cost-consented checks for each required role. */
+export interface DesktopSaveAndVerifyModelConfiguration {
+  saved: boolean
+  verificationCostAccepted: boolean
+  allRequiredRolesVerified: boolean
+  cancelled: boolean
+  models: string[]
+  attemptCount: number
+  latencyMs: number
+  roleResults: DesktopModelCapabilityCheckRoleResults
+  settings: DesktopModelSettings
 }
 
 /** Editable KB-local model role, capacity, reasoning, and user-priced cost values. */

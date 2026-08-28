@@ -10,7 +10,9 @@ from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
 from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
 from openkb.desktop_model_execution_profile import DesktopModelExecutionProfile
 from openkb.desktop_model_gateway import DesktopModelCallError
-from openkb.desktop_model_result_failure import is_model_result_failure
+from openkb.desktop_model_result_failure import (
+    suspend_analysis_operation_failure,
+)
 
 
 @dataclass(frozen=True)
@@ -51,12 +53,16 @@ class DesktopAnalysisCapabilityGate:
             self.profile
         )
 
-    def invalidate_result_failure(self, error: DesktopModelCallError) -> None:
-        self.invalidate_failure(error.failure.code, reason=error.failure.reason)
+    def suspend_result_failure(self, gateway: object, error: DesktopModelCallError) -> None:
+        """Route a workload failure through operation-local/shared classification."""
+        suspend_analysis_operation_failure(self.kb_dir, gateway, error)
 
     def invalidate_failure(self, failure_code: str, *, reason: str) -> None:
-        """Forget successful evidence after one protocol-shaped result failure."""
-        if self.profile is None or not is_model_result_failure(failure_code):
+        """Forget shared evidence only for confirmed credential/configuration failures."""
+        if self.profile is None or failure_code not in {
+            "model_authentication_failed",
+            "model_configuration_invalid",
+        }:
             return
         DesktopModelCapabilityStore(self.kb_dir).invalidate(
             self.profile,

@@ -93,7 +93,7 @@ class DesktopDiagnosticBundleService:
                 schema_version = _scalar(connection, "SELECT MAX(version) FROM schema_migrations")
                 payloads: dict[str, object | bytes] = {
                     "manifest.json": {
-                        "format": "openkb-desktop-diagnostic-bundle-v2",
+                        "format": "openkb-desktop-diagnostic-bundle-v3",
                         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                         "openkb_version": __version__,
                         "schema_version": schema_version,
@@ -194,6 +194,68 @@ class DesktopDiagnosticBundleService:
                             """,
                         ),
                     },
+                    "model-operation-contracts.json": {
+                        "contracts": _rows(
+                            connection,
+                            """
+                            SELECT operation, capability_identity, prompt_contract_digest,
+                                status, failure_code, failure_stage, failure_signature,
+                                CASE
+                                    WHEN operation IN ('retrieval_plan', 'page_tree_selection')
+                                        THEN 'regenerate_answer'
+                                    WHEN operation = 'knowledge_graph_extraction'
+                                        THEN 'retry_graph_extraction'
+                                    WHEN operation = 'page_tree_enrichment'
+                                        THEN 'retry_page_tree_enrichment'
+                                    WHEN operation IN (
+                                        'knowledge_analysis', 'knowledge_analysis_batch',
+                                        'knowledge_analysis_merge'
+                                    ) THEN 'recover_import_or_start_reanalysis'
+                                    WHEN operation = 'structured_output_repair'
+                                        THEN 'retry_parent_operation'
+                                    ELSE 'verify_model_configuration'
+                                END AS recovery_action,
+                                created_at, updated_at
+                            FROM model_operation_contract_states
+                            ORDER BY updated_at DESC, operation, prompt_contract_digest
+                            """,
+                        ),
+                        "retry_permits": _rows(
+                            connection,
+                            """
+                            SELECT operation, capability_identity, prompt_contract_digest,
+                                retry_scope, created_at
+                            FROM model_operation_retry_permits
+                            ORDER BY created_at DESC, operation, prompt_contract_digest
+                            """,
+                        ),
+                        "events": _rows(
+                            connection,
+                            """
+                            SELECT event_id, operation, capability_identity,
+                                prompt_contract_digest, status, failure_code,
+                                failure_stage, failure_signature,
+                                CASE
+                                    WHEN operation IN ('retrieval_plan', 'page_tree_selection')
+                                        THEN 'regenerate_answer'
+                                    WHEN operation = 'knowledge_graph_extraction'
+                                        THEN 'retry_graph_extraction'
+                                    WHEN operation = 'page_tree_enrichment'
+                                        THEN 'retry_page_tree_enrichment'
+                                    WHEN operation IN (
+                                        'knowledge_analysis', 'knowledge_analysis_batch',
+                                        'knowledge_analysis_merge'
+                                    ) THEN 'recover_import_or_start_reanalysis'
+                                    WHEN operation = 'structured_output_repair'
+                                        THEN 'retry_parent_operation'
+                                    ELSE 'verify_model_configuration'
+                                END AS recovery_action,
+                                created_at
+                            FROM model_operation_contract_events
+                            ORDER BY event_id DESC
+                            """,
+                        ),
+                    },
                     "graph-diagnostics.json": {
                         "diagnostics": _rows(
                             connection,
@@ -207,6 +269,27 @@ class DesktopDiagnosticBundleService:
                             """
                             SELECT feature_key, enabled, approved_snapshot_revision, updated_at
                             FROM desktop_graph_feature_flags ORDER BY feature_key
+                            """,
+                        ),
+                        "results": _rows(
+                            connection,
+                            """
+                            SELECT result_id, document_id, status, capability_identity,
+                                prompt_contract_digest, extraction_method,
+                                node_count, edge_count, created_at
+                            FROM knowledge_graph_results
+                            ORDER BY created_at DESC, result_id
+                            """,
+                        ),
+                        "current_results": _rows(
+                            connection,
+                            """
+                            SELECT current.document_id, current.result_id, results.status,
+                                results.node_count, results.edge_count
+                            FROM knowledge_graph_current AS current
+                            JOIN knowledge_graph_results AS results
+                                ON results.result_id = current.result_id
+                            ORDER BY current.document_id
                             """,
                         ),
                     },

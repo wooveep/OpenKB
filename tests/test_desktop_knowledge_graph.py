@@ -10,16 +10,27 @@ import time
 import zipfile
 from contextlib import contextmanager
 
+import pytest
+
 import openkb.desktop_retrieval as retrieval
 from openkb import desktop_engine_knowledge_graph as graph_engine
 from openkb import desktop_model_transport
 from openkb.desktop_answer_types import DesktopEvidenceRef
 from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
 from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
+from openkb.desktop_graph_feature_flags import (
+    desktop_knowledge_snapshot_digest,
+    desktop_knowledge_snapshot_revision,
+    enable_local_graph_after_evaluation,
+    local_graph_default_enabled,
+)
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_graph import (
     DesktopKnowledgeGraphQueryError,
     DesktopKnowledgeGraphService,
+    _EvidenceInput,
+    _model_input,
+    _model_payload_from_text,
     local_graph_evidence_ids,
 )
 from openkb.desktop_knowledge_graph_tasks import DesktopKnowledgeGraphExtractionTasks
@@ -29,12 +40,230 @@ from openkb.desktop_model_gateway import (
     DesktopModelGateway,
     DesktopModelResult,
 )
+from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
 from openkb.desktop_model_settings import save_desktop_model_settings
 from openkb.desktop_model_terminal import DesktopTerminalModelEvent
 from openkb.desktop_model_usage import DesktopModelUsageStore
+from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_retrieval import DesktopEvidenceRetriever, _Candidate, _with_graph_budget
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_dir
 from openkb.locks import kb_ingest_lock
+
+
+def test_graph_validator_rejects_evidence_omitted_from_the_bounded_prompt():
+    evidence = tuple(
+        _EvidenceInput(
+            evidence_id=f"evidence-{index}",
+            text="x" * 1_200,
+            document_name="large.md",
+            section=f"Section {index}",
+        )
+        for index in range(12)
+    )
+    source_material, included = _model_input(evidence)
+    prompt_ids = {
+        item["evidence_id"] for item in json.loads(source_material)["evidence"]
+    }
+    omitted = evidence[-1].evidence_id
+
+    assert len(included) == 10
+    assert omitted not in prompt_ids
+    with pytest.raises(ValueError, match="Knowledge graph node is invalid"):
+        _model_payload_from_text(
+            json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "id": "omitted-node",
+                            "evidence_id": omitted,
+                            "type": "concept",
+                            "label": "Invisible evidence",
+                        }
+                    ],
+                    "edges": [],
+                }
+            ),
+            included,
+        )
+
+
+def test_empty_model_graph_is_a_success_without_fabricated_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "empty-graph.txt"
+    source.write_text("This source has no graphable relationship.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+
+    assert DesktopKnowledgeGraphService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(
+            lambda _request, _timeout_seconds: json.dumps({"nodes": [], "edges": []})
+        ),
+    ).extract_document(document.document_id)
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM knowledge_graph_nodes").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM knowledge_graph_edges").fetchone() == (0,)
+
+
+def test_empty_model_graph_is_projected_as_completed_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "empty-graph-task.txt"
+    source.write_text("This source also has no graphable relationship.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    gateway = DesktopModelGateway(
+        lambda _request, _timeout_seconds: json.dumps({"nodes": [], "edges": []})
+    )
+    tasks = DesktopKnowledgeGraphExtractionTasks(kb_dir)
+
+    assert tasks.queue(document.document_id, gateway)
+    assert tasks.run_document(document.document_id, gateway, should_stop=lambda: False)
+
+    [task] = DesktopTextImportService(kb_dir).list_import_jobs()[
+        "knowledge_graph_extractions"
+    ]
+    assert task["status"] == "completed_empty"
+    assert task["node_count"] == 0
+    assert task["edge_count"] == 0
+
+
+def test_repaired_empty_model_graph_is_projected_as_completed_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "repaired-empty-graph-task.txt"
+    source.write_text("This source has no supported relationship.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    calls: list[str] = []
+
+    def response(request, _timeout_seconds):
+        calls.append(request.operation)
+        if request.operation == "knowledge_graph_extraction":
+            return "not-json"
+        return json.dumps({"nodes": [], "edges": []})
+
+    gateway = DesktopModelGateway(response)
+    tasks = DesktopKnowledgeGraphExtractionTasks(kb_dir)
+    assert tasks.queue(document.document_id, gateway)
+    assert tasks.run_document(document.document_id, gateway, should_stop=lambda: False)
+
+    assert calls == ["knowledge_graph_extraction", "structured_output_repair"]
+    [task] = DesktopTextImportService(kb_dir).list_import_jobs()[
+        "knowledge_graph_extractions"
+    ]
+    assert task["status"] == "completed_empty"
+    assert task["node_count"] == 0
+    assert task["edge_count"] == 0
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            """
+            SELECT results.status, results.node_count, results.edge_count
+            FROM knowledge_graph_current AS current
+            JOIN knowledge_graph_results AS results ON results.result_id = current.result_id
+            WHERE current.document_id = ?
+            """,
+            (document.document_id,),
+        ).fetchone() == ("completed_empty", 0, 0)
+
+
+def test_new_empty_graph_replaces_previous_relationships_for_the_document(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "replaced-graph.txt"
+    source.write_text("Atlas uses the gateway.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    call_count = 0
+
+    def graph_response(request, _timeout_seconds):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            return json.dumps({"nodes": [], "edges": []})
+        [evidence] = json.loads(request.content)["evidence"]
+        return json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "entity-1",
+                        "evidence_id": evidence["evidence_id"],
+                        "type": "entity",
+                        "label": "Atlas",
+                    },
+                    {
+                        "id": "concept-1",
+                        "evidence_id": evidence["evidence_id"],
+                        "type": "concept",
+                        "label": "Gateway",
+                    },
+                ],
+                "edges": [
+                    {
+                        "evidence_id": evidence["evidence_id"],
+                        "source_id": "entity-1",
+                        "target_id": "concept-1",
+                        "type": "USES",
+                    }
+                ],
+            }
+        )
+
+    service = DesktopKnowledgeGraphService(
+        kb_dir, model_gateway=DesktopModelGateway(graph_response)
+    )
+    assert service.extract_document(document.document_id)
+    approved_digest = desktop_knowledge_snapshot_digest(kb_dir)
+    approved_revision = desktop_knowledge_snapshot_revision(kb_dir)
+    enable_local_graph_after_evaluation(
+        kb_dir,
+        "passing-suite",
+        approved_digest,
+        approved_revision,
+    )
+    assert local_graph_default_enabled(kb_dir)
+    assert service.extract_document(document.document_id)
+    assert desktop_knowledge_snapshot_revision(kb_dir) > approved_revision
+    assert desktop_knowledge_snapshot_digest(kb_dir) != approved_digest
+    assert not local_graph_default_enabled(kb_dir)
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM knowledge_graph_nodes").fetchone() == (2,)
+        assert connection.execute("SELECT COUNT(*) FROM knowledge_graph_edges").fetchone() == (1,)
+        results = connection.execute(
+            """
+            SELECT results.status, results.node_count, results.edge_count
+            FROM knowledge_graph_results AS results
+            WHERE results.document_id = ? ORDER BY results.created_at, results.result_id
+            """,
+            (document.document_id,),
+        ).fetchall()
+        current = connection.execute(
+            """
+            SELECT results.status, results.node_count, results.edge_count
+            FROM knowledge_graph_current AS current
+            JOIN knowledge_graph_results AS results ON results.result_id = current.result_id
+            WHERE current.document_id = ?
+            """,
+            (document.document_id,),
+        ).fetchone()
+        assert results == [("completed", 2, 1), ("completed_empty", 0, 0)]
+        assert current == ("completed_empty", 0, 0)
+        assert local_graph_evidence_ids(
+            connection, terms=("Atlas",), anchor_evidence_ids=()
+        ) == ()
 
 
 def test_graph_records_keep_same_named_nodes_separate_and_evidence_bound(tmp_path, monkeypatch):
@@ -255,7 +484,76 @@ def test_invalid_graph_repair_marks_final_usage_as_model_result_failure(tmp_path
     ]
     assert {record["lifecycle_status"] for record in failed} == {"model_result_failure"}
     assert {record["failure_code"] for record in failed} == {"model_response_invalid"}
-    assert capability_store.state(profile).status == "unchecked"
+    assert capability_store.state(profile).status == "verified"
+    operation_state = DesktopModelOperationContractStore(kb_dir).state(
+        operation="knowledge_graph_extraction",
+        capability_identity=profile.capability_evidence_profile.identity,
+        prompt_contract_digest=prompt_contract_for("knowledge_graph_extraction").digest,
+    )
+    assert operation_state.status == "suspended"
+    assert operation_state.failure_code == "knowledge_graph_response_invalid"
+
+
+def test_suspended_graph_contract_blocks_later_documents_until_explicit_retry(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    first_source = tmp_path / "first-invalid-graph.txt"
+    first_source.write_text("Atlas uses a local gateway.", encoding="utf-8")
+    second_source = tmp_path / "second-invalid-graph.txt"
+    second_source.write_text("Meridian uses another local gateway.", encoding="utf-8")
+    first = DesktopTextImportService(kb_dir).import_text(first_source).document
+    second = DesktopTextImportService(kb_dir).import_text(second_source).document
+    save_desktop_model_settings(
+        kb_dir,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+    )
+    calls: list[str] = []
+    valid_response = False
+
+    class InvalidThenValidTransport:
+        def __init__(self, *, model, bundle):
+            del model, bundle
+
+        def __call__(self, request, _timeout_seconds):
+            calls.append(request.operation)
+            if valid_response:
+                return json.dumps({"nodes": [], "edges": []})
+            return "not-json"
+
+    monkeypatch.setattr(
+        desktop_model_transport,
+        "DesktopLiteLLMTransport",
+        InvalidThenValidTransport,
+    )
+    gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
+    assert gateway is not None
+    profile = gateway.execution_profile_for_operation("knowledge_graph_extraction")
+    DesktopModelCapabilityStore(kb_dir).mark_verified(profile)
+    tasks = DesktopKnowledgeGraphExtractionTasks(kb_dir)
+    assert tasks.queue(first.document_id, gateway)
+    assert tasks.queue(second.document_id, gateway)
+
+    assert not tasks.run_document(first.document_id, gateway, should_stop=lambda: False)
+    assert calls == ["knowledge_graph_extraction", "structured_output_repair"]
+    assert tasks.pending_document_ids(gateway) == ()
+    assert not tasks.run_document(second.document_id, gateway, should_stop=lambda: False)
+    assert calls == ["knowledge_graph_extraction", "structured_output_repair"]
+
+    valid_response = True
+    assert tasks.retry(first.document_id, gateway)
+    assert tasks.pending_document_ids(gateway) == (first.document_id,)
+    assert tasks.run_document(first.document_id, gateway, should_stop=lambda: False)
+    assert calls[-1] == "knowledge_graph_extraction"
+    assert tasks.pending_document_ids(gateway) == (second.document_id,)
 
 
 def test_graph_query_diagnostic_never_waits_for_an_active_kb_mutation(tmp_path, monkeypatch):

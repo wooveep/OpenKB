@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import sqlite3
 import uuid
@@ -122,6 +123,7 @@ class DesktopKnowledgeLifecycleMixin:
                     new_stale_after=None,
                     occurred_at=now,
                 )
+                _delete_adoption_state_for_page_in(connection, page_id)
                 connection.execute(
                     "DELETE FROM knowledge_page_working_drafts WHERE page_id = ?", (page_id,)
                 )
@@ -245,6 +247,62 @@ class DesktopKnowledgeLifecycleMixin:
 
 
 _UNCHANGED = object()
+
+
+def _delete_adoption_state_for_page_in(
+    connection: sqlite3.Connection,
+    page_id: str,
+) -> None:
+    """Remove replay and review records that cannot outlive their target page."""
+    origins = {
+        (int(row[0]), str(row[1]))
+        for row in connection.execute(
+            """
+            SELECT generation_id, item_key
+            FROM knowledge_origin_references WHERE page_id = ?
+            """,
+            (page_id,),
+        )
+    }
+    request_ids: list[tuple[str]] = []
+    for row in connection.execute(
+        """
+        SELECT request_id, generation_id, item_key, page_id,
+            candidate_page_id, candidates_json
+        FROM knowledge_adoption_requests
+        """
+    ):
+        try:
+            candidates = json.loads(str(row[5]))
+        except ValueError:
+            candidates = ()
+        candidate_references_page = isinstance(candidates, list) and any(
+            isinstance(candidate, dict) and candidate.get("page_id") == page_id
+            for candidate in candidates
+        )
+        if (
+            (int(row[1]), str(row[2])) in origins
+            or row[3] == page_id
+            or row[4] == page_id
+            or candidate_references_page
+        ):
+            request_ids.append((str(row[0]),))
+    connection.executemany(
+        "DELETE FROM knowledge_adoption_requests WHERE request_id = ?",
+        request_ids,
+    )
+    connection.execute(
+        "DELETE FROM knowledge_reconciliation_resolution_records WHERE target_page_id = ?",
+        (page_id,),
+    )
+    connection.execute(
+        "DELETE FROM knowledge_reconciliation_candidates WHERE target_page_id = ?",
+        (page_id,),
+    )
+    connection.execute(
+        "DELETE FROM knowledge_origin_references WHERE page_id = ?",
+        (page_id,),
+    )
 
 
 def _normalize_stale_after(value: str | None) -> str | None:

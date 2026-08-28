@@ -13,7 +13,6 @@ import json
 import logging
 import sqlite3
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
@@ -26,6 +25,18 @@ from openkb.desktop_knowledge_generations import (
     publish_generation_changes_in,
 )
 from openkb.desktop_knowledge_metadata import encode_knowledge_labels
+from openkb.desktop_knowledge_reconciliation_adoption import (
+    KnowledgeReconciliationBaseline as _Baseline,
+)
+from openkb.desktop_knowledge_reconciliation_adoption import (
+    KnowledgeWorkingDraft as _WorkingDraft,
+)
+from openkb.desktop_knowledge_reconciliation_adoption import (
+    candidate_has_durable_adoption_origin_in,
+)
+from openkb.desktop_knowledge_reconciliation_adoption import (
+    record_adoption_match_in as _record_adoption_match_in,
+)
 from openkb.desktop_knowledge_reconciliation_changes import (
     IncomingKnowledgeChange,
     extract_incoming_knowledge_changes,
@@ -39,25 +50,6 @@ from openkb.desktop_okf_projection import (
 from openkb.desktop_workspace import desktop_state_database_path
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class _Baseline:
-    kind: str
-    baseline_id: str
-    title: str
-    content_markdown: str
-    page_id: str | None = None
-
-
-@dataclass(frozen=True)
-class _WorkingDraft:
-    page_id: str
-    title: str
-    content_markdown: str
-    content_sha256: str
-    updated_at: str
-    published: _Baseline
 
 
 class DesktopKnowledgeReconciliationService:
@@ -179,7 +171,7 @@ class DesktopKnowledgeReconciliationService:
                     COALESCE(pages.page_id, drafts.page_id), drafts.title,
                     drafts.content_markdown,
                     drafts.updated_at, candidates.staged_decision,
-                    candidates.staged_content_markdown
+                    candidates.staged_content_markdown, documents.availability
                 FROM knowledge_reconciliation_candidates AS candidates
                 JOIN source_documents AS documents ON documents.document_id = candidates.document_id
                 LEFT JOIN knowledge_pages AS pages ON pages.page_id = COALESCE(
@@ -216,11 +208,15 @@ class DesktopKnowledgeReconciliationService:
                     )
                 WHERE candidates.status = 'pending_conflict'
                     AND candidates.resolution_status IS NULL
-                    AND documents.availability = 'available'
                 ORDER BY candidates.created_at DESC, candidates.candidate_id
                 """
             ).fetchall()
-            return tuple(_conflict_from_row(row) for row in rows)
+            return tuple(
+                _conflict_from_row(row)
+                for row in rows
+                if str(row[17]) == "available"
+                or candidate_has_durable_adoption_origin_in(connection, str(row[0]))
+            )
         finally:
             connection.close()
 
@@ -263,6 +259,25 @@ class DesktopKnowledgeReconciliationService:
             return current_generation_id_in(connection)
         finally:
             connection.close()
+
+    def record_adoption_match_in(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        document_id: str,
+        change: IncomingKnowledgeChange,
+        target_page_id: str,
+        observed_generation_id: int,
+    ) -> str:
+        """Queue an explicit generated-to-user-page adoption for human reconciliation."""
+        return _record_adoption_match_in(
+            connection,
+            document_id=document_id,
+            change=change,
+            target_page_id=target_page_id,
+            observed_generation_id=observed_generation_id,
+            insert_candidate=_insert_candidate_in,
+        )
 
     def _reconcile_change_in(
         self,
@@ -601,6 +616,7 @@ def _insert_candidate_in(
         SELECT candidate_id FROM knowledge_reconciliation_candidates
         WHERE document_id = ? AND kind = ? AND normalized_title = ?
             AND content_sha256 = ? AND classification = ? AND status = ?
+            AND COALESCE(target_page_id, '') = COALESCE(?, '')
             AND resolution_status IS NULL
         ORDER BY created_at, candidate_id LIMIT 1
         """,
@@ -611,6 +627,7 @@ def _insert_candidate_in(
             change.content_sha256,
             classification,
             status,
+            baseline.page_id if baseline is not None and status == "pending_conflict" else None,
         ),
     ).fetchone()
     if existing is not None:

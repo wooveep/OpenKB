@@ -22,7 +22,16 @@ from openkb.desktop_model_gateway import (
     DesktopModelGateway,
     DesktopModelRequest,
     gateway_analysis_capability_verified,
-    invalidate_analysis_capability,
+)
+from openkb.desktop_model_result_failure import (
+    DesktopModelOperationSuspendedError,
+    authorize_model_operation_retry,
+    mark_structured_output_operations_ready,
+    model_operation_dispatch_possible,
+    require_model_operation_dispatch,
+    suspend_analysis_operation_failure,
+    suspend_model_operation_contract,
+    suspend_structured_model_operation,
 )
 from openkb.desktop_page_tree import PageTreeGeneration
 from openkb.desktop_page_tree_store import lease_current_page_tree
@@ -74,6 +83,7 @@ def select_page_tree_evidence(
     is_cancelled: Callable[[], bool] | None = None,
     on_model_event: Callable[[object], None] | None = None,
     lease_tree: PageTreeLeaseFactory = lease_current_page_tree,
+    retry_scope: str | None = None,
 ) -> PageTreeSelectionResult:
     """Call PageTree Selection at most once, then return only bound Evidence identities."""
     try:
@@ -104,6 +114,17 @@ def select_page_tree_evidence(
                     trigger_reasons=triggers,
                     degradation_reasons=("page_tree_selection_unverified",),
                 )
+            if not model_operation_dispatch_possible(
+                kb_dir,
+                model_gateway,
+                operation="page_tree_selection",
+                retry_scope=retry_scope,
+            ):
+                return PageTreeSelectionResult(
+                    generation_ids=generation_ids,
+                    trigger_reasons=triggers,
+                    degradation_reasons=("page_tree_selection_suspended",),
+                )
             prompt = _selection_prompt(question, trees)
             attempts = 0
             response_characters = 0
@@ -112,6 +133,21 @@ def select_page_tree_evidence(
 
                 def invoke(request: DesktopModelRequest):
                     nonlocal attempts, response_characters
+                    if retry_scope is not None:
+                        authorize_model_operation_retry(
+                            kb_dir,
+                            model_gateway,
+                            operation=request.operation,
+                            retry_scope=retry_scope,
+                            capability_identity=request.capability_identity,
+                            prompt_contract_digest=request.prompt_contract_digest,
+                        )
+                    require_model_operation_dispatch(
+                        kb_dir,
+                        model_gateway,
+                        request,
+                        retry_scope=retry_scope,
+                    )
                     call_attempts = 0
 
                     def observe(event) -> None:
@@ -152,6 +188,7 @@ def select_page_tree_evidence(
                     validate=lambda content: _selected_nodes(content, trees),
                 )
                 selected = output.value
+                mark_structured_output_operations_ready(kb_dir, model_gateway, output)
             except DesktopModelCancelledError:
                 return PageTreeSelectionResult(
                     generation_ids=generation_ids,
@@ -159,12 +196,15 @@ def select_page_tree_evidence(
                     degradation_reasons=("page_tree_selection_cancelled",),
                     model_cost=_selection_cost(prompt, attempts),
                 )
-            except DesktopModelCallError as error:
-                invalidate_analysis_capability(
-                    model_gateway,
-                    error.failure.code,
-                    error.failure.reason,
+            except DesktopModelOperationSuspendedError:
+                return PageTreeSelectionResult(
+                    generation_ids=generation_ids,
+                    trigger_reasons=triggers,
+                    degradation_reasons=("page_tree_selection_suspended",),
+                    model_cost=_selection_cost(prompt, attempts),
                 )
+            except DesktopModelCallError as error:
+                suspend_analysis_operation_failure(kb_dir, model_gateway, error)
                 return PageTreeSelectionResult(
                     generation_ids=generation_ids,
                     trigger_reasons=triggers,
@@ -172,10 +212,13 @@ def select_page_tree_evidence(
                     model_cost=_selection_cost(prompt, attempts),
                 )
             except DesktopStructuredOutputInvalidError as error:
-                invalidate_analysis_capability(
+                suspend_structured_model_operation(
+                    kb_dir,
                     model_gateway,
-                    "model_response_invalid",
-                    str(error),
+                    error,
+                    operation="page_tree_selection",
+                    failure_code="model_response_invalid",
+                    reason="The PageTree Selection response could not be validated.",
                 )
                 return PageTreeSelectionResult(
                     generation_ids=generation_ids,
@@ -184,6 +227,13 @@ def select_page_tree_evidence(
                     model_cost=_selection_cost(prompt, attempts, response_characters),
                 )
             except (ValueError, json.JSONDecodeError):
+                suspend_model_operation_contract(
+                    kb_dir,
+                    model_gateway,
+                    operation="page_tree_selection",
+                    failure_code="model_response_invalid",
+                    reason="The PageTree Selection response could not be validated.",
+                )
                 return PageTreeSelectionResult(
                     generation_ids=generation_ids,
                     trigger_reasons=triggers,

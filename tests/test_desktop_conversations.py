@@ -9,7 +9,9 @@ from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
-def test_conversation_persists_messages_versions_draft_and_selected_evidence(tmp_path):
+def test_conversation_persists_messages_versions_draft_and_selected_evidence(
+    tmp_path, monkeypatch
+):
     kb_dir = tmp_path / "desktop-kb"
     source = tmp_path / "guide.txt"
     source.write_text(
@@ -19,6 +21,14 @@ def test_conversation_persists_messages_versions_draft_and_selected_evidence(tmp
     DesktopKnowledgeBaseRuntime().create(kb_dir)
     DesktopTextImportService(kb_dir).import_text(source)
     service = DesktopConversationService(kb_dir)
+    retry_flags: list[bool] = []
+    generate = service._answers.generate
+
+    def observed_generate(question: str, **kwargs):
+        retry_flags.append(bool(kwargs.get("retry_suspended_operations", False)))
+        return generate(question, **kwargs)
+
+    monkeypatch.setattr(service._answers, "generate", observed_generate)
 
     created = service.create()
     conversation_id = str(created["conversation_id"])
@@ -35,6 +45,7 @@ def test_conversation_persists_messages_versions_draft_and_selected_evidence(tmp
     regenerated = service.regenerate(conversation_id, assistant["message_id"])
     versions = regenerated["messages"][1]["answer_versions"]
     assert [version["version_number"] for version in versions] == [1, 2]
+    assert retry_flags == [False, True]
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         connection.execute(
             """

@@ -44,6 +44,7 @@ class DesktopValidatedStructuredOutput(Generic[ValidatedValue]):
     result: DesktopModelResult
     value: ValidatedValue
     repaired: bool
+    initial_result: DesktopModelResult | None = None
 
 
 def run_structured_output(
@@ -118,7 +119,14 @@ def run_structured_output(
             response_example=output_example,
             response_schema_name=_schema_name(contract_version),
             generation_parameters=dict(repair_generation),
-            prompt_contract_digest=_snapshot_digest(repair_snapshot),
+            prompt_contract_digest=_repair_contract_digest(
+                repair_snapshot,
+                parent_operation=operation,
+                parent_prompt_contract_digest=_snapshot_digest(active_snapshot),
+                output_schema=output_schema,
+            ),
+            parent_operation=operation,
+            parent_prompt_contract_digest=_snapshot_digest(active_snapshot),
             prompt_contract_version=repair_version,
             prompt_contract_snapshot=repair_snapshot,
         )
@@ -146,7 +154,7 @@ def run_structured_output(
                 failure_event_id=failure_event_id,
             ) from second_error
         complete_model_result(repaired)
-        return DesktopValidatedStructuredOutput(repaired, value, True)
+        return DesktopValidatedStructuredOutput(repaired, value, True, initial)
     complete_model_result(initial)
     return DesktopValidatedStructuredOutput(initial, value, False)
 
@@ -160,6 +168,23 @@ def normalize_structured_output(content: str) -> str:
     if len(lines) < 2 or not lines[-1].strip().startswith("```"):
         return normalized
     return "\n".join(lines[1:-1]).strip()
+
+
+def _repair_contract_digest(
+    repair_snapshot: dict[str, object],
+    *,
+    parent_operation: str,
+    parent_prompt_contract_digest: str,
+    output_schema: dict[str, object] | None,
+) -> str:
+    return _snapshot_digest(
+        {
+            "repair_contract": repair_snapshot,
+            "parent_operation": parent_operation,
+            "parent_prompt_contract_digest": parent_prompt_contract_digest,
+            "output_schema": output_schema,
+        }
+    )
 
 
 def _repair_input(

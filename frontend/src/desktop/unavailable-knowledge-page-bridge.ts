@@ -6,6 +6,12 @@ import type {
   DesktopKnowledgeExport,
   DesktopKnowledgeExportMode,
   DesktopKnowledgeSourceCandidate,
+  DesktopKnowledgeWorkspace,
+  DesktopKnowledgeWorkspaceHistory,
+  DesktopKnowledgeWorkspaceItem,
+  DesktopKnowledgeWorkspaceItemRequest,
+  DesktopKnowledgeAdoptionResult,
+  DesktopKnowledgeAdoptionDecision,
   DesktopMissingSourceBinding,
   DesktopMissingSourceCandidates,
   DesktopMissingSourceDismissal,
@@ -14,6 +20,40 @@ import type {
 /** Shared unavailable implementations keep the main production Bridge focused. */
 export abstract class UnavailableKnowledgePageBridge {
   protected abstract unavailable<T>(): Promise<T>
+
+  knowledgeWorkspace(query = ""): Promise<DesktopKnowledgeWorkspace> {
+    void query
+    return this.unavailable()
+  }
+
+  getKnowledgeWorkspaceItem(
+    item: DesktopKnowledgeWorkspaceItemRequest,
+  ): Promise<DesktopKnowledgeWorkspaceItem> {
+    void item
+    return this.unavailable()
+  }
+
+  knowledgeWorkspaceHistory(generationId?: number): Promise<DesktopKnowledgeWorkspaceHistory> {
+    void generationId
+    return this.unavailable()
+  }
+
+  adoptKnowledgeItem(
+    generationId: number,
+    itemKey: string,
+    adoptionRequestId: string,
+    requestId: string,
+    decision?: DesktopKnowledgeAdoptionDecision,
+    candidatePageId?: string,
+  ): Promise<DesktopKnowledgeAdoptionResult> {
+    void generationId
+    void itemKey
+    void adoptionRequestId
+    void requestId
+    void decision
+    void candidatePageId
+    return this.unavailable()
+  }
 
   knowledgePages(): Promise<DesktopKnowledgePages> {
     return this.unavailable()

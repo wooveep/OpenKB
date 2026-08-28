@@ -188,6 +188,28 @@ class DesktopKnowledgePage(DesktopKnowledgePageSummary):
         }
 
 
+def knowledge_page_summaries_in(
+    connection: sqlite3.Connection,
+    *,
+    query: str = "",
+) -> tuple[DesktopKnowledgePageSummary, ...]:
+    """Read User Knowledge Page summaries inside an owning read transaction."""
+    normalized = query.strip().casefold()
+    rows = connection.execute(
+        f"""
+        {_PAGE_STATE_CTE}
+        SELECT * FROM page_state
+        WHERE ? = ''
+            OR instr(lower(title), ?) > 0
+            OR instr(lower(COALESCE(draft_content_markdown, '')), ?) > 0
+            OR instr(lower(COALESCE(published_content_markdown, '')), ?) > 0
+        ORDER BY kind, updated_at DESC, title COLLATE NOCASE
+        """,
+        (normalized, normalized, normalized, normalized),
+    ).fetchall()
+    return tuple(_summary(_page_from_row(row)) for row in rows)
+
+
 class DesktopKnowledgePageService(DesktopKnowledgeLifecycleMixin):
     """Autosave one Working Draft and publish immutable user revisions explicitly."""
 
@@ -201,16 +223,9 @@ class DesktopKnowledgePageService(DesktopKnowledgeLifecycleMixin):
         with kb_read_lock(self.state_dir):
             connection = self._connect()
             try:
-                rows = connection.execute(
-                    f"""
-                    {_PAGE_STATE_CTE}
-                    SELECT * FROM page_state
-                    ORDER BY kind, updated_at DESC, title COLLATE NOCASE
-                    """
-                ).fetchall()
+                return knowledge_page_summaries_in(connection)
             finally:
                 connection.close()
-        return tuple(_summary(_page_from_row(row)) for row in rows)
 
     def selected_page_id(self) -> str | None:
         self._require_database()

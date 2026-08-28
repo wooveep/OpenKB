@@ -405,6 +405,14 @@
         },
         "testSucceeded": "Connected in {{latency}} ms ({{attempts}} attempt).",
         "testRejected": "The model provider did not accept the connection test.",
+        "saveAndVerify": "Save and Verify",
+        "saveAndVerifyReviewTitle": "Save settings and verify model capabilities",
+        "saveAndVerifyReviewDescription": "Settings are saved to this knowledge base first, then Analysis and Answer are checked independently. Calls may incur provider charges; one role failing does not roll back settings or another role's result.",
+        "saveAndVerifyCost": "I understand these capability checks may incur model-provider charges.",
+        "confirmSaveAndVerify": "Save and start verification",
+        "saveAndVerifySucceeded": "Settings saved and all required model roles verified ({{attempts}} attempts).",
+        "saveAndVerifyPartial": "Settings saved; one or more model roles were not verified. Review each role and retry when ready.",
+        "saveAndVerifyCancelled": "Settings saved; verification stopped and undispatched roles remain unchecked.",
         "analysisCapability": "Analysis capability",
         "answerCapability": "Answer capability",
         "capabilityStates": {
@@ -413,7 +421,9 @@
           "verified": "Verified",
           "failed": "Check failed",
           "cancelled": "Check cancelled",
-          "unavailable": "Unavailable"
+          "unavailable": "Unavailable",
+          "unverified": "Unverified",
+          "not_required": "Not required"
         },
         "appearanceTitle": "Appearance & language",
         "appearanceDescription": "These preferences apply to the desktop workbench on this device.",
@@ -519,7 +529,77 @@
       "stopAnswer": "Stop",
       "answerCancellationWarning": "OpenKB stopped waiting and closed the active stream when possible. Provider-side cancellation cannot be guaranteed, so remote computation or billing may continue.",
       "capabilityDegradationTitle": "Capability degradation",
-      "capabilityDegradationDescription": "OpenKB used a safe deterministic retrieval fallback because an optional capability was unavailable.",
+      "capabilityDegradationDescription": "These capabilities were unavailable for this operation. OpenKB retained usable results and applied safe fallbacks.",
+      "capabilityDegradationTechnicalDetails": "Technical details",
+      "capabilityDegradationOpenSettings": "Open Model Settings",
+      "capabilityDegradationRetry": "Retry this answer",
+      "capabilityDegradations": {
+        "retrievalPlan": {
+          "title": "Retrieval planning is unverified",
+          "impact": "This answer used deterministic retrieval instead of a model-authored plan; citations still come from local evidence.",
+          "recovery": "Use Save and Verify for the Analysis role in Model Settings, then retry the question."
+        },
+        "retrievalPlanUnavailable": {
+          "title": "Retrieval planning is not configured",
+          "impact": "No Analysis model was available, so this answer used deterministic retrieval with local citations.",
+          "recovery": "Configure the Analysis role and use Save and Verify in Model Settings."
+        },
+        "retrievalPlanCancelled": {
+          "title": "Retrieval planning was cancelled",
+          "impact": "The optional planning call stopped and deterministic retrieval completed the answer safely.",
+          "recovery": "Retry this answer when you are ready to run planning again."
+        },
+        "retrievalPlanSuspended": {
+          "title": "Retrieval planning is suspended",
+          "impact": "This answer used deterministic retrieval after the current retrieval-plan contract returned an unusable result.",
+          "recovery": "Regenerate this answer to explicitly retry the same contract after correcting the model configuration."
+        },
+        "pageTreeSelection": {
+          "title": "Page-tree selection is unverified",
+          "impact": "Deterministic page selection was used and may widen the candidate set, but it does not fabricate knowledge.",
+          "recovery": "Use Save and Verify for the Analysis role in Model Settings, then retry the question."
+        },
+        "pageTreeSelectionUnavailable": {
+          "title": "Page-tree selection is not configured",
+          "impact": "No Analysis model was available, so deterministic evidence selection was retained.",
+          "recovery": "Configure the Analysis role and use Save and Verify in Model Settings."
+        },
+        "pageTreeSelectionCancelled": {
+          "title": "Page-tree selection was cancelled",
+          "impact": "The optional selection call stopped; deterministic evidence selection remained available.",
+          "recovery": "Retry this answer to run page-tree selection again."
+        },
+        "pageTreeSelectionSuspended": {
+          "title": "Page-tree selection is suspended",
+          "impact": "This answer kept deterministic evidence selection after the current page-tree contract failed validation.",
+          "recovery": "Regenerate this answer to explicitly retry the same contract after correcting the model configuration."
+        },
+        "answerModel": {
+          "title": "Answer model is unverified",
+          "impact": "The answer role has not passed its capability check for the current configuration; local retrieval remains available.",
+          "recovery": "Check the Answer model, API URL, and credential, then use Save and Verify for that role."
+        },
+        "answerModelUnavailable": {
+          "title": "Answer model is not configured",
+          "impact": "OpenKB retained retrieved evidence but could not use the configured Answer role.",
+          "recovery": "Configure the Answer role and use Save and Verify in Model Settings."
+        },
+        "answerModelFallback": {
+          "title": "Answer model used a fallback",
+          "impact": "The Answer call failed, so OpenKB returned a safe evidence-based fallback instead.",
+          "recovery": "Check the provider failure, then retry this answer explicitly."
+        },
+        "knowledgeGraph": {
+          "title": "Knowledge Graph extraction is suspended",
+          "impact": "Only this graph extraction contract is affected; answers and other verified capabilities are not disabled with it.",
+          "recovery": "Review the task failure, correct the Analysis model, and explicitly retry graph extraction."
+        },
+        "generic": {
+          "title": "Optional capability unavailable",
+          "impact": "OpenKB used a deterministic fallback and retained verifiable evidence.",
+          "recovery": "Expand Technical details, then retry from the corresponding task or Model Settings."
+        }
+      },
       "answerStreaming": "Generating answer…",
       "answerRetrying": "Retrying answer…",
       "answerInterrupted": "Interrupted answer",
@@ -551,6 +631,37 @@
         "missingSources": "Missing sources",
         "conflicts": "Knowledge conflicts",
         "versions": "Document versions"
+      },
+      "workspace": {
+        "search": "Search title, content, aliases, or tags",
+        "history": "Generation history",
+        "current": "Return to current knowledge",
+        "generation": "Generation {{id}}",
+        "itemCount": "{{count}} items",
+        "currentBadge": "Current",
+        "historyBadge": "Historical",
+        "historical": "Viewing immutable generation {{id}}.",
+        "noHistory": "No generated history yet.",
+        "loading": "Loading Knowledge Workspace…",
+        "loadingItem": "Loading knowledge details…",
+        "empty": "No generated or user-owned knowledge matches. You can still create a Working Draft on the right.",
+        "createOrSelect": "Select knowledge or create a user-owned Working Draft.",
+        "authority": { "generated": "Generated snapshot", "user": "User page" },
+        "generatedSnapshot": "Generated knowledge snapshot",
+        "readOnly": "This immutable generated snapshot is read-only. Adopting it creates a new user-owned Working Draft without rewriting the snapshot.",
+        "adopt": "Adopt as Working Draft",
+        "adopted": "A user-owned Working Draft was created.",
+        "reconciliationQueued": "The generated change was added to the Review Queue.",
+        "reconcileCandidate": "Reconcile with {{title}}",
+        "openCandidate": "Open {{title}}",
+        "candidateUnavailable": "That candidate page is no longer available. Refresh the adoption choice and try again.",
+        "createSeparate": "Create a separate Working Draft",
+        "adoption": {
+          "reconciliation_required": "The generated change is now in the Review Queue for this existing page. OpenKB did not overwrite anything.",
+          "choice_required": "A possibly similar user page exists. Choose whether to reconcile with it or create a separate Working Draft."
+        },
+        "sources": "Resolvable sources",
+        "noSources": "This snapshot has no resolvable source mapping."
       },
       "export": {
         "action": "Export",
@@ -674,17 +785,20 @@
         "title": "Knowledge Graph extraction",
         "description": "Optional evidence-bound graph records. Documents remain available if this task fails.",
         "attempts": "{{count}} attempts",
+        "counts": "{{nodes}} nodes · {{edges}} edges",
         "callIdentity": "Call {{callId}} · attempt {{attemptId}}",
         "cancel": "Cancel extraction",
         "resume": "Resume extraction",
         "retry": "Retry extraction",
         "actionRejected": "This Knowledge Graph task changed before the action was applied. Refresh and try again.",
         "cancelWarning": "OpenKB stopped its local wait and closes an active stream when possible. Provider-side cancellation cannot be guaranteed, so remote computation or billing may continue.",
+        "invalidRecovery": "Only this graph extraction contract is suspended; other verified capabilities remain available. Check the Analysis model and choose Retry extraction. A strict empty result is accepted when the document supports no relationship.",
         "statuses": {
           "pending": "Pending",
           "running": "Running",
           "failed": "Failed",
-          "completed": "Completed"
+          "completed": "Completed",
+          "completed_empty": "Completed (no supported relations)"
         }
       },
       "catalog": {

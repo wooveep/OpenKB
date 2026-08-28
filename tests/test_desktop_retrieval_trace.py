@@ -6,16 +6,21 @@ import json
 import sqlite3
 from collections.abc import Iterator
 
+from openkb import desktop_model_transport
 from openkb.desktop_conversations import DesktopConversationService
 from openkb.desktop_import_runner import DesktopTextImportService
+from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
 from openkb.desktop_model_gateway import DesktopModelCancelledError, DesktopModelGateway
+from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
+from openkb.desktop_model_settings import save_desktop_model_settings
 from openkb.desktop_model_terminal import MODEL_CONNECT_TIMEOUT_SECONDS
 from openkb.desktop_page_tree import (
     PageTreeEvidenceBinding,
     PageTreeGeneration,
     PageTreeNode,
 )
-from openkb.desktop_page_tree_selection import _selected_evidence_ids
+from openkb.desktop_page_tree_selection import _selected_evidence_ids, select_page_tree_evidence
+from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseRuntime,
@@ -171,6 +176,68 @@ def test_page_tree_selection_failure_keeps_deterministic_baseline(tmp_path) -> N
     )
     assert "multi_hop" in page_tree_trace.trigger_reasons
     assert "page_tree_selection_failed" in page_tree_trace.degradation_reasons
+
+
+def test_invalid_page_tree_selection_suspends_only_its_operation(
+    tmp_path, monkeypatch
+) -> None:
+    kb_dir = _knowledge_base(tmp_path)
+    save_desktop_model_settings(
+        kb_dir,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+    )
+
+    calls: list[str] = []
+
+    class InvalidTransport:
+        def __init__(self, *, model, bundle):
+            del model, bundle
+
+        def __call__(self, request, _timeout_seconds):
+            calls.append(request.operation)
+            return "not-json"
+
+    monkeypatch.setattr(desktop_model_transport, "DesktopLiteLLMTransport", InvalidTransport)
+    gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
+    assert gateway is not None
+    profile = gateway.execution_profile_for_operation("page_tree_selection")
+    capability_store = DesktopModelCapabilityStore(kb_dir)
+    capability_store.mark_verified(profile)
+    baseline = DesktopEvidenceRetriever(kb_dir).retrieve("Compare Alpha and Beta")
+
+    result = select_page_tree_evidence(
+        kb_dir,
+        "Compare Alpha and Beta",
+        baseline.retrieval_plan,
+        baseline.evidence,
+        gateway,
+    )
+
+    assert result.degradation_reasons == ("page_tree_selection_invalid",)
+    assert capability_store.state(profile).status == "verified"
+    operation_state = DesktopModelOperationContractStore(kb_dir).state(
+        operation="page_tree_selection",
+        capability_identity=profile.capability_evidence_profile.identity,
+        prompt_contract_digest=prompt_contract_for("page_tree_selection").digest,
+    )
+    assert operation_state.status == "suspended"
+    assert operation_state.failure_code == "model_response_invalid"
+    call_count = len(calls)
+
+    blocked = select_page_tree_evidence(
+        kb_dir,
+        "Compare Alpha and Beta",
+        baseline.retrieval_plan,
+        baseline.evidence,
+        gateway,
+    )
+
+    assert blocked.degradation_reasons == ("page_tree_selection_suspended",)
+    assert len(calls) == call_count
 
 
 def test_page_tree_selection_does_not_charge_when_provider_never_starts(tmp_path) -> None:

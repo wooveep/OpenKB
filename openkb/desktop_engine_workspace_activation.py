@@ -13,7 +13,7 @@ from openkb import desktop_knowledge_reanalysis as reanalysis_runtime
 from openkb.desktop_catalog_store import start_catalog_rebuilds
 from openkb.desktop_conversations import recover_stale_conversation_generations
 from openkb.desktop_knowledge_graph_tasks import DesktopKnowledgeGraphExtractionTasks
-from openkb.desktop_okf_projection import materialize_okf_projection
+from openkb.desktop_okf_projection import has_valid_okf_projection, materialize_okf_projection
 from openkb.desktop_page_tree_enrichment import DesktopPageTreeEnrichmentService
 from openkb.desktop_page_tree_store import start_page_tree_rebuilds
 from openkb.desktop_raw_assets import DesktopRawAssetService
@@ -65,7 +65,7 @@ def _activate_knowledge_base(
         recover_stale_conversation_generations(active_kb_dir)
         reanalysis_runtime.recover_interrupted_knowledge_reanalysis(active_kb_dir)
         DesktopRawAssetService(active_kb_dir).verify_available_documents()
-        materialize_okf_projection(active_kb_dir)
+        _materialize_okf_projection_on_open(active_kb_dir)
         start_page_tree_rebuilds(active_kb_dir)
         start_catalog_rebuilds(active_kb_dir, recover=True)
         # Runtime restoration may repair durable state, but it must never start
@@ -87,3 +87,9 @@ def _interrupt_previous_reanalysis(server: DesktopEngineServer) -> None:
         reanalysis_runtime.recover_interrupted_knowledge_reanalysis(Path(previous.kb_dir))
         DesktopPageTreeEnrichmentService(Path(previous.kb_dir)).recover_interrupted()
         DesktopKnowledgeGraphExtractionTasks(Path(previous.kb_dir)).recover_interrupted()
+
+
+def _materialize_okf_projection_on_open(kb_dir: Path) -> None:
+    """Preserve any valid on-disk projection; only repair a missing/invalid tree."""
+    if not has_valid_okf_projection(kb_dir):
+        materialize_okf_projection(kb_dir)

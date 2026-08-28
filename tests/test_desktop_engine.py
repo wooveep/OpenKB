@@ -18,6 +18,7 @@ from openkb.desktop_engine import (
     DesktopEngineServer,
     DesktopProtocolError,
     DesktopRequest,
+    DesktopRequestError,
     FrameReader,
     encode_frame,
 )
@@ -42,6 +43,66 @@ def _empty_knowledge_analysis() -> str:
             "entities": [],
         }
     )
+
+
+def _seed_generated_workspace_item(
+    kb_dir: Path,
+    tmp_path: Path,
+    *,
+    title: str = "Generated Knowledge",
+    item_key: str = "generated-item",
+) -> tuple[int, str, str]:
+    source = tmp_path / f"{item_key}.md"
+    source.write_text(f"# {title}\n\n{title} is evidence-bound.", encoding="utf-8")
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        evidence_id = str(
+            connection.execute(
+                "SELECT evidence_id FROM evidence_occurrences WHERE document_id = ? LIMIT 1",
+                (imported.document.document_id,),
+            ).fetchone()[0]
+        )
+        cursor = connection.execute(
+            "INSERT INTO knowledge_generations (parent_generation_id, created_at) "
+            "VALUES (NULL, '2026-08-28T00:00:00+00:00')"
+        )
+        generation_id = int(cursor.lastrowid)
+        connection.execute(
+            "INSERT INTO knowledge_generation_state (singleton, current_generation_id) "
+            "VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET "
+            "current_generation_id = excluded.current_generation_id",
+            (generation_id,),
+        )
+        markdown = f"# {title}\n\n{title} is evidence-bound.[^src-generated]"
+        connection.execute(
+            """
+            INSERT INTO knowledge_generation_items (
+                generation_id, item_key, kind, title, normalized_title,
+                content_markdown, content_sha256, source_document_id, created_at,
+                provenance_state, aliases_json, tags_json
+            ) VALUES (?, ?, 'concept', ?, ?, ?, ?, ?, '2026-08-28T00:00:00+00:00',
+                'source_backed', '[]', '[]')
+            """,
+            (
+                generation_id,
+                item_key,
+                title,
+                title.casefold(),
+                markdown,
+                hashlib.sha256(markdown.encode("utf-8")).hexdigest(),
+                imported.document.document_id,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_generation_item_sources (
+                generation_id, item_key, source_id, evidence_id, claim_text
+            ) VALUES (?, ?, 'src-generated', ?, ?)
+            """,
+            (generation_id, item_key, evidence_id, f"{title} is evidence-bound."),
+        )
+        connection.commit()
+    return generation_id, item_key, evidence_id
 
 
 class FragmentedBytesIO(io.BytesIO):
@@ -330,7 +391,7 @@ def test_engine_creates_and_activates_a_sqlite_desktop_knowledge_base(tmp_path):
         "knowledge_base": {
             "kb_dir": str(desktop_kb),
             "name": "Desktop KB",
-            "schema_version": 44,
+            "schema_version": desktop_workspace_module._MIGRATIONS[-1][0],
             "last_checkpoint_at": None,
         },
         "events": [
@@ -1314,6 +1375,676 @@ def test_engine_autosaves_then_explicitly_publishes_user_knowledge_pages(tmp_pat
         cancel_event=None,
     )
     assert restored["selected_page_id"] == saved["page_id"]
+
+
+def test_engine_knowledge_workspace_lists_current_generated_and_user_authorities(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "workspace-source.md"
+    source.write_text("# OpenKB\n\nOpenKB keeps knowledge evidence-bound.", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        evidence_id = str(
+            connection.execute(
+                "SELECT evidence_id FROM evidence_occurrences WHERE document_id = ? LIMIT 1",
+                (imported.document.document_id,),
+            ).fetchone()[0]
+        )
+        cursor = connection.execute(
+            "INSERT INTO knowledge_generations (parent_generation_id, created_at) "
+            "VALUES (NULL, '2026-08-28T00:00:00+00:00')"
+        )
+        generation_id = int(cursor.lastrowid)
+        connection.execute(
+            "INSERT INTO knowledge_generation_state (singleton, current_generation_id) "
+            "VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET "
+            "current_generation_id = excluded.current_generation_id",
+            (generation_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_generation_items (
+                generation_id, item_key, kind, title, normalized_title,
+                content_markdown, content_sha256, source_document_id, created_at,
+                provenance_state, entity_subtype, aliases_json, tags_json,
+                analysis_provenance_json
+            ) VALUES (?, 'openkb-item', 'concept', 'OpenKB', 'openkb', ?, ?, ?, ?,
+                'source_backed', NULL, '["OKB"]', '["knowledge"]', ?)
+            """,
+            (
+                generation_id,
+                "# OpenKB\n\nEvidence-bound knowledge.[^src-1]",
+                hashlib.sha256(b"generated").hexdigest(),
+                imported.document.document_id,
+                "2026-08-28T00:00:00+00:00",
+                json.dumps(
+                    {
+                        "provider": "deepseek",
+                        "model": "deepseek-v4-pro",
+                        "prompt_digest": "prompt-digest",
+                        "engine_version": "0.1.0",
+                        "schema_version": "openkb.knowledge-analysis.v1",
+                    }
+                ),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_generation_item_sources (
+                generation_id, item_key, source_id, evidence_id, claim_text
+            ) VALUES (?, 'openkb-item', 'src-1', ?, 'Evidence-bound knowledge.')
+            """,
+            (generation_id, evidence_id),
+        )
+        connection.commit()
+    DesktopKnowledgePageService(kb_dir).save_draft(
+        page_id=None,
+        kind="entity",
+        title="OpenKB Team",
+        content_markdown="# OpenKB Team",
+    )
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    result = server._dispatch(
+        DesktopRequest(
+            request_id="knowledge-workspace",
+            method="workbench.knowledge_workspace",
+            params={"query": "OpenKB"},
+        ),
+        cancel_event=None,
+    )
+    legacy = server._dispatch(
+        DesktopRequest(
+            request_id="legacy-knowledge-pages",
+            method="workbench.knowledge_pages",
+            params={},
+        ),
+        cancel_event=None,
+    )
+    generated = next(item for item in result["items"] if item["authority"] == "generated")
+    detail = server._dispatch(
+        DesktopRequest(
+            request_id="generated-detail",
+            method="workbench.knowledge_workspace_item",
+            params={
+                "authority": "generated",
+                "generation_id": generation_id,
+                "item_key": "openkb-item",
+            },
+        ),
+        cancel_event=None,
+    )
+
+    assert result["current_generation_id"] == generation_id
+    assert {(item["authority"], item["title"]) for item in result["items"]} == {
+        ("generated", "OpenKB"),
+        ("user", "OpenKB Team"),
+    }
+    assert generated["current"] is True
+    assert legacy["pages"] == [DesktopKnowledgePageService(kb_dir).list_pages()[0].as_dict()]
+    assert detail["authority"] == "generated"
+    assert detail["content_markdown"].startswith("# OpenKB")
+    assert detail["aliases"] == ["OKB"]
+    assert detail["tags"] == ["knowledge"]
+    assert detail["source_map"][0]["evidence_id"] == evidence_id
+    assert detail["editable"] is False
+
+
+def test_engine_adopts_generated_knowledge_as_an_idempotent_working_draft(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    generation_id, item_key, evidence_id = _seed_generated_workspace_item(kb_dir, tmp_path)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    request = DesktopRequest(
+        request_id="adopt-generated-item",
+        method="workbench.adopt_knowledge_item",
+        params={
+            "generation_id": generation_id,
+            "item_key": item_key,
+            "adoption_request_id": "adoption-1",
+        },
+    )
+
+    adopted = server._dispatch(request, cancel_event=None)
+    repeated = server._dispatch(request, cancel_event=None)
+    with pytest.raises(DesktopRequestError) as request_conflict:
+        server._dispatch(
+            DesktopRequest(
+                request_id="adopt-generated-item-conflict",
+                method="workbench.adopt_knowledge_item",
+                params={
+                    "generation_id": generation_id,
+                    "item_key": "different-generated-item",
+                    "adoption_request_id": "adoption-1",
+                },
+            ),
+            cancel_event=None,
+        )
+    same_origin = server._dispatch(
+        DesktopRequest(
+            request_id="adopt-generated-item-again",
+            method="workbench.adopt_knowledge_item",
+            params={
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": "adoption-2",
+            },
+        ),
+        cancel_event=None,
+    )
+
+    assert adopted["status"] == "adopted"
+    assert repeated == adopted
+    assert request_conflict.value.code == "knowledge_adoption_request_conflict"
+    assert same_origin["status"] == "already_adopted"
+    assert same_origin["page_id"] == adopted["page_id"]
+    page = DesktopKnowledgePageService(kb_dir).get_page(str(adopted["page_id"]))
+    assert page.publication_state == "draft"
+    assert page.published_revision is None
+    assert page.working_draft is not None
+    assert page.working_draft.source_map[0].evidence_id == evidence_id
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT generation_id, item_key, page_id FROM knowledge_origin_references"
+        ).fetchall() == [(generation_id, item_key, adopted["page_id"])]
+        assert (
+            connection.execute("SELECT COUNT(*) FROM knowledge_page_working_drafts").fetchone()[0]
+            == 1
+        )
+        assert (
+            connection.execute(
+                "SELECT content_markdown FROM knowledge_generation_items "
+                "WHERE generation_id = ? AND item_key = ?",
+                (generation_id, item_key),
+            )
+            .fetchone()[0]
+            .startswith("# Generated Knowledge")
+        )
+
+    DesktopKnowledgePageService(kb_dir).permanent_delete(
+        str(adopted["page_id"]),
+        confirmation_page_id=str(adopted["page_id"]),
+    )
+    readopted = server._dispatch(
+        DesktopRequest(
+            request_id="readopt-generated-item",
+            method="workbench.adopt_knowledge_item",
+            params={
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": "adoption-after-delete",
+            },
+        ),
+        cancel_event=None,
+    )
+    assert readopted["status"] == "adopted"
+    assert readopted["page_id"] != adopted["page_id"]
+
+
+def test_engine_adoption_preserves_multiple_claims_bound_to_one_source(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    generation_id, item_key, evidence_id = _seed_generated_workspace_item(kb_dir, tmp_path)
+    content = (
+        "# Generated Knowledge\n\n"
+        "Generated Knowledge is evidence-bound.[^src-generated]\n\n"
+        "Generated Knowledge stays local.[^src-generated]"
+    )
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        connection.execute(
+            "UPDATE knowledge_generation_items SET content_markdown = ?, content_sha256 = ? "
+            "WHERE generation_id = ? AND item_key = ?",
+            (
+                content,
+                hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                generation_id,
+                item_key,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_generation_item_sources (
+                generation_id, item_key, source_id, evidence_id, claim_text
+            ) VALUES (?, ?, 'src-generated', ?, 'Generated Knowledge stays local.')
+            """,
+            (generation_id, item_key, evidence_id),
+        )
+        connection.commit()
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    adopted = server._dispatch(
+        DesktopRequest(
+            request_id="adopt-multiple-claims",
+            method="workbench.adopt_knowledge_item",
+            params={
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": "adoption-multiple-claims",
+            },
+        ),
+        cancel_event=None,
+    )
+
+    page = DesktopKnowledgePageService(kb_dir).get_page(str(adopted["page_id"]))
+    assert page.working_draft is not None
+    assert {source.claim_text for source in page.working_draft.source_map} == {
+        "Generated Knowledge is evidence-bound.",
+        "Generated Knowledge stays local.",
+    }
+    published = DesktopKnowledgePageService(kb_dir).publish(str(adopted["page_id"]))
+    assert published.publication_diagnostics == ()
+
+
+def test_engine_adoption_collision_requires_reconciliation_without_overwrite(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    generation_id, item_key, _evidence_id = _seed_generated_workspace_item(kb_dir, tmp_path)
+    existing = DesktopKnowledgePageService(kb_dir).save_draft(
+        page_id=None,
+        kind="concept",
+        title="Generated Knowledge",
+        content_markdown="# Human Working Draft\n\nKeep this content.",
+    )
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    result = server._dispatch(
+        DesktopRequest(
+            request_id="adopt-collision",
+            method="workbench.adopt_knowledge_item",
+            params={
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": "adoption-collision",
+            },
+        ),
+        cancel_event=None,
+    )
+
+    assert result["status"] == "reconciliation_required"
+    assert result["page_id"] is None
+    assert result["candidates"] == [
+        {
+            "page_id": existing.page_id,
+            "title": "Generated Knowledge",
+            "publication_state": "draft",
+            "match": "exact",
+            "confidence": 1.0,
+        }
+    ]
+    repeated_origin = server._dispatch(
+        DesktopRequest(
+            request_id="adopt-collision-again",
+            method="workbench.adopt_knowledge_item",
+            params={
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": "adoption-collision-again",
+            },
+        ),
+        cancel_event=None,
+    )
+    assert repeated_origin["status"] == "reconciliation_required"
+    assert repeated_origin["candidates"] == result["candidates"]
+    current = DesktopKnowledgePageService(kb_dir).get_page(existing.page_id)
+    assert current.working_draft is not None
+    assert current.working_draft.content_markdown.endswith("Keep this content.")
+    conflicts = server._dispatch(
+        DesktopRequest(
+            request_id="adoption-reconciliation-queue",
+            method="workbench.knowledge_reconciliation_conflicts",
+            params={},
+        ),
+        cancel_event=None,
+    )["conflicts"]
+    assert len(conflicts) == 1
+    assert conflicts[0]["target_page_id"] == existing.page_id
+    assert conflicts[0]["content_markdown"].startswith("# Generated Knowledge")
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT page_id FROM knowledge_origin_references"
+        ).fetchone() == (existing.page_id,)
+
+    DesktopKnowledgePageService(kb_dir).permanent_delete(
+        existing.page_id,
+        confirmation_page_id=existing.page_id,
+    )
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM knowledge_origin_references WHERE page_id = ?",
+            (existing.page_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM knowledge_adoption_requests "
+            "WHERE generation_id = ? AND item_key = ?",
+            (generation_id, item_key),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM knowledge_reconciliation_candidates "
+            "WHERE target_page_id = ?",
+            (existing.page_id,),
+        ).fetchone() == (0,)
+    readopted = server._dispatch(
+        DesktopRequest(
+            request_id="adopt-collision-after-delete",
+            method="workbench.adopt_knowledge_item",
+            params={
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": "adoption-collision",
+            },
+        ),
+        cancel_event=None,
+    )
+    assert readopted["status"] == "adopted"
+    assert readopted["page_id"] != existing.page_id
+
+
+def test_engine_adoption_collision_survives_an_unavailable_source_binding(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    generation_id, item_key, _evidence_id = _seed_generated_workspace_item(
+        kb_dir, tmp_path
+    )
+    existing = DesktopKnowledgePageService(kb_dir).save_draft(
+        page_id=None,
+        kind="concept",
+        title="Generated Knowledge",
+        content_markdown="# Human Working Draft\n\nKeep this content.",
+    )
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        document_id = str(
+            connection.execute(
+                "SELECT source_document_id FROM knowledge_generation_items "
+                "WHERE generation_id = ? AND item_key = ?",
+                (generation_id, item_key),
+            ).fetchone()[0]
+        )
+        connection.execute(
+            "UPDATE source_documents SET availability = 'failed' WHERE document_id = ?",
+            (document_id,),
+        )
+        connection.commit()
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    adopted = server._dispatch(
+        DesktopRequest(
+            request_id="adopt-unavailable-collision",
+            method="workbench.adopt_knowledge_item",
+            params={
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": "adoption-unavailable-collision",
+            },
+        ),
+        cancel_event=None,
+    )
+    queue = server._dispatch(
+        DesktopRequest(
+            request_id="unavailable-adoption-review-queue",
+            method="workbench.knowledge_reconciliation_conflicts",
+            params={},
+        ),
+        cancel_event=None,
+    )["conflicts"]
+
+    assert adopted["status"] == "reconciliation_required"
+    assert adopted["candidates"][0]["page_id"] == existing.page_id
+    assert len(queue) == 1
+    assert queue[0]["target_page_id"] == existing.page_id
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM knowledge_reconciliation_candidate_sources"
+        ).fetchone() == (0,)
+
+    server._dispatch(
+        DesktopRequest(
+            request_id="stage-unavailable-adoption",
+            method="workbench.stage_knowledge_reconciliation_decisions",
+            params={
+                "candidate_ids": [queue[0]["candidate_id"]],
+                "decision": "replace_draft",
+            },
+        ),
+        cancel_event=None,
+    )
+    committed = server._dispatch(
+        DesktopRequest(
+            request_id="commit-unavailable-adoption",
+            method="workbench.commit_knowledge_reconciliation_decisions",
+            params={},
+        ),
+        cancel_event=None,
+    )
+
+    assert committed["draft_updated_count"] == 1
+    current = DesktopKnowledgePageService(kb_dir).get_page(existing.page_id)
+    assert current.working_draft is not None
+    assert current.working_draft.content_markdown.startswith("# Generated Knowledge")
+    assert current.working_draft.source_map == ()
+
+
+def test_engine_high_confidence_adoption_queues_reconciliation_without_choice(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    generation_id, item_key, _evidence_id = _seed_generated_workspace_item(
+        kb_dir, tmp_path
+    )
+    existing = DesktopKnowledgePageService(kb_dir).save_draft(
+        page_id=None,
+        kind="concept",
+        title="Generated Knowledg",
+        content_markdown="# Human Working Draft\n\nKeep this content.",
+    )
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    result = server._dispatch(
+        DesktopRequest(
+            request_id="adopt-high-confidence",
+            method="workbench.adopt_knowledge_item",
+            params={
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": "adoption-high-confidence",
+            },
+        ),
+        cancel_event=None,
+    )
+
+    assert result["status"] == "reconciliation_required"
+    assert result["page_id"] is None
+    assert result["candidates"][0]["page_id"] == existing.page_id
+    assert result["candidates"][0]["match"] == "possible"
+    assert result["candidates"][0]["confidence"] >= 0.9
+    current = DesktopKnowledgePageService(kb_dir).get_page(existing.page_id)
+    assert current.working_draft is not None
+    assert current.working_draft.content_markdown.endswith("Keep this content.")
+
+
+def test_engine_ambiguous_adoption_can_explicitly_create_a_separate_page(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    generation_id, item_key, _evidence_id = _seed_generated_workspace_item(kb_dir, tmp_path)
+    existing = DesktopKnowledgePageService(kb_dir).save_draft(
+        page_id=None,
+        kind="concept",
+        title="Generated Knowledge Guide",
+        content_markdown="# Human Guide\n\nKeep this separate.",
+    )
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    choice = server._dispatch(
+        DesktopRequest(
+            request_id="adopt-ambiguous",
+            method="workbench.adopt_knowledge_item",
+            params={
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": "adoption-ambiguous",
+            },
+        ),
+        cancel_event=None,
+    )
+    with pytest.raises(DesktopRequestError) as semantic_conflict:
+        server._dispatch(
+            DesktopRequest(
+                request_id="adopt-ambiguous-conflicting-replay",
+                method="workbench.adopt_knowledge_item",
+                params={
+                    "generation_id": generation_id,
+                    "item_key": item_key,
+                    "adoption_request_id": "adoption-ambiguous",
+                    "adoption_decision": "create_new",
+                },
+            ),
+            cancel_event=None,
+        )
+    created = server._dispatch(
+        DesktopRequest(
+            request_id="adopt-ambiguous-new-page",
+            method="workbench.adopt_knowledge_item",
+            params={
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": "adoption-ambiguous-new-page",
+                "adoption_decision": "create_new",
+            },
+        ),
+        cancel_event=None,
+    )
+
+    assert choice["status"] == "choice_required"
+    assert semantic_conflict.value.code == "knowledge_adoption_request_conflict"
+    assert choice["candidates"][0]["page_id"] == existing.page_id
+    assert created["status"] == "adopted"
+    assert created["page_id"] != existing.page_id
+    original = DesktopKnowledgePageService(kb_dir).get_page(existing.page_id)
+    assert original.working_draft is not None
+    assert original.working_draft.content_markdown.endswith("Keep this separate.")
+
+
+def test_engine_ambiguous_adoption_can_queue_reconciliation_with_selected_page(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    generation_id, item_key, _evidence_id = _seed_generated_workspace_item(kb_dir, tmp_path)
+    existing = DesktopKnowledgePageService(kb_dir).save_draft(
+        page_id=None,
+        kind="concept",
+        title="Generated Knowledge Guide",
+        content_markdown="# Human Guide\n\nReview this before merging.",
+    )
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    choice = server._dispatch(
+        DesktopRequest(
+            request_id="adopt-select-existing",
+            method="workbench.adopt_knowledge_item",
+            params={
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": "adoption-select-existing",
+            },
+        ),
+        cancel_event=None,
+    )
+    queued = server._dispatch(
+        DesktopRequest(
+            request_id="adopt-selected-existing",
+            method="workbench.adopt_knowledge_item",
+            params={
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": "adoption-selected-existing",
+                "adoption_decision": "use_existing",
+                "candidate_page_id": existing.page_id,
+            },
+        ),
+        cancel_event=None,
+    )
+
+    assert choice["status"] == "choice_required"
+    assert queued["status"] == "reconciliation_required"
+    conflicts = server._dispatch(
+        DesktopRequest(
+            request_id="selected-existing-review-queue",
+            method="workbench.knowledge_reconciliation_conflicts",
+            params={},
+        ),
+        cancel_event=None,
+    )["conflicts"]
+    assert len(conflicts) == 1
+    assert conflicts[0]["target_page_id"] == existing.page_id
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT page_id FROM knowledge_origin_references"
+        ).fetchone() == (existing.page_id,)
+        assert connection.execute(
+            "SELECT decision, candidate_page_id FROM knowledge_adoption_requests "
+            "WHERE request_id = 'adoption-selected-existing'"
+        ).fetchone() == ("use_existing", existing.page_id)
+
+
+def test_engine_generated_history_is_explicit_and_default_workspace_is_current(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    first_generation, _, _ = _seed_generated_workspace_item(
+        kb_dir, tmp_path, title="Historical Concept", item_key="historical-item"
+    )
+    current_generation, _, _ = _seed_generated_workspace_item(
+        kb_dir, tmp_path, title="Current Concept", item_key="current-item"
+    )
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    current = server._dispatch(
+        DesktopRequest(
+            request_id="current-workspace",
+            method="workbench.knowledge_workspace",
+            params={},
+        ),
+        cancel_event=None,
+    )
+    history = server._dispatch(
+        DesktopRequest(
+            request_id="workspace-history",
+            method="workbench.knowledge_workspace_history",
+            params={},
+        ),
+        cancel_event=None,
+    )
+    historical = server._dispatch(
+        DesktopRequest(
+            request_id="historical-generation",
+            method="workbench.knowledge_workspace_history",
+            params={"generation_id": first_generation},
+        ),
+        cancel_event=None,
+    )
+
+    assert current["current_generation_id"] == current_generation
+    assert [item["title"] for item in current["items"]] == ["Current Concept"]
+    generations = {item["generation_id"]: item for item in history["generations"]}
+    assert generations[first_generation]["current"] is False
+    assert generations[current_generation]["current"] is True
+    assert generations[first_generation]["item_count"] == 1
+    assert [item["title"] for item in historical["items"]] == ["Historical Concept"]
+    assert historical["current"] is False
 
 
 def test_engine_exports_a_typed_knowledge_bundle_to_a_selected_directory(tmp_path):

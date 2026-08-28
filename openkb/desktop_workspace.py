@@ -15,7 +15,14 @@ from openkb.desktop_import_deduplication import (
 from openkb.desktop_knowledge_analysis_migrations import (
     register_knowledge_analysis_migration_functions,
 )
-from openkb.desktop_workspace_feature_migrations import DESKTOP_FEATURE_MIGRATIONS
+from openkb.desktop_model_capability_compatibility import (
+    migrate_legacy_analysis_capability_profiles_in,
+)
+from openkb.desktop_workspace_backup import migrate_existing_database
+from openkb.desktop_workspace_feature_migrations import (
+    DESKTOP_FEATURE_MIGRATIONS,
+    MODEL_OPERATION_STATE_MIGRATION_VERSION,
+)
 from openkb.desktop_workspace_migration_execution import pending_migration_statements
 from openkb.locks import kb_import_runtime_lock, kb_ingest_lock
 
@@ -559,6 +566,7 @@ def _apply_migrations(
             "Desktop Knowledge Base has a non-contiguous migration ledger."
         )
 
+    newly_applied: set[int] = set()
     for version, statements in _MIGRATIONS:
         if version in applied:
             continue
@@ -586,6 +594,12 @@ def _apply_migrations(
             else:
                 connection.commit()
         applied.add(version)
+        newly_applied.add(version)
+    if MODEL_OPERATION_STATE_MIGRATION_VERSION in newly_applied:
+        migrate_legacy_analysis_capability_profiles_in(
+            connection,
+            migrated_at=_timestamp(),
+        )
     if 12 in applied and deduplication_backfill_needed(connection):
         try:
             if in_transaction:
@@ -696,7 +710,12 @@ def _load_desktop_knowledge_base(kb_dir: Path) -> DesktopKnowledgeBase:
                 raise DesktopKnowledgeBaseNotFoundError(kb_dir)
             connection = _connect(database_path)
             try:
-                schema_version = _apply_migrations(connection, creating=False)
+                schema_version = migrate_existing_database(
+                    connection,
+                    database_path=database_path,
+                    latest_version=_MIGRATIONS[-1][0],
+                    apply_migrations=_apply_migrations,
+                )
                 if _metadata(connection, "format") != _DESKTOP_FORMAT:
                     raise DesktopKnowledgeBaseStateError(
                         "Selected SQLite database is not an OpenKB Desktop Knowledge Base."

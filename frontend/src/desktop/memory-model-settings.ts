@@ -1,4 +1,10 @@
-import type { DesktopModelSettings } from "./contracts"
+import type {
+  DesktopModelConnectionTest,
+  DesktopModelSettings,
+  DesktopModelSettingsDraft,
+  DesktopSaveAndVerifyModelConfiguration,
+} from "./contracts"
+import { MemoryKnowledgeReviewBridge } from "./memory-knowledge-review-bridge"
 
 /** Fresh model-settings state for one isolated in-memory Desktop Bridge. */
 export function createMemoryModelSettings(): DesktopModelSettings {
@@ -63,5 +69,88 @@ export function createMemoryModelSettings(): DesktopModelSettings {
       totalCost: null,
       tokenUsageSource: null,
     },
+  }
+}
+
+/** Model-settings behavior shared by the renderer-only Desktop Bridge. */
+export abstract class MemoryModelSettingsBridge extends MemoryKnowledgeReviewBridge {
+  private modelSettingsResult: DesktopModelSettings = createMemoryModelSettings()
+
+  async modelSettings(): Promise<DesktopModelSettings> {
+    return this.modelSettingsResult
+  }
+
+  async saveModelSettings(
+    settings: DesktopModelSettingsDraft,
+    requestId: string,
+  ): Promise<DesktopModelSettings> {
+    void requestId
+    this.modelSettingsResult = {
+      ...this.modelSettingsResult,
+      ...settings,
+      apiKeyConfigured: Boolean(settings.apiKey),
+      analysisConcurrency: settings.maxConcurrentModelCalls,
+    }
+    return this.modelSettingsResult
+  }
+
+  async saveAndVerifyModelSettings(
+    settings: DesktopModelSettingsDraft,
+    requestId: string,
+  ): Promise<DesktopSaveAndVerifyModelConfiguration> {
+    const saved = await this.saveModelSettings(settings, requestId)
+    const verification = await this.testModelConnection(settings, requestId)
+    return {
+      saved: true,
+      verificationCostAccepted: true,
+      allRequiredRolesVerified:
+        verification.roleResults.analysis.status === "verified"
+        && verification.roleResults.answer.status === "verified",
+      cancelled: false,
+      models: verification.models,
+      attemptCount: verification.attemptCount,
+      latencyMs: verification.latencyMs,
+      roleResults: verification.roleResults,
+      settings: saved,
+    }
+  }
+
+  async testModelConnection(
+    settings: DesktopModelSettingsDraft,
+    requestId: string,
+  ): Promise<DesktopModelConnectionTest> {
+    void requestId
+    return {
+      ok: true,
+      model: settings.model,
+      models: [settings.model],
+      latencyMs: 42,
+      attemptCount: 1,
+      profileIdentity: "memory-answer-profile",
+      capabilityStatus: "answer_verified",
+      roleResults: {
+        default: { role: "default", model: settings.model, status: "verified", reason: null, attemptCount: 1, profileIdentity: "memory-answer-profile", cached: false, coveredBy: "answer" },
+        analysis: {
+          role: "analysis",
+          model: null,
+          status: "unavailable",
+          reason: "The memory Custom provider has no structured Analysis adapter.",
+          attemptCount: 0,
+          profileIdentity: null,
+          cached: false,
+          coveredBy: null,
+        },
+        answer: {
+          role: "answer",
+          model: settings.model,
+          status: "verified",
+          reason: null,
+          attemptCount: 1,
+          profileIdentity: "memory-answer-profile",
+          cached: false,
+          coveredBy: null,
+        },
+      },
+    }
   }
 }

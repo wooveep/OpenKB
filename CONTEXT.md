@@ -51,6 +51,13 @@ The single versioned command, query, error, and event contract through which
 the React workbench reaches the Python Engine under Desktop Shell mediation.
 _Avoid_: REST client, direct sidecar call, component IPC
 
+**Knowledge Workspace Contract**:
+The additive Desktop Bridge surface for listing and reading current Generated
+Knowledge Items and User Knowledge Pages, adopting generated items, and reading
+generation history. Existing knowledge-page operations retain their meaning for
+User Knowledge Pages only.
+_Avoid_: redefined Knowledge Page contract, generated-only API
+
 **Portable Desktop Package**:
 A self-contained Windows distribution that a user extracts and starts through
 one executable entry point without installing language runtimes or services.
@@ -161,8 +168,9 @@ independently editable or importable source of truth.
 _Avoid_: OKF database, bidirectional Markdown store
 
 **OKF Concept ID**:
-The stable identity of one projected Knowledge Page, derived from its immutable
-page or generation identity rather than its editable title.
+The stable identity of one projected knowledge artifact, derived from its
+immutable User Knowledge Page or generation identity rather than its editable
+title.
 _Avoid_: page title, regenerated slug
 
 **Knowledge Projection Export**:
@@ -372,19 +380,55 @@ never silently reduced when the model context cannot contain it.
 _Avoid_: final output reserve, unlimited reasoning budget
 
 **Model Capability Check**:
-A cancellable, user-initiated check cached for one complete Model Execution
-Profile. A small bounded request exercises its actual streaming, reasoning
-control, finish reason, final content, and schema behavior; saving settings
-never starts the check, and generated check content is not persisted.
+A cancellable, explicitly initiated check cached for one complete Model
+Execution Profile. A small bounded request exercises its actual streaming,
+reasoning control, finish reason, final content, and schema behavior; generated
+check content is not persisted.
 _Avoid_: TCP probe, document analysis, health telemetry
+
+**Save and Verify Model Configuration**:
+The explicit user action that persists Model Configuration and then runs its
+required role-specific Model Capability Checks after disclosing that provider
+calls may incur cost. A failed or cancelled check does not roll back the saved
+configuration. Stop prevents only role checks that have not yet been dispatched;
+an already-dispatched check finishes and retains its result.
+_Avoid_: automatic verification, hidden provider call, save-only readiness
+
+**Model Role Verification**:
+The independently recorded verified, failed, cancelled, unverified, unavailable,
+or not-required readiness of one configured model role. Analysis and Answer are
+required; a distinct Default is not checked, while an inherited Default is
+explicitly covered by Answer. Results may be reused only when the complete role
+and capability-check signature is identical, not merely the provider or model.
+_Avoid_: global model readiness, shared-model shortcut
 
 **Model Capability Check Cache**:
 The knowledge-base-local successful check for one exact Model Execution
-Profile. It has no time expiry but is invalidated by profile or adapter changes
-and by later protocol-shaped Model Result Failures. Invalidation returns the
-profile to an unverified state; it is not a permanent ban and an explicit
-successful Model Capability Check can verify it again.
+Profile. It has no time expiry but is invalidated by profile or adapter changes,
+by a failed capability check, or by a confirmed shared adapter-protocol breach;
+an uncertain breach requires the same signature across two independent
+operations, while schema and domain-validation failures remain operation-local.
 _Avoid_: permanent provider guarantee, global capability registry
+
+**Model Operation Contract State**:
+The knowledge-base-local readiness of one model operation under an exact Model
+Execution Profile and Prompt Contract. An operation-specific invalid result may
+suspend that exact combination; only an explicit retry reopens it unchanged,
+while a profile or contract change starts a new unverified state without an
+automatic provider call. Regenerate Answer, Recover Import, and explicit
+Start/Retry Knowledge Reanalysis are the user actions that can reopen their
+respective suspended contracts. Their action-scoped retry round may contain
+parallel batches, but ends on a validated/failed terminal result or when the
+action stops; ordinary new work cannot reuse it. Structured-output repair uses
+a contract bound to its parent operation, parent Prompt Contract, and schema.
+_Avoid_: Model Capability Check Cache, global model failure
+
+**Legacy Capability Invalidation**:
+An unverified Model Execution Profile state created before operation-specific
+failure scoping. Migration carries forward only an exact durable row that was
+still recorded as verified; unchecked or invalidated history remains unverified,
+even when a nearby legacy diagnostic appears operation-local.
+_Avoid_: automatic verification, discarded failure history
 
 **Interactive Model Lane**:
 At least one high-priority model execution slot reserved for an interactive
@@ -396,13 +440,14 @@ _Avoid_: background Analysis Concurrency, unlimited answer concurrency
 The code-owned, versioned combination of model instructions, input shape,
 output schema, validation rules, and bounded generation policy for one operation.
 Every structured contract explicitly asks for JSON and carries a code-owned
-minimal JSON output example consistent with its schema. Knowledge Analysis Plans
-retain the complete canonical snapshot and digest for recovery.
+canonical JSON output example accepted by both its schema and operation
+validator. Knowledge Analysis Plans retain the complete canonical snapshot and
+digest for recovery.
 _Avoid_: AGENTS.md prompt, user prompt override
 
 **Structured Output Repair**:
 The single Analysis Model call allowed after deterministic normalization and
-local schema validation cannot make a nonempty structured result valid. It
+local schema validation cannot make a structured result operation-valid. It
 receives the original schema, its canonical JSON example, the validation errors,
 and evidence-bound source material; an empty final result, Reasoning Output
 Exhaustion, or a second invalid result ends automatic recovery.
@@ -552,8 +597,8 @@ Document Version using current model behavior without reimporting its Raw Asset.
 _Avoid_: duplicate import, automatic D1 analysis
 
 **Unmapped Knowledge Revision**:
-An existing Knowledge Page revision that predates the Knowledge Source Map and
-may support browsing and routing but not claim-level evidence selection.
+An existing User Knowledge Page revision that predates the Knowledge Source Map
+and may support browsing and routing but not claim-level evidence selection.
 _Avoid_: Missing Source Candidate, invalid migration
 
 **Stage Run**:
@@ -658,18 +703,58 @@ and Grounded Answers; it is not a first-release Desktop Workbench browsing
 surface.
 _Avoid_: graph view
 
-**Knowledge Page**:
-A user-editable representation of an approved concept or entity in a knowledge
-base.
-_Avoid_: source document
+**Empty Knowledge Graph Result**:
+A successful Knowledge Graph extraction containing no evidence-backed nodes or
+edges. It publishes a `completed_empty` current graph generation that supersedes
+older relationships for the source and is reported as a normal zero-count
+success rather than a warning.
+_Avoid_: invalid graph response, failed extraction
+
+**Knowledge Workspace**:
+The unified browsing surface for Generated Knowledge Items and User Knowledge
+Pages; its default scope contains the current generated generation and all user
+pages, while prior generated generations remain explicit history.
+_Avoid_: User Knowledge Page, generated-only list
+
+**Knowledge Base Compatibility Migration**:
+An additive, transactional schema transition preceded by a restorable backup.
+It exposes current generated knowledge in place and never triggers model calls,
+Knowledge Reanalysis, or authoritative-content rewriting.
+_Avoid_: document reimport, destructive upgrade
+
+**Generated Knowledge Item**:
+An immutable, generation-bound Concept or Entity produced by Knowledge Analysis
+and browsable as generated knowledge. It remains read-only unless a user adopts
+it into a separate User Knowledge Page.
+_Avoid_: User Knowledge Page, Working Draft
+
+**User Knowledge Page**:
+A user-owned Concept or Entity with stable identity, revisions, and an explicit
+publication lifecycle.
+_Avoid_: Generated Knowledge Item, source document
+
+**Knowledge Adoption**:
+The explicit creation of a User Knowledge Page Working Draft from a Generated
+Knowledge Item, or the explicit routing of that item to an existing page's
+Review Queue, while preserving its source map and generation provenance. It
+does not edit or replace the originating generated item or silently overwrite
+the selected page.
+_Avoid_: edit generated knowledge, automatic promotion
+
+**Knowledge Origin Reference**:
+The immutable `(generation_id, item_key)` link from an adopted User Knowledge
+Page to the Generated Knowledge Item that seeded it; the page receives its own
+stable identity.
+_Avoid_: User Knowledge Page ID, title match
 
 **Current Published Revision**:
-The one Knowledge Page revision currently eligible for navigation and, through
-its source bindings, retrieval; it remains active while a newer draft is edited.
+The one User Knowledge Page revision currently eligible for navigation and,
+through its source bindings, retrieval; it remains active while a newer draft
+is edited.
 _Avoid_: latest saved draft, generation candidate
 
 **Working Draft**:
-The recoverable, unpublished revision being edited for one Knowledge Page,
+The recoverable, unpublished revision being edited for one User Knowledge Page,
 which may coexist with its Current Published Revision.
 _Avoid_: Current Published Revision, temporary editor text
 
@@ -679,9 +764,9 @@ the Publication Gate to become the Current Published Revision.
 _Avoid_: autosave, verification
 
 **Knowledge Verification**:
-An explicit human confirmation of one complete Knowledge Page revision and its
-sources. Any subsequent content, source, or lifecycle change requires a new
-verification.
+An explicit human confirmation of one complete User Knowledge Page revision and
+its sources. Any subsequent content, source, or lifecycle change requires a
+new verification.
 _Avoid_: save, conflict selection
 
 **Knowledge Trust Tier**:
@@ -701,11 +786,12 @@ _Avoid_: Document Availability, quarantine status
 
 **Knowledge Metadata**:
 The editable title, description, tags, lifecycle, and source associations of a
-Knowledge Page revision, none of which determines the page's stable identity.
+User Knowledge Page revision, none of which determines the page's stable
+identity.
 _Avoid_: Concept ID, generated taxonomy
 
 **Draft Revision**:
-A saved Knowledge Page revision that is not eligible for Grounded Answers
+A saved User Knowledge Page revision that is not eligible for Grounded Answers
 because it has not passed the Publication Gate.
 _Avoid_: failed save, published revision
 
@@ -726,9 +812,9 @@ events that excludes content deleted by a submitted conflict decision.
 _Avoid_: rejected candidate archive
 
 **Source-backed Knowledge Claim**:
-A statement in a Knowledge Page whose OKF source marker resolves to an
-EvidenceRef in Available Knowledge. It may route and rank source evidence but
-is never itself Answer Evidence.
+A statement in a Generated Knowledge Item or User Knowledge Page whose OKF
+source marker resolves to an EvidenceRef in Available Knowledge. It may route
+and rank source evidence but is never itself Answer Evidence.
 _Avoid_: unsourced user note, generated assertion
 
 **Knowledge Source Map**:
@@ -754,7 +840,7 @@ it.
 _Avoid_: Quarantined Document, stable knowledge
 
 **User Revision**:
-A user-authored revision of a Knowledge Page stored in authority data and
+A user-authored revision of a User Knowledge Page stored in authority data and
 materialized to Markdown.
 _Avoid_: Markdown edit
 
@@ -765,7 +851,9 @@ _Avoid_: import failure
 
 **Knowledge Reconciliation**:
 Classification of incoming concept and entity changes as compatible additions
-or Conflicts against approved knowledge.
+or Conflicts against approved knowledge. Adoption never overwrites a possible
+matching User Knowledge Page: a confident match enters reconciliation, while an
+ambiguous match requires the user to choose the existing page or a new page.
 _Avoid_: document deduplication
 
 **Three-way Knowledge Reconciliation**:
@@ -774,8 +862,8 @@ when an import affects a page with unpublished user work.
 _Avoid_: automatic draft merge, document version review
 
 **Knowledge Deprecation**:
-The reversible lifecycle change that removes a published Knowledge Page from
-default routing while retaining its identity, content, and history.
+The reversible lifecycle change that removes a published User Knowledge Page
+from default routing while retaining its identity, content, and history.
 _Avoid_: permanent deletion
 
 **Review Queue**:
@@ -804,8 +892,10 @@ document retrieval remains the safe fallback for a Grounded Answer.
 _Avoid_: graph-only search
 
 **Capability Degradation**:
-A visible condition in which an optional processing or retrieval capability is
-unavailable while a safe, usable fallback remains available.
+A visible, operation-specific condition in which an optional processing or
+retrieval capability is unavailable while a safe fallback remains available.
+Its primary message states the user impact and recovery action; technical codes
+remain available in details and Application Logs.
 _Avoid_: successful completion
 
 **Quarantined Document**:

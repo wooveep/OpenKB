@@ -40,17 +40,16 @@ from openkb.desktop_import_checkpoint_validation import (
     matches_preflight_checkpoint,
     stage_completed,
 )
+from openkb.desktop_import_checkpoints import next_import_stage, require_import_checkpoint
 from openkb.desktop_import_control import DesktopImportControl
 from openkb.desktop_import_deduplication import DuplicateImportSignal, normalized_body_sha256
 from openkb.desktop_import_failures import DIRECT_IMPORT_QUARANTINE_CODES
-from openkb.desktop_import_model_call import (
-    quarantine_import_model_call,
-    run_import_model_call,
-)
+from openkb.desktop_import_model_call import quarantine_import_model_call
+from openkb.desktop_import_model_dispatch import DesktopImportAnalysisDispatcher
 from openkb.desktop_import_model_ledger import DesktopImportModelLedger
 from openkb.desktop_import_quarantine import DesktopImportQuarantineStore
 from openkb.desktop_import_recovery import DesktopImportRecoveryStore
-from openkb.desktop_import_store import IMPORT_STAGES, DesktopImportStore, ImportJobState
+from openkb.desktop_import_store import DesktopImportStore, ImportJobState
 from openkb.desktop_import_types import (
     DesktopImportedDocument,
     DesktopImportTask,
@@ -129,6 +128,11 @@ class DesktopTextImportService:
         self._model_gateway = model_gateway
         self._require_model_analysis = require_model_analysis
         self._parser_mode = require_parser_mode(parser_mode)
+        self._analysis_dispatch = DesktopImportAnalysisDispatcher(
+            store=self._store,
+            ledger=self._model_ledger,
+            control=self._control,
+        )
 
     def import_text(self, source_path: Path) -> DesktopTextImportResult:
         """Create and execute a brand-new supported document Import Job."""
@@ -177,7 +181,9 @@ class DesktopTextImportService:
                     context_capacity=override.context_capacity,
                 )
             try:
-                result = self._run(self._recovery.begin(job_id, override))
+                state = self._recovery.begin(job_id, override)
+                self._analysis_dispatch.begin_recovery(job_id)
+                result = self._run(state)
             except DesktopImportError:
                 raise
             except (OSError, sqlite3.Error, LockException) as error:
@@ -185,6 +191,7 @@ class DesktopTextImportService:
                     "desktop_import_failed", f"Could not recover import {job_id}: {error}"
                 ) from error
             finally:
+                self._analysis_dispatch.end_recovery()
                 if selected_model_recovery:
                     model_recovery.record_resulting_plan(job_id)
         self._start_graph_extraction(result)
@@ -207,7 +214,7 @@ class DesktopTextImportService:
             raise DesktopImportError(
                 "import_job_not_cancellable", f"Job {job_id} is {state.status}; not cancellable."
             )
-        self._store.cancel_job(state, self._next_stage(state))
+        self._store.cancel_job(state, next_import_stage(self._store, state))
 
     def _start_graph_extraction(self, result: DesktopTextImportResult) -> None:
         """Make optional graph work independent from the completed Import Job result."""
@@ -235,7 +242,9 @@ class DesktopTextImportService:
     def _run(self, state: ImportJobState) -> DesktopTextImportResult:
         stages = {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
         active_stage = (
-            "raw_asset" if stage_completed(stages, "raw_asset") else self._next_stage(state, stages)
+            "raw_asset"
+            if stage_completed(stages, "raw_asset")
+            else next_import_stage(self._store, state, stages)
         )
         terminal_state_committed = False
         analysis_gate = DesktopAnalysisCapabilityGate(self._store.kb_dir, None, False)
@@ -272,7 +281,7 @@ class DesktopTextImportService:
                     checkpoint=document_ir_checkpoint(blocks, source_images),
                 )
             else:
-                document_ir = self._checkpoint(state, "document_ir")
+                document_ir = require_import_checkpoint(self._store, state, "document_ir")
                 blocks = document_ir_from_checkpoint(document_ir)
                 source_images = source_images_from_checkpoint(document_ir)
                 require_usable_document_ir(blocks)
@@ -296,7 +305,9 @@ class DesktopTextImportService:
                     checkpoint=evidence_checkpoint(evidence),
                 )
             else:
-                evidence = evidence_from_checkpoint(self._checkpoint(state, "evidence"), blocks)
+                evidence = evidence_from_checkpoint(
+                    require_import_checkpoint(self._store, state, "evidence"), blocks
+                )
                 if stages["evidence"].status == "skipped":
                     content_duplicate = self._store.find_available_document_by_normalized_body(
                         normalized_body_hash
@@ -424,14 +435,11 @@ class DesktopTextImportService:
                         provider=execution.provider,
                         model=execution.model,
                         engine_version=__version__,
-                        analyze=lambda request: run_import_model_call(
+                        analyze=lambda request: self._analysis_dispatch.run(
                             gateway=gateway,
-                            ledger=self._model_ledger,
-                            store=self._store,
                             state=state,
                             stage=active_stage,
                             request=request,
-                            is_cancelled=lambda: self._control.action is not None,
                         ),
                         honor_control=honor_analysis_control,
                         on_batch_completed=lambda completed, total: self._store.emit_stage(
@@ -443,6 +451,9 @@ class DesktopTextImportService:
                         max_parallel_batches=getattr(gateway, "analysis_concurrency", 1),
                         capability_profile=execution.capability,
                         execution_profile=analysis_gate.profile,
+                        on_operation_validated=lambda request: self._analysis_dispatch.mark_ready(
+                            gateway, request
+                        ),
                     )
                     knowledge_analysis = run.analysis
                     analysis_provenance_json = run.provenance_json
@@ -454,7 +465,9 @@ class DesktopTextImportService:
                         checkpoint=run.checkpoint,
                     )
             else:
-                analysis_checkpoint = self._checkpoint(state, "model_analysis")
+                analysis_checkpoint = require_import_checkpoint(
+                    self._store, state, "model_analysis"
+                )
                 knowledge_analysis = knowledge_analysis_from_checkpoint(analysis_checkpoint)
                 if knowledge_analysis is not None:
                     analysis_provenance_json = knowledge_analysis_provenance_from_checkpoint(
@@ -538,7 +551,7 @@ class DesktopTextImportService:
                 suggested_action="Continue the import to reuse completed checkpoints.",
             ) from error
         except DesktopModelCallError as error:
-            analysis_gate.invalidate_result_failure(error)
+            analysis_gate.suspend_result_failure(self._model_gateway, error)
             importlog.log_model_analysis_quarantine(state, active_stage, error)
             public_code = quarantine_import_model_call(
                 ledger=self._model_ledger,
@@ -609,7 +622,7 @@ class DesktopTextImportService:
         source_format = source_format_for_path(state.source)
         raw_suffix = state.source.suffix.lower()
         if stage_completed(stages, "raw_asset"):
-            checkpoint = self._checkpoint(state, "raw_asset")
+            checkpoint = require_import_checkpoint(self._store, state, "raw_asset")
             if not isinstance(checkpoint, dict):
                 raise DesktopImportError(
                     "import_checkpoint_invalid", "Invalid raw asset checkpoint."
@@ -652,7 +665,9 @@ class DesktopTextImportService:
             text = ""
         asset_sha256 = hashlib.sha256(raw_bytes).hexdigest()
         if not preflight_completed or not matches_preflight_checkpoint(
-            self._checkpoint(state, active_stage), asset_sha256, len(raw_bytes)
+            require_import_checkpoint(self._store, state, active_stage),
+            asset_sha256,
+            len(raw_bytes),
         ):
             if preflight_completed:
                 self._honor_control(state, active_stage)
@@ -780,20 +795,3 @@ class DesktopTextImportService:
         if action == "cancelled":
             self._store.cancel_job(state, stage)
             raise DesktopImportError("import_cancelled", "Import cancelled at checkpoint.")
-
-    def _checkpoint(self, state: ImportJobState, stage: str) -> object:
-        checkpoint = self._store.checkpoint(state.stage_ids[stage])
-        if checkpoint is None:
-            raise DesktopImportError(
-                "import_checkpoint_invalid", f"Completed stage {stage} has no usable checkpoint."
-            )
-        return checkpoint
-
-    def _next_stage(
-        self, state: ImportJobState, stages: Mapping[str, DesktopStageRun] | None = None
-    ) -> str:
-        values = stages or {stage.stage: stage for stage in self._store.stage_runs(state.job_id)}
-        for stage in IMPORT_STAGES:
-            if values[stage].status not in {"completed", "skipped"}:
-                return stage
-        return "search"

@@ -189,36 +189,46 @@ def knowledge_snapshot_digest_in(connection: sqlite3.Connection, kb_dir: Path) -
             ORDER BY evidence_occurrences.document_id, evidence_occurrences.ordinal
             """,
         ),
+        "graph_selection": _rows(
+            connection,
+            """
+            SELECT current.document_id, results.status, results.capability_identity,
+                results.prompt_contract_digest, results.extraction_method,
+                results.node_count, results.edge_count
+            FROM knowledge_graph_current AS current
+            JOIN knowledge_graph_results AS results ON results.result_id = current.result_id
+            JOIN source_documents AS documents ON documents.document_id = current.document_id
+            WHERE documents.availability = 'available'
+            ORDER BY current.document_id
+            """,
+        ),
         "graph_nodes": _rows(
             connection,
             """
-            SELECT knowledge_graph_nodes.node_id, knowledge_graph_nodes.evidence_id,
-                knowledge_graph_nodes.node_type, knowledge_graph_nodes.label,
-                knowledge_graph_nodes.normalized_label,
-                knowledge_graph_nodes.extraction_method
-            FROM knowledge_graph_nodes
+            SELECT nodes.node_id, nodes.evidence_id, nodes.node_type, nodes.label,
+                nodes.normalized_label, nodes.extraction_method
+            FROM current_knowledge_graph_nodes AS nodes
             JOIN evidence_occurrences
-                ON evidence_occurrences.evidence_id = knowledge_graph_nodes.evidence_id
+                ON evidence_occurrences.evidence_id = nodes.evidence_id
             JOIN source_documents
                 ON source_documents.document_id = evidence_occurrences.document_id
             WHERE source_documents.availability = 'available'
-            ORDER BY knowledge_graph_nodes.node_id
+            ORDER BY nodes.node_id
             """,
         ),
         "graph_edges": _rows(
             connection,
             """
-            SELECT knowledge_graph_edges.edge_id, knowledge_graph_edges.evidence_id,
-                knowledge_graph_edges.source_node_id, knowledge_graph_edges.target_node_id,
-                knowledge_graph_edges.edge_type, knowledge_graph_edges.support_score,
-                knowledge_graph_edges.extraction_method
-            FROM knowledge_graph_edges
+            SELECT edges.edge_id, edges.evidence_id, edges.source_node_id,
+                edges.target_node_id, edges.edge_type, edges.support_score,
+                edges.extraction_method
+            FROM current_knowledge_graph_edges AS edges
             JOIN evidence_occurrences
-                ON evidence_occurrences.evidence_id = knowledge_graph_edges.evidence_id
+                ON evidence_occurrences.evidence_id = edges.evidence_id
             JOIN source_documents
                 ON source_documents.document_id = evidence_occurrences.document_id
             WHERE source_documents.availability = 'available'
-            ORDER BY knowledge_graph_edges.edge_id
+            ORDER BY edges.edge_id
             """,
         ),
         "knowledge_generation": _rows(

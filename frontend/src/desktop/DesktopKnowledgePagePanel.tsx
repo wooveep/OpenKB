@@ -64,8 +64,20 @@ function newEditor(kind: DesktopKnowledgePageKind): KnowledgePageEditor {
   }
 }
 
+type DesktopKnowledgePagePanelProps = {
+  requestedPageId?: string | null
+  onKnowledgePagesChanged?: (preferredPageId: string | null) => void
+  embedded?: boolean
+  startNew?: boolean
+}
+
 /** Edit an autosaved Working Draft and publish it only through an explicit action. */
-export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId?: string | null }) {
+export function DesktopKnowledgePagePanel({
+  requestedPageId,
+  onKnowledgePagesChanged,
+  embedded = false,
+  startNew = false,
+}: DesktopKnowledgePagePanelProps) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
   const [pages, setPages] = useState<DesktopKnowledgePageSummary[]>([])
@@ -91,6 +103,17 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
   const saveChainRef = useRef<Promise<void>>(Promise.resolve())
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mountedRef = useRef(true)
+  const onKnowledgePagesChangedRef = useRef(onKnowledgePagesChanged)
+
+  useEffect(() => {
+    onKnowledgePagesChangedRef.current = onKnowledgePagesChanged
+  }, [onKnowledgePagesChanged])
+
+  const notifyKnowledgePagesChanged = useCallback((preferredPageId: string | null) => {
+    onKnowledgePagesChangedRef.current?.(
+      mountedRef.current ? preferredPageId : null,
+    )
+  }, [])
 
   const refreshPages = useCallback(async () => {
     const result = await bridge.knowledgePages()
@@ -134,6 +157,7 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
     void operation.then(
       (page) => {
         pageIdRef.current = page.pageId
+        notifyKnowledgePagesChanged(page.pageId)
         if (!mountedRef.current) return
         updatePageSummary(page)
         if (editVersion === editVersionRef.current) {
@@ -154,7 +178,7 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
     )
     saveChainRef.current = operation.then(() => undefined, () => undefined)
     return operation
-  }, [applyServerPage, bridge, updatePageSummary])
+  }, [applyServerPage, bridge, notifyKnowledgePagesChanged, updatePageSummary])
 
   const flushDraft = useCallback(async () => {
     if (autosaveTimerRef.current !== null) {
@@ -199,7 +223,9 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
         if (disposed) return
         setPages(result.pages)
         setError(null)
-        if (!requestedPageId && result.selectedPageId) void selectPage(result.selectedPageId)
+        if (!startNew && !requestedPageId && result.selectedPageId) {
+          void selectPage(result.selectedPageId)
+        }
       })
       .catch((reason) => {
         if (!disposed) setError(reason instanceof Error ? reason.message : String(reason))
@@ -208,7 +234,7 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
         if (!disposed) setLoading(false)
       })
     return () => { disposed = true }
-  }, [bridge, requestedPageId, selectPage])
+  }, [bridge, requestedPageId, selectPage, startNew])
 
   useEffect(() => {
     if (!requestedPageId) return
@@ -308,13 +334,15 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
         source.evidenceId,
         nextDesktopRequestId("knowledge-page-source"),
       )
+      notifyKnowledgePagesChanged(page.pageId)
+      if (!mountedRef.current) return
       applyServerPage(page)
       updatePageSummary(page)
       setSelectedClaim("")
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
+      if (mountedRef.current) setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setBindingSource(false)
+      if (mountedRef.current) setBindingSource(false)
     }
   }
 
@@ -329,12 +357,14 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
         pageId,
         nextDesktopRequestId("knowledge-page-publish"),
       )
+      notifyKnowledgePagesChanged(page.pageId)
+      if (!mountedRef.current) return
       applyServerPage(page)
       await refreshPages()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
+      if (mountedRef.current) setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setPublishing(false)
+      if (mountedRef.current) setPublishing(false)
     }
   }
 
@@ -348,12 +378,14 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
         pageId,
         nextDesktopRequestId("knowledge-page-verification"),
       )
+      notifyKnowledgePagesChanged(page.pageId)
+      if (!mountedRef.current) return
       applyServerPage(page)
       updatePageSummary(page)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
+      if (mountedRef.current) setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setVerifying(false)
+      if (mountedRef.current) setVerifying(false)
     }
   }
 
@@ -367,12 +399,14 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
     try {
       await flushDraft()
       const page = await operation(pageId)
+      notifyKnowledgePagesChanged(page.pageId)
+      if (!mountedRef.current) return
       applyServerPage(page)
       updatePageSummary(page)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
+      if (mountedRef.current) setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setMutatingLifecycle(false)
+      if (mountedRef.current) setMutatingLifecycle(false)
     }
   }
 
@@ -388,6 +422,8 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
         pageId,
         nextDesktopRequestId("knowledge-page-delete"),
       )
+      notifyKnowledgePagesChanged(null)
+      if (!mountedRef.current) return
       pageRead.current += 1
       const next = newEditor("concept")
       editorRef.current = next
@@ -396,9 +432,9 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
       setEditor(next)
       await refreshPages()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
+      if (mountedRef.current) setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setMutatingLifecycle(false)
+      if (mountedRef.current) setMutatingLifecycle(false)
     }
   }
 
@@ -444,9 +480,15 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
   const canPublish = Boolean(editor.pageId || editor.title.trim())
 
   return (
-    <section className="mt-8 overflow-hidden rounded-apple-lg border border-border/70 bg-background shadow-sm" data-testid="desktop-knowledge-pages">
-      <div className="grid min-h-[32rem] lg:grid-cols-[15rem_minmax(0,1fr)]">
-        <aside className="border-b border-border/70 bg-muted/20 p-3 lg:border-b-0 lg:border-r">
+    <section
+      className={embedded
+        ? "min-w-0"
+        : "mt-8 overflow-hidden rounded-apple-lg border border-border/70 bg-background shadow-sm"}
+      data-testid="desktop-knowledge-pages"
+    >
+      <div className={embedded ? "min-h-[32rem]" : "grid min-h-[32rem] lg:grid-cols-[15rem_minmax(0,1fr)]"}>
+        {!embedded ? (
+          <aside className="border-b border-border/70 bg-muted/20 p-3 lg:border-b-0 lg:border-r">
           <div className="flex flex-wrap gap-2">
             <Button size="sm" disabled={busy} onClick={() => void beginNew("concept")}>
               <FilePlus2 className="size-3.5" />
@@ -469,7 +511,8 @@ export function DesktopKnowledgePagePanel({ requestedPageId }: { requestedPageId
               {t("desktop.knowledgeBases.knowledgePages.empty")}
             </p>
           )}
-        </aside>
+          </aside>
+        ) : null}
 
         <div className="min-w-0 p-5 md:p-6">
           <div className="flex flex-wrap items-start justify-between gap-3">

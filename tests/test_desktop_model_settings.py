@@ -13,7 +13,12 @@ import pytest
 from openkb import desktop_engine_model_settings, desktop_model_transport
 from openkb.config import DEFAULT_API_BASE_URL, DEFAULT_CONFIG, save_config
 from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
-from openkb.desktop_engine import DesktopEngineServer, DesktopRequest, DesktopRequestError
+from openkb.desktop_engine import (
+    DesktopEngineServer,
+    DesktopRequest,
+    DesktopRequestError,
+    FrameReader,
+)
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_model_capability_check import answer_capability_check_request
@@ -31,6 +36,7 @@ from openkb.desktop_model_gateway import (
     DesktopModelRequest,
     DesktopModelResult,
 )
+from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
 from openkb.desktop_model_settings import (
     DEFAULT_MAX_CONCURRENT_MODEL_CALLS,
     DesktopModelSettings,
@@ -535,6 +541,11 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
             )
         ),
     ).import_text(source)
+    DesktopModelOperationContractStore(kb_dir).mark_ready(
+        operation="knowledge_analysis",
+        capability_identity="diagnostic-profile-identity",
+        prompt_contract_digest="diagnostic-prompt-contract",
+    )
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         connection.execute(
             "UPDATE model_calls SET reason = ?, suggested_action = ?",
@@ -575,6 +586,7 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
         "import-jobs.json",
         "model-calls.json",
         "model-usage.json",
+        "model-operation-contracts.json",
         "graph-diagnostics.json",
         "page-tree-enrichment.json",
         "integrity.json",
@@ -583,6 +595,19 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
     }
     with zipfile.ZipFile(destination) as archive:
         content = "\n".join(archive.read(name).decode("utf-8") for name in archive.namelist())
+        operation_diagnostics = json.loads(archive.read("model-operation-contracts.json"))
+        graph_diagnostics = json.loads(archive.read("graph-diagnostics.json"))
+    assert operation_diagnostics["contracts"]
+    assert {
+        "operation",
+        "capability_identity",
+        "prompt_contract_digest",
+        "status",
+        "recovery_action",
+    } <= operation_diagnostics["contracts"][0].keys()
+    assert {"diagnostics", "feature_flags", "results", "current_results"} <= (
+        graph_diagnostics.keys()
+    )
     assert "private-source-content" not in content
     assert "private-model-response" not in content
     assert "diagnostic-credential-secret" not in content
@@ -643,6 +668,142 @@ def test_engine_settings_routes_accept_a_direct_api_key_without_persisting_it_in
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         values = connection.execute("SELECT value FROM metadata").fetchall()
     assert all("engine-settings-key" not in value[0] for value in values)
+
+
+def test_invalid_model_settings_do_not_retire_active_optional_gateways(tmp_path):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    previous = save_desktop_model_settings(
+        kb_dir,
+        provider="custom",
+        model="stable-model",
+        api_base_url="https://models.example.test/v1",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+    )
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    resolved = kb_dir.resolve()
+    gateway = DesktopModelGateway(lambda _request, _timeout: "unused")
+    server._page_tree_enrichment_gateways[resolved] = gateway
+    server._knowledge_graph_extraction_gateways[resolved] = gateway
+
+    with pytest.raises(DesktopRequestError) as invalid:
+        server._dispatch(
+            DesktopRequest(
+                request_id="invalid-settings-save",
+                method="workbench.save_model_settings",
+                params={
+                    "provider": "custom",
+                    "model": "replacement-model",
+                    "api_base_url": "https://models.example.test/v1",
+                    "api_key": "replacement-key",
+                    "max_concurrent_model_calls": 0,
+                },
+            ),
+            cancel_event=None,
+        )
+
+    assert invalid.value.code == "desktop_model_settings_invalid"
+    assert read_desktop_model_settings(kb_dir) == previous
+    assert server._page_tree_enrichment_gateways == {resolved: gateway}
+    assert server._knowledge_graph_extraction_gateways == {resolved: gateway}
+
+
+def test_saving_identical_model_settings_keeps_active_optional_gateways(tmp_path):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    settings = save_desktop_model_settings(
+        kb_dir,
+        provider="custom",
+        model="stable-model",
+        api_base_url="https://models.example.test/v1",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+    )
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    resolved = kb_dir.resolve()
+    gateway = DesktopModelGateway(lambda _request, _timeout: "unused")
+    server._page_tree_enrichment_gateways[resolved] = gateway
+    server._knowledge_graph_extraction_gateways[resolved] = gateway
+
+    server._dispatch(
+        DesktopRequest(
+            request_id="identical-settings-save",
+            method="workbench.save_model_settings",
+            params={
+                "provider": settings.provider,
+                "model": settings.model,
+                "api_base_url": settings.api_base_url,
+                "api_key": settings.api_key,
+                "max_concurrent_model_calls": settings.max_concurrent_model_calls,
+            },
+        ),
+        cancel_event=None,
+    )
+
+    assert server._page_tree_enrichment_gateways == {resolved: gateway}
+    assert server._knowledge_graph_extraction_gateways == {resolved: gateway}
+
+
+def test_saving_answer_only_settings_keeps_analysis_workers_until_transport_changes(
+    tmp_path,
+):
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    settings = save_desktop_model_settings(
+        kb_dir,
+        provider="custom",
+        model="default-model",
+        analysis_model="analysis-model",
+        answer_model="answer-a",
+        api_base_url="https://models.example.test/v1",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+    )
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    resolved = kb_dir.resolve()
+    gateway = DesktopModelGateway(lambda _request, _timeout: "unused")
+    server._page_tree_enrichment_gateways[resolved] = gateway
+    server._knowledge_graph_extraction_gateways[resolved] = gateway
+    params = {
+        "provider": settings.provider,
+        "model": settings.model,
+        "analysis_model": settings.analysis_model,
+        "answer_model": "answer-b",
+        "api_base_url": settings.api_base_url,
+        "api_key": settings.api_key,
+        "max_concurrent_model_calls": settings.max_concurrent_model_calls,
+    }
+
+    server._dispatch(
+        DesktopRequest(
+            request_id="answer-only-settings-save",
+            method="workbench.save_model_settings",
+            params=params,
+        ),
+        cancel_event=None,
+    )
+
+    assert server._page_tree_enrichment_gateways == {resolved: gateway}
+    assert server._knowledge_graph_extraction_gateways == {resolved: gateway}
+
+    server._dispatch(
+        DesktopRequest(
+            request_id="transport-settings-save",
+            method="workbench.save_model_settings",
+            params={**params, "api_key": "replacement-key"},
+        ),
+        cancel_event=None,
+    )
+
+    assert server._page_tree_enrichment_gateways == {}
+    assert server._knowledge_graph_extraction_gateways == {}
 
 
 def test_saving_an_unusable_analysis_profile_invalidates_old_capability_evidence(tmp_path):
@@ -834,11 +995,337 @@ def test_engine_deepseek_check_verifies_the_exact_analysis_profile(tmp_path, mon
     assert observed[0].reasoning_effort == "high"
     assert observed[0].generation_parameters == {
         "temperature": 0,
-        "max_tokens": profile.provider_output_ceiling_tokens,
+        "max_tokens": profile.capability_evidence_profile.provider_output_ceiling_tokens,
     }
     assert observed[1].operation == "model_capability_answer"
     assert observed[1].response_schema is None
     assert observed[1].structured_output_mode is None
+
+
+def test_engine_save_and_verify_persists_settings_and_returns_partial_role_results(
+    tmp_path, monkeypatch
+) -> None:
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    calls: list[str] = []
+
+    class PartialGateway:
+        def analyze(self, request, *, on_event, is_cancelled):
+            del on_event
+            assert is_cancelled is not None
+            calls.append(request.operation)
+            return DesktopModelResult("analysis-check", '{"status":"bad"}', 1)
+
+        def stream(self, request, *, on_event, on_delta, is_cancelled):
+            del on_event
+            assert is_cancelled is not None
+            calls.append(request.operation)
+            on_delta(1, "OK")
+            return DesktopModelResult("answer-check", "OK", 1)
+
+    monkeypatch.setattr(
+        desktop_engine_model_settings,
+        "desktop_model_gateway_for_settings",
+        lambda _kb_dir, _settings: PartialGateway(),
+    )
+    params = {
+        "provider": "deepseek",
+        "model": "deepseek-v4-default",
+        "analysis_model": "deepseek-v4-analysis",
+        "answer_model": "deepseek-v4-answer",
+        "api_base_url": "https://api.deepseek.com",
+        "api_key": "saved-after-failure",
+        "max_concurrent_model_calls": 1,
+        "verification_cost_accepted": True,
+    }
+
+    result = server._dispatch(
+        DesktopRequest(
+            request_id="save-and-verify",
+            method="workbench.save_and_verify_model_settings",
+            params=params,
+        ),
+        cancel_event=Event(),
+    )
+
+    assert result["saved"] is True
+    assert result["all_required_roles_verified"] is False
+    assert result["role_results"]["analysis"]["status"] == "failed"
+    assert result["role_results"]["answer"]["status"] == "verified"
+    assert result["attempt_count"] == 2
+    assert result["models"] == ["deepseek-v4-analysis", "deepseek-v4-answer"]
+    assert result["role_results"]["default"]["status"] == "not_required"
+    assert calls == ["model_capability_analysis", "model_capability_answer"]
+    saved = read_desktop_model_settings(kb_dir)
+    assert saved.api_key == "saved-after-failure"
+    assert DesktopModelCapabilityStore(kb_dir).state(
+        answer_capability_profile_for_settings(saved)
+    ).status == "verified"
+
+
+def test_engine_save_and_verify_cancellation_retains_completed_and_undispatched_roles(
+    tmp_path, monkeypatch
+) -> None:
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    calls: list[str] = []
+
+    class CancelledGateway:
+        def analyze(self, request, *, on_event, is_cancelled):
+            del on_event
+            assert is_cancelled is not None
+            calls.append(request.operation)
+            raise DesktopModelCancelledError()
+
+        def stream(self, request, *, on_event, on_delta, is_cancelled):
+            del request, on_event, on_delta, is_cancelled
+            pytest.fail("An undispatched role must remain unverified after cancellation.")
+
+    monkeypatch.setattr(
+        desktop_engine_model_settings,
+        "desktop_model_gateway_for_settings",
+        lambda _kb_dir, _settings: CancelledGateway(),
+    )
+
+    result = server._dispatch(
+        DesktopRequest(
+            request_id="save-verify-cancelled",
+            method="workbench.save_and_verify_model_settings",
+            params={
+                "provider": "deepseek",
+                "model": "deepseek-v4-pro",
+                "api_base_url": "https://api.deepseek.com",
+                "api_key": "retained-key",
+                "max_concurrent_model_calls": 1,
+                "verification_cost_accepted": True,
+            },
+        ),
+        cancel_event=Event(),
+    )
+
+    assert result["saved"] is True
+    assert result["cancelled"] is True
+    assert result["role_results"]["analysis"]["status"] == "cancelled"
+    assert result["role_results"]["answer"]["status"] == "unverified"
+    assert calls == ["model_capability_analysis"]
+    assert read_desktop_model_settings(kb_dir).api_key == "retained-key"
+
+
+def test_save_and_verify_finishes_dispatched_role_before_honoring_stop(
+    tmp_path, monkeypatch
+) -> None:
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    cancel_event = Event()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        desktop_engine_model_settings.enrichment_engine,
+        "start_page_tree_enrichments",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Capability-check consent must not start PageTree enrichment."
+        ),
+    )
+    monkeypatch.setattr(
+        desktop_engine_model_settings.graph_engine,
+        "start_knowledge_graph_extractions",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Capability-check consent must not start Knowledge Graph extraction."
+        ),
+    )
+
+    class StopDuringAnalysisGateway:
+        def analyze(self, request, *, on_event, is_cancelled):
+            del on_event
+            calls.append(request.operation)
+            assert not is_cancelled()
+            cancel_event.set()
+            assert not is_cancelled()
+            return DesktopModelResult("analysis-check", '{"status":"ok"}', 1)
+
+        def stream(self, request, *, on_event, on_delta, is_cancelled):
+            del request, on_event, on_delta, is_cancelled
+            pytest.fail("Stop must prevent dispatching the next role check.")
+
+    monkeypatch.setattr(
+        desktop_engine_model_settings,
+        "desktop_model_gateway_for_settings",
+        lambda _kb_dir, _settings: StopDuringAnalysisGateway(),
+    )
+    result = server._dispatch(
+        DesktopRequest(
+            request_id="save-verify-stop-after-dispatch",
+            method="workbench.save_and_verify_model_settings",
+            params={
+                "provider": "deepseek",
+                "model": "deepseek-v4-default",
+                "analysis_model": "deepseek-v4-analysis",
+                "answer_model": "deepseek-v4-answer",
+                "api_base_url": "https://api.deepseek.com",
+                "api_key": "retained-after-stop",
+                "max_concurrent_model_calls": 1,
+                "verification_cost_accepted": True,
+            },
+        ),
+        cancel_event=cancel_event,
+    )
+
+    assert result["saved"] is True
+    assert result["cancelled"] is True
+    assert result["role_results"]["analysis"]["status"] == "verified"
+    assert result["role_results"]["answer"]["status"] == "unverified"
+    assert calls == ["model_capability_analysis"]
+    saved = read_desktop_model_settings(kb_dir)
+    assert saved.api_key == "retained-after-stop"
+    assert DesktopModelCapabilityStore(kb_dir).state(
+        analysis_execution_profile_for_settings(saved)
+    ).status == "verified"
+
+
+def test_engine_save_and_verify_returns_saved_result_when_outer_request_is_cancelled(
+    tmp_path, monkeypatch
+) -> None:
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    output = io.BytesIO()
+    server = DesktopEngineServer(io.BytesIO(), output, workspace=workspace)
+    server._handshake_complete = True
+    monkeypatch.setattr(
+        desktop_engine_model_settings,
+        "desktop_model_gateway_for_settings",
+        lambda *_args: pytest.fail("Cancellation must stop undispatched checks."),
+    )
+    cancelled = Event()
+    cancelled.set()
+
+    server._run_request(
+        DesktopRequest(
+            request_id="save-verify-outer-cancelled",
+            method="workbench.save_and_verify_model_settings",
+            params={
+                "provider": "deepseek",
+                "model": "deepseek-v4-pro",
+                "api_base_url": "https://api.deepseek.com",
+                "api_key": "saved-before-cancel",
+                "max_concurrent_model_calls": 1,
+                "verification_cost_accepted": True,
+            },
+        ),
+        cancelled,
+    )
+
+    output.seek(0)
+    reader = FrameReader(output)
+    response = next(
+        frame
+        for frame in iter(reader.read_frame, None)
+        if frame.get("id") == "save-verify-outer-cancelled"
+    )
+    assert response["result"]["saved"] is True
+    assert response["result"]["cancelled"] is True
+    assert response["result"]["role_results"]["analysis"]["status"] == "unverified"
+    assert response["result"]["role_results"]["answer"]["status"] == "unverified"
+    assert read_desktop_model_settings(kb_dir).api_key == "saved-before-cancel"
+
+
+def test_engine_save_and_verify_requires_cost_consent_before_saving(tmp_path) -> None:
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    before = read_desktop_model_settings(kb_dir)
+
+    with pytest.raises(DesktopRequestError) as captured:
+        server._dispatch(
+            DesktopRequest(
+                request_id="save-verify-without-consent",
+                method="workbench.save_and_verify_model_settings",
+                params={
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "api_base_url": "https://api.deepseek.com",
+                    "api_key": "must-not-be-saved",
+                    "max_concurrent_model_calls": 1,
+                },
+            ),
+            cancel_event=Event(),
+        )
+
+    assert captured.value.code == "model_verification_cost_consent_required"
+    assert read_desktop_model_settings(kb_dir) == before
+
+
+def test_engine_save_and_verify_reuses_only_exact_verified_role_profiles(
+    tmp_path, monkeypatch
+) -> None:
+    kb_dir = _create_desktop_kb(tmp_path / "desktop-kb")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.open(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+    calls: list[str] = []
+
+    class VerifiedGateway:
+        def analyze(self, request, *, on_event, is_cancelled):
+            del on_event, is_cancelled
+            calls.append(request.operation)
+            return DesktopModelResult("analysis-check", '{"status":"ok"}', 1)
+
+        def stream(self, request, *, on_event, on_delta, is_cancelled):
+            del on_event, is_cancelled
+            calls.append(request.operation)
+            on_delta(1, "OK")
+            return DesktopModelResult("answer-check", "OK", 1)
+
+    monkeypatch.setattr(
+        desktop_engine_model_settings,
+        "desktop_model_gateway_for_settings",
+        lambda _kb_dir, _settings: VerifiedGateway(),
+    )
+    params = {
+        "provider": "deepseek",
+        "model": "deepseek-v4-default",
+        "analysis_model": "deepseek-v4-analysis",
+        "answer_model": "deepseek-v4-answer",
+        "api_base_url": "https://api.deepseek.com",
+        "api_key": "cached-key",
+        "max_concurrent_model_calls": 1,
+        "verification_cost_accepted": True,
+    }
+
+    first = server._dispatch(
+        DesktopRequest(
+            request_id="save-verify-first",
+            method="workbench.save_and_verify_model_settings",
+            params=params,
+        ),
+        cancel_event=Event(),
+    )
+    second = server._dispatch(
+        DesktopRequest(
+            request_id="save-verify-second",
+            method="workbench.save_and_verify_model_settings",
+            params=params,
+        ),
+        cancel_event=Event(),
+    )
+
+    assert first["attempt_count"] == 2
+    assert second["attempt_count"] == 0
+    assert second["role_results"]["analysis"]["cached"] is True
+    assert second["role_results"]["answer"]["cached"] is True
+    assert second["role_results"]["default"]["status"] == "not_required"
+    assert calls == ["model_capability_analysis", "model_capability_answer"]
 
 
 def test_engine_rejects_unusable_analysis_capacity_before_check_or_cache_write(

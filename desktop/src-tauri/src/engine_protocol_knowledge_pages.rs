@@ -1,13 +1,102 @@
 //! Desktop Concept/Entity page requests owned by the Python SQLite authority.
 
 use super::{
-    BridgeError, BridgeResult, EngineSupervisor, KnowledgeExportMode, KnowledgeExportResult,
-    KnowledgePage, KnowledgePageDeletionResult, KnowledgePageKind, KnowledgePagesResult,
-    KnowledgeSourcesResult, LONG_REQUEST_TIMEOUT,
+    BridgeError, BridgeResult, EngineSupervisor, KnowledgeAdoptionDecision,
+    KnowledgeAdoptionResult, KnowledgeExportMode, KnowledgeExportResult, KnowledgePage,
+    KnowledgePageDeletionResult, KnowledgePageKind, KnowledgePagesResult, KnowledgeSourcesResult,
+    KnowledgeWorkspaceHistory, KnowledgeWorkspaceItemDetail, KnowledgeWorkspaceItemRequest,
+    KnowledgeWorkspaceResult, LONG_REQUEST_TIMEOUT,
 };
 use serde_json::json;
 
 impl EngineSupervisor {
+    pub fn knowledge_workspace(&self, query: String) -> BridgeResult<KnowledgeWorkspaceResult> {
+        self.ensure_started()?;
+        let value = self.request_started(
+            "workbench.knowledge_workspace",
+            json!({ "query": query }),
+            None,
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine Knowledge Workspace response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn knowledge_workspace_item(
+        &self,
+        item: KnowledgeWorkspaceItemRequest,
+    ) -> BridgeResult<KnowledgeWorkspaceItemDetail> {
+        self.ensure_started()?;
+        let params = match item {
+            KnowledgeWorkspaceItemRequest::Generated(item) => json!({
+                "authority": "generated",
+                "generation_id": item.generation_id,
+                "item_key": item.item_key,
+            }),
+            KnowledgeWorkspaceItemRequest::User(item) => json!({
+                "authority": "user",
+                "page_id": item.page_id,
+            }),
+        };
+        let value = self.request_started("workbench.knowledge_workspace_item", params, None)?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine Knowledge Workspace item has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn knowledge_workspace_history(
+        &self,
+        generation_id: Option<u64>,
+    ) -> BridgeResult<KnowledgeWorkspaceHistory> {
+        self.ensure_started()?;
+        let value = self.request_started(
+            "workbench.knowledge_workspace_history",
+            json!({ "generation_id": generation_id }),
+            None,
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine Knowledge Workspace history has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn adopt_knowledge_item(
+        &self,
+        generation_id: u64,
+        item_key: String,
+        adoption_request_id: String,
+        request_id: String,
+        decision: Option<KnowledgeAdoptionDecision>,
+        candidate_page_id: Option<String>,
+    ) -> BridgeResult<KnowledgeAdoptionResult> {
+        self.ensure_started()?;
+        let value = self.request_started(
+            "workbench.adopt_knowledge_item",
+            json!({
+                "generation_id": generation_id,
+                "item_key": item_key,
+                "adoption_request_id": adoption_request_id,
+                "adoption_decision": decision,
+                "candidate_page_id": candidate_page_id,
+            }),
+            Some(request_id),
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine Knowledge Adoption response has an invalid shape: {error}"),
+            )
+        })
+    }
+
     pub fn knowledge_pages(&self) -> BridgeResult<KnowledgePagesResult> {
         self.ensure_started()?;
         let value = self.request_started("workbench.knowledge_pages", json!({}), None)?;

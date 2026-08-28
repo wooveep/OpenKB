@@ -95,6 +95,57 @@ def materialize_okf_projection(kb_dir: Path) -> None:
             discard_okf_projection_staging(staged)
 
 
+def has_valid_okf_projection(kb_dir: Path) -> bool:
+    """Check an existing projection without transforming or regenerating it."""
+    resolved = kb_dir.expanduser().resolve()
+    target = resolved / "knowledge-pages"
+    if not target.is_dir():
+        return False
+    try:
+        if lint_okf_projection(target):
+            return False
+        with sqlite3.connect(desktop_state_database_path(resolved)) as connection:
+            expected = _expected_projection_files_in(connection)
+        return all((target / relative).is_file() for relative in expected)
+    except (OSError, sqlite3.Error, ValueError, yaml.YAMLError):
+        return False
+
+
+def _expected_projection_files_in(connection: sqlite3.Connection) -> tuple[Path, ...]:
+    expected = {
+        Path("index.md"),
+        Path("concept/index.md"),
+        Path("entity/index.md"),
+        Path("generated/index.md"),
+        Path("generated/concept/index.md"),
+        Path("generated/entity/index.md"),
+        Path("log.md"),
+    }
+    expected.update(
+        Path(str(row[1])) / f"{row[0]}.md"
+        for row in connection.execute(
+            """
+            SELECT page_id, kind FROM knowledge_pages
+            WHERE current_revision_id IS NOT NULL
+                AND lifecycle_state IN ('stable', 'deprecated')
+            """
+        ).fetchall()
+    )
+    expected.update(
+        Path("generated") / str(row[1]) / f"{row[0]}.md"
+        for row in connection.execute(
+            """
+            SELECT items.item_key, items.kind
+            FROM knowledge_generation_state AS state
+            JOIN knowledge_generation_items AS items
+                ON items.generation_id = state.current_generation_id
+            WHERE state.singleton = 1
+            """
+        ).fetchall()
+    )
+    return tuple(sorted(expected))
+
+
 def stage_okf_projection_in(connection: sqlite3.Connection, kb_dir: Path) -> Path:
     """Render one transactional SQLite view into a hidden complete bundle."""
     staging_root = desktop_state_dir(kb_dir) / "okf-projection-staging"

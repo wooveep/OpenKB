@@ -17,6 +17,7 @@ import type {
 } from "./contracts-import-observability"
 import type {
   DesktopModelConnectionTest,
+  DesktopSaveAndVerifyModelConfiguration,
   DesktopModelSettings,
   DesktopModelSettingsDraft,
 } from "./model-settings-contracts"
@@ -28,11 +29,25 @@ import type {
   DesktopRetrievalPlan,
   DesktopRetrievalTrace,
 } from "./contracts-retrieval"
+import type {
+  DesktopKnowledgeAdoptionDecision,
+  DesktopKnowledgeAdoptionResult,
+  DesktopKnowledgePage,
+  DesktopKnowledgePageDeletion,
+  DesktopKnowledgePageKind,
+  DesktopKnowledgePages,
+  DesktopKnowledgeSourceCandidate,
+  DesktopKnowledgeWorkspace,
+  DesktopKnowledgeWorkspaceHistory,
+  DesktopKnowledgeWorkspaceItem,
+  DesktopKnowledgeWorkspaceItemRequest,
+} from "./knowledge-page-contracts"
 export type * from "./knowledge-reanalysis-contracts"
 export type * from "./model-call-lifecycle-contracts"
 export type * from "./contracts-import-observability"
 export type * from "./model-settings-contracts"
 export type * from "./contracts-retrieval"
+export type * from "./knowledge-page-contracts"
 
 export const DESKTOP_BRIDGE_PROTOCOL_VERSION = 1
 
@@ -307,7 +322,9 @@ export interface DesktopPageTreeEnrichmentControlResult {
 export interface DesktopKnowledgeGraphExtractionTask {
   documentId: string
   documentName: string
-  status: "pending" | "running" | "failed" | "completed"
+  status: "pending" | "running" | "failed" | "completed" | "completed_empty"
+  nodeCount: number
+  edgeCount: number
   reason: string
   provider: string
   model: string
@@ -396,98 +413,6 @@ export interface DesktopGlobalSearchResult {
 export interface DesktopGlobalSearchResults {
   query: string
   results: DesktopGlobalSearchResult[]
-}
-
-export type DesktopKnowledgePageKind = "concept" | "entity"
-export type DesktopKnowledgePagePublicationState = "draft" | "unpublished_changes" | "published"
-export type DesktopKnowledgeLifecycleState = "draft" | "stable" | "deprecated"
-export type DesktopKnowledgeProvenanceState = "source_backed" | "structural" | "legacy_unmapped" | "unsourced" | "invalid"
-export type DesktopKnowledgeVerificationState = "unverified" | "human_reviewed"
-export type DesktopKnowledgeVerificationReason =
-  | "publish_required"
-  | "working_draft_not_verifiable"
-  | "not_verified"
-  | "revision_changed"
-  | "publication_gate_blocked"
-  | "legacy_unmapped_not_verifiable"
-  | "deprecated_not_verifiable"
-  | "lifecycle_changed"
-
-export interface DesktopKnowledgeVerificationStatus {
-  state: DesktopKnowledgeVerificationState
-  canVerify: boolean
-  reason: DesktopKnowledgeVerificationReason | null
-  actor: string | null
-  verifiedAt: string | null
-  revisionId: string | null
-}
-
-export interface DesktopKnowledgePageSummary {
-  pageId: string
-  kind: DesktopKnowledgePageKind
-  title: string
-  publicationState: DesktopKnowledgePagePublicationState
-  publishedRevisionNumber: number | null
-  updatedAt: string
-  lifecycleState: DesktopKnowledgeLifecycleState
-  staleAfter: string | null
-  isStale: boolean
-}
-
-export interface DesktopKnowledgeSourceCandidate {
-  evidenceId: string
-  documentId: string
-  documentName: string
-  section: string
-  locator: Record<string, unknown>
-  excerpt: string
-}
-
-export interface DesktopKnowledgeSourceMapEntry extends DesktopKnowledgeSourceCandidate {
-  sourceId: string
-  claimText: string
-  availability: "available" | "unavailable"
-}
-
-export interface DesktopKnowledgePublicationDiagnostic {
-  code: string
-  message: string
-  sourceId: string
-}
-
-export interface DesktopKnowledgePublishedRevision {
-  revisionNumber: number
-  title: string
-  contentMarkdown: string
-  publishedAt: string
-  provenanceState: DesktopKnowledgeProvenanceState
-  sourceMap: DesktopKnowledgeSourceMapEntry[]
-}
-
-export interface DesktopKnowledgeWorkingDraft {
-  title: string
-  contentMarkdown: string
-  updatedAt: string
-  provenanceState: DesktopKnowledgeProvenanceState
-  sourceMap: DesktopKnowledgeSourceMapEntry[]
-}
-
-export interface DesktopKnowledgePage extends DesktopKnowledgePageSummary {
-  materializedPath: string
-  publishedRevision: DesktopKnowledgePublishedRevision | null
-  workingDraft: DesktopKnowledgeWorkingDraft | null
-  verification: DesktopKnowledgeVerificationStatus
-  publicationDiagnostics: DesktopKnowledgePublicationDiagnostic[]
-}
-
-export interface DesktopKnowledgePages {
-  pages: DesktopKnowledgePageSummary[]
-  selectedPageId: string | null
-}
-
-export interface DesktopKnowledgePageDeletion {
-  pageId: string
-  deleted: boolean
 }
 
 export type DesktopDocumentVersionCandidateDecision = "link_to_candidate" | "keep_separate"
@@ -664,6 +589,10 @@ export interface DesktopBridge {
     settings: DesktopModelSettingsDraft,
     requestId: string,
   ): Promise<DesktopModelSettings>
+  saveAndVerifyModelSettings(
+    settings: DesktopModelSettingsDraft,
+    requestId: string,
+  ): Promise<DesktopSaveAndVerifyModelConfiguration>
   testModelConnection(
     settings: DesktopModelSettingsDraft,
     requestId: string,
@@ -711,6 +640,19 @@ export interface DesktopBridge {
   askConversation(conversationId: string, question: string, requestId: string): Promise<DesktopConversation>
   regenerateConversationAnswer(conversationId: string, assistantMessageId: string, requestId: string): Promise<DesktopConversation>
   selectAnswerVersion(conversationId: string, assistantMessageId: string, answerVersionId: string, requestId: string): Promise<DesktopConversation>
+  knowledgeWorkspace(query?: string): Promise<DesktopKnowledgeWorkspace>
+  getKnowledgeWorkspaceItem(
+    item: DesktopKnowledgeWorkspaceItemRequest,
+  ): Promise<DesktopKnowledgeWorkspaceItem>
+  knowledgeWorkspaceHistory(generationId?: number): Promise<DesktopKnowledgeWorkspaceHistory>
+  adoptKnowledgeItem(
+    generationId: number,
+    itemKey: string,
+    adoptionRequestId: string,
+    requestId: string,
+    decision?: DesktopKnowledgeAdoptionDecision,
+    candidatePageId?: string,
+  ): Promise<DesktopKnowledgeAdoptionResult>
   knowledgePages(): Promise<DesktopKnowledgePages>
   getKnowledgePage(pageId: string): Promise<DesktopKnowledgePage>
   saveKnowledgePage(

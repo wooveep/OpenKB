@@ -8,6 +8,7 @@ mod desktop_knowledge_reanalysis_commands;
 mod desktop_logging;
 mod desktop_logging_config;
 mod desktop_missing_source_commands;
+mod desktop_model_settings_commands;
 mod desktop_runtime;
 mod engine_protocol;
 mod engine_wire;
@@ -20,11 +21,13 @@ use desktop_diagnostic_commands::{
     desktop_reveal_sensitive_trace_directory, desktop_stop_sensitive_trace,
 };
 use desktop_knowledge_page_commands::{
-    desktop_bind_knowledge_page_source, desktop_deprecate_knowledge_page,
-    desktop_export_knowledge_bundle, desktop_get_knowledge_page, desktop_knowledge_pages,
-    desktop_permanently_delete_knowledge_page, desktop_publish_knowledge_page,
-    desktop_restore_knowledge_page, desktop_save_knowledge_page, desktop_search_knowledge_sources,
-    desktop_set_knowledge_page_stale_after, desktop_verify_knowledge_page,
+    desktop_adopt_knowledge_item, desktop_bind_knowledge_page_source,
+    desktop_deprecate_knowledge_page, desktop_export_knowledge_bundle, desktop_get_knowledge_page,
+    desktop_get_knowledge_workspace_item, desktop_knowledge_pages, desktop_knowledge_workspace,
+    desktop_knowledge_workspace_history, desktop_permanently_delete_knowledge_page,
+    desktop_publish_knowledge_page, desktop_restore_knowledge_page, desktop_save_knowledge_page,
+    desktop_search_knowledge_sources, desktop_set_knowledge_page_stale_after,
+    desktop_verify_knowledge_page,
 };
 use desktop_knowledge_reanalysis_commands::{
     desktop_knowledge_reanalysis, desktop_retry_knowledge_reanalysis,
@@ -34,6 +37,10 @@ use desktop_missing_source_commands::{
     desktop_bind_missing_source_candidate, desktop_dismiss_missing_source_candidates,
     desktop_missing_source_candidates,
 };
+use desktop_model_settings_commands::{
+    desktop_model_settings, desktop_save_and_verify_model_settings, desktop_save_model_settings,
+    desktop_test_model_connection,
+};
 use desktop_runtime::DesktopRuntimeState;
 use engine_protocol::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
@@ -42,8 +49,8 @@ use engine_protocol::{
     GroundedAnswersResult, ImportControlResult, ImportJobsResult, ImportSourceInspection,
     KnowledgeBaseActivationResult, KnowledgeGraphExtractionControlResult,
     KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
-    KnowledgeReconciliationDecision, ModelConnectionTest, ModelSettings, ModelSettingsDraft,
-    PageTreeEnrichmentControlResult, RawDocument, RecoveryOverride, TextDocumentImportResult,
+    KnowledgeReconciliationDecision, PageTreeEnrichmentControlResult, RawDocument,
+    RecoveryOverride, TextDocumentImportResult,
 };
 use process_tree::ProcessTreeJob;
 use std::{path::Path, sync::Arc};
@@ -403,46 +410,6 @@ async fn desktop_select_answer_version(
     .map_err(desktop_join_error!("answer version selection"))?
 }
 
-#[tauri::command]
-async fn desktop_model_settings(
-    state: State<'_, DesktopState>,
-) -> Result<ModelSettings, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.model_settings())
-        .await
-        .map_err(|error| BridgeError {
-            code: "desktop_command_failed".to_owned(),
-            message: format!("Desktop model-settings lookup stopped unexpectedly: {error}"),
-        })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_save_model_settings(
-    state: State<'_, DesktopState>,
-    settings: ModelSettingsDraft,
-    request_id: String,
-) -> Result<ModelSettings, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.save_model_settings(settings, request_id))
-        .await
-        .map_err(|error| BridgeError {
-            code: "desktop_command_failed".to_owned(),
-            message: format!("Desktop model-settings save stopped unexpectedly: {error}"),
-        })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_test_model_connection(
-    state: State<'_, DesktopState>,
-    settings: ModelSettingsDraft,
-    request_id: String,
-) -> Result<ModelConnectionTest, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.test_model_connection(settings, request_id))
-        .await
-        .map_err(desktop_join_error!("model connection test"))?
-}
-
 #[tauri::command(rename_all = "camelCase")]
 async fn desktop_export_diagnostic_bundle(
     state: State<'_, DesktopState>,
@@ -747,11 +714,16 @@ fn main() {
             desktop_select_answer_version,
             desktop_model_settings,
             desktop_save_model_settings,
+            desktop_save_and_verify_model_settings,
             desktop_test_model_connection,
             desktop_export_diagnostic_bundle,
             desktop_knowledge_reanalysis,
             desktop_start_knowledge_reanalysis,
             desktop_retry_knowledge_reanalysis,
+            desktop_knowledge_workspace,
+            desktop_get_knowledge_workspace_item,
+            desktop_knowledge_workspace_history,
+            desktop_adopt_knowledge_item,
             desktop_knowledge_pages,
             desktop_get_knowledge_page,
             desktop_save_knowledge_page,

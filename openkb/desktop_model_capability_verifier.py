@@ -36,12 +36,14 @@ class DesktopModelCapabilityVerificationError(RuntimeError):
         reason: str,
         *,
         failure_event_id: str | None = None,
+        attempt_count: int = 0,
     ) -> None:
         super().__init__(reason)
         self.role = role
         self.code = code
         self.reason = reason
         self.failure_event_id = failure_event_id
+        self.attempt_count = attempt_count
 
 
 @dataclass(frozen=True)
@@ -90,12 +92,21 @@ def verify_model_capability(
     if profile is not None:
         store.begin(profile)
     result: DesktopModelResult | None = None
+    observed_attempts = 0
+
+    def observe(event: Any) -> None:
+        nonlocal observed_attempts
+        attempt = getattr(event, "attempt", 0)
+        if isinstance(attempt, int):
+            observed_attempts = max(observed_attempts, attempt)
+        on_event(event)
+
     try:
         if role == "answer":
             invoke = getattr(gateway, "stream")
             result = invoke(
                 request,
-                on_event=on_event,
+                on_event=observe,
                 on_delta=lambda _attempt, _delta: None,
                 is_cancelled=is_cancelled,
             )
@@ -103,7 +114,7 @@ def verify_model_capability(
             invoke = getattr(gateway, "analyze")
             result = invoke(
                 request,
-                on_event=on_event,
+                on_event=observe,
                 is_cancelled=is_cancelled,
             )
         assert result is not None
@@ -115,6 +126,7 @@ def verify_model_capability(
             role,
             "request_cancelled",
             f"{role.title()} Model Capability Check was cancelled.",
+            attempt_count=observed_attempts,
         ) from error
     except DesktopModelCallError as error:
         if profile is not None:
@@ -128,6 +140,7 @@ def verify_model_capability(
             error.failure.code,
             error.failure.reason,
             failure_event_id=error.failure_event_id,
+            attempt_count=max(observed_attempts, error.attempt_count),
         ) from error
     except ValueError as error:
         reason = str(error)
@@ -154,6 +167,7 @@ def verify_model_capability(
             "model_capability_check_failed",
             reason,
             failure_event_id=failure_event_id,
+            attempt_count=max(observed_attempts, result.attempt_count if result else 0),
         ) from error
     assert result is not None
     complete_model_result(result)

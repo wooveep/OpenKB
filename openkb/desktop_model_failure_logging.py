@@ -139,6 +139,10 @@ def own_terminal_model_failure(
         },
         observations={
             "operation": request.operation,
+            "capability_identity": request.capability_identity,
+            "prompt_contract_digest": request.prompt_contract_digest,
+            "parent_operation": request.parent_operation,
+            "parent_prompt_contract_digest": request.parent_prompt_contract_digest,
             "provider": context.provider_name,
             "model": context.model_name,
             "adapter": request.provider_adapter,
@@ -211,6 +215,10 @@ def result_diagnostic_context(
 ) -> dict[str, object]:
     return {
         "operation": request.operation,
+        "capability_identity": request.capability_identity,
+        "prompt_contract_digest": request.prompt_contract_digest,
+        "parent_operation": request.parent_operation,
+        "parent_prompt_contract_digest": request.parent_prompt_contract_digest,
         "provider": provider,
         "model": model,
         "adapter": request.provider_adapter,

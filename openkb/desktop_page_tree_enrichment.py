@@ -16,10 +16,23 @@ from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
     DesktopModelGateway,
+    DesktopModelRequest,
     gateway_analysis_capability_verified,
-    invalidate_analysis_capability,
 )
-from openkb.desktop_model_result_failure import invalidate_structured_model_result
+from openkb.desktop_model_result_failure import (
+    DesktopModelOperationSuspendedError,
+    authorize_model_operation_retry,
+    mark_structured_output_operations_ready,
+    model_operation_dispatch_possible,
+    require_model_operation_dispatch,
+    revoke_model_operation_retry_scope,
+    suspend_analysis_operation_failure,
+    suspend_structured_model_operation,
+)
+from openkb.desktop_page_tree_enrichment_contract import (
+    page_tree_enrichment_request_in,
+    parse_page_tree_enrichment_summaries,
+)
 from openkb.desktop_page_tree_enrichment_control import (
     INTERRUPTED_CODE as _INTERRUPTED_CODE,
 )
@@ -39,15 +52,9 @@ from openkb.desktop_structured_output import (
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
-PAGE_TREE_ENRICHMENT_SCHEMA = "openkb.page-tree-enrichment.v1"
 _PAGE_TREE_ENRICHMENT_CONTRACT = prompt_contract_for("page_tree_enrichment")
 PAGE_TREE_ENRICHMENT_PROMPT_DIGEST = _PAGE_TREE_ENRICHMENT_CONTRACT.digest
 
-_MAX_INPUT_NODES = 96
-_MAX_INPUT_CHARS = 24_000
-_MAX_EVIDENCE_PER_NODE = 2
-_MAX_EVIDENCE_CHARS = 320
-_MAX_SUMMARY_CHARS = 600
 _FAILED_CODE = "page_tree_enrichment_failed"
 _UNAVAILABLE_CODE = "source_document_unavailable"
 _UNAVAILABLE_REASON = "The source document is no longer Available."
@@ -68,6 +75,7 @@ class _EnrichmentClaim:
     execution_token: str
     request_content: str
     node_ids: frozenset[str]
+    retry_scope: str | None
 
 
 class DesktopPageTreeEnrichmentService:
@@ -149,7 +157,7 @@ class DesktopPageTreeEnrichmentService:
 
     def retry_document(self, document_id: str, gateway: DesktopModelGateway) -> bool:
         """Make one interrupted or failed optional task runnable after explicit user action."""
-        return retry_document_in(
+        accepted = retry_document_in(
             self.state_dir,
             self.database_path,
             document_id,
@@ -157,6 +165,15 @@ class DesktopPageTreeEnrichmentService:
             model=gateway.model_name,
             prompt_digest=PAGE_TREE_ENRICHMENT_PROMPT_DIGEST,
         )
+        if accepted:
+            for operation in ("page_tree_enrichment", "structured_output_repair"):
+                authorize_model_operation_retry(
+                    self.kb_dir,
+                    gateway,
+                    operation=operation,
+                    retry_scope=_retry_scope(document_id),
+                )
+        return accepted
 
     def pending_document_ids(self, gateway: DesktopModelGateway) -> tuple[str, ...]:
         with kb_ingest_lock(self.state_dir):
@@ -179,7 +196,7 @@ class DesktopPageTreeEnrichmentService:
                     )
                     rows = connection.execute(
                         """
-                        SELECT tasks.document_id
+                        SELECT tasks.document_id, tasks.reason
                         FROM document_page_tree_enrichment_tasks AS tasks
                         JOIN source_documents AS documents
                             ON documents.document_id = tasks.document_id
@@ -187,7 +204,8 @@ class DesktopPageTreeEnrichmentService:
                             AND tasks.model = ? AND tasks.prompt_digest = ?
                             AND tasks.error_code IS NULL
                             AND documents.availability = 'available'
-                        ORDER BY tasks.updated_at, tasks.document_id LIMIT 50
+                        ORDER BY CASE WHEN tasks.reason = 'explicit_retry' THEN 0 ELSE 1 END,
+                            tasks.updated_at, tasks.document_id LIMIT 50
                         """,
                         (
                             gateway.provider_name,
@@ -195,9 +213,21 @@ class DesktopPageTreeEnrichmentService:
                             PAGE_TREE_ENRICHMENT_PROMPT_DIGEST,
                         ),
                     ).fetchall()
-                    return tuple(str(row[0]) for row in rows)
+                    documents = tuple((str(row[0]), str(row[1])) for row in rows)
             finally:
                 connection.close()
+        return tuple(
+            document_id
+            for document_id, reason in documents
+            if model_operation_dispatch_possible(
+                self.kb_dir,
+                gateway,
+                operation="page_tree_enrichment",
+                retry_scope=(
+                    _retry_scope(document_id) if reason == "explicit_retry" else None
+                ),
+            )
+        )
 
     def deterministic_work_active(self) -> bool:
         connection = self._connect()
@@ -227,21 +257,55 @@ class DesktopPageTreeEnrichmentService:
             return False
         if should_stop():
             self._interrupt(claim)
+            if claim.retry_scope is not None:
+                revoke_model_operation_retry_scope(self.kb_dir, claim.retry_scope)
+            return False
+        if not model_operation_dispatch_possible(
+            self.kb_dir,
+            gateway,
+            operation="page_tree_enrichment",
+            retry_scope=claim.retry_scope,
+        ):
+            self._interrupt(claim)
+            if claim.retry_scope is not None:
+                revoke_model_operation_retry_scope(self.kb_dir, claim.retry_scope)
             return False
         try:
+
+            def invoke(request: DesktopModelRequest):
+                if claim.retry_scope is not None:
+                    authorize_model_operation_retry(
+                        self.kb_dir,
+                        gateway,
+                        operation=request.operation,
+                        retry_scope=claim.retry_scope,
+                        capability_identity=request.capability_identity,
+                        prompt_contract_digest=request.prompt_contract_digest,
+                    )
+                require_model_operation_dispatch(
+                    self.kb_dir,
+                    gateway,
+                    request,
+                    retry_scope=claim.retry_scope,
+                )
+                return gateway.analyze(
+                    request,
+                    on_event=lambda event: self._record_attempt(claim, event),
+                    is_cancelled=should_stop,
+                )
+
             output = run_structured_output(
                 operation="page_tree_enrichment",
                 document_name=claim.document_name,
                 source_material=claim.request_content,
-                invoke=lambda request: gateway.analyze(
-                    request,
-                    on_event=lambda event: self._record_attempt(claim, event),
-                    is_cancelled=should_stop,
+                invoke=invoke,
+                validate=lambda content: parse_page_tree_enrichment_summaries(
+                    content, claim.node_ids
                 ),
-                validate=lambda content: _parse_summaries(content, claim.node_ids),
             )
             result = output.result
             summaries = output.value
+            mark_structured_output_operations_ready(self.kb_dir, gateway, output)
             if should_stop():
                 self._interrupt(claim)
                 return False
@@ -256,17 +320,29 @@ class DesktopPageTreeEnrichmentService:
             return published
         except DesktopModelCancelledError:
             self._interrupt(claim)
+        except DesktopModelOperationSuspendedError:
+            self._interrupt(claim)
         except DesktopModelCallError as error:
-            invalidate_analysis_capability(gateway, error.failure.code, error.failure.reason)
+            suspend_analysis_operation_failure(self.kb_dir, gateway, error)
             self._fail(claim, error.failure.code, error.failure.reason)
         except DesktopStructuredOutputInvalidError as error:
-            invalidate_structured_model_result(gateway, error)
+            suspend_structured_model_operation(
+                self.kb_dir,
+                gateway,
+                error,
+                operation="page_tree_enrichment",
+                failure_code=_INVALID_RESPONSE_CODE,
+                reason=_INVALID_RESPONSE_REASON,
+            )
             self._fail(claim, _INVALID_RESPONSE_CODE, _INVALID_RESPONSE_REASON)
         except (json.JSONDecodeError, TypeError, ValueError):
             self._fail(claim, _INVALID_RESPONSE_CODE, _INVALID_RESPONSE_REASON)
         except Exception:
             logger.exception("PageTree enrichment failed for %s", claim.document_id)
             self._fail(claim, _FAILED_CODE, "PageTree enrichment could not be completed.")
+        finally:
+            if claim.retry_scope is not None:
+                revoke_model_operation_retry_scope(self.kb_dir, claim.retry_scope)
         return False
 
     def _claim(self, document_id: str, gateway: DesktopModelGateway) -> _EnrichmentClaim | None:
@@ -277,7 +353,7 @@ class DesktopPageTreeEnrichmentService:
                 row = connection.execute(
                     """
                     SELECT tasks.base_generation_id, tasks.provider, tasks.model,
-                        tasks.prompt_digest, documents.display_name
+                        tasks.prompt_digest, documents.display_name, tasks.reason
                     FROM document_page_tree_enrichment_tasks AS tasks
                     JOIN source_documents AS documents
                         ON documents.document_id = tasks.document_id
@@ -305,7 +381,7 @@ class DesktopPageTreeEnrichmentService:
                     connection.rollback()
                     return None
                 base_generation_id = str(row[0])
-                request_content, node_ids = _request_content_in(
+                request_content, node_ids = page_tree_enrichment_request_in(
                     connection, base_generation_id, str(row[4])
                 )
                 token = uuid.uuid4().hex
@@ -345,6 +421,9 @@ class DesktopPageTreeEnrichmentService:
                     execution_token=token,
                     request_content=request_content,
                     node_ids=node_ids,
+                    retry_scope=(
+                        _retry_scope(document_id) if str(row[5]) == "explicit_retry" else None
+                    ),
                 )
             except BaseException:
                 connection.rollback()
@@ -590,110 +669,6 @@ def active_page_tree_summaries_in(
     return {str(node_id): str(summary) for node_id, summary in rows}
 
 
-def _request_content_in(
-    connection: sqlite3.Connection,
-    base_generation_id: str,
-    document_name: str,
-) -> tuple[str, frozenset[str]]:
-    rows = connection.execute(
-        """
-        SELECT node_id, parent_node_id, node_order, depth, kind, title
-        FROM document_page_tree_nodes
-        WHERE generation_id = ? ORDER BY node_order LIMIT ?
-        """,
-        (base_generation_id, _MAX_INPUT_NODES),
-    ).fetchall()
-    if not rows:
-        raise ValueError("PageTree enrichment requires a deterministic tree.")
-    evidence_rows = connection.execute(
-        """
-        SELECT bindings.node_id, refs.evidence_id, refs.text
-        FROM document_page_tree_node_evidence AS bindings
-        JOIN evidence_refs AS refs ON refs.evidence_id = bindings.evidence_id
-        WHERE bindings.generation_id = ?
-        ORDER BY bindings.node_id, bindings.association_order
-        """,
-        (base_generation_id,),
-    ).fetchall()
-    evidence_by_node: dict[str, list[dict[str, str]]] = {}
-    for node_id, evidence_id, text in evidence_rows:
-        values = evidence_by_node.setdefault(str(node_id), [])
-        if len(values) < _MAX_EVIDENCE_PER_NODE:
-            values.append(
-                {
-                    "evidence_id": str(evidence_id),
-                    "excerpt": str(text)[:_MAX_EVIDENCE_CHARS],
-                }
-            )
-    nodes: list[dict[str, object]] = []
-    remaining = _MAX_INPUT_CHARS
-    for row in rows:
-        node_id = str(row[0])
-        value: dict[str, object] = {
-            "node_id": node_id,
-            "parent_node_id": str(row[1]) if row[1] is not None else None,
-            "order": int(row[2]),
-            "depth": int(row[3]),
-            "kind": str(row[4]),
-            "title": str(row[5]),
-            "evidence": evidence_by_node.get(node_id, []),
-        }
-        size = len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
-        if nodes and size > remaining:
-            break
-        nodes.append(value)
-        remaining -= size
-    payload = {
-        "schema_version": PAGE_TREE_ENRICHMENT_SCHEMA,
-        "document_name": document_name,
-        "nodes": nodes,
-    }
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")), frozenset(
-        str(node["node_id"]) for node in nodes
-    )
-
-
-def _parse_summaries(content: str, allowed_node_ids: frozenset[str]) -> tuple[tuple[str, str], ...]:
-    payload = json.loads(_json_object_text(content))
-    if not isinstance(payload, dict) or set(payload) != {"schema_version", "summaries"}:
-        raise ValueError("PageTree enrichment returned an unsupported response shape.")
-    if payload.get("schema_version") != PAGE_TREE_ENRICHMENT_SCHEMA:
-        raise ValueError("PageTree enrichment returned an unsupported schema version.")
-    values = payload.get("summaries")
-    if not isinstance(values, list) or len(values) > len(allowed_node_ids):
-        raise ValueError("PageTree enrichment summaries are invalid.")
-    summaries: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for value in values:
-        if not isinstance(value, dict) or set(value) != {"node_id", "summary"}:
-            raise ValueError("PageTree enrichment summary is invalid.")
-        node_id = value.get("node_id")
-        summary = value.get("summary")
-        if not isinstance(node_id, str) or node_id not in allowed_node_ids or node_id in seen:
-            raise ValueError("PageTree enrichment node identity is invalid.")
-        if not isinstance(summary, str):
-            raise ValueError("PageTree enrichment summary text is invalid.")
-        normalized = " ".join(summary.split())
-        if not normalized or len(normalized) > _MAX_SUMMARY_CHARS:
-            raise ValueError("PageTree enrichment summary text is invalid.")
-        seen.add(node_id)
-        summaries.append((node_id, normalized))
-    return tuple(summaries)
-
-
-def _json_object_text(content: str) -> str:
-    stripped = content.strip()
-    if stripped.startswith("```") and stripped.endswith("```"):
-        first_newline = stripped.find("\n")
-        if first_newline >= 0:
-            stripped = stripped[first_newline + 1 : -3].strip()
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError("PageTree enrichment did not return JSON.")
-    return stripped[start : end + 1]
-
-
 def _queue_target_in(
     connection: sqlite3.Connection,
     document_id: str,
@@ -797,3 +772,7 @@ def _queue_reason(
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _retry_scope(document_id: str) -> str:
+    return f"page_tree_enrichment:{document_id}"
