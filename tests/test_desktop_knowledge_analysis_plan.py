@@ -17,6 +17,7 @@ from openkb.desktop_knowledge_analysis import (
     KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
     parse_knowledge_analysis,
 )
+from openkb.desktop_knowledge_analysis_batch_planning import knowledge_analysis_merge_prompt
 from openkb.desktop_knowledge_analysis_batches import (
     deterministic_merge_knowledge,
     estimate_knowledge_analysis_batch_tokens,
@@ -275,13 +276,38 @@ def test_analysis_execution_profile_reserves_final_json_before_reasoning(
     assert profile.adapter_identity == "deepseek"
     assert profile.adapter_version == "deepseek.v1"
     assert profile.structured_output_mode == "json_object"
-    assert profile.final_output_reserve_tokens == 8_192
-    assert profile.reasoning_allowance_tokens == int(8_192 * allowance_multiplier)
+    assert profile.final_output_reserve_tokens == 4_096
+    assert profile.reasoning_allowance_tokens == int(4_096 * allowance_multiplier)
     assert profile.provider_output_ceiling_tokens == (
         profile.final_output_reserve_tokens + profile.reasoning_allowance_tokens
     )
     assert profile.document_input_budget_tokens <= 12_000
     assert profile.identity == profile.identity
+
+
+def test_small_deepseek_context_keeps_room_for_final_description_merge() -> None:
+    capability = DesktopModelCapabilityProfile(
+        context_capacity=10_240,
+        document_input_capacity=10_240,
+        supports_native_json_schema=False,
+        supports_streaming=True,
+        supports_reasoning=True,
+    )
+    profile = build_analysis_execution_profile(
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        capability=capability,
+        reasoning_effort="off",
+    )
+
+    prompt = knowledge_analysis_merge_prompt(
+        "OCloudView安装手册_V10.3.docx",
+        ("甲" * 616, "乙" * 606, "丙" * 221),
+        node_id="merge:2:0",
+        input_budget_tokens=profile.document_input_budget_tokens,
+    )
+
+    assert estimate_model_tokens(prompt) <= profile.document_input_budget_tokens
 
 
 def test_analysis_execution_profile_fails_before_dispatch_when_minimum_batch_cannot_fit() -> None:
@@ -442,6 +468,50 @@ def test_exact_knowledge_is_deduplicated_before_description_merge() -> None:
         "evidence-1",
         "evidence-2",
     )
+
+
+def test_deterministic_merge_uses_validator_identity_across_entity_subtypes() -> None:
+    def analysis(subtype: str, evidence_id: str, claim: str):
+        return parse_knowledge_analysis(
+            json.dumps(
+                {
+                    "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+                    "analysis_scope": "batch",
+                    "document_description": "Batch description.",
+                    "concepts": [],
+                    "entities": [
+                        {
+                            "title": "OpenKB",
+                            "subtype": subtype,
+                            "aliases": [],
+                            "tags": [],
+                            "claims": [
+                                {
+                                    "text": claim,
+                                    "source_evidence_ids": [evidence_id],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            expected_scope="batch",
+        )
+
+    merged = deterministic_merge_knowledge(
+        (
+            analysis("Product", "evidence-1", "OpenKB is a desktop product."),
+            analysis("Software", "evidence-2", "OpenKB imports documents."),
+        )
+    )
+
+    assert len(merged.entities) == 1
+    assert merged.entities[0].subtype == "product"
+    assert tuple(claim.source_evidence_ids for claim in merged.entities[0].claims) == (
+        ("evidence-1",),
+        ("evidence-2",),
+    )
+    assert parse_knowledge_analysis(json.dumps(merged.as_dict())) == merged
 
 
 def test_completed_hierarchical_merge_nodes_are_reused_on_recovery(tmp_path) -> None:

@@ -134,8 +134,12 @@ class DesktopKnowledgeAnalysis:
             body: list[str] = []
             for claim in resolved_claims:
                 markers: list[str] = []
+                canonical_evidence_ids: set[str] = set()
                 for evidence_id in claim.source_evidence_ids:
                     canonical_evidence_id = evidence_id_map[evidence_id]
+                    if canonical_evidence_id in canonical_evidence_ids:
+                        continue
+                    canonical_evidence_ids.add(canonical_evidence_id)
                     source_id = stable_source_id(canonical_evidence_id)
                     sources.append(
                         KnowledgeGenerationSource(

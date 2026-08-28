@@ -60,30 +60,7 @@ def dispatch_model_settings_request(
             return _settings_payload(kb_dir, read_desktop_model_settings(kb_dir))
         if request.method == "workbench.save_model_settings":
             server._begin_workspace_mutation(request, cancel_event)
-            previous = read_desktop_model_settings(kb_dir)
-            try:
-                settings = save_desktop_model_settings(
-                    kb_dir,
-                    provider=request.params.get("provider"),
-                    model=request.params.get("model"),
-                    api_base_url=request.params.get("api_base_url"),
-                    api_key=request.params.get("api_key"),
-                    max_concurrent_model_calls=request.params.get(
-                        "max_concurrent_model_calls"
-                    ),
-                    requests_per_minute=request.params.get("requests_per_minute"),
-                    tokens_per_minute=request.params.get("tokens_per_minute"),
-                    **_role_settings_params(request.params),
-                )
-            except DesktopModelSettingsError as error:
-                raise DesktopRequestError(error.code, str(error)) from error
-            _retire_optional_gateways_if_analysis_settings_changed(
-                server,
-                kb_dir,
-                previous=previous,
-                current=settings,
-            )
-            _invalidate_changed_profile(kb_dir, previous, settings)
+            settings = _save_request_model_settings(server, kb_dir, request.params)
             return _settings_payload(kb_dir, settings)
         if request.method == "workbench.save_and_verify_model_settings":
             if request.params.get("verification_cost_accepted") is not True:
@@ -92,30 +69,7 @@ def dispatch_model_settings_request(
                     "Confirm that Model Capability Checks may incur provider cost "
                     "before continuing.",
                 )
-            previous = read_desktop_model_settings(kb_dir)
-            try:
-                settings = save_desktop_model_settings(
-                    kb_dir,
-                    provider=request.params.get("provider"),
-                    model=request.params.get("model"),
-                    api_base_url=request.params.get("api_base_url"),
-                    api_key=request.params.get("api_key"),
-                    max_concurrent_model_calls=request.params.get(
-                        "max_concurrent_model_calls"
-                    ),
-                    requests_per_minute=request.params.get("requests_per_minute"),
-                    tokens_per_minute=request.params.get("tokens_per_minute"),
-                    **_role_settings_params(request.params),
-                )
-            except DesktopModelSettingsError as error:
-                raise DesktopRequestError(error.code, str(error)) from error
-            _retire_optional_gateways_if_analysis_settings_changed(
-                server,
-                kb_dir,
-                previous=previous,
-                current=settings,
-            )
-            _invalidate_changed_profile(kb_dir, previous, settings)
+            settings = _save_request_model_settings(server, kb_dir, request.params)
             return _verify_saved_settings(
                 server,
                 request,
@@ -130,9 +84,7 @@ def dispatch_model_settings_request(
                     model=request.params.get("model"),
                     api_base_url=request.params.get("api_base_url"),
                     api_key=request.params.get("api_key"),
-                    max_concurrent_model_calls=request.params.get(
-                        "max_concurrent_model_calls"
-                    ),
+                    max_concurrent_model_calls=request.params.get("max_concurrent_model_calls"),
                     requests_per_minute=request.params.get("requests_per_minute"),
                     tokens_per_minute=request.params.get("tokens_per_minute"),
                     **_role_settings_params(request.params),
@@ -229,6 +181,39 @@ def dispatch_model_settings_request(
     raise DesktopRequestError(
         "method_not_found", f"Unknown model-settings method: {request.method}"
     )
+
+
+def _save_request_model_settings(
+    server: DesktopEngineServer,
+    kb_dir: Path,
+    params: dict[str, object],
+) -> DesktopModelSettings:
+    """Persist one request and apply the shared gateway/profile transition exactly once."""
+    from openkb.desktop_engine import DesktopRequestError
+
+    previous = read_desktop_model_settings(kb_dir)
+    try:
+        settings = save_desktop_model_settings(
+            kb_dir,
+            provider=params.get("provider"),
+            model=params.get("model"),
+            api_base_url=params.get("api_base_url"),
+            api_key=params.get("api_key"),
+            max_concurrent_model_calls=params.get("max_concurrent_model_calls"),
+            requests_per_minute=params.get("requests_per_minute"),
+            tokens_per_minute=params.get("tokens_per_minute"),
+            **_role_settings_params(params),
+        )
+    except DesktopModelSettingsError as error:
+        raise DesktopRequestError(error.code, str(error)) from error
+    _retire_optional_gateways_if_analysis_settings_changed(
+        server,
+        kb_dir,
+        previous=previous,
+        current=settings,
+    )
+    _invalidate_changed_profile(kb_dir, previous, settings)
+    return settings
 
 
 def _verify_saved_settings(

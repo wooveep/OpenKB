@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 import traceback
@@ -181,10 +182,15 @@ def sanitize_event_fields(fields: Mapping[str, object] | None) -> dict[str, obje
 
 
 def _sanitized_stack(record: logging.LogRecord) -> tuple[str | None, list[dict[str, object]]]:
-    if record.exc_info is None:
+    exc_info = record.exc_info
+    if exc_info is True:
+        exc_info = sys.exc_info()
+    elif isinstance(exc_info, BaseException):
+        exc_info = (type(exc_info), exc_info, exc_info.__traceback__)
+    if not isinstance(exc_info, tuple) or len(exc_info) != 3:
         return None, []
-    error_type = record.exc_info[0].__name__ if record.exc_info[0] is not None else None
-    frames = traceback.extract_tb(record.exc_info[2]) if record.exc_info[2] else []
+    error_type = exc_info[0].__name__ if exc_info[0] is not None else None
+    frames = traceback.extract_tb(exc_info[2]) if exc_info[2] else []
     return error_type, [
         {
             "module": Path(frame.filename).stem[:128],

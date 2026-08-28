@@ -79,8 +79,6 @@ _CANDIDATE_SCHEMA: dict[str, object] = {
     "required": ["title", "aliases", "tags", "claims"],
     "additionalProperties": False,
 }
-
-
 def _knowledge_schema(scope: str) -> dict[str, object]:
     return {
         "type": "object",
@@ -212,7 +210,7 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
         "Resolve only listed semantic conflicts, do not introduce facts, claims, or Evidence "
         "links, keep document_description within 2,000 characters, and return only the required "
         "JSON object.",
-        version=3,
+        version=4,
         output_schema={
             "type": "object",
             "properties": {"document_description": {"type": "string"}},
@@ -221,7 +219,7 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
         },
         input_shape={"type": "validated_descriptions_and_conflicts", "evidence_bound": True},
         validation_rules=("description_only", "no_new_knowledge_fields"),
-        token_budget_policy={"reserve_output_tokens": 8_192, "document_input_share": 0.5},
+        token_budget_policy={"reserve_output_tokens": 4_096, "document_input_share": 0.5},
     ),
     "page_tree_enrichment": _contract(
         "page_tree_enrichment",

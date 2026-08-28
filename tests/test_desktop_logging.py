@@ -11,6 +11,7 @@ import pytest
 
 from openkb.desktop_failure_context import failure_kind_for_code
 from openkb.desktop_import_logging import ImportStageDiagnostics
+from openkb.desktop_log_handler import DiagnosticJsonFormatter
 from openkb.desktop_logging import (
     TRACE_LEVEL,
     configure_desktop_engine_logging,
@@ -265,6 +266,37 @@ def test_json_log_includes_only_sanitized_traceback_frames(tmp_path: Path) -> No
         "test_json_log_includes_only_sanitized_traceback_frames"
     )
     assert "filename" not in serialized
+
+
+def test_json_formatter_normalizes_boolean_exc_info_from_frozen_runtime() -> None:
+    settings = settings_from_environment(
+        {
+            "OPENKB_LOG_LEVEL": "WARN",
+            "OPENKB_RUNTIME_SESSION_ID": "session-frozen-stack",
+        }
+    )
+    formatter = DiagnosticJsonFormatter(settings)
+
+    try:
+        raise RuntimeError("FROZEN-EXCEPTION-MESSAGE-SENTINEL")
+    except RuntimeError:
+        record = logging.LogRecord(
+            name="openkb.test_logging",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="runtime_failed",
+            args=(),
+            exc_info=True,  # type: ignore[arg-type]
+        )
+        payload = json.loads(formatter.format(record))
+
+    serialized = json.dumps(payload)
+    assert payload["error_type"] == "RuntimeError"
+    assert payload["stack"][-1]["function"] == (
+        "test_json_formatter_normalizes_boolean_exc_info_from_frozen_runtime"
+    )
+    assert "FROZEN-EXCEPTION-MESSAGE-SENTINEL" not in serialized
 
 
 def test_configure_migrates_plaintext_log_before_writing_json(tmp_path: Path) -> None:

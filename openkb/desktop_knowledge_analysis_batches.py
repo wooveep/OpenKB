@@ -576,14 +576,13 @@ def deterministic_merge_knowledge(
 ) -> DesktopKnowledgeAnalysis:
     """Normalize and deduplicate exact knowledge without asking a model to reproduce it."""
     accumulators: dict[
-        tuple[str, str, str | None],
+        tuple[str, str],
         dict[str, object],
     ] = {}
     for analysis in analyses:
         for candidate in (*analysis.concepts, *analysis.entities):
             normalized_title = normalize_knowledge_title(candidate.title)[1]
-            subtype = _normalized_text(candidate.subtype) if candidate.subtype else None
-            key = (candidate.kind, normalized_title, subtype)
+            key = (candidate.kind, normalized_title)
             current = accumulators.setdefault(
                 key,
                 {
@@ -603,9 +602,10 @@ def deterministic_merge_knowledge(
                 _extend_unique(claim_state[1], claim.source_evidence_ids)
     concepts: list[KnowledgeAnalysisCandidate] = []
     entities: list[KnowledgeAnalysisCandidate] = []
-    for (kind, _title, subtype), current in accumulators.items():
+    for (kind, _title), current in accumulators.items():
         original = current["candidate"]
         assert isinstance(original, KnowledgeAnalysisCandidate)
+        subtype = _normalized_text(original.subtype) if original.subtype else None
         claims = current["claims"]
         assert isinstance(claims, dict)
         merged = KnowledgeAnalysisCandidate(
