@@ -57,13 +57,14 @@ def test_knowledge_analysis_contract_bounds_structured_output_size() -> None:
     assert "within 2,000 characters" in instructions
 
 
-def test_changed_knowledge_analysis_prompts_are_version_three() -> None:
-    for operation in (
-        "knowledge_analysis",
-        "knowledge_analysis_batch",
-        "knowledge_analysis_merge",
-    ):
-        assert prompt_contract_for(operation).version == f"openkb.prompt.{operation}.v3"
+def test_changed_knowledge_analysis_prompt_versions_are_pinned() -> None:
+    expected_versions = {
+        "knowledge_analysis": 3,
+        "knowledge_analysis_batch": 3,
+        "knowledge_analysis_merge": 4,
+    }
+    for operation, version in expected_versions.items():
+        assert prompt_contract_for(operation).version == f"openkb.prompt.{operation}.v{version}"
 
 
 def test_every_structured_contract_has_a_canonical_schema_valid_json_example() -> None:

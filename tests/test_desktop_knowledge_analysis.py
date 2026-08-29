@@ -93,6 +93,30 @@ def test_duplicate_claim_merges_sources_without_treating_order_as_identity() -> 
     assert claim.source_evidence_ids == ("evidence-one", "evidence-two")
 
 
+def test_incoming_change_deduplicates_sources_after_canonical_d2_mapping() -> None:
+    payload = json.loads(_analysis_response(("evidence-one", "evidence-two")))
+    payload["concepts"][0]["claims"] = [
+        {
+            "text": "Both prompt references resolve to one canonical source.",
+            "source_evidence_ids": ["evidence-one", "evidence-two"],
+        }
+    ]
+    payload["entities"] = []
+    analysis = parse_knowledge_analysis(json.dumps(payload))
+
+    [change] = analysis.incoming_changes(
+        {
+            "evidence-one": "canonical-evidence",
+            "evidence-two": "canonical-evidence",
+        },
+        analysis_provenance_json="{}",
+    )
+
+    assert len(change.sources) == 1
+    assert change.sources[0].evidence_id == "canonical-evidence"
+    assert change.content_markdown.count(f"[^{change.sources[0].source_id}]") == 1
+
+
 def test_structured_analysis_publishes_source_backed_unverified_knowledge(
     tmp_path: Path,
 ) -> None:

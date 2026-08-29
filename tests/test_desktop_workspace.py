@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -385,6 +386,11 @@ def test_operation_state_migration_leaves_ambiguous_graph_invalidation_unverifie
         reasoning_effort="high",
         api_base_url=settings.api_base_url,
     )
+    unknown_verified_legacy = replace(
+        unknown_legacy,
+        prompt_contract_digest="verified-unknown-analysis-contract",
+        generation_policy_digest="verified-unknown-generation-policy",
+    )
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
         _drop_post_v44_schema(connection)
@@ -408,16 +414,33 @@ def test_operation_state_migration_leaves_ambiguous_graph_invalidation_unverifie
             INSERT OR REPLACE INTO model_capability_checks (
                 profile_identity, profile_json, status, failure_code, reason,
                 checked_at, created_at, updated_at
+            ) VALUES (?, ?, 'verified', NULL, NULL, ?, ?, ?)
+            """,
+            (
+                unknown_verified_legacy.identity,
+                json.dumps(
+                    unknown_verified_legacy.as_dict(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "2026-08-27T10:00:00+00:00",
+                "2026-08-27T10:00:00+00:00",
+                "2026-08-27T10:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO model_capability_checks (
+                profile_identity, profile_json, status, failure_code, reason,
+                checked_at, created_at, updated_at
             ) VALUES (?, ?, 'unchecked', 'model_response_invalid', ?, NULL, ?, ?)
             """,
             (
                 unknown_legacy.identity,
-                json.dumps(
-                    unknown_legacy.as_dict(), sort_keys=True, separators=(",", ":")
-                ),
+                json.dumps(unknown_legacy.as_dict(), sort_keys=True, separators=(",", ":")),
                 "Unknown legacy invalidation.",
                 "2026-08-27T10:00:00+00:00",
-                "2026-08-27T12:00:00+00:00",
+                "2026-08-27T11:00:00+00:00",
             ),
         )
         connection.execute(
@@ -440,15 +463,139 @@ def test_operation_state_migration_leaves_ambiguous_graph_invalidation_unverifie
         prompt_contract_digest=prompt_contract_for("knowledge_graph_extraction").digest,
     )
     assert capability.status == "unchecked"
-    assert DesktopModelCapabilityStore(kb_dir).state(
-        unknown_legacy.capability_evidence_profile
-    ).status == "unchecked"
+    assert (
+        DesktopModelCapabilityStore(kb_dir).state(unknown_legacy.capability_evidence_profile).status
+        == "unchecked"
+    )
     assert operation.status == "unverified"
     assert operation.failure_stage is None
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute(
+        decisions = connection.execute(
             "SELECT decision FROM model_capability_compatibility_audit ORDER BY decision"
-        ).fetchall() == [("left_unverified",), ("left_unverified",)]
+        ).fetchall()
+        assert decisions == [
+            ("carried_verified",),
+            ("left_unverified",),
+            ("left_unverified",),
+        ]
+
+
+def test_operation_state_migration_restores_only_proven_graph_local_invalidation(
+    tmp_path,
+) -> None:
+    kb_dir = tmp_path / "proven-legacy-graph-invalidation"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    settings = validate_desktop_model_settings(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        analysis_model="deepseek-v4-pro",
+        api_base_url="https://api.deepseek.com",
+        api_key="test-key",
+        max_concurrent_model_calls=1,
+        analysis_reasoning="off",
+    )
+    current = build_analysis_execution_profile(
+        provider=settings.provider,
+        model=settings.analysis_model_name,
+        capability=settings.capability_for_role("analysis"),
+        reasoning_effort="off",
+        api_base_url=settings.api_base_url,
+    )
+    verified_legacy = replace(
+        current,
+        prompt_contract_digest="verified-legacy-analysis-contract",
+        generation_policy_digest="verified-legacy-generation-policy",
+    )
+    invalidated_legacy = replace(
+        current,
+        prompt_contract_digest="invalidated-legacy-analysis-contract",
+        generation_policy_digest="invalidated-legacy-generation-policy",
+    )
+    assert (
+        verified_legacy.capability_evidence_profile.identity
+        == invalidated_legacy.capability_evidence_profile.identity
+    )
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        _drop_post_v44_schema(connection)
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO model_capability_checks (
+                profile_identity, profile_json, status, failure_code, reason,
+                checked_at, created_at, updated_at
+            ) VALUES (?, ?, 'verified', NULL, NULL, ?, ?, ?)
+            """,
+            (
+                verified_legacy.identity,
+                json.dumps(verified_legacy.as_dict(), sort_keys=True, separators=(",", ":")),
+                "2026-08-27T10:00:00+00:00",
+                "2026-08-27T10:00:00+00:00",
+                "2026-08-27T10:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO model_capability_checks (
+                profile_identity, profile_json, status, failure_code, reason,
+                checked_at, created_at, updated_at
+            ) VALUES (?, ?, 'unchecked', 'model_response_invalid', ?, NULL, ?, ?)
+            """,
+            (
+                invalidated_legacy.identity,
+                json.dumps(invalidated_legacy.as_dict(), sort_keys=True, separators=(",", ":")),
+                "Knowledge Graph response was invalid.",
+                "2026-08-27T10:30:00+00:00",
+                "2026-08-27T11:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_graph_diagnostics (
+                diagnostic_id, phase, error_code, document_id, created_at
+            ) VALUES ('proven-graph-failure', 'extraction',
+                'knowledge_graph_response_invalid', NULL, '2026-08-27T11:00:00+00:00')
+            """
+        )
+        connection.commit()
+
+    DesktopKnowledgeBaseRuntime().open(kb_dir)
+
+    shared = current.capability_evidence_profile
+    capability = DesktopModelCapabilityStore(kb_dir).state(shared)
+    migrated_operation = DesktopModelOperationContractStore(kb_dir).state(
+        operation="knowledge_graph_extraction",
+        capability_identity=shared.identity,
+        prompt_contract_digest=invalidated_legacy.prompt_contract_digest,
+    )
+    current_operation = DesktopModelOperationContractStore(kb_dir).state(
+        operation="knowledge_graph_extraction",
+        capability_identity=shared.identity,
+        prompt_contract_digest=prompt_contract_for("knowledge_graph_extraction").digest,
+    )
+    assert capability.status == "verified"
+    assert capability.checked_at == "2026-08-27T10:00:00+00:00"
+    assert migrated_operation.status == "suspended"
+    assert migrated_operation.failure_code == "knowledge_graph_response_invalid"
+    assert migrated_operation.failure_stage == "domain_validation"
+    assert current_operation.status == "unverified"
+    with sqlite3.connect(database_path) as connection:
+        audit = connection.execute(
+            """
+            SELECT decision, evidence_json
+            FROM model_capability_compatibility_audit
+            ORDER BY migrated_at, legacy_profile_identity
+            """
+        ).fetchall()
+        assert sorted(str(row[0]) for row in audit) == [
+            "carried_verified",
+            "restored_graph_local",
+        ]
+        restored_evidence = next(
+            json.loads(str(row[1])) for row in audit if str(row[0]) == "restored_graph_local"
+        )
+        assert restored_evidence["successful_profile_identity"] == verified_legacy.identity
+        assert restored_evidence["graph_diagnostic_id"] == "proven-graph-failure"
+        assert restored_evidence["provider_called"] is False
 
 
 def test_open_repairs_partial_preledger_result_observation_migration(tmp_path) -> None:
