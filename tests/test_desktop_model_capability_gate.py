@@ -200,11 +200,14 @@ def test_explicit_retry_round_is_scoped_and_keeps_suspension_until_a_terminal_re
         operation="retrieval_plan",
         retry_scope="answer:one",
     )
-    assert store.state(
-        operation="retrieval_plan",
-        capability_identity=shared.identity,
-        prompt_contract_digest=digest,
-    ).status == "suspended"
+    assert (
+        store.state(
+            operation="retrieval_plan",
+            capability_identity=shared.identity,
+            prompt_contract_digest=digest,
+        ).status
+        == "suspended"
+    )
     assert not model_operation_dispatch_allowed(
         kb_dir,
         gateway,
@@ -217,6 +220,7 @@ def test_explicit_retry_round_is_scoped_and_keeps_suspension_until_a_terminal_re
         operation="retrieval_plan",
         retry_scope="answer:one",
     )
+
     def join_retry_round(_worker: int) -> bool:
         return model_operation_dispatch_allowed(
             kb_dir,
@@ -277,11 +281,14 @@ def test_new_contract_state_resolves_old_uncertain_signature_for_corroboration(
     )
 
     assert independent == 1
-    assert store.state(
-        operation="retrieval_plan",
-        capability_identity=shared.identity,
-        prompt_contract_digest="old-retrieval-digest",
-    ).failure_signature is None
+    assert (
+        store.state(
+            operation="retrieval_plan",
+            capability_identity=shared.identity,
+            prompt_contract_digest="old-retrieval-digest",
+        ).failure_signature
+        is None
+    )
 
 
 def test_terminal_result_clears_only_the_exact_contract_retry_round(tmp_path) -> None:
@@ -649,16 +656,22 @@ def test_recovery_marks_the_actual_analysis_contract_ready_after_settings_change
         "knowledge_analysis",
     ]
     store = DesktopModelOperationContractStore(kb_dir)
-    assert store.state(
-        operation="knowledge_analysis",
-        capability_identity=original_profile.capability_evidence_profile.identity,
-        prompt_contract_digest=prompt_contract_for("knowledge_analysis").digest,
-    ).status == "suspended"
-    assert store.state(
-        operation="knowledge_analysis",
-        capability_identity=changed_profile.capability_evidence_profile.identity,
-        prompt_contract_digest=prompt_contract_for("knowledge_analysis").digest,
-    ).status == "ready"
+    assert (
+        store.state(
+            operation="knowledge_analysis",
+            capability_identity=original_profile.capability_evidence_profile.identity,
+            prompt_contract_digest=prompt_contract_for("knowledge_analysis").digest,
+        ).status
+        == "suspended"
+    )
+    assert (
+        store.state(
+            operation="knowledge_analysis",
+            capability_identity=changed_profile.capability_evidence_profile.identity,
+            prompt_contract_digest=prompt_contract_for("knowledge_analysis").digest,
+        ).status
+        == "ready"
+    )
 
 
 @pytest.mark.parametrize(
@@ -709,9 +722,7 @@ def test_retrieval_plan_result_failure_suspends_only_its_operation(
     capability_store = DesktopModelCapabilityStore(kb_dir)
     capability_store.mark_verified(profile)
 
-    result = build_retrieval_plan(
-        "What evidence is available?", gateway, kb_dir=kb_dir
-    )
+    result = build_retrieval_plan("What evidence is available?", gateway, kb_dir=kb_dir)
 
     assert result.degradations == ("retrieval_plan_fallback",)
     usage = DesktopModelUsageStore(kb_dir).records()
@@ -725,12 +736,8 @@ def test_retrieval_plan_result_failure_suspends_only_its_operation(
             "retrieval_plan",
             "structured_output_repair",
         ]
-        assert {record["lifecycle_status"] for record in failed} == {
-            "model_result_failure"
-        }
-        assert {record["failure_code"] for record in failed} == {
-            "model_response_invalid"
-        }
+        assert {record["lifecycle_status"] for record in failed} == {"model_result_failure"}
+        assert {record["failure_code"] for record in failed} == {"model_response_invalid"}
     state = capability_store.state(profile)
     assert state.status == "verified"
     operation_state = DesktopModelOperationContractStore(kb_dir).state(
@@ -742,9 +749,7 @@ def test_retrieval_plan_result_failure_suspends_only_its_operation(
     assert operation_state.failure_code == failure_code
     usage_count = len(DesktopModelUsageStore(kb_dir).records())
 
-    blocked = build_retrieval_plan(
-        "What evidence is available?", gateway, kb_dir=kb_dir
-    )
+    blocked = build_retrieval_plan("What evidence is available?", gateway, kb_dir=kb_dir)
 
     assert blocked.degradations == ("retrieval_plan_suspended",)
     assert len(DesktopModelUsageStore(kb_dir).records()) == usage_count
@@ -814,16 +819,22 @@ def test_explicit_retry_with_valid_repair_marks_parent_and_bound_repair_ready(
     assert repaired.degradations == ()
     assert repair_digests[0] == repair_digests[1]
     store = DesktopModelOperationContractStore(kb_dir)
-    assert store.state(
-        operation="retrieval_plan",
-        capability_identity=profile.capability_evidence_profile.identity,
-        prompt_contract_digest=prompt_contract_for("retrieval_plan").digest,
-    ).status == "ready"
-    assert store.state(
-        operation="structured_output_repair",
-        capability_identity=profile.capability_evidence_profile.identity,
-        prompt_contract_digest=repair_digests[0],
-    ).status == "ready"
+    assert (
+        store.state(
+            operation="retrieval_plan",
+            capability_identity=profile.capability_evidence_profile.identity,
+            prompt_contract_digest=prompt_contract_for("retrieval_plan").digest,
+        ).status
+        == "ready"
+    )
+    assert (
+        store.state(
+            operation="structured_output_repair",
+            capability_identity=profile.capability_evidence_profile.identity,
+            prompt_contract_digest=repair_digests[0],
+        ).status
+        == "ready"
+    )
 
     normal = build_retrieval_plan("What does Atlas use?", gateway, kb_dir=kb_dir)
     assert normal.degradations == ()
@@ -868,9 +879,7 @@ def test_confirmed_authentication_failure_invalidates_shared_analysis_role(
     store = DesktopModelCapabilityStore(kb_dir)
     store.mark_verified(profile)
 
-    result = build_retrieval_plan(
-        "What evidence is available?", gateway, kb_dir=kb_dir
-    )
+    result = build_retrieval_plan("What evidence is available?", gateway, kb_dir=kb_dir)
 
     assert result.degradations == ("retrieval_plan_fallback",)
     state = store.state(profile)

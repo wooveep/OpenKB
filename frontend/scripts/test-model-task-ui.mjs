@@ -95,6 +95,9 @@ try {
   const { runDocumentImportBatch } = await vite.ssrLoadModule(
     "/src/desktop/desktop-import-batch.ts",
   )
+  const { createLatestRefresh } = await vite.ssrLoadModule(
+    "/src/desktop/latest-refresh.ts",
+  )
   const { TauriKnowledgePageBridge } = await vite.ssrLoadModule(
     "/src/desktop/tauri-knowledge-page-bridge.ts",
   )
@@ -392,6 +395,44 @@ try {
     activeImports -= 1
   })
   assert.equal(peakImports, 4)
+
+  let activeRefreshLoads = 0
+  let peakRefreshLoads = 0
+  let refreshLoadNumber = 0
+  const releaseRefreshLoads = []
+  const committedRefreshes = []
+  const refresh = createLatestRefresh({
+    load: () => {
+      refreshLoadNumber += 1
+      activeRefreshLoads += 1
+      peakRefreshLoads = Math.max(peakRefreshLoads, activeRefreshLoads)
+      return new Promise((resolveLoad) => {
+        releaseRefreshLoads.push(() => {
+          activeRefreshLoads -= 1
+          resolveLoad(refreshLoadNumber)
+        })
+      })
+    },
+    commit: (value) => committedRefreshes.push(value),
+  })
+  refresh.request()
+  refresh.request()
+  refresh.request()
+  assert.equal(refreshLoadNumber, 1)
+  assert.equal(peakRefreshLoads, 1)
+  releaseRefreshLoads.shift()()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(refreshLoadNumber, 2)
+  assert.deepEqual(committedRefreshes, [])
+  releaseRefreshLoads.shift()()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(peakRefreshLoads, 1)
+  assert.deepEqual(committedRefreshes, [2])
+  refresh.dispose()
+  refresh.request()
+  assert.equal(refreshLoadNumber, 2)
   console.log("model task UI tests: OK")
 } finally {
   await vite.close()

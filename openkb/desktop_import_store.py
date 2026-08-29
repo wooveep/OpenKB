@@ -6,6 +6,7 @@ import json
 import logging
 import sqlite3
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -42,7 +43,7 @@ from openkb.desktop_page_tree_enrichment_tasks import page_tree_enrichment_tasks
 from openkb.desktop_page_tree_tasks import page_tree_rebuild_tasks_in
 from openkb.desktop_source_image_assets import write_source_images as write_source_image_files
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
-from openkb.locks import atomic_write_bytes, kb_ingest_lock
+from openkb.locks import atomic_write_bytes, kb_ingest_lock, kb_read_lock
 
 IMPORT_STAGES = tuple(
     "preflight raw_asset document_ir evidence deterministic_page_tree model_analysis search".split()
@@ -204,26 +205,25 @@ class DesktopImportStore:
 
     def list_import_jobs(self) -> dict[str, object]:
         self.require_database()
-        connection = self._connect()
-        try:
+        with kb_read_lock(self.state_dir), closing(self._connect()) as connection:
             rows = connection.execute(
                 """
-                SELECT import_jobs.job_id, COALESCE(import_job_runtime.status, import_jobs.status),
-                    import_jobs.progress, import_jobs.document_id, source_documents.document_id,
-                    source_documents.display_name, source_documents.source_format,
-                    source_documents.asset_sha256, source_documents.availability,
+                SELECT jobs.job_id, COALESCE(runtime.status, jobs.status),
+                    jobs.progress, jobs.document_id, sources.document_id,
+                    sources.display_name, sources.source_format,
+                    sources.asset_sha256, sources.availability,
                     (SELECT COUNT(*) FROM evidence_occurrences
                      WHERE evidence_occurrences.document_id = COALESCE(
-                         document_content_fingerprints.canonical_document_id,
-                         source_documents.document_id
+                         fingerprints.canonical_document_id,
+                         sources.document_id
                      )),
-                    import_jobs.source_path
-                FROM import_jobs
-                LEFT JOIN import_job_runtime ON import_job_runtime.job_id = import_jobs.job_id
-                LEFT JOIN source_documents ON source_documents.document_id = import_jobs.document_id
-                LEFT JOIN document_content_fingerprints
-                    ON document_content_fingerprints.document_id = source_documents.document_id
-                ORDER BY import_jobs.created_at DESC
+                    jobs.source_path
+                FROM import_jobs AS jobs
+                LEFT JOIN import_job_runtime AS runtime ON runtime.job_id = jobs.job_id
+                LEFT JOIN source_documents AS sources ON sources.document_id = jobs.document_id
+                LEFT JOIN document_content_fingerprints AS fingerprints
+                    ON fingerprints.document_id = sources.document_id
+                ORDER BY jobs.created_at DESC
                 """
             ).fetchall()
             tasks = tuple(task_from_row(connection, row, _STAGE_ORDER_SQL) for row in rows)
@@ -231,8 +231,6 @@ class DesktopImportStore:
             page_tree_enrichments = page_tree_enrichment_tasks_in(connection)
             knowledge_graph_extractions = knowledge_graph_extraction_tasks_in(connection)
             catalog_rebuild = catalog_rebuild_task_in(connection)
-        finally:
-            connection.close()
         return {
             "jobs": [task.as_dict() for task in tasks],
             "page_tree_rebuilds": page_tree_rebuilds,
@@ -781,6 +779,7 @@ class DesktopImportStore:
         connection = sqlite3.connect(self.database_path)
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
     def _emit_stage(
         self,
         job_id: str,

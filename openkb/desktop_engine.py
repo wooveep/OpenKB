@@ -33,15 +33,16 @@ from openkb.desktop_grounded_answer import DesktopGroundedAnswerService
 from openkb.desktop_import import (
     DesktopImportControl,
     DesktopImportError,
-    DesktopTextImportService,
 )
 from openkb.desktop_import_sources import inspect_import_sources
+from openkb.desktop_import_task_snapshots import DesktopImportTaskSnapshots
 from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageError
 from openkb.desktop_legacy_office_parsers import shutdown_legacy_office_runtime
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_model_transport import desktop_model_gateway_for
 from openkb.desktop_raw_assets import DesktopRawAssetService
+from openkb.desktop_request_workers import DesktopRequestWorkers
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
     DesktopKnowledgeBaseRuntime,
@@ -168,6 +169,8 @@ class DesktopEngineServer:
         self._workspace = workspace or DesktopKnowledgeBaseRuntime()
         self._workspace_transition = DesktopWorkspaceTransitionCoordinator(self._workspace)
         self._workspace_requests_lock = threading.RLock()
+        self._import_task_snapshots = DesktopImportTaskSnapshots()
+        self._request_workers = DesktopRequestWorkers()
         self._engine_version = engine_version or __version__
         self._model_gateway_factory = model_gateway_factory or desktop_model_gateway_for
         self._handshake_complete = False
@@ -240,15 +243,7 @@ class DesktopEngineServer:
             cancel_event = threading.Event()
             self._active_requests[request_key] = cancel_event
 
-        worker = threading.Thread(
-            target=self._run_request,
-            args=(request, cancel_event),
-            daemon=True,
-            name=f"openkb-engine-{request_key}",
-        )
-        with self._workers_lock:
-            self._workers.add(worker)
-        worker.start()
+        self._request_workers.submit(self._run_request, request, cancel_event)
 
     def _run_request(self, request: DesktopRequest, cancel_event: threading.Event | None) -> None:
         diagnostics = EngineRequestDiagnostics.begin(request.request_id, request.method)
@@ -294,9 +289,6 @@ class DesktopEngineServer:
                     self._active_requests.pop(request_key, None)
                     self._non_cancelable_mutations.discard(request_key)
             self._emit_event("engine.request_completed", completed_data)
-            current = threading.current_thread()
-            with self._workers_lock:
-                self._workers.discard(current)
 
     def _dispatch(
         self, request: DesktopRequest, cancel_event: threading.Event | None
@@ -379,7 +371,7 @@ class DesktopEngineServer:
             active = self._workspace.active()
             if active is None:
                 return {"jobs": []}
-            return DesktopTextImportService(Path(active.kb_dir)).list_import_jobs()
+            return self._import_task_snapshots.read(Path(active.kb_dir))
         if request.method == "workbench.read_raw_document":
             active = self._workspace.active()
             if active is None:
@@ -523,6 +515,7 @@ class DesktopEngineServer:
         )
 
     def _join_workers(self) -> None:
+        self._request_workers.close()
         while True:
             with self._workers_lock:
                 workers = tuple(self._workers)
@@ -626,9 +619,7 @@ def _recovery_override_param(request: DesktopRequest) -> DesktopRecoveryOverride
         value.get("checkAndRecover", False),
     )
     if type(check_and_recover) is not bool:
-        raise DesktopRequestError(
-            "invalid_params", "check_and_recover must be a boolean."
-        )
+        raise DesktopRequestError("invalid_params", "check_and_recover must be a boolean.")
     return DesktopRecoveryOverride(
         model=model_value.strip() if isinstance(model_value, str) else None,
         context_capacity=context_value,

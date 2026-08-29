@@ -28,6 +28,7 @@ import {
 } from "./DesktopWorkbenchShell"
 import { DesktopBridgeError } from "./contracts"
 import { runDocumentImportBatch } from "./desktop-import-batch"
+import { createLatestRefresh, type LatestRefresh } from "./latest-refresh"
 import { nextDesktopRequestId } from "./request-id"
 import { useDeferredImportSources } from "./useDeferredImportSources"
 import { useDesktopRuntimeEvents } from "./useDesktopRuntimeEvents"
@@ -135,6 +136,8 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
   const trayTipShown = useRef(false)
   const importInspectionRead = useRef(0)
   const addImportSourcesRef = useRef<(paths: string[]) => void>(() => undefined)
+  const importTaskRefresh = useRef<LatestRefresh | null>(null)
+  const activeKnowledgeBaseDirectory = knowledgeBase?.kbDir ?? null
   const knowledgeReanalysis = useKnowledgeReanalysis({ bridge, kbDir: knowledgeBase?.kbDir ?? null, engineReady })
 
   const refreshActiveKnowledgeBase = useCallback(async () => {
@@ -264,15 +267,15 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined
     let disposed = false
+    const refresh = createLatestRefresh({
+      load: () => bridge.importJobs(),
+      commit: ({ jobs }) => setImportTasks(jobs),
+    })
+    importTaskRefresh.current = refresh
     void bridge
       .subscribe((event) => {
-        if (event.kind === "import.stage_progress") {
-          void bridge
-            .importJobs()
-            .then(({ jobs }) => {
-              if (!disposed) setImportTasks(jobs)
-            })
-            .catch(() => undefined)
+        if (event.kind === "import.stage_progress" && activeKnowledgeBaseDirectory !== null) {
+          refresh.request()
         }
       })
       .then((remove) => {
@@ -285,9 +288,11 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
       .catch(() => undefined)
     return () => {
       disposed = true
+      refresh.dispose()
+      if (importTaskRefresh.current === refresh) importTaskRefresh.current = null
       unsubscribe?.()
     }
-  }, [bridge])
+  }, [activeKnowledgeBaseDirectory, bridge])
 
   const beginSelection = (mode: DialogMode) => {
     setDialogMode(mode)
@@ -495,11 +500,7 @@ export default function DesktopKnowledgeBaseWorkspace({ engineReady = true }: { 
         running: true,
       })
     })
-    try {
-      setImportTasks((await bridge.importJobs()).jobs)
-    } catch {
-      // The batch summary still reports document failures when task refresh is unavailable.
-    }
+    importTaskRefresh.current?.request()
     setImportBatchSummary({ total: batchTotal, completed, failures, running: false })
     setImportSources([])
     setExcludedImportSources([])
