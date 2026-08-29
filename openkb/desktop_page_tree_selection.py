@@ -24,8 +24,8 @@ from openkb.desktop_model_gateway import (
     gateway_analysis_capability_verified,
 )
 from openkb.desktop_model_result_failure import (
+    DesktopModelOperationCompletionAuthority,
     DesktopModelOperationSuspendedError,
-    authorize_model_operation_retry,
     mark_structured_output_operations_ready,
     model_operation_dispatch_possible,
     require_model_operation_dispatch,
@@ -133,15 +133,6 @@ def select_page_tree_evidence(
 
                 def invoke(request: DesktopModelRequest):
                     nonlocal attempts, response_characters
-                    if retry_scope is not None:
-                        authorize_model_operation_retry(
-                            kb_dir,
-                            model_gateway,
-                            operation=request.operation,
-                            retry_scope=retry_scope,
-                            capability_identity=request.capability_identity,
-                            prompt_contract_digest=request.prompt_contract_digest,
-                        )
                     require_model_operation_dispatch(
                         kb_dir,
                         model_gateway,
@@ -188,7 +179,14 @@ def select_page_tree_evidence(
                     validate=lambda content: _selected_nodes(content, trees),
                 )
                 selected = output.value
-                mark_structured_output_operations_ready(kb_dir, model_gateway, output)
+                mark_structured_output_operations_ready(
+                    kb_dir,
+                    model_gateway,
+                    output,
+                    authority=DesktopModelOperationCompletionAuthority.for_retry_scope(
+                        retry_scope
+                    ),
+                )
             except DesktopModelCancelledError:
                 return PageTreeSelectionResult(
                     generation_ids=generation_ids,

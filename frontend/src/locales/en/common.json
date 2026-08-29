@@ -786,13 +786,18 @@
         "description": "Optional evidence-bound graph records. Documents remain available if this task fails.",
         "attempts": "{{count}} attempts",
         "counts": "{{nodes}} nodes · {{edges}} edges",
+        "dispositions": "{{retained}} retained · {{weakened}} weakened · {{rejected}} rejected",
         "callIdentity": "Call {{callId}} · attempt {{attemptId}}",
         "cancel": "Cancel extraction",
         "resume": "Resume extraction",
         "retry": "Retry extraction",
         "actionRejected": "This Knowledge Graph task changed before the action was applied. Refresh and try again.",
         "cancelWarning": "OpenKB stopped its local wait and closes an active stream when possible. Provider-side cancellation cannot be guaranteed, so remote computation or billing may continue.",
-        "invalidRecovery": "Only this graph extraction contract is suspended; other verified capabilities remain available. Check the Analysis model and choose Retry extraction. A strict empty result is accepted when the document supports no relationship.",
+        "invalidRecovery": "OpenKB rejected an unsafe graph response for this document. The operation is suspended only if the same structural failure is confirmed on another document. Check the Analysis model and choose Retry extraction.",
+        "qualities": {
+          "full": "Full",
+          "degraded": "Degraded"
+        },
         "statuses": {
           "pending": "Pending",
           "running": "Running",

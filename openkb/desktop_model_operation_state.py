@@ -114,6 +114,55 @@ class DesktopModelOperationContractStore:
             failure_signature=None,
         )
 
+    def mark_ready_unless_suspended(
+        self,
+        *,
+        operation: str,
+        capability_identity: str,
+        prompt_contract_digest: str,
+    ) -> bool:
+        """Publish readiness without letting stale in-flight work clear a suspension."""
+        return (
+            self._write(
+                operation=operation,
+                capability_identity=capability_identity,
+                prompt_contract_digest=prompt_contract_digest,
+                status="ready",
+                failure_code=None,
+                reason=None,
+                failure_stage=None,
+                failure_signature=None,
+                preserve_suspension=True,
+            )
+            >= 0
+        )
+
+    def mark_ready_for_retry(
+        self,
+        *,
+        operation: str,
+        capability_identity: str,
+        prompt_contract_digest: str,
+        retry_scope: str,
+    ) -> bool:
+        """Clear only the suspension revision captured by this retry action."""
+        if not retry_scope:
+            raise ValueError("Model operation retry scope must not be empty.")
+        return (
+            self._write(
+                operation=operation,
+                capability_identity=capability_identity,
+                prompt_contract_digest=prompt_contract_digest,
+                status="ready",
+                failure_code=None,
+                reason=None,
+                failure_stage=None,
+                failure_signature=None,
+                retry_scope=retry_scope,
+            )
+            >= 0
+        )
+
     def mark_unverified(
         self,
         *,
@@ -144,40 +193,41 @@ class DesktopModelOperationContractStore:
         """Persist one scoped permit without changing the suspended contract state."""
         if not retry_scope:
             raise ValueError("Model operation retry scope must not be empty.")
-        now = datetime.now(timezone.utc).isoformat()
         with kb_ingest_lock(self._state_dir):
             connection = self._connect()
             try:
                 with connection:
-                    row = connection.execute(
-                        """
-                        SELECT status FROM model_operation_contract_states
-                        WHERE operation = ? AND capability_identity = ?
-                            AND prompt_contract_digest = ?
-                        """,
-                        (operation, capability_identity, prompt_contract_digest),
-                    ).fetchone()
-                    if row is None or str(row[0]) != "suspended":
-                        return False
-                    connection.execute(
-                        """
-                        INSERT INTO model_operation_retry_permits (
-                            operation, capability_identity, prompt_contract_digest,
-                            retry_scope, created_at
-                        ) VALUES (?, ?, ?, ?, ?)
-                        ON CONFLICT(
-                            operation, capability_identity, prompt_contract_digest, retry_scope
-                        ) DO UPDATE SET created_at = excluded.created_at
-                        """,
-                        (
-                            operation,
-                            capability_identity,
-                            prompt_contract_digest,
-                            retry_scope,
-                            now,
-                        ),
+                    return authorize_model_operation_retry_in(
+                        connection,
+                        operation=operation,
+                        capability_identity=capability_identity,
+                        prompt_contract_digest=prompt_contract_digest,
+                        retry_scope=retry_scope,
                     )
-                    return True
+            finally:
+                connection.close()
+
+    def authorize_retry_group(
+        self,
+        *,
+        retry_scope: str,
+        contracts: tuple[tuple[str, str, str], ...],
+    ) -> None:
+        """Bind every exact contract observed by one non-task user action."""
+        if not retry_scope:
+            raise ValueError("Model operation retry scope must not be empty.")
+        with kb_ingest_lock(self._state_dir):
+            connection = self._connect()
+            try:
+                with connection:
+                    for operation, capability_identity, prompt_contract_digest in contracts:
+                        authorize_model_operation_retry_in(
+                            connection,
+                            operation=operation,
+                            capability_identity=capability_identity,
+                            prompt_contract_digest=prompt_contract_digest,
+                            retry_scope=retry_scope,
+                        )
             finally:
                 connection.close()
 
@@ -195,7 +245,7 @@ class DesktopModelOperationContractStore:
             try:
                 row = connection.execute(
                     """
-                    SELECT status FROM model_operation_contract_states
+                    SELECT status, revision FROM model_operation_contract_states
                     WHERE operation = ? AND capability_identity = ?
                         AND prompt_contract_digest = ?
                     """,
@@ -210,12 +260,14 @@ class DesktopModelOperationContractStore:
                     SELECT 1 FROM model_operation_retry_permits
                     WHERE operation = ? AND capability_identity = ?
                         AND prompt_contract_digest = ? AND retry_scope = ?
+                        AND suspension_revision = ?
                     """,
                     (
                         operation,
                         capability_identity,
                         prompt_contract_digest,
                         retry_scope,
+                        int(row[1]),
                     ),
                 ).fetchone()
                 return permit is not None
@@ -237,7 +289,7 @@ class DesktopModelOperationContractStore:
                 with connection:
                     row = connection.execute(
                         """
-                        SELECT status FROM model_operation_contract_states
+                        SELECT status, revision FROM model_operation_contract_states
                         WHERE operation = ? AND capability_identity = ?
                             AND prompt_contract_digest = ?
                         """,
@@ -252,12 +304,14 @@ class DesktopModelOperationContractStore:
                         SELECT 1 FROM model_operation_retry_permits
                         WHERE operation = ? AND capability_identity = ?
                             AND prompt_contract_digest = ? AND retry_scope = ?
+                            AND suspension_revision = ?
                         """,
                         (
                             operation,
                             capability_identity,
                             prompt_contract_digest,
                             retry_scope,
+                            int(row[1]),
                         ),
                     ).fetchone()
                     return permit is not None
@@ -270,10 +324,7 @@ class DesktopModelOperationContractStore:
             connection = self._connect()
             try:
                 with connection:
-                    connection.execute(
-                        "DELETE FROM model_operation_retry_permits WHERE retry_scope = ?",
-                        (retry_scope,),
-                    )
+                    revoke_model_operation_retry_scope_in(connection, retry_scope)
             finally:
                 connection.close()
 
@@ -288,12 +339,45 @@ class DesktopModelOperationContractStore:
         reason: str | None,
         failure_stage: str | None,
         failure_signature: str | None,
+        preserve_suspension: bool = False,
+        retry_scope: str | None = None,
     ) -> int:
+        if preserve_suspension and retry_scope is not None:
+            raise ValueError("Retry-scoped readiness cannot also preserve every suspension.")
         now = datetime.now(timezone.utc).isoformat()
         with kb_ingest_lock(self._state_dir):
             connection = self._connect()
             try:
                 with connection:
+                    if preserve_suspension or retry_scope is not None:
+                        current = connection.execute(
+                            """
+                            SELECT status, revision FROM model_operation_contract_states
+                            WHERE operation = ? AND capability_identity = ?
+                                AND prompt_contract_digest = ?
+                            """,
+                            (operation, capability_identity, prompt_contract_digest),
+                        ).fetchone()
+                        if current is not None and str(current[0]) == "suspended":
+                            if preserve_suspension:
+                                return -1
+                            permit = connection.execute(
+                                """
+                                SELECT 1 FROM model_operation_retry_permits
+                                WHERE operation = ? AND capability_identity = ?
+                                    AND prompt_contract_digest = ? AND retry_scope = ?
+                                    AND suspension_revision = ?
+                                """,
+                                (
+                                    operation,
+                                    capability_identity,
+                                    prompt_contract_digest,
+                                    retry_scope,
+                                    int(current[1]),
+                                ),
+                            ).fetchone()
+                            if permit is None:
+                                return -1
                     connection.execute(
                         """
                         UPDATE model_operation_contract_states
@@ -304,21 +388,22 @@ class DesktopModelOperationContractStore:
                         """,
                         (operation, capability_identity, prompt_contract_digest),
                     )
-                    connection.execute(
-                        """
-                        DELETE FROM model_operation_retry_permits
-                        WHERE operation = ? AND capability_identity = ?
-                            AND prompt_contract_digest = ?
-                        """,
-                        (operation, capability_identity, prompt_contract_digest),
-                    )
+                    if status != "suspended":
+                        connection.execute(
+                            """
+                            DELETE FROM model_operation_retry_permits
+                            WHERE operation = ? AND capability_identity = ?
+                                AND prompt_contract_digest = ?
+                            """,
+                            (operation, capability_identity, prompt_contract_digest),
+                        )
                     connection.execute(
                         """
                         INSERT INTO model_operation_contract_states (
                             operation, capability_identity, prompt_contract_digest, status,
                             failure_code, reason, failure_stage, failure_signature,
-                            created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            created_at, updated_at, revision
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                         ON CONFLICT(operation, capability_identity, prompt_contract_digest)
                         DO UPDATE SET
                             status = excluded.status,
@@ -326,7 +411,8 @@ class DesktopModelOperationContractStore:
                             reason = excluded.reason,
                             failure_stage = excluded.failure_stage,
                             failure_signature = excluded.failure_signature,
-                            updated_at = excluded.updated_at
+                            updated_at = excluded.updated_at,
+                            revision = model_operation_contract_states.revision + 1
                         """,
                         (
                             operation,
@@ -378,6 +464,67 @@ class DesktopModelOperationContractStore:
         connection = sqlite3.connect(self._database_path)
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+
+def authorize_model_operation_retry_in(
+    connection: sqlite3.Connection,
+    *,
+    operation: str,
+    capability_identity: str,
+    prompt_contract_digest: str,
+    retry_scope: str,
+) -> bool:
+    """Bind one permit to the suspension revision in the caller's transaction."""
+    if not retry_scope:
+        raise ValueError("Model operation retry scope must not be empty.")
+    row = connection.execute(
+        """
+        SELECT status, revision FROM model_operation_contract_states
+        WHERE operation = ? AND capability_identity = ?
+            AND prompt_contract_digest = ?
+        """,
+        (operation, capability_identity, prompt_contract_digest),
+    ).fetchone()
+    if row is None or str(row[0]) != "suspended":
+        return False
+    connection.execute(
+        """
+        INSERT INTO model_operation_retry_permits (
+            operation, capability_identity, prompt_contract_digest,
+            retry_scope, created_at, suspension_revision
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(
+            operation, capability_identity, prompt_contract_digest, retry_scope
+        ) DO NOTHING
+        """,
+        (
+            operation,
+            capability_identity,
+            prompt_contract_digest,
+            retry_scope,
+            datetime.now(timezone.utc).isoformat(),
+            int(row[1]),
+        ),
+    )
+    permit = connection.execute(
+        """
+        SELECT suspension_revision FROM model_operation_retry_permits
+        WHERE operation = ? AND capability_identity = ?
+            AND prompt_contract_digest = ? AND retry_scope = ?
+        """,
+        (operation, capability_identity, prompt_contract_digest, retry_scope),
+    ).fetchone()
+    return permit is not None and int(permit[0]) == int(row[1])
+
+
+def revoke_model_operation_retry_scope_in(
+    connection: sqlite3.Connection, retry_scope: str
+) -> None:
+    """Revoke one action scope inside its owning task-state transaction."""
+    connection.execute(
+        "DELETE FROM model_operation_retry_permits WHERE retry_scope = ?",
+        (retry_scope,),
+    )
 
 
 def _status(value: str) -> ModelOperationContractStatus:

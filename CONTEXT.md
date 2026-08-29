@@ -697,18 +697,82 @@ lexical similarity, and optional bounded LLM judgment. A D3 candidate requires
 review and never merges entities automatically.
 _Avoid_: resolved entity
 
+**Knowledge Graph Candidate**:
+A proposed node or relationship extracted from model output that has not yet
+satisfied the Knowledge Graph's evidence and relationship constraints.
+_Avoid_: graph record, validated graph
+
 **Knowledge Graph**:
 An internal, evidence-backed relationship structure used to improve retrieval
 and Grounded Answers; it is not a first-release Desktop Workbench browsing
 surface.
 _Avoid_: graph view
 
+**Canonical Graph Relationship Type**:
+A code-owned stable relationship category used for graph storage and retrieval
+across model and provider variations.
+_Avoid_: Graph Relation Label, arbitrary predicate
+
+**Graph Relation Label**:
+A bounded source-facing relationship phrase retained from extraction without
+becoming the stable graph query category.
+_Avoid_: Canonical Graph Relationship Type
+
+**Graph Support Quote**:
+A bounded verbatim substring of one EvidenceRef used to prove that a Knowledge
+Graph Candidate is anchored in source text without proving its interpretation.
+_Avoid_: generated explanation, semantic verification
+
+**Graph Support Locator**:
+The EvidenceRef-relative character range derived from a locally validated Graph
+Support Quote so graph records can return to source without duplicating its text.
+_Avoid_: stored quote copy, document-global offset
+
 **Empty Knowledge Graph Result**:
-A successful Knowledge Graph extraction containing no evidence-backed nodes or
-edges. It publishes a `completed_empty` current graph generation that supersedes
-older relationships for the source and is reported as a normal zero-count
-success rather than a warning.
-_Avoid_: invalid graph response, failed extraction
+A successful Knowledge Graph extraction whose valid model result explicitly
+contains no candidates. It is not produced by rejecting every candidate from a
+nonempty invalid result.
+_Avoid_: invalid graph response, rejected candidate set, failed extraction
+
+**Degraded Knowledge Graph Result**:
+A completed Knowledge Graph extraction that publishes only its evidence-safe
+subset while explicitly reporting weakened or rejected candidates.
+_Avoid_: Empty Knowledge Graph Result, failed extraction, silent partial success
+
+**Knowledge Graph Result Quality**:
+The `full` or `degraded` assessment of a completed Knowledge Graph result,
+recorded independently from whether its extraction lifecycle completed or failed.
+_Avoid_: extraction status, diagnostic log level
+
+**Current Knowledge Graph Generation**:
+The immutable Knowledge Graph result selected for retrieval by compatibility and
+quality; a compatible full generation is not displaced by a degraded attempt.
+_Avoid_: latest extraction attempt, merged graph attempts
+
+**Legacy Evidence-bound Graph Record**:
+A migrated graph node or edge that retains its valid EvidenceRef but predates
+Graph Support Locator verification.
+_Avoid_: quote-verified record, automatically reanalysed record
+
+**Knowledge Graph Issue**:
+A source-content-free classification of one rejected, weakened, or fatal graph
+candidate condition, including its contract path and disposition.
+_Avoid_: model response excerpt, generic graph failure
+
+**Graph Verification State**:
+The locally derived `source_anchored`, `ambiguous`, or `legacy_evidence_bound`
+assessment of a retained graph record; model-reported confidence is not authoritative.
+_Avoid_: support score, provider confidence
+
+**Knowledge Graph Compatibility Key**:
+The Document Version and Evidence snapshot, canonical graph schema, normalizer,
+and verification-policy versions that determine whether a full generation may remain current.
+_Avoid_: provider identity, model identity, Evidence ID alone
+
+**Knowledge Graph Failure Signature**:
+A source-content-free structural failure identity used across independent documents
+to distinguish a shared operation-contract problem from one document's semantic failure.
+_Avoid_: exception text, source excerpt, single-document failure
 
 **Knowledge Workspace**:
 The unified browsing surface for Generated Knowledge Items and User Knowledge

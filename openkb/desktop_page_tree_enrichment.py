@@ -20,15 +20,16 @@ from openkb.desktop_model_gateway import (
     gateway_analysis_capability_verified,
 )
 from openkb.desktop_model_result_failure import (
+    DesktopModelOperationCompletionAuthority,
     DesktopModelOperationSuspendedError,
-    authorize_model_operation_retry,
     mark_structured_output_operations_ready,
     model_operation_dispatch_possible,
     require_model_operation_dispatch,
-    revoke_model_operation_retry_scope,
+    revoke_model_operation_retry_scope_in,
     suspend_analysis_operation_failure,
     suspend_structured_model_operation,
 )
+from openkb.desktop_page_tree_enrichment_actions import DesktopPageTreeEnrichmentActions
 from openkb.desktop_page_tree_enrichment_contract import (
     page_tree_enrichment_request_in,
     parse_page_tree_enrichment_summaries,
@@ -39,11 +40,7 @@ from openkb.desktop_page_tree_enrichment_control import (
 from openkb.desktop_page_tree_enrichment_control import (
     INTERRUPTED_REASON as _INTERRUPTED_REASON,
 )
-from openkb.desktop_page_tree_enrichment_control import (
-    recover_interrupted_in,
-    request_cancel_in,
-    retry_document_in,
-)
+from openkb.desktop_page_tree_enrichment_control import page_tree_enrichment_queue_reason
 from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
@@ -85,6 +82,10 @@ class DesktopPageTreeEnrichmentService:
         self.kb_dir = kb_dir.expanduser().resolve()
         self.state_dir = desktop_state_dir(self.kb_dir)
         self.database_path = desktop_state_database_path(self.kb_dir)
+        self._actions = DesktopPageTreeEnrichmentActions(
+            self.kb_dir,
+            prompt_digest=PAGE_TREE_ENRICHMENT_PROMPT_DIGEST,
+        )
 
     def queue_eligible(self, gateway: DesktopModelGateway, *, retry_failed: bool = False) -> int:
         """Queue Available current trees whose active overlay has a different identity."""
@@ -128,17 +129,28 @@ class DesktopPageTreeEnrichmentService:
                     )
                     document_id = str(row[0])
                     if current_target == target:
-                        _complete_repaired_task_in(connection, document_id, target, now)
+                        retry_scope = _complete_repaired_task_in(
+                            connection, document_id, target, now
+                        )
+                        if retry_scope is not None:
+                            revoke_model_operation_retry_scope_in(
+                                connection, retry_scope
+                            )
                         continue
-                    if _queue_target_in(
+                    task_queued, retry_scope = _queue_target_in(
                         connection,
                         document_id,
                         target,
-                        _queue_reason(current_target, target),
+                        page_tree_enrichment_queue_reason(current_target, target),
                         now,
                         retry_failed=retry_failed,
-                    ):
+                    )
+                    if task_queued:
                         queued += 1
+                        if retry_scope is not None:
+                            revoke_model_operation_retry_scope_in(
+                                connection, retry_scope
+                            )
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -149,31 +161,15 @@ class DesktopPageTreeEnrichmentService:
 
     def recover_interrupted(self) -> int:
         """Return process-owned running work to its durable pending state."""
-        return recover_interrupted_in(self.state_dir, self.database_path)
+        return self._actions.recover_interrupted()
 
     def request_cancel(self, document_id: str) -> bool:
         """Mark pending work interrupted; a running worker observes Engine cancellation."""
-        return request_cancel_in(self.state_dir, self.database_path, document_id)
+        return self._actions.request_cancel(document_id)
 
     def retry_document(self, document_id: str, gateway: DesktopModelGateway) -> bool:
         """Make one interrupted or failed optional task runnable after explicit user action."""
-        accepted = retry_document_in(
-            self.state_dir,
-            self.database_path,
-            document_id,
-            provider=gateway.provider_name,
-            model=gateway.model_name,
-            prompt_digest=PAGE_TREE_ENRICHMENT_PROMPT_DIGEST,
-        )
-        if accepted:
-            for operation in ("page_tree_enrichment", "structured_output_repair"):
-                authorize_model_operation_retry(
-                    self.kb_dir,
-                    gateway,
-                    operation=operation,
-                    retry_scope=_retry_scope(document_id),
-                )
-        return accepted
+        return self._actions.retry_document(document_id, gateway)
 
     def pending_document_ids(self, gateway: DesktopModelGateway) -> tuple[str, ...]:
         with kb_ingest_lock(self.state_dir):
@@ -181,11 +177,26 @@ class DesktopPageTreeEnrichmentService:
             try:
                 with connection:
                     now = _timestamp()
+                    unavailable_scopes = tuple(
+                        str(row[0])
+                        for row in connection.execute(
+                            """
+                            SELECT DISTINCT tasks.retry_scope
+                            FROM document_page_tree_enrichment_tasks AS tasks
+                            JOIN source_documents AS documents
+                                ON documents.document_id = tasks.document_id
+                            WHERE tasks.status IN ('pending', 'running')
+                                AND tasks.retry_scope IS NOT NULL
+                                AND documents.availability != 'available'
+                            """
+                        ).fetchall()
+                    )
                     connection.execute(
                         """
                         UPDATE document_page_tree_enrichment_tasks AS tasks
                         SET status = 'failed', execution_token = NULL, error_code = ?,
-                            error_reason = ?, updated_at = ?, completed_at = ?
+                            error_reason = ?, retry_scope = NULL,
+                            updated_at = ?, completed_at = ?
                         WHERE status IN ('pending', 'running') AND EXISTS (
                             SELECT 1 FROM source_documents AS documents
                             WHERE documents.document_id = tasks.document_id
@@ -194,9 +205,11 @@ class DesktopPageTreeEnrichmentService:
                         """,
                         (_UNAVAILABLE_CODE, _UNAVAILABLE_REASON, now, now),
                     )
+                    for retry_scope in unavailable_scopes:
+                        revoke_model_operation_retry_scope_in(connection, retry_scope)
                     rows = connection.execute(
                         """
-                        SELECT tasks.document_id, tasks.reason
+                        SELECT tasks.document_id, tasks.retry_scope
                         FROM document_page_tree_enrichment_tasks AS tasks
                         JOIN source_documents AS documents
                             ON documents.document_id = tasks.document_id
@@ -204,6 +217,8 @@ class DesktopPageTreeEnrichmentService:
                             AND tasks.model = ? AND tasks.prompt_digest = ?
                             AND tasks.error_code IS NULL
                             AND documents.availability = 'available'
+                            AND (tasks.reason != 'explicit_retry'
+                                OR tasks.retry_scope IS NOT NULL)
                         ORDER BY CASE WHEN tasks.reason = 'explicit_retry' THEN 0 ELSE 1 END,
                             tasks.updated_at, tasks.document_id LIMIT 50
                         """,
@@ -213,19 +228,20 @@ class DesktopPageTreeEnrichmentService:
                             PAGE_TREE_ENRICHMENT_PROMPT_DIGEST,
                         ),
                     ).fetchall()
-                    documents = tuple((str(row[0]), str(row[1])) for row in rows)
+                    documents = tuple(
+                        (str(row[0]), str(row[1]) if row[1] is not None else None)
+                        for row in rows
+                    )
             finally:
                 connection.close()
         return tuple(
             document_id
-            for document_id, reason in documents
+            for document_id, retry_scope in documents
             if model_operation_dispatch_possible(
                 self.kb_dir,
                 gateway,
                 operation="page_tree_enrichment",
-                retry_scope=(
-                    _retry_scope(document_id) if reason == "explicit_retry" else None
-                ),
+                retry_scope=retry_scope,
             )
         )
 
@@ -257,8 +273,6 @@ class DesktopPageTreeEnrichmentService:
             return False
         if should_stop():
             self._interrupt(claim)
-            if claim.retry_scope is not None:
-                revoke_model_operation_retry_scope(self.kb_dir, claim.retry_scope)
             return False
         if not model_operation_dispatch_possible(
             self.kb_dir,
@@ -267,21 +281,10 @@ class DesktopPageTreeEnrichmentService:
             retry_scope=claim.retry_scope,
         ):
             self._interrupt(claim)
-            if claim.retry_scope is not None:
-                revoke_model_operation_retry_scope(self.kb_dir, claim.retry_scope)
             return False
         try:
 
             def invoke(request: DesktopModelRequest):
-                if claim.retry_scope is not None:
-                    authorize_model_operation_retry(
-                        self.kb_dir,
-                        gateway,
-                        operation=request.operation,
-                        retry_scope=claim.retry_scope,
-                        capability_identity=request.capability_identity,
-                        prompt_contract_digest=request.prompt_contract_digest,
-                    )
                 require_model_operation_dispatch(
                     self.kb_dir,
                     gateway,
@@ -305,7 +308,14 @@ class DesktopPageTreeEnrichmentService:
             )
             result = output.result
             summaries = output.value
-            mark_structured_output_operations_ready(self.kb_dir, gateway, output)
+            mark_structured_output_operations_ready(
+                self.kb_dir,
+                gateway,
+                output,
+                authority=DesktopModelOperationCompletionAuthority.for_retry_scope(
+                    claim.retry_scope
+                ),
+            )
             if should_stop():
                 self._interrupt(claim)
                 return False
@@ -340,9 +350,6 @@ class DesktopPageTreeEnrichmentService:
         except Exception:
             logger.exception("PageTree enrichment failed for %s", claim.document_id)
             self._fail(claim, _FAILED_CODE, "PageTree enrichment could not be completed.")
-        finally:
-            if claim.retry_scope is not None:
-                revoke_model_operation_retry_scope(self.kb_dir, claim.retry_scope)
         return False
 
     def _claim(self, document_id: str, gateway: DesktopModelGateway) -> _EnrichmentClaim | None:
@@ -353,7 +360,8 @@ class DesktopPageTreeEnrichmentService:
                 row = connection.execute(
                     """
                     SELECT tasks.base_generation_id, tasks.provider, tasks.model,
-                        tasks.prompt_digest, documents.display_name, tasks.reason
+                        tasks.prompt_digest, documents.display_name, tasks.reason,
+                        tasks.retry_scope
                     FROM document_page_tree_enrichment_tasks AS tasks
                     JOIN source_documents AS documents
                         ON documents.document_id = tasks.document_id
@@ -365,6 +373,8 @@ class DesktopPageTreeEnrichmentService:
                         AND tasks.provider = ? AND tasks.model = ?
                         AND tasks.prompt_digest = ?
                         AND documents.availability = 'available'
+                        AND (tasks.reason != 'explicit_retry'
+                            OR tasks.retry_scope IS NOT NULL)
                         AND NOT EXISTS (
                             SELECT 1 FROM document_page_tree_rebuild_tasks AS rebuild
                             WHERE rebuild.status IN ('pending', 'running')
@@ -422,7 +432,9 @@ class DesktopPageTreeEnrichmentService:
                     request_content=request_content,
                     node_ids=node_ids,
                     retry_scope=(
-                        _retry_scope(document_id) if str(row[5]) == "explicit_retry" else None
+                        str(row[6])
+                        if str(row[5]) == "explicit_retry" and row[6] is not None
+                        else None
                     ),
                 )
             except BaseException:
@@ -466,7 +478,7 @@ class DesktopPageTreeEnrichmentService:
                 connection.execute("BEGIN IMMEDIATE")
                 current = connection.execute(
                     """
-                    SELECT documents.availability
+                    SELECT documents.availability, tasks.retry_scope
                     FROM document_page_tree_enrichment_tasks AS tasks
                     JOIN document_page_tree_current AS base
                         ON base.document_id = tasks.document_id
@@ -491,7 +503,8 @@ class DesktopPageTreeEnrichmentService:
                         """
                         UPDATE document_page_tree_enrichment_tasks
                         SET status = 'failed', execution_token = NULL, error_code = ?,
-                            error_reason = ?, updated_at = ?, completed_at = ?
+                            error_reason = ?, retry_scope = NULL,
+                            updated_at = ?, completed_at = ?
                         WHERE document_id = ? AND status = 'running' AND execution_token = ?
                         """,
                         (
@@ -503,6 +516,8 @@ class DesktopPageTreeEnrichmentService:
                             claim.execution_token,
                         ),
                     )
+                    if current[1] is not None:
+                        revoke_model_operation_retry_scope_in(connection, str(current[1]))
                     connection.commit()
                     return False
                 enrichment_generation_id = uuid.uuid4().hex
@@ -572,11 +587,14 @@ class DesktopPageTreeEnrichmentService:
                     """
                     UPDATE document_page_tree_enrichment_tasks
                     SET status = 'completed', execution_token = NULL, error_code = NULL,
-                        error_reason = NULL, updated_at = ?, completed_at = ?
+                        error_reason = NULL, retry_scope = NULL,
+                        updated_at = ?, completed_at = ?
                     WHERE document_id = ? AND status = 'running' AND execution_token = ?
                     """,
                     (now, now, claim.document_id, claim.execution_token),
                 )
+                if claim.retry_scope is not None:
+                    revoke_model_operation_retry_scope_in(connection, claim.retry_scope)
                 connection.commit()
                 return True
             except BaseException:
@@ -619,7 +637,8 @@ class DesktopPageTreeEnrichmentService:
                             """
                             UPDATE document_page_tree_enrichment_tasks
                             SET status = ?, execution_token = NULL, error_code = ?,
-                                error_reason = ?, updated_at = ?, completed_at = ?
+                                error_reason = ?, retry_scope = NULL,
+                                updated_at = ?, completed_at = ?
                             WHERE document_id = ? AND status = 'running'
                                 AND execution_token = ?
                             """,
@@ -633,6 +652,10 @@ class DesktopPageTreeEnrichmentService:
                                 claim.execution_token,
                             ),
                         )
+                        if claim.retry_scope is not None:
+                            revoke_model_operation_retry_scope_in(
+                                connection, claim.retry_scope
+                            )
                 finally:
                     connection.close()
         except (OSError, sqlite3.Error):
@@ -677,10 +700,11 @@ def _queue_target_in(
     now: str,
     *,
     retry_failed: bool = False,
-) -> bool:
+) -> tuple[bool, str | None]:
     existing = connection.execute(
         """
-        SELECT base_generation_id, provider, model, prompt_digest, status, error_code
+        SELECT base_generation_id, provider, model, prompt_digest, status, error_code,
+            retry_scope
         FROM document_page_tree_enrichment_tasks WHERE document_id = ?
         """,
         (document_id,),
@@ -690,7 +714,10 @@ def _queue_target_in(
         if status in {"pending", "running"} or (
             status == "failed" and not retry_failed and str(existing[5]) != _UNAVAILABLE_CODE
         ):
-            return False
+            return False, None
+    previous_scope = (
+        str(existing[6]) if existing is not None and existing[6] is not None else None
+    )
     connection.execute(
         """
         INSERT INTO document_page_tree_enrichment_tasks (
@@ -706,8 +733,8 @@ def _queue_target_in(
             model = excluded.model, prompt_digest = excluded.prompt_digest,
             execution_token = NULL, attempt_count = 0, model_attempt = 0,
             call_id = NULL, timeout_seconds = NULL, remaining_seconds = NULL,
-            error_code = NULL, error_reason = NULL, updated_at = excluded.updated_at,
-            completed_at = NULL
+            error_code = NULL, error_reason = NULL, retry_scope = NULL,
+            updated_at = excluded.updated_at, completed_at = NULL
         """,
         (
             document_id,
@@ -720,7 +747,7 @@ def _queue_target_in(
             now,
         ),
     )
-    return True
+    return True, previous_scope
 
 
 def _complete_repaired_task_in(
@@ -728,8 +755,12 @@ def _complete_repaired_task_in(
     document_id: str,
     target: tuple[str, str, str, str],
     now: str,
-) -> None:
-    connection.execute(
+) -> str | None:
+    previous = connection.execute(
+        "SELECT retry_scope FROM document_page_tree_enrichment_tasks WHERE document_id = ?",
+        (document_id,),
+    ).fetchone()
+    cursor = connection.execute(
         """
         INSERT INTO document_page_tree_enrichment_tasks (
             document_id, base_generation_id, status, reason, provider, model,
@@ -744,7 +775,7 @@ def _complete_repaired_task_in(
             prompt_digest = excluded.prompt_digest, execution_token = NULL,
             attempt_count = 0, model_attempt = 0, call_id = NULL,
             timeout_seconds = NULL, remaining_seconds = NULL, error_code = NULL,
-            error_reason = NULL, updated_at = excluded.updated_at,
+            error_reason = NULL, retry_scope = NULL, updated_at = excluded.updated_at,
             completed_at = excluded.completed_at
         WHERE document_page_tree_enrichment_tasks.base_generation_id
                 != excluded.base_generation_id
@@ -755,24 +786,10 @@ def _complete_repaired_task_in(
         """,
         (document_id, *target, now, now, now),
     )
-
-
-def _queue_reason(
-    current: tuple[str | None, str | None, str | None, str | None],
-    target: tuple[str, str, str, str],
-) -> str:
-    if current[0] is None:
-        return "initial"
-    if current[0] != target[0]:
-        return "base_generation_update"
-    if current[1:3] != target[1:3]:
-        return "model_update"
-    return "prompt_update"
+    if cursor.rowcount != 1 or previous is None or previous[0] is None:
+        return None
+    return str(previous[0])
 
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _retry_scope(document_id: str) -> str:
-    return f"page_tree_enrichment:{document_id}"

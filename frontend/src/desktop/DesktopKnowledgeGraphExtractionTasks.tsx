@@ -51,6 +51,7 @@ export function DesktopKnowledgeGraphExtractionTasks({
               <p className="truncate text-sm font-medium">{task.documentName}</p>
               <p className="mt-1 text-xs text-muted-foreground">
                 {t(`desktop.tasks.knowledgeGraph.statuses.${task.status}`)}
+                {task.quality ? ` · ${t(`desktop.tasks.knowledgeGraph.qualities.${task.quality}`)}` : ""}
                 {" · "}{task.provider} / {task.model}
               </p>
               {task.status === "completed" || task.status === "completed_empty" ? (
@@ -58,6 +59,15 @@ export function DesktopKnowledgeGraphExtractionTasks({
                   {t("desktop.tasks.knowledgeGraph.counts", {
                     nodes: task.nodeCount,
                     edges: task.edgeCount,
+                  })}
+                </p>
+              ) : null}
+              {task.quality === "degraded" ? (
+                <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                  {t("desktop.tasks.knowledgeGraph.dispositions", {
+                    retained: task.retainedCount,
+                    weakened: task.weakenedCount,
+                    rejected: task.rejectedCount,
                   })}
                 </p>
               ) : null}
@@ -90,9 +100,9 @@ export function DesktopKnowledgeGraphExtractionTasks({
             <Button className="mt-3" size="sm" variant="outline" disabled={controllingDocumentId === task.documentId} onClick={() => void control(task, true)}>
               {t("desktop.tasks.knowledgeGraph.cancel")}
             </Button>
-          ) : task.status === "pending" || task.status === "failed" ? (
+          ) : task.status === "pending" || task.status === "failed" || (task.status === "completed" && task.quality === "degraded") ? (
             <Button className="mt-3" size="sm" disabled={controllingDocumentId === task.documentId} onClick={() => void control(task, false)}>
-              {t(task.status === "failed" ? "desktop.tasks.knowledgeGraph.retry" : "desktop.tasks.knowledgeGraph.resume")}
+              {t(task.status === "pending" ? "desktop.tasks.knowledgeGraph.resume" : "desktop.tasks.knowledgeGraph.retry")}
             </Button>
           ) : null}
         </article>

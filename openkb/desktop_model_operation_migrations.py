@@ -53,6 +53,21 @@ MODEL_OPERATION_RETRY_MIGRATION_STATEMENTS: tuple[str, ...] = (
     """,
 )
 
+MODEL_OPERATION_RETRY_REVISION_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    ALTER TABLE model_operation_contract_states
+    ADD COLUMN revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0)
+    """,
+    """
+    ALTER TABLE model_operation_retry_permits
+    ADD COLUMN suspension_revision INTEGER
+        CHECK(suspension_revision IS NULL OR suspension_revision >= 0)
+    """,
+    """
+    DELETE FROM model_operation_retry_permits
+    """,
+)
+
 MODEL_OPERATION_AUDIT_MIGRATION_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS model_operation_contract_events (

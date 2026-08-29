@@ -796,6 +796,13 @@ def test_explicit_retry_with_valid_repair_marks_parent_and_bound_repair_ready(
         operation="retrieval_plan",
         retry_scope="answer:repair",
     )
+    assert authorize_model_operation_retry(
+        kb_dir,
+        gateway,
+        operation="structured_output_repair",
+        retry_scope="answer:repair",
+        prompt_contract_digest=repair_digests[0],
+    )
 
     repaired = build_retrieval_plan(
         "What does Atlas use?",
@@ -877,7 +884,7 @@ def test_confirmed_authentication_failure_invalidates_shared_analysis_role(
     assert state.failure_code == "model_authentication_failed"
 
 
-def test_same_uncertain_protocol_signature_requires_two_independent_operations(
+def test_graph_failure_does_not_corroborate_shared_protocol_across_operations(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setattr(
@@ -904,9 +911,7 @@ def test_same_uncertain_protocol_signature_requires_two_independent_operations(
         def __call__(self, _request, _timeout_seconds):
             return ""
 
-    monkeypatch.setattr(
-        desktop_model_transport, "DesktopLiteLLMTransport", EmptyResultTransport
-    )
+    monkeypatch.setattr(desktop_model_transport, "DesktopLiteLLMTransport", EmptyResultTransport)
     gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert gateway is not None
     profile = gateway.execution_profile_for_operation("retrieval_plan")
@@ -916,24 +921,27 @@ def test_same_uncertain_protocol_signature_requires_two_independent_operations(
     build_retrieval_plan("What does Atlas use?", gateway, kb_dir=kb_dir)
     assert store.state(profile).status == "verified"
 
-    assert not DesktopKnowledgeGraphService(
-        kb_dir, model_gateway=gateway
-    ).extract_document(document.document_id)
-    assert store.state(profile).status == "unchecked"
-    states = [
-        DesktopModelOperationContractStore(kb_dir).state(
-            operation=operation,
-            capability_identity=profile.capability_evidence_profile.identity,
-            prompt_contract_digest=prompt_contract_for(operation).digest,
-        )
-        for operation in ("retrieval_plan", "knowledge_graph_extraction")
-    ]
-    assert {state.failure_stage for state in states} == {"uncertain_shared_protocol"}
-    assert len({state.failure_signature for state in states}) == 1
-    assert states[0].failure_signature is not None
+    assert not DesktopKnowledgeGraphService(kb_dir, model_gateway=gateway).extract_document(
+        document.document_id
+    )
+    assert store.state(profile).status == "verified"
+    retrieval_state = DesktopModelOperationContractStore(kb_dir).state(
+        operation="retrieval_plan",
+        capability_identity=profile.capability_evidence_profile.identity,
+        prompt_contract_digest=prompt_contract_for("retrieval_plan").digest,
+    )
+    graph_state = DesktopModelOperationContractStore(kb_dir).state(
+        operation="knowledge_graph_extraction",
+        capability_identity=profile.capability_evidence_profile.identity,
+        prompt_contract_digest=prompt_contract_for("knowledge_graph_extraction").digest,
+    )
+    assert retrieval_state.failure_stage == "uncertain_shared_protocol"
+    assert retrieval_state.failure_signature is not None
+    assert graph_state.status == "unverified"
+    assert graph_state.failure_signature is None
 
 
-def test_repair_failures_from_two_parent_pipelines_count_as_one_operation(
+def test_graph_repair_failure_does_not_join_cross_pipeline_corroboration(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setattr(
@@ -953,6 +961,7 @@ def test_repair_failures_from_two_parent_pipelines_count_as_one_operation(
         api_key="test-key",
         max_concurrent_model_calls=1,
     )
+    repair_digests: dict[str, str] = {}
 
     class InvalidPrimaryAndTerminalRepairTransport:
         def __init__(self, *, model, bundle):
@@ -960,6 +969,9 @@ def test_repair_failures_from_two_parent_pipelines_count_as_one_operation(
 
         def __call__(self, request, _timeout_seconds):
             if request.operation == "structured_output_repair":
+                assert request.parent_operation is not None
+                assert request.prompt_contract_digest is not None
+                repair_digests[request.parent_operation] = request.prompt_contract_digest
                 return DesktopModelProviderResponse(
                     "",
                     observations=DesktopModelOutputObservations(
@@ -1004,18 +1016,25 @@ def test_repair_failures_from_two_parent_pipelines_count_as_one_operation(
             """,
             (profile.capability_evidence_profile.identity,),
         ).fetchall()
-    assert len(repair_rows) == 2
+    assert len(repair_rows) == 1
     assert {str(row[0]) for row in repair_rows} == {"suspended"}
     assert {str(row[1]) for row in repair_rows} == {"uncertain_shared_protocol"}
     signatures = [str(row[2]) for row in repair_rows if row[2] is not None]
     assert len(signatures) == 1
-    assert len({str(row[3]) for row in repair_rows}) == 2
+    assert set(repair_digests) == {"retrieval_plan", "knowledge_graph_extraction"}
+    assert str(repair_rows[0][3]) == repair_digests["retrieval_plan"]
+    assert str(repair_rows[0][3]) != repair_digests["knowledge_graph_extraction"]
     for parent_operation in ("retrieval_plan", "knowledge_graph_extraction"):
-        assert DesktopModelOperationContractStore(kb_dir).state(
-            operation=parent_operation,
-            capability_identity=profile.capability_evidence_profile.identity,
-            prompt_contract_digest=prompt_contract_for(parent_operation).digest,
-        ).failure_signature is None
+        assert (
+            DesktopModelOperationContractStore(kb_dir)
+            .state(
+                operation=parent_operation,
+                capability_identity=profile.capability_evidence_profile.identity,
+                prompt_contract_digest=prompt_contract_for(parent_operation).digest,
+            )
+            .failure_signature
+            is None
+        )
 
 
 def test_unverified_retrieval_plan_uses_fallback_without_provider_call(

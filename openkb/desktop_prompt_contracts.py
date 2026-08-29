@@ -123,10 +123,7 @@ def _contract(
             sort_keys=True,
             separators=(",", ":"),
         )
-        instructions = (
-            f"{instructions.rstrip()}\n\nEXAMPLE JSON OUTPUT:\n"
-            f"{serialized_example}"
-        )
+        instructions = f"{instructions.rstrip()}\n\nEXAMPLE JSON OUTPUT:\n{serialized_example}"
     return DesktopPromptContract(
         operation=operation,
         version=f"openkb.prompt.{operation}.v{version}",
@@ -158,8 +155,7 @@ def minimal_json_example(schema: dict[str, object]) -> object:
         return {
             name: minimal_json_example(property_schema)
             for name in required
-            if isinstance(name, str)
-            and isinstance((property_schema := properties.get(name)), dict)
+            if isinstance(name, str) and isinstance((property_schema := properties.get(name)), dict)
         }
     if schema_type == "array":
         return []
@@ -296,9 +292,11 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
     "knowledge_graph_extraction": _contract(
         "knowledge_graph_extraction",
         "Extract a small evidence-bound graph. Return one JSON object with nodes and edges. "
-        "Every node and edge uses only supplied Evidence IDs; both edge endpoints cite the "
-        "same evidence. Do not merge same-named entities or invent facts.",
-        version=4,
+        "Every node and edge uses only supplied Evidence IDs and includes a support_quote that "
+        "is an exact substring of that Evidence. Both edge endpoints cite the same evidence. "
+        "Use only relationship types in the output schema. Do not merge same-named entities "
+        "or invent facts.",
+        version=5,
         output_schema=knowledge_graph_output_schema(),
         output_example={
             "nodes": [
@@ -307,12 +305,14 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
                     "evidence_id": "evidence-1",
                     "type": "entity",
                     "label": "OpenKB",
+                    "support_quote": "OpenKB",
                 },
                 {
                     "id": "concept-1",
                     "evidence_id": "evidence-1",
                     "type": "concept",
                     "label": "Knowledge base",
+                    "support_quote": "knowledge base",
                 },
             ],
             "edges": [
@@ -321,11 +321,17 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
                     "source_id": "entity-1",
                     "target_id": "concept-1",
                     "type": "IS_A",
+                    "support_quote": "OpenKB is a knowledge base.",
                 }
             ],
         },
         input_shape={"type": "graph_evidence", "evidence_bound": True},
-        validation_rules=("known_evidence_ids_only", "same_evidence_edge_endpoints"),
+        validation_rules=(
+            "known_evidence_ids_only",
+            "exact_support_quote_required",
+            "same_evidence_edge_endpoints",
+            "canonical_relationship_types_only",
+        ),
     ),
     "grounded_answer": _contract(
         "grounded_answer",

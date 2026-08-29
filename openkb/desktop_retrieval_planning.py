@@ -16,8 +16,8 @@ from openkb.desktop_model_gateway import (
     gateway_analysis_capability_verified,
 )
 from openkb.desktop_model_result_failure import (
+    DesktopModelOperationCompletionAuthority,
     DesktopModelOperationSuspendedError,
-    authorize_model_operation_retry,
     mark_structured_output_operations_ready,
     model_operation_dispatch_possible,
     record_structured_model_result_failure,
@@ -72,15 +72,6 @@ def build_retrieval_plan(
         def invoke(request: DesktopModelRequest):
             nonlocal attempts, response
             if kb_dir is not None:
-                if retry_scope is not None:
-                    authorize_model_operation_retry(
-                        kb_dir,
-                        model_gateway,
-                        operation=request.operation,
-                        retry_scope=retry_scope,
-                        capability_identity=request.capability_identity,
-                        prompt_contract_digest=request.prompt_contract_digest,
-                    )
                 require_model_operation_dispatch(
                     kb_dir,
                     model_gateway,
@@ -122,7 +113,14 @@ def build_retrieval_plan(
             validate=lambda content: model_plan(question, content),
         )
         if kb_dir is not None:
-            mark_structured_output_operations_ready(kb_dir, model_gateway, output)
+            mark_structured_output_operations_ready(
+                kb_dir,
+                model_gateway,
+                output,
+                authority=DesktopModelOperationCompletionAuthority.for_retry_scope(
+                    retry_scope
+                ),
+            )
         return DesktopRetrievalPlanningResult(
             with_baseline_terms(fallback, output.value),
             (),

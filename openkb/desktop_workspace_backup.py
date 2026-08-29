@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import Protocol
 
@@ -92,7 +93,10 @@ def valid_migration_backup(path: Path, *, expected_version: int) -> bool:
     if not path.is_file():
         return False
     try:
-        with sqlite3.connect(path) as backup:
+        # sqlite3.Connection's context manager commits or rolls back but does
+        # not close the database. Windows then refuses to rename the validated
+        # temporary backup while this process still owns its file handle.
+        with closing(sqlite3.connect(path)) as backup:
             integrity = backup.execute("PRAGMA integrity_check").fetchone()
             version = backup.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
         return integrity == ("ok",) and version == (expected_version,)

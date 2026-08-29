@@ -23,10 +23,12 @@ from openkb.desktop_model_gateway import (
     gateway_answer_capability_verified,
 )
 from openkb.desktop_model_result_failure import (
-    authorize_model_operation_retry,
+    authorize_model_operation_retry_group,
     revoke_model_operation_retry_scope,
 )
+from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
+from openkb.desktop_structured_output import structured_output_repair_contract_digest
 
 AnswerDeltaCallback = Callable[[str, str, bool, int], None]
 AnswerCancellationCallback = Callable[[], bool]
@@ -140,18 +142,23 @@ class DesktopGroundedAnswerService:
         operation_retry_scopes: dict[str, str] = {}
         retry_scope: str | None = None
         if retry_suspended_operations and self._model_gateway is not None:
-            retry_scope = f"grounded_answer:{answer_id}"
-            for operation in (
-                "retrieval_plan",
-                "page_tree_selection",
-                "structured_output_repair",
-            ):
-                authorize_model_operation_retry(
-                    self._kb_dir,
-                    self._model_gateway,
-                    operation=operation,
-                    retry_scope=retry_scope,
-                )
+            retry_scope = f"grounded_answer:{answer_id}:{uuid.uuid4().hex}"
+            authorize_model_operation_retry_group(
+                self._kb_dir,
+                self._model_gateway,
+                retry_scope=retry_scope,
+                contracts=tuple(
+                    contract
+                    for operation in ("retrieval_plan", "page_tree_selection")
+                    for contract in (
+                        (operation, prompt_contract_for(operation).digest),
+                        (
+                            "structured_output_repair",
+                            structured_output_repair_contract_digest(operation),
+                        ),
+                    )
+                ),
+            )
             operation_retry_scopes = {
                 "retrieval_plan": retry_scope,
                 "page_tree_selection": retry_scope,

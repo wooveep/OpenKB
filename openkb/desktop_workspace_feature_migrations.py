@@ -21,11 +21,15 @@ from openkb.desktop_knowledge_analysis_migrations import (
 from openkb.desktop_knowledge_analysis_plan_migrations import (
     KNOWLEDGE_ANALYSIS_PLAN_MIGRATION_STATEMENTS,
 )
+from openkb.desktop_knowledge_graph_interpretation_migrations import (
+    KNOWLEDGE_GRAPH_INTERPRETATION_MIGRATION_STATEMENTS,
+)
 from openkb.desktop_knowledge_graph_result_migrations import (
     KNOWLEDGE_GRAPH_CURRENT_REVISION_MIGRATION_STATEMENTS,
     KNOWLEDGE_GRAPH_RESULT_MIGRATION_STATEMENTS,
 )
 from openkb.desktop_knowledge_graph_task_migrations import (
+    KNOWLEDGE_GRAPH_RETRY_SCOPE_MIGRATION_STATEMENTS,
     KNOWLEDGE_GRAPH_TASK_MIGRATION_STATEMENTS,
 )
 from openkb.desktop_knowledge_provenance_migrations import (
@@ -44,6 +48,7 @@ from openkb.desktop_model_observability_migrations import MODEL_LIFECYCLE_MIGRAT
 from openkb.desktop_model_operation_migrations import (
     MODEL_OPERATION_AUDIT_MIGRATION_STATEMENTS,
     MODEL_OPERATION_RETRY_MIGRATION_STATEMENTS,
+    MODEL_OPERATION_RETRY_REVISION_MIGRATION_STATEMENTS,
     MODEL_OPERATION_STATE_MIGRATION_STATEMENTS,
 )
 from openkb.desktop_model_result_migrations import (
@@ -53,6 +58,7 @@ from openkb.desktop_model_usage_migrations import MODEL_USAGE_MIGRATION_STATEMEN
 from openkb.desktop_okf_projection_migrations import OKF_PROJECTION_MIGRATION_STATEMENTS
 from openkb.desktop_page_tree_enrichment_migrations import (
     PAGE_TREE_ENRICHMENT_MIGRATION_STATEMENTS,
+    PAGE_TREE_ENRICHMENT_RETRY_SCOPE_MIGRATION_STATEMENTS,
 )
 from openkb.desktop_retrieval_trace_migrations import RETRIEVAL_TRACE_MIGRATION_STATEMENTS
 from openkb.desktop_workspace_migrations import (
@@ -88,6 +94,7 @@ MODEL_OPERATION_RETRY_MIGRATION_VERSION = 48
 KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_VERSION = 49
 MODEL_OPERATION_AUDIT_MIGRATION_VERSION = 50
 KNOWLEDGE_GRAPH_CURRENT_REVISION_MIGRATION_VERSION = 51
+KNOWLEDGE_GRAPH_INTERPRETATION_MIGRATION_VERSION = 52
 
 
 DESKTOP_FEATURE_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
@@ -147,5 +154,12 @@ DESKTOP_FEATURE_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (
         KNOWLEDGE_GRAPH_CURRENT_REVISION_MIGRATION_VERSION,
         KNOWLEDGE_GRAPH_CURRENT_REVISION_MIGRATION_STATEMENTS,
+    ),
+    (
+        KNOWLEDGE_GRAPH_INTERPRETATION_MIGRATION_VERSION,
+        KNOWLEDGE_GRAPH_INTERPRETATION_MIGRATION_STATEMENTS
+        + MODEL_OPERATION_RETRY_REVISION_MIGRATION_STATEMENTS
+        + KNOWLEDGE_GRAPH_RETRY_SCOPE_MIGRATION_STATEMENTS
+        + PAGE_TREE_ENRICHMENT_RETRY_SCOPE_MIGRATION_STATEMENTS,
     ),
 )

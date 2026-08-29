@@ -94,6 +94,7 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
                     "evidence_id": item["evidence_id"],
                     "type": "entity",
                     "label": label,
+                    "support_quote": text.strip(),
                 }
             )
         return json.dumps({"nodes": nodes, "edges": []})

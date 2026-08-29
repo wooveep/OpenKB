@@ -84,3 +84,11 @@ PAGE_TREE_ENRICHMENT_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON document_page_tree_enrichment_tasks(status, updated_at)
     """,
 )
+
+
+PAGE_TREE_ENRICHMENT_RETRY_SCOPE_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    ALTER TABLE document_page_tree_enrichment_tasks
+    ADD COLUMN retry_scope TEXT
+    """,
+)

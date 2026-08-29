@@ -325,6 +325,10 @@ export interface DesktopKnowledgeGraphExtractionTask {
   status: "pending" | "running" | "failed" | "completed" | "completed_empty"
   nodeCount: number
   edgeCount: number
+  quality: "full" | "degraded" | null
+  retainedCount: number
+  weakenedCount: number
+  rejectedCount: number
   reason: string
   provider: string
   model: string

@@ -13,12 +13,13 @@ from openkb.desktop_knowledge_graph import DesktopKnowledgeGraphService
 from openkb.desktop_model_event import normalize_model_event
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_model_result_failure import (
-    authorize_model_operation_retry,
+    authorize_model_operation_retry_group_in,
     model_operation_dispatch_possible,
-    revoke_model_operation_retry_scope,
+    revoke_model_operation_retry_scope_in,
 )
 from openkb.desktop_model_usage import model_activity_for_call_in
 from openkb.desktop_prompt_contracts import prompt_contract_for
+from openkb.desktop_structured_output import structured_output_repair_contract_digest
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -77,53 +78,107 @@ class DesktopKnowledgeGraphExtractionTasks:
             connection = self._connect()
             try:
                 with connection:
+                    retry_scopes = tuple(
+                        str(row[0])
+                        for row in connection.execute(
+                            """
+                            SELECT DISTINCT retry_scope
+                            FROM knowledge_graph_extraction_tasks
+                            WHERE status IN ('pending', 'running') AND retry_scope IS NOT NULL
+                            """
+                        ).fetchall()
+                    )
+                    for retry_scope in retry_scopes:
+                        revoke_model_operation_retry_scope_in(connection, retry_scope)
                     cursor = connection.execute(
                         """
                         UPDATE knowledge_graph_extraction_tasks
                         SET status = 'pending', execution_token = NULL,
-                            error_code = ?, error_reason = ?, updated_at = ?, completed_at = NULL
+                            retry_scope = NULL, error_code = ?, error_reason = ?,
+                            updated_at = ?, completed_at = NULL
                         WHERE status IN ('pending', 'running')
                         """,
                         (INTERRUPTED_CODE, INTERRUPTED_REASON, _timestamp()),
                     )
-                    return cursor.rowcount
+                    recovered = cursor.rowcount
             finally:
                 connection.close()
+        return recovered
 
     def request_cancel(self, document_id: str) -> bool:
         """Invalidate the durable claim before signalling a live model call."""
+        retry_scope: str | None = None
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             try:
                 with connection:
+                    row = connection.execute(
+                        """
+                        SELECT retry_scope FROM knowledge_graph_extraction_tasks
+                        WHERE document_id = ? AND status IN ('pending', 'running')
+                        """,
+                        (document_id,),
+                    ).fetchone()
+                    retry_scope = str(row[0]) if row is not None and row[0] is not None else None
                     cursor = connection.execute(
                         """
                         UPDATE knowledge_graph_extraction_tasks
                         SET status = 'pending', execution_token = NULL,
-                            error_code = ?, error_reason = ?, updated_at = ?, completed_at = NULL
+                            retry_scope = NULL, error_code = ?, error_reason = ?,
+                            updated_at = ?, completed_at = NULL
                         WHERE document_id = ? AND status IN ('pending', 'running')
                         """,
                         (INTERRUPTED_CODE, INTERRUPTED_REASON, _timestamp(), document_id),
                     )
-                    return cursor.rowcount == 1
+                    cancelled = cursor.rowcount == 1
+                    if cancelled and retry_scope is not None:
+                        revoke_model_operation_retry_scope_in(connection, retry_scope)
             finally:
                 connection.close()
+        return cancelled
 
     def retry(self, document_id: str, gateway: DesktopModelGateway) -> bool:
         """Make interrupted or failed work runnable only after a user action."""
         accepted = False
+        previous_scope: str | None = None
+        retry_scope = _new_retry_scope(document_id)
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             try:
                 with connection:
+                    previous = connection.execute(
+                        """
+                        SELECT retry_scope FROM knowledge_graph_extraction_tasks
+                        WHERE document_id = ?
+                        """,
+                        (document_id,),
+                    ).fetchone()
+                    previous_scope = (
+                        str(previous[0])
+                        if previous is not None and previous[0] is not None
+                        else None
+                    )
                     cursor = connection.execute(
                         """
                         UPDATE knowledge_graph_extraction_tasks
                         SET status = 'pending', reason = 'explicit_retry',
                             provider = ?, model = ?, prompt_digest = ?,
-                            execution_token = NULL, error_code = NULL, error_reason = NULL,
-                            updated_at = ?, completed_at = NULL
-                        WHERE document_id = ? AND status IN ('pending', 'failed')
+                            execution_token = NULL, retry_scope = ?, error_code = NULL,
+                            error_reason = NULL, updated_at = ?, completed_at = NULL
+                        WHERE document_id = ? AND (
+                                status IN ('pending', 'failed')
+                                OR (
+                                    status = 'completed'
+                                    AND (
+                                        SELECT latest.quality
+                                        FROM knowledge_graph_results AS latest
+                                        WHERE latest.document_id =
+                                            knowledge_graph_extraction_tasks.document_id
+                                        ORDER BY latest.created_at DESC, latest.result_id DESC
+                                        LIMIT 1
+                                    ) = 'degraded'
+                                )
+                            )
                             AND EXISTS (
                                 SELECT 1 FROM source_documents
                                 WHERE source_documents.document_id = ?
@@ -134,22 +189,34 @@ class DesktopKnowledgeGraphExtractionTasks:
                             gateway.provider_name,
                             gateway.model_name,
                             PROMPT_DIGEST,
+                            retry_scope,
                             _timestamp(),
                             document_id,
                             document_id,
                         ),
                     )
                     accepted = cursor.rowcount == 1
+                    if accepted:
+                        authorize_model_operation_retry_group_in(
+                            connection,
+                            gateway,
+                            retry_scope=retry_scope,
+                            contracts=(
+                                ("knowledge_graph_extraction", None),
+                                (
+                                    "structured_output_repair",
+                                    structured_output_repair_contract_digest(
+                                        "knowledge_graph_extraction"
+                                    ),
+                                ),
+                            ),
+                        )
+                        if previous_scope is not None:
+                            revoke_model_operation_retry_scope_in(
+                                connection, previous_scope
+                            )
             finally:
                 connection.close()
-        if accepted:
-            for operation in ("knowledge_graph_extraction", "structured_output_repair"):
-                authorize_model_operation_retry(
-                    self.kb_dir,
-                    gateway,
-                    operation=operation,
-                    retry_scope=_retry_scope(document_id),
-                )
         return accepted
 
     def pending_document_ids(self, gateway: DesktopModelGateway) -> tuple[str, ...]:
@@ -157,7 +224,7 @@ class DesktopKnowledgeGraphExtractionTasks:
         try:
             rows = connection.execute(
                 """
-                SELECT tasks.document_id, tasks.reason
+                SELECT tasks.document_id, tasks.retry_scope
                 FROM knowledge_graph_extraction_tasks AS tasks
                 JOIN source_documents AS documents ON documents.document_id = tasks.document_id
                 WHERE tasks.status = 'pending'
@@ -165,24 +232,25 @@ class DesktopKnowledgeGraphExtractionTasks:
                         OR tasks.error_code = 'model_operation_suspended')
                     AND tasks.provider = ? AND tasks.model = ?
                     AND tasks.prompt_digest = ? AND documents.availability = 'available'
+                    AND (tasks.reason != 'explicit_retry' OR tasks.retry_scope IS NOT NULL)
                 ORDER BY CASE WHEN tasks.reason = 'explicit_retry' THEN 0 ELSE 1 END,
                     tasks.updated_at, tasks.document_id LIMIT 50
                 """,
                 (gateway.provider_name, gateway.model_name, PROMPT_DIGEST),
             ).fetchall()
-            documents = tuple((str(row[0]), str(row[1])) for row in rows)
+            documents = tuple(
+                (str(row[0]), str(row[1]) if row[1] is not None else None) for row in rows
+            )
         finally:
             connection.close()
         return tuple(
             document_id
-            for document_id, reason in documents
+            for document_id, retry_scope in documents
             if model_operation_dispatch_possible(
                 self.kb_dir,
                 gateway,
                 operation="knowledge_graph_extraction",
-                retry_scope=(
-                    _retry_scope(document_id) if reason == "explicit_retry" else None
-                ),
+                retry_scope=retry_scope,
             )
         )
 
@@ -204,8 +272,6 @@ class DesktopKnowledgeGraphExtractionTasks:
 
         if claim_stopped():
             self._finish(document_id, token, "pending", INTERRUPTED_CODE, INTERRUPTED_REASON)
-            if retry_scope is not None:
-                revoke_model_operation_retry_scope(self.kb_dir, retry_scope)
             return False
         if not model_operation_dispatch_possible(
             self.kb_dir,
@@ -220,8 +286,6 @@ class DesktopKnowledgeGraphExtractionTasks:
                 "model_operation_suspended",
                 "The Knowledge Graph extraction contract is suspended.",
             )
-            if retry_scope is not None:
-                revoke_model_operation_retry_scope(self.kb_dir, retry_scope)
             return False
         failures: list[tuple[str, str]] = []
         published_claim = False
@@ -258,9 +322,6 @@ class DesktopKnowledgeGraphExtractionTasks:
             logger.exception("Knowledge Graph extraction failed for %s", document_name)
             self._finish(document_id, token, "failed", FAILED_CODE, FAILED_REASON)
             return False
-        finally:
-            if retry_scope is not None:
-                revoke_model_operation_retry_scope(self.kb_dir, retry_scope)
 
     def _publish_and_complete(
         self,
@@ -275,7 +336,7 @@ class DesktopKnowledgeGraphExtractionTasks:
                 connection.execute("BEGIN IMMEDIATE")
                 owned = connection.execute(
                     """
-                    SELECT 1 FROM knowledge_graph_extraction_tasks
+                    SELECT retry_scope FROM knowledge_graph_extraction_tasks
                     WHERE document_id = ? AND status = 'running' AND execution_token = ?
                     """,
                     (document_id, token),
@@ -289,7 +350,8 @@ class DesktopKnowledgeGraphExtractionTasks:
                     """
                     UPDATE knowledge_graph_extraction_tasks
                     SET status = 'completed', execution_token = NULL, error_code = NULL,
-                        error_reason = NULL, updated_at = ?, completed_at = ?
+                        error_reason = NULL, retry_scope = NULL,
+                        updated_at = ?, completed_at = ?
                     WHERE document_id = ? AND status = 'running' AND execution_token = ?
                     """,
                     (now, now, document_id, token),
@@ -297,6 +359,8 @@ class DesktopKnowledgeGraphExtractionTasks:
                 if cursor.rowcount != 1:
                     connection.rollback()
                     return False
+                if owned[0] is not None:
+                    revoke_model_operation_retry_scope_in(connection, str(owned[0]))
                 connection.commit()
                 return True
             except BaseException:
@@ -316,7 +380,7 @@ class DesktopKnowledgeGraphExtractionTasks:
                 connection.execute("BEGIN IMMEDIATE")
                 row = connection.execute(
                     """
-                    SELECT documents.display_name, tasks.reason
+                    SELECT documents.display_name, tasks.reason, tasks.retry_scope
                     FROM knowledge_graph_extraction_tasks AS tasks
                     JOIN source_documents AS documents ON documents.document_id = tasks.document_id
                     WHERE tasks.document_id = ? AND tasks.status = 'pending'
@@ -325,6 +389,7 @@ class DesktopKnowledgeGraphExtractionTasks:
                         AND tasks.provider = ?
                         AND tasks.model = ? AND tasks.prompt_digest = ?
                         AND documents.availability = 'available'
+                        AND (tasks.reason != 'explicit_retry' OR tasks.retry_scope IS NOT NULL)
                     """,
                     (document_id, gateway.provider_name, gateway.model_name, PROMPT_DIGEST),
                 ).fetchone()
@@ -349,7 +414,7 @@ class DesktopKnowledgeGraphExtractionTasks:
                     return None
                 connection.commit()
                 retry_scope = (
-                    _retry_scope(document_id) if str(row[1]) == "explicit_retry" else None
+                    str(row[2]) if str(row[1]) == "explicit_retry" and row[2] is not None else None
                 )
                 return token, str(row[0]), retry_scope
             except BaseException:
@@ -418,11 +483,20 @@ class DesktopKnowledgeGraphExtractionTasks:
                 try:
                     with connection:
                         now = _timestamp()
+                        owned = connection.execute(
+                            """
+                            SELECT retry_scope FROM knowledge_graph_extraction_tasks
+                            WHERE document_id = ? AND status = 'running'
+                                AND execution_token = ?
+                            """,
+                            (document_id, token),
+                        ).fetchone()
                         cursor = connection.execute(
                             """
                             UPDATE knowledge_graph_extraction_tasks
                             SET status = ?, execution_token = NULL, error_code = ?,
-                                error_reason = ?, updated_at = ?, completed_at = ?
+                                error_reason = ?, retry_scope = NULL,
+                                updated_at = ?, completed_at = ?
                             WHERE document_id = ? AND status = 'running' AND execution_token = ?
                             """,
                             (
@@ -435,6 +509,8 @@ class DesktopKnowledgeGraphExtractionTasks:
                                 token,
                             ),
                         )
+                        if cursor.rowcount == 1 and owned is not None and owned[0] is not None:
+                            revoke_model_operation_retry_scope_in(connection, str(owned[0]))
                         return cursor.rowcount == 1
                 finally:
                     connection.close()
@@ -461,14 +537,23 @@ def knowledge_graph_extraction_tasks_in(
             END,
             CASE WHEN tasks.status = 'completed' THEN COALESCE(results.node_count, 0) ELSE 0 END,
             CASE WHEN tasks.status = 'completed' THEN COALESCE(results.edge_count, 0) ELSE 0 END,
+            CASE WHEN tasks.status = 'completed' THEN results.quality ELSE NULL END,
+            CASE WHEN tasks.status = 'completed'
+                THEN COALESCE(results.retained_count, 0) ELSE 0 END,
+            CASE WHEN tasks.status = 'completed'
+                THEN COALESCE(results.weakened_count, 0) ELSE 0 END,
+            CASE WHEN tasks.status = 'completed'
+                THEN COALESCE(results.rejected_count, 0) ELSE 0 END,
             tasks.reason, tasks.provider, tasks.model, tasks.attempt_count, tasks.model_attempt,
             tasks.call_id, tasks.error_code, tasks.error_reason,
             tasks.updated_at, tasks.completed_at
         FROM knowledge_graph_extraction_tasks AS tasks
         JOIN source_documents AS documents ON documents.document_id = tasks.document_id
-        LEFT JOIN knowledge_graph_current AS current
-            ON current.document_id = tasks.document_id
-        LEFT JOIN knowledge_graph_results AS results ON results.result_id = current.result_id
+        LEFT JOIN knowledge_graph_results AS results ON results.result_id = (
+            SELECT latest.result_id FROM knowledge_graph_results AS latest
+            WHERE latest.document_id = tasks.document_id
+            ORDER BY latest.created_at DESC, latest.result_id DESC LIMIT 1
+        )
         ORDER BY tasks.updated_at DESC, tasks.document_id LIMIT 50
         """
     ).fetchall()
@@ -479,19 +564,23 @@ def knowledge_graph_extraction_tasks_in(
             "status": str(row[2]),
             "node_count": int(row[3]),
             "edge_count": int(row[4]),
-            "reason": str(row[5]),
-            "provider": str(row[6]),
-            "model": str(row[7]),
-            "attempt_count": int(row[8]),
-            "model_attempt": int(row[9]),
-            "call_id": str(row[10]) if row[10] is not None else None,
-            "error_code": str(row[11]) if row[11] is not None else None,
-            "error_reason": str(row[12]) if row[12] is not None else None,
-            "updated_at": str(row[13]),
-            "completed_at": str(row[14]) if row[14] is not None else None,
+            "quality": str(row[5]) if row[5] is not None else None,
+            "retained_count": int(row[6]),
+            "weakened_count": int(row[7]),
+            "rejected_count": int(row[8]),
+            "reason": str(row[9]),
+            "provider": str(row[10]),
+            "model": str(row[11]),
+            "attempt_count": int(row[12]),
+            "model_attempt": int(row[13]),
+            "call_id": str(row[14]) if row[14] is not None else None,
+            "error_code": str(row[15]) if row[15] is not None else None,
+            "error_reason": str(row[16]) if row[16] is not None else None,
+            "updated_at": str(row[17]),
+            "completed_at": str(row[18]) if row[18] is not None else None,
             "model_activity": (
-                model_activity_for_call_in(connection, str(row[10]))
-                if row[10] is not None
+                model_activity_for_call_in(connection, str(row[14]))
+                if row[14] is not None
                 else None
             ),
         }
@@ -503,5 +592,5 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _retry_scope(document_id: str) -> str:
-    return f"knowledge_graph_extraction:{document_id}"
+def _new_retry_scope(document_id: str) -> str:
+    return f"knowledge_graph_extraction:{document_id}:{uuid.uuid4().hex}"

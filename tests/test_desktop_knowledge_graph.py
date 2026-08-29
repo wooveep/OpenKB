@@ -40,12 +40,17 @@ from openkb.desktop_model_gateway import (
     DesktopModelGateway,
     DesktopModelResult,
 )
-from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
+from openkb.desktop_model_operation_state import (
+    DesktopModelOperationContractStore,
+    authorize_model_operation_retry_in,
+)
+from openkb.desktop_model_result_failure import authorize_model_operation_retry
 from openkb.desktop_model_settings import save_desktop_model_settings
 from openkb.desktop_model_terminal import DesktopTerminalModelEvent
 from openkb.desktop_model_usage import DesktopModelUsageStore
 from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_retrieval import DesktopEvidenceRetriever, _Candidate, _with_graph_budget
+from openkb.desktop_structured_output import structured_output_repair_contract_digest
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -61,14 +66,15 @@ def test_graph_validator_rejects_evidence_omitted_from_the_bounded_prompt():
         for index in range(12)
     )
     source_material, included = _model_input(evidence)
-    prompt_ids = {
-        item["evidence_id"] for item in json.loads(source_material)["evidence"]
-    }
+    prompt_ids = {item["evidence_id"] for item in json.loads(source_material)["evidence"]}
     omitted = evidence[-1].evidence_id
 
     assert len(included) == 10
     assert omitted not in prompt_ids
-    with pytest.raises(ValueError, match="Knowledge graph node is invalid"):
+    with pytest.raises(
+        ValueError,
+        match=r"unknown_evidence at nodes\[0\]\.evidence_id",
+    ):
         _model_payload_from_text(
             json.dumps(
                 {
@@ -78,6 +84,41 @@ def test_graph_validator_rejects_evidence_omitted_from_the_bounded_prompt():
                             "evidence_id": omitted,
                             "type": "concept",
                             "label": "Invisible evidence",
+                            "support_quote": "x",
+                        }
+                    ],
+                    "edges": [],
+                }
+            ),
+            included,
+        )
+
+
+def test_graph_validator_cannot_anchor_a_quote_outside_provider_visible_evidence():
+    evidence = (
+        _EvidenceInput(
+            evidence_id="evidence-1",
+            text=("A" * 1_200) + " hidden-tail",
+            document_name="large.md",
+            section="Long section",
+        ),
+    )
+    _source_material, included = _model_input(evidence)
+
+    with pytest.raises(
+        ValueError,
+        match=r"support_quote_not_found at nodes\[0\]\.support_quote",
+    ):
+        _model_payload_from_text(
+            json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "id": "hidden",
+                            "evidence_id": "evidence-1",
+                            "type": "concept",
+                            "label": "Hidden",
+                            "support_quote": "hidden-tail",
                         }
                     ],
                     "edges": [],
@@ -109,6 +150,259 @@ def test_empty_model_graph_is_a_success_without_fabricated_rows(tmp_path, monkey
         assert connection.execute("SELECT COUNT(*) FROM knowledge_graph_edges").fetchone() == (0,)
 
 
+def test_supported_natural_relationship_publishes_as_related_to(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "natural-relation.txt"
+    source.write_text("Atlas is operated by Cloudyi.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+
+    def graph_response(request, _timeout_seconds):
+        [evidence] = json.loads(request.content)["evidence"]
+        return json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "atlas",
+                        "evidence_id": evidence["evidence_id"],
+                        "type": "entity",
+                        "label": "Atlas",
+                        "support_quote": "Atlas",
+                    },
+                    {
+                        "id": "cloudyi",
+                        "evidence_id": evidence["evidence_id"],
+                        "type": "entity",
+                        "label": "Cloudyi",
+                        "support_quote": "Cloudyi",
+                    },
+                ],
+                "edges": [
+                    {
+                        "evidence_id": evidence["evidence_id"],
+                        "source_id": "atlas",
+                        "target_id": "cloudyi",
+                        "type": "OPERATED_BY",
+                        "support_quote": evidence["text"],
+                    }
+                ],
+            }
+        )
+
+    assert DesktopKnowledgeGraphService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(graph_response),
+    ).extract_document(document.document_id)
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            """
+            SELECT edge_type, relation_label, support_start, support_end, verification_state
+            FROM knowledge_graph_edges
+            """
+        ).fetchall() == [("RELATED_TO", "OPERATED_BY", 0, 29, "ambiguous")]
+        result = connection.execute(
+            """
+            SELECT quality, retained_count, weakened_count, rejected_count,
+                canonical_schema_version, normalizer_version, verification_policy_version
+            FROM knowledge_graph_results
+            """
+        ).fetchone()
+        assert result == (
+            "degraded",
+            3,
+            1,
+            0,
+            "openkb.graph-schema.v2",
+            "openkb.graph-normalizer.v1",
+            "openkb.graph-verification.v1",
+        )
+        assert connection.execute(
+            """
+            SELECT code, contract_path, disposition, failure_class
+            FROM knowledge_graph_attempt_issues
+            """
+        ).fetchall() == [("unsupported_relationship", "edges[0].type", "weakened", "semantic")]
+        assert "support_quote" not in {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(knowledge_graph_edges)")
+        }
+
+    diagnostic_path = tmp_path / "graph-diagnostics.zip"
+    DesktopDiagnosticBundleService(kb_dir).export(diagnostic_path)
+    with zipfile.ZipFile(diagnostic_path) as archive:
+        diagnostic_payload = json.loads(archive.read("graph-diagnostics.json"))
+    assert diagnostic_payload["results"][0]["quality"] == "degraded"
+    assert diagnostic_payload["attempts"][0]["weakened_count"] == 1
+    assert diagnostic_payload["attempt_issues"] == [
+        {
+            "attempt_id": diagnostic_payload["attempts"][0]["attempt_id"],
+            "document_id": document.document_id,
+            "ordinal": 0,
+            "code": "unsupported_relationship",
+            "contract_path": "edges[0].type",
+            "disposition": "weakened",
+            "failure_class": "semantic",
+        }
+    ]
+    assert "OPERATED_BY" not in json.dumps(diagnostic_payload)
+
+
+def test_degraded_graph_quality_and_dispositions_are_projected_to_the_task(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "degraded-task.txt"
+    source.write_text("Atlas leads Gateway.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+
+    def graph_response(request, _timeout_seconds):
+        [evidence] = json.loads(request.content)["evidence"]
+        return json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "atlas",
+                        "evidence_id": evidence["evidence_id"],
+                        "type": "entity",
+                        "label": "Atlas",
+                        "support_quote": "Atlas",
+                    },
+                    {
+                        "id": "gateway",
+                        "evidence_id": evidence["evidence_id"],
+                        "type": "concept",
+                        "label": "Gateway",
+                        "support_quote": "Gateway",
+                    },
+                ],
+                "edges": [
+                    {
+                        "evidence_id": evidence["evidence_id"],
+                        "source_id": "atlas",
+                        "target_id": "gateway",
+                        "type": "LEADS",
+                        "support_quote": evidence["text"],
+                    }
+                ],
+            }
+        )
+
+    gateway = DesktopModelGateway(graph_response)
+    tasks = DesktopKnowledgeGraphExtractionTasks(kb_dir)
+    assert tasks.queue(document.document_id, gateway)
+    assert tasks.run_document(document.document_id, gateway, should_stop=lambda: False)
+
+    [task] = DesktopTextImportService(kb_dir).list_import_jobs()["knowledge_graph_extractions"]
+    assert task["status"] == "completed"
+    assert task["quality"] == "degraded"
+    assert task["retained_count"] == 3
+    assert task["weakened_count"] == 1
+    assert task["rejected_count"] == 0
+    assert tasks.retry(document.document_id, gateway)
+    [retried] = DesktopTextImportService(kb_dir).list_import_jobs()["knowledge_graph_extractions"]
+    assert retried["status"] == "pending"
+    assert retried["reason"] == "explicit_retry"
+
+
+def test_compatible_degraded_retry_is_retained_without_displacing_current_full_graph(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "promotion.txt"
+    source.write_text("Atlas uses Gateway.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    relationship = "USES"
+
+    def graph_response(request, _timeout_seconds):
+        [evidence] = json.loads(request.content)["evidence"]
+        return json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "atlas",
+                        "evidence_id": evidence["evidence_id"],
+                        "type": "entity",
+                        "label": "Atlas",
+                        "support_quote": "Atlas",
+                    },
+                    {
+                        "id": "gateway",
+                        "evidence_id": evidence["evidence_id"],
+                        "type": "concept",
+                        "label": "Gateway",
+                        "support_quote": "Gateway",
+                    },
+                ],
+                "edges": [
+                    {
+                        "evidence_id": evidence["evidence_id"],
+                        "source_id": "atlas",
+                        "target_id": "gateway",
+                        "type": relationship,
+                        "support_quote": evidence["text"],
+                    }
+                ],
+            }
+        )
+
+    service = DesktopKnowledgeGraphService(
+        kb_dir, model_gateway=DesktopModelGateway(graph_response)
+    )
+    assert service.extract_document(document.document_id)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        full_result = str(
+            connection.execute(
+                "SELECT result_id FROM knowledge_graph_current WHERE document_id = ?",
+                (document.document_id,),
+            ).fetchone()[0]
+        )
+
+    relationship = "LEADS"
+    assert service.extract_document(document.document_id)
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT result_id FROM knowledge_graph_current WHERE document_id = ?",
+            (document.document_id,),
+        ).fetchone() == (full_result,)
+        results = connection.execute(
+            """
+            SELECT quality, canonical_schema_version, normalizer_version,
+                verification_policy_version
+            FROM knowledge_graph_results WHERE document_id = ?
+            """,
+            (document.document_id,),
+        ).fetchall()
+        attempts = connection.execute(
+            """
+            SELECT quality, weakened_count FROM knowledge_graph_attempts
+            WHERE document_id = ?
+            """,
+            (document.document_id,),
+        ).fetchall()
+    assert {str(row[0]) for row in results} == {"full", "degraded"}
+    assert {tuple(row[1:]) for row in results} == {
+        (
+            "openkb.graph-schema.v2",
+            "openkb.graph-normalizer.v1",
+            "openkb.graph-verification.v1",
+        )
+    }
+    assert sorted(attempts) == [("degraded", 1), ("full", 0)]
+
+
 def test_empty_model_graph_is_projected_as_completed_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
@@ -126,9 +420,7 @@ def test_empty_model_graph_is_projected_as_completed_empty(tmp_path, monkeypatch
     assert tasks.queue(document.document_id, gateway)
     assert tasks.run_document(document.document_id, gateway, should_stop=lambda: False)
 
-    [task] = DesktopTextImportService(kb_dir).list_import_jobs()[
-        "knowledge_graph_extractions"
-    ]
+    [task] = DesktopTextImportService(kb_dir).list_import_jobs()["knowledge_graph_extractions"]
     assert task["status"] == "completed_empty"
     assert task["node_count"] == 0
     assert task["edge_count"] == 0
@@ -157,9 +449,7 @@ def test_repaired_empty_model_graph_is_projected_as_completed_empty(tmp_path, mo
     assert tasks.run_document(document.document_id, gateway, should_stop=lambda: False)
 
     assert calls == ["knowledge_graph_extraction", "structured_output_repair"]
-    [task] = DesktopTextImportService(kb_dir).list_import_jobs()[
-        "knowledge_graph_extractions"
-    ]
+    [task] = DesktopTextImportService(kb_dir).list_import_jobs()["knowledge_graph_extractions"]
     assert task["status"] == "completed_empty"
     assert task["node_count"] == 0
     assert task["edge_count"] == 0
@@ -175,9 +465,7 @@ def test_repaired_empty_model_graph_is_projected_as_completed_empty(tmp_path, mo
         ).fetchone() == ("completed_empty", 0, 0)
 
 
-def test_new_empty_graph_replaces_previous_relationships_for_the_document(
-    tmp_path, monkeypatch
-):
+def test_new_empty_graph_replaces_previous_relationships_for_the_document(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
     )
@@ -202,12 +490,14 @@ def test_new_empty_graph_replaces_previous_relationships_for_the_document(
                         "evidence_id": evidence["evidence_id"],
                         "type": "entity",
                         "label": "Atlas",
+                        "support_quote": "Atlas",
                     },
                     {
                         "id": "concept-1",
                         "evidence_id": evidence["evidence_id"],
                         "type": "concept",
                         "label": "Gateway",
+                        "support_quote": "gateway",
                     },
                 ],
                 "edges": [
@@ -216,6 +506,7 @@ def test_new_empty_graph_replaces_previous_relationships_for_the_document(
                         "source_id": "entity-1",
                         "target_id": "concept-1",
                         "type": "USES",
+                        "support_quote": evidence["text"],
                     }
                 ],
             }
@@ -261,9 +552,7 @@ def test_new_empty_graph_replaces_previous_relationships_for_the_document(
         ).fetchone()
         assert results == [("completed", 2, 1), ("completed_empty", 0, 0)]
         assert current == ("completed_empty", 0, 0)
-        assert local_graph_evidence_ids(
-            connection, terms=("Atlas",), anchor_evidence_ids=()
-        ) == ()
+        assert local_graph_evidence_ids(connection, terms=("Atlas",), anchor_evidence_ids=()) == ()
 
 
 def test_graph_records_keep_same_named_nodes_separate_and_evidence_bound(tmp_path, monkeypatch):
@@ -297,18 +586,21 @@ def test_graph_records_keep_same_named_nodes_separate_and_evidence_bound(tmp_pat
                         "evidence_id": item["evidence_id"],
                         "type": "entity",
                         "label": "Atlas",
+                        "support_quote": item["text"],
                     },
                     {
                         "id": concept_id,
                         "evidence_id": item["evidence_id"],
                         "type": "concept",
                         "label": "Deployment",
+                        "support_quote": item["text"],
                     },
                     {
                         "id": claim_id,
                         "evidence_id": item["evidence_id"],
                         "type": "claim",
                         "label": item["text"],
+                        "support_quote": item["text"],
                     },
                 )
             )
@@ -319,12 +611,14 @@ def test_graph_records_keep_same_named_nodes_separate_and_evidence_bound(tmp_pat
                         "source_id": entity_id,
                         "target_id": concept_id,
                         "type": "RELATED_TO",
+                        "support_quote": item["text"],
                     },
                     {
                         "evidence_id": item["evidence_id"],
                         "source_id": concept_id,
                         "target_id": claim_id,
                         "type": "SUPPORTS",
+                        "support_quote": item["text"],
                     },
                 )
             )
@@ -434,7 +728,9 @@ def test_graph_failures_keep_baseline_answers_and_only_record_safe_diagnostics(
     assert ("query", "knowledge_graph_query_timeout") in diagnostics
 
 
-def test_invalid_graph_repair_marks_final_usage_as_model_result_failure(tmp_path, monkeypatch):
+def test_invalid_graph_repair_records_failure_without_single_document_suspension(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(
         "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
     )
@@ -490,8 +786,26 @@ def test_invalid_graph_repair_marks_final_usage_as_model_result_failure(tmp_path
         capability_identity=profile.capability_evidence_profile.identity,
         prompt_contract_digest=prompt_contract_for("knowledge_graph_extraction").digest,
     )
-    assert operation_state.status == "suspended"
-    assert operation_state.failure_code == "knowledge_graph_response_invalid"
+    assert operation_state.status == "unverified"
+    assert operation_state.failure_code is None
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        attempt = connection.execute(
+            """
+            SELECT lifecycle, quality, retained_count, rejected_count, failure_signature
+            FROM knowledge_graph_attempts WHERE document_id = ?
+            """,
+            (document.document_id,),
+        ).fetchone()
+        issues = connection.execute(
+            """
+            SELECT code, contract_path, disposition, failure_class
+            FROM knowledge_graph_attempt_issues ORDER BY ordinal
+            """
+        ).fetchall()
+    assert attempt is not None
+    assert attempt[:4] == ("failed", None, 0, 0)
+    assert str(attempt[4]).startswith("kg:")
+    assert issues == [("invalid_json", "$", "fatal", "shape")]
 
 
 def test_suspended_graph_contract_blocks_later_documents_until_explicit_retry(
@@ -506,8 +820,11 @@ def test_suspended_graph_contract_blocks_later_documents_until_explicit_retry(
     first_source.write_text("Atlas uses a local gateway.", encoding="utf-8")
     second_source = tmp_path / "second-invalid-graph.txt"
     second_source.write_text("Meridian uses another local gateway.", encoding="utf-8")
+    third_source = tmp_path / "third-invalid-graph.txt"
+    third_source.write_text("Orion uses one more local gateway.", encoding="utf-8")
     first = DesktopTextImportService(kb_dir).import_text(first_source).document
     second = DesktopTextImportService(kb_dir).import_text(second_source).document
+    third = DesktopTextImportService(kb_dir).import_text(third_source).document
     save_desktop_model_settings(
         kb_dir,
         provider="deepseek",
@@ -541,19 +858,499 @@ def test_suspended_graph_contract_blocks_later_documents_until_explicit_retry(
     tasks = DesktopKnowledgeGraphExtractionTasks(kb_dir)
     assert tasks.queue(first.document_id, gateway)
     assert tasks.queue(second.document_id, gateway)
+    assert tasks.queue(third.document_id, gateway)
 
     assert not tasks.run_document(first.document_id, gateway, should_stop=lambda: False)
     assert calls == ["knowledge_graph_extraction", "structured_output_repair"]
-    assert tasks.pending_document_ids(gateway) == ()
+    assert tasks.pending_document_ids(gateway) == (second.document_id, third.document_id)
     assert not tasks.run_document(second.document_id, gateway, should_stop=lambda: False)
-    assert calls == ["knowledge_graph_extraction", "structured_output_repair"]
+    assert calls == [
+        "knowledge_graph_extraction",
+        "structured_output_repair",
+        "knowledge_graph_extraction",
+        "structured_output_repair",
+    ]
+    assert tasks.pending_document_ids(gateway) == ()
+    assert not tasks.run_document(third.document_id, gateway, should_stop=lambda: False)
+    assert len(calls) == 4
+    profile = gateway.execution_profile_for_operation("knowledge_graph_extraction")
+    state = DesktopModelOperationContractStore(kb_dir).state(
+        operation="knowledge_graph_extraction",
+        capability_identity=profile.capability_evidence_profile.identity,
+        prompt_contract_digest=prompt_contract_for("knowledge_graph_extraction").digest,
+    )
+    assert state.status == "suspended"
+    assert state.failure_code == "knowledge_graph_response_invalid"
+    assert state.failure_signature is not None
 
     valid_response = True
     assert tasks.retry(first.document_id, gateway)
     assert tasks.pending_document_ids(gateway) == (first.document_id,)
     assert tasks.run_document(first.document_id, gateway, should_stop=lambda: False)
     assert calls[-1] == "knowledge_graph_extraction"
-    assert tasks.pending_document_ids(gateway) == (second.document_id,)
+    assert tasks.pending_document_ids(gateway) == (third.document_id,)
+
+
+def test_all_rejected_semantic_graph_does_not_spend_the_repair_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "unsupported-node.txt"
+    source.write_text("Atlas uses Gateway.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    operations: list[str] = []
+
+    def unsupported_node(request, _timeout_seconds):
+        operations.append(request.operation)
+        [evidence] = json.loads(request.content)["evidence"]
+        return json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "atlas",
+                        "evidence_id": evidence["evidence_id"],
+                        "type": "person",
+                        "label": "Atlas",
+                        "support_quote": "Atlas",
+                    }
+                ],
+                "edges": [],
+            }
+        )
+
+    assert not DesktopKnowledgeGraphService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(unsupported_node),
+    ).extract_document(document.document_id)
+
+    assert operations == ["knowledge_graph_extraction"]
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            """
+            SELECT lifecycle, rejected_count FROM knowledge_graph_attempts
+            WHERE document_id = ?
+            """,
+            (document.document_id,),
+        ).fetchone() == ("failed", 1)
+        assert connection.execute(
+            """
+            SELECT code, contract_path FROM knowledge_graph_attempt_issues
+            """
+        ).fetchall() == [("unsupported_node_type", "nodes[0].type")]
+
+
+def test_in_flight_valid_graph_finishes_without_clearing_a_newer_suspension(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "in-flight.txt"
+    source.write_text("No supported relationship is present.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    capability_identity = "test-analysis-capability"
+    contract = prompt_contract_for("knowledge_graph_extraction")
+
+    class CapabilityProfile:
+        identity = capability_identity
+
+    class ExecutionProfile:
+        capability_evidence_profile = CapabilityProfile()
+
+    class SuspendingGateway:
+        provider_name = "test-provider"
+        model_name = "test-model"
+
+        def execution_profile_for_operation(self, _operation):
+            return ExecutionProfile()
+
+        def analyze(self, request, *, on_event, is_cancelled):
+            del on_event
+            assert is_cancelled is None or not is_cancelled()
+            DesktopModelOperationContractStore(kb_dir).suspend(
+                operation="knowledge_graph_extraction",
+                capability_identity=capability_identity,
+                prompt_contract_digest=contract.digest,
+                failure_code="knowledge_graph_response_invalid",
+                reason="A concurrent document corroborated the structural failure.",
+                failure_stage="domain_validation",
+                failure_signature="kg:concurrent",
+            )
+            return DesktopModelResult(
+                "in-flight-call",
+                json.dumps({"nodes": [], "edges": []}),
+                1,
+                diagnostic_context={
+                    "operation": request.operation,
+                    "capability_identity": capability_identity,
+                    "prompt_contract_digest": request.prompt_contract_digest,
+                },
+            )
+
+    assert DesktopKnowledgeGraphService(
+        kb_dir,
+        model_gateway=SuspendingGateway(),  # type: ignore[arg-type]
+    ).extract_document(document.document_id)
+
+    state = DesktopModelOperationContractStore(kb_dir).state(
+        operation="knowledge_graph_extraction",
+        capability_identity=capability_identity,
+        prompt_contract_digest=contract.digest,
+    )
+    assert state.status == "suspended"
+    assert state.failure_signature == "kg:concurrent"
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT status FROM knowledge_graph_results WHERE document_id = ?",
+            (document.document_id,),
+        ).fetchone() == ("completed_empty",)
+
+
+def test_explicit_retry_finishes_without_clearing_a_newer_suspension(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "explicit-retry-in-flight.txt"
+    source.write_text("No supported relationship is present.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    capability_identity = "test-analysis-capability"
+    contract = prompt_contract_for("knowledge_graph_extraction")
+    retry_scope = f"knowledge_graph:{document.document_id}"
+    store = DesktopModelOperationContractStore(kb_dir)
+    store.suspend(
+        operation="knowledge_graph_extraction",
+        capability_identity=capability_identity,
+        prompt_contract_digest=contract.digest,
+        failure_code="knowledge_graph_response_invalid",
+        reason="The original graph response was invalid.",
+        failure_stage="domain_validation",
+        failure_signature="kg:original",
+    )
+    assert store.authorize_retry(
+        operation="knowledge_graph_extraction",
+        capability_identity=capability_identity,
+        prompt_contract_digest=contract.digest,
+        retry_scope=retry_scope,
+    )
+
+    class CapabilityProfile:
+        identity = capability_identity
+
+    class ExecutionProfile:
+        capability_evidence_profile = CapabilityProfile()
+
+    class SuspendingGateway:
+        provider_name = "test-provider"
+        model_name = "test-model"
+
+        def execution_profile_for_operation(self, _operation):
+            return ExecutionProfile()
+
+        def analyze(self, request, *, on_event, is_cancelled):
+            del on_event
+            assert is_cancelled is None or not is_cancelled()
+            store.suspend(
+                operation="knowledge_graph_extraction",
+                capability_identity=capability_identity,
+                prompt_contract_digest=contract.digest,
+                failure_code="knowledge_graph_response_invalid",
+                reason="A concurrent document corroborated a newer failure.",
+                failure_stage="domain_validation",
+                failure_signature="kg:newer",
+            )
+            return DesktopModelResult(
+                "explicit-retry-call",
+                json.dumps({"nodes": [], "edges": []}),
+                1,
+                diagnostic_context={
+                    "operation": request.operation,
+                    "capability_identity": capability_identity,
+                    "prompt_contract_digest": request.prompt_contract_digest,
+                },
+            )
+
+    assert DesktopKnowledgeGraphService(
+        kb_dir,
+        model_gateway=SuspendingGateway(),  # type: ignore[arg-type]
+    ).extract_document(document.document_id, retry_scope=retry_scope)
+
+    state = store.state(
+        operation="knowledge_graph_extraction",
+        capability_identity=capability_identity,
+        prompt_contract_digest=contract.digest,
+    )
+    assert state.status == "suspended"
+    assert state.failure_signature == "kg:newer"
+    assert not store.dispatch_possible(
+        operation="knowledge_graph_extraction",
+        capability_identity=capability_identity,
+        prompt_contract_digest=contract.digest,
+        retry_scope=retry_scope,
+    )
+
+
+def test_retry_action_does_not_authorize_a_suspension_created_before_dispatch(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "late-suspension.txt"
+    source.write_text("No supported relationship is present.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    capability_identity = "test-analysis-capability"
+    contract = prompt_contract_for("knowledge_graph_extraction")
+    retry_scope = f"knowledge_graph_extraction:{document.document_id}:action"
+    store = DesktopModelOperationContractStore(kb_dir)
+
+    class CapabilityProfile:
+        identity = capability_identity
+
+    class ExecutionProfile:
+        capability_evidence_profile = CapabilityProfile()
+
+    class CountingGateway:
+        provider_name = "test-provider"
+        model_name = "test-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execution_profile_for_operation(self, _operation):
+            return ExecutionProfile()
+
+        def analyze(self, request, *, on_event, is_cancelled):
+            del request, on_event, is_cancelled
+            self.calls += 1
+            return DesktopModelResult("unexpected-call", '{"nodes":[],"edges":[]}', 1)
+
+    gateway = CountingGateway()
+    assert not authorize_model_operation_retry(
+        kb_dir,
+        gateway,
+        operation="knowledge_graph_extraction",
+        retry_scope=retry_scope,
+    )
+
+    def admit_then_suspend(*_args, **_kwargs) -> bool:
+        store.suspend(
+            operation="knowledge_graph_extraction",
+            capability_identity=capability_identity,
+            prompt_contract_digest=contract.digest,
+            failure_code="knowledge_graph_response_invalid",
+            reason="A concurrent document suspended this contract.",
+            failure_stage="domain_validation",
+        )
+        return True
+
+    monkeypatch.setattr(
+        "openkb.desktop_knowledge_graph.model_operation_dispatch_possible",
+        admit_then_suspend,
+    )
+    failures: list[str] = []
+
+    assert not DesktopKnowledgeGraphService(
+        kb_dir,
+        model_gateway=gateway,  # type: ignore[arg-type]
+    ).extract_document(
+        document.document_id,
+        retry_scope=retry_scope,
+        on_failure=lambda code, _reason: failures.append(code),
+    )
+    assert gateway.calls == 0
+    assert failures == ["model_operation_suspended"]
+
+
+def test_new_graph_retry_action_uses_a_unique_scope_for_the_current_revisions(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "stale-retry-scope.txt"
+    source.write_text("No supported relationship is present.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    capability_identity = "test-analysis-capability"
+
+    class CapabilityProfile:
+        identity = capability_identity
+
+    class ExecutionProfile:
+        capability_evidence_profile = CapabilityProfile()
+
+    class RetryGateway:
+        provider_name = "test-provider"
+        model_name = "test-model"
+
+        def execution_profile_for_operation(self, _operation):
+            return ExecutionProfile()
+
+    gateway = RetryGateway()
+    tasks = DesktopKnowledgeGraphExtractionTasks(kb_dir)
+    assert tasks.queue(document.document_id, gateway)  # type: ignore[arg-type]
+    contract = prompt_contract_for("knowledge_graph_extraction")
+    repair_digest = structured_output_repair_contract_digest("knowledge_graph_extraction")
+    store = DesktopModelOperationContractStore(kb_dir)
+    contracts = (
+        ("knowledge_graph_extraction", contract.digest),
+        ("structured_output_repair", repair_digest),
+    )
+    for operation, digest in contracts:
+        store.suspend(
+            operation=operation,
+            capability_identity=capability_identity,
+            prompt_contract_digest=digest,
+            failure_code="knowledge_graph_response_invalid",
+            reason="Original failure.",
+            failure_stage="domain_validation",
+        )
+
+    observed_publications: list[tuple[bool, str | None, str, str]] = []
+
+    def observe_authorization(connection, *, operation, retry_scope, **kwargs):
+        row = connection.execute(
+            "SELECT retry_scope FROM knowledge_graph_extraction_tasks WHERE document_id = ?",
+            (document.document_id,),
+        ).fetchone()
+        observed_publications.append(
+            (
+                connection.in_transaction,
+                str(row[0]) if row is not None and row[0] is not None else None,
+                retry_scope,
+                operation,
+            )
+        )
+        return authorize_model_operation_retry_in(
+            connection,
+            operation=operation,
+            retry_scope=retry_scope,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        "openkb.desktop_model_result_failure._authorize_model_operation_retry_in",
+        observe_authorization,
+    )
+
+    assert tasks.retry(document.document_id, gateway)  # type: ignore[arg-type]
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        first_scope = str(
+            connection.execute(
+                "SELECT retry_scope FROM knowledge_graph_extraction_tasks WHERE document_id = ?",
+                (document.document_id,),
+            ).fetchone()[0]
+        )
+    assert first_scope.startswith(f"knowledge_graph_extraction:{document.document_id}:")
+
+    for operation, digest in contracts:
+        store.suspend(
+            operation=operation,
+            capability_identity=capability_identity,
+            prompt_contract_digest=digest,
+            failure_code="knowledge_graph_response_invalid",
+            reason="Newer failure after the first action.",
+            failure_stage="domain_validation",
+        )
+    assert tasks.retry(document.document_id, gateway)  # type: ignore[arg-type]
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        second_scope = str(
+            connection.execute(
+                "SELECT retry_scope FROM knowledge_graph_extraction_tasks WHERE document_id = ?",
+                (document.document_id,),
+            ).fetchone()[0]
+        )
+
+    assert second_scope != first_scope
+    for operation, digest in contracts:
+        assert not store.dispatch_possible(
+            operation=operation,
+            capability_identity=capability_identity,
+            prompt_contract_digest=digest,
+            retry_scope=first_scope,
+        )
+        assert store.dispatch_possible(
+            operation=operation,
+            capability_identity=capability_identity,
+            prompt_contract_digest=digest,
+            retry_scope=second_scope,
+        )
+    assert observed_publications
+    assert all(
+        in_transaction and stored_scope == requested_scope
+        for in_transaction, stored_scope, requested_scope, _ in observed_publications
+    )
+    assert tasks.pending_document_ids(gateway) == (document.document_id,)  # type: ignore[arg-type]
+
+
+def test_graph_retry_revokes_partial_authorization_if_group_setup_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "partial-retry-authorization.txt"
+    source.write_text("No supported relationship is present.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    capability_identity = "test-analysis-capability"
+
+    class CapabilityProfile:
+        identity = capability_identity
+
+    class ExecutionProfile:
+        capability_evidence_profile = CapabilityProfile()
+
+    class RetryGateway:
+        provider_name = "test-provider"
+        model_name = "test-model"
+
+        def execution_profile_for_operation(self, _operation):
+            return ExecutionProfile()
+
+    gateway = RetryGateway()
+    tasks = DesktopKnowledgeGraphExtractionTasks(kb_dir)
+    assert tasks.queue(document.document_id, gateway)  # type: ignore[arg-type]
+    contract = prompt_contract_for("knowledge_graph_extraction")
+    DesktopModelOperationContractStore(kb_dir).suspend(
+        operation="knowledge_graph_extraction",
+        capability_identity=capability_identity,
+        prompt_contract_digest=contract.digest,
+        failure_code="knowledge_graph_response_invalid",
+        reason="Original failure.",
+        failure_stage="domain_validation",
+    )
+
+    def fail_second_authorization(connection, *, operation, **kwargs):
+        if operation == "structured_output_repair":
+            raise RuntimeError("repair authorization failed")
+        return authorize_model_operation_retry_in(
+            connection, operation=operation, **kwargs
+        )
+
+    monkeypatch.setattr(
+        "openkb.desktop_model_result_failure._authorize_model_operation_retry_in",
+        fail_second_authorization,
+    )
+
+    with pytest.raises(RuntimeError, match="repair authorization failed"):
+        tasks.retry(document.document_id, gateway)  # type: ignore[arg-type]
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT status, reason, retry_scope FROM knowledge_graph_extraction_tasks "
+            "WHERE document_id = ?",
+            (document.document_id,),
+        ).fetchone() == ("pending", "initial", None)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM model_operation_retry_permits"
+        ).fetchone() == (0,)
 
 
 def test_graph_query_diagnostic_never_waits_for_an_active_kb_mutation(tmp_path, monkeypatch):
@@ -687,6 +1484,7 @@ def test_graph_task_is_cancelled_durably_and_retried_explicitly(tmp_path):
                                 "evidence_id": evidence[0]["evidence_id"],
                                 "type": "entity",
                                 "label": "Atlas",
+                                "support_quote": "Atlas",
                             }
                         ],
                         "edges": [],
@@ -773,6 +1571,7 @@ def test_cancel_at_publish_barrier_cannot_publish_a_stale_graph_claim(tmp_path, 
                                 "evidence_id": evidence[0]["evidence_id"],
                                 "type": "entity",
                                 "label": "Atlas",
+                                "support_quote": "Atlas",
                             }
                         ],
                         "edges": [],

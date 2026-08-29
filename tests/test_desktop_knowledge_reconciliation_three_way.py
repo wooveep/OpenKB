@@ -50,7 +50,21 @@ def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:
 
 
 def _drop_current_model_schema(connection: sqlite3.Connection) -> None:
+    connection.execute("DROP VIEW IF EXISTS current_knowledge_graph_edges")
+    connection.execute("DROP VIEW IF EXISTS current_knowledge_graph_nodes")
     for table in (
+        "knowledge_graph_attempt_issues",
+        "knowledge_graph_attempts",
+        "knowledge_graph_current",
+        "knowledge_graph_result_edges",
+        "knowledge_graph_result_nodes",
+        "knowledge_graph_results",
+        "knowledge_adoption_requests",
+        "knowledge_origin_references",
+        "model_capability_compatibility_audit",
+        "model_operation_contract_events",
+        "model_operation_retry_permits",
+        "model_operation_contract_states",
         "knowledge_graph_extraction_tasks",
         "legacy_model_recovery_audit",
         "model_usage_records",
@@ -68,6 +82,20 @@ def _drop_current_model_schema(connection: sqlite3.Connection) -> None:
             "SELECT 1 FROM pragma_table_info(?) WHERE name = ?", (table, column)
         ).fetchone():
             connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    for table, columns in (
+        ("knowledge_graph_nodes", ("support_start", "support_end", "verification_state")),
+        (
+            "knowledge_graph_edges",
+            ("relation_label", "support_start", "support_end", "verification_state"),
+        ),
+        ("document_page_tree_enrichment_tasks", ("retry_scope",)),
+    ):
+        existing = {
+            str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for column in columns:
+            if column in existing:
+                connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
     connection.execute("DELETE FROM schema_migrations WHERE version >= 38")
 
 

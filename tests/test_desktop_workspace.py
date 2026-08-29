@@ -34,6 +34,8 @@ def _drop_post_v44_schema(connection: sqlite3.Connection) -> None:
     connection.execute("DROP VIEW IF EXISTS current_knowledge_graph_edges")
     connection.execute("DROP VIEW IF EXISTS current_knowledge_graph_nodes")
     for table in (
+        "knowledge_graph_attempt_issues",
+        "knowledge_graph_attempts",
         "knowledge_graph_current",
         "knowledge_graph_result_edges",
         "knowledge_graph_result_nodes",
@@ -46,7 +48,38 @@ def _drop_post_v44_schema(connection: sqlite3.Connection) -> None:
         "model_operation_contract_states",
     ):
         connection.execute(f"DROP TABLE IF EXISTS {table}")
+    _drop_columns_if_present(
+        connection,
+        "knowledge_graph_nodes",
+        ("support_start", "support_end", "verification_state"),
+    )
+    _drop_columns_if_present(
+        connection,
+        "knowledge_graph_edges",
+        ("relation_label", "support_start", "support_end", "verification_state"),
+    )
+    _drop_columns_if_present(
+        connection,
+        "knowledge_graph_extraction_tasks",
+        ("retry_scope",),
+    )
+    _drop_columns_if_present(
+        connection,
+        "document_page_tree_enrichment_tasks",
+        ("retry_scope",),
+    )
     connection.execute("DELETE FROM schema_migrations WHERE version >= 45")
+
+
+def _drop_columns_if_present(
+    connection: sqlite3.Connection,
+    table: str,
+    columns: tuple[str, ...],
+) -> None:
+    existing = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    for column in columns:
+        if column in existing:
+            connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
 
 
 def _drop_post_v37_schema(connection: sqlite3.Connection) -> None:
@@ -354,20 +387,7 @@ def test_operation_state_migration_leaves_ambiguous_graph_invalidation_unverifie
     )
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
-        connection.execute("DROP VIEW current_knowledge_graph_edges")
-        connection.execute("DROP VIEW current_knowledge_graph_nodes")
-        for table in (
-            "knowledge_graph_current",
-            "knowledge_graph_result_edges",
-            "knowledge_graph_result_nodes",
-            "knowledge_graph_results",
-            "knowledge_adoption_requests",
-            "knowledge_origin_references",
-            "model_capability_compatibility_audit",
-            "model_operation_contract_states",
-        ):
-            connection.execute(f"DROP TABLE IF EXISTS {table}")
-        connection.execute("DELETE FROM schema_migrations WHERE version >= 45")
+        _drop_post_v44_schema(connection)
         connection.execute(
             """
             INSERT OR REPLACE INTO model_capability_checks (

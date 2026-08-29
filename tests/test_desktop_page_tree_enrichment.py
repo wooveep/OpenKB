@@ -14,8 +14,15 @@ from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
-from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelRequest
-from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
+from openkb.desktop_model_gateway import (
+    DesktopModelGateway,
+    DesktopModelRequest,
+    DesktopModelResult,
+)
+from openkb.desktop_model_operation_state import (
+    DesktopModelOperationContractStore,
+    authorize_model_operation_retry_in,
+)
 from openkb.desktop_model_settings import (
     read_desktop_model_settings,
     save_desktop_model_settings,
@@ -26,6 +33,7 @@ from openkb.desktop_page_tree_enrichment import DesktopPageTreeEnrichmentService
 from openkb.desktop_page_tree_rebuild_state import queue_page_tree_rebuild_in
 from openkb.desktop_page_tree_store import load_current_page_tree_in
 from openkb.desktop_prompt_contracts import prompt_contract_for
+from openkb.desktop_structured_output import structured_output_repair_contract_digest
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
@@ -246,6 +254,245 @@ def test_invalid_enrichment_repair_marks_final_usage_as_model_result_failure(tmp
     ).status == "suspended"
 
 
+def test_repeated_page_tree_retry_uses_fresh_scope_and_revokes_cancelled_authority(tmp_path):
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "repeated-retry.md"
+    source.write_text("# Stable\n\nThe deterministic tree remains available.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    capability_identity = "page-tree-retry-capability"
+
+    class CapabilityProfile:
+        identity = capability_identity
+
+    class ExecutionProfile:
+        capability_evidence_profile = CapabilityProfile()
+
+    class RetryGateway:
+        provider_name = "provider-a"
+        model_name = "model-a"
+
+        def execution_profile_for_operation(self, _operation):
+            return ExecutionProfile()
+
+    gateway = RetryGateway()
+    service = DesktopPageTreeEnrichmentService(kb_dir)
+    assert service.queue_eligible(gateway) == 1
+
+    store = DesktopModelOperationContractStore(kb_dir)
+    contracts = (
+        ("page_tree_enrichment", prompt_contract_for("page_tree_enrichment").digest),
+        (
+            "structured_output_repair",
+            structured_output_repair_contract_digest("page_tree_enrichment"),
+        ),
+    )
+    for operation, digest in contracts:
+        store.suspend(
+            operation=operation,
+            capability_identity=capability_identity,
+            prompt_contract_digest=digest,
+            failure_code="model_response_invalid",
+            reason="Original failure.",
+            failure_stage="domain_validation",
+        )
+
+    assert service.retry_document(imported.document.document_id, gateway)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        first_scope = str(
+            connection.execute(
+                "SELECT retry_scope FROM document_page_tree_enrichment_tasks "
+                "WHERE document_id = ?",
+                (imported.document.document_id,),
+            ).fetchone()[0]
+        )
+    assert first_scope.startswith(f"page_tree_enrichment:{imported.document.document_id}:")
+    assert service.request_cancel(imported.document.document_id)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT retry_scope FROM document_page_tree_enrichment_tasks WHERE document_id = ?",
+            (imported.document.document_id,),
+        ).fetchone() == (None,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM model_operation_retry_permits WHERE retry_scope = ?",
+            (first_scope,),
+        ).fetchone() == (0,)
+
+    for operation, digest in contracts:
+        store.suspend(
+            operation=operation,
+            capability_identity=capability_identity,
+            prompt_contract_digest=digest,
+            failure_code="model_response_invalid",
+            reason="Newer failure.",
+            failure_stage="domain_validation",
+        )
+    assert service.retry_document(imported.document.document_id, gateway)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        second_scope = str(
+            connection.execute(
+                "SELECT retry_scope FROM document_page_tree_enrichment_tasks "
+                "WHERE document_id = ?",
+                (imported.document.document_id,),
+            ).fetchone()[0]
+        )
+    assert second_scope != first_scope
+    assert service.pending_document_ids(gateway) == (imported.document.document_id,)
+
+
+def test_page_tree_retry_does_not_publish_scope_until_both_contracts_are_prepared(
+    tmp_path, monkeypatch
+):
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "retry-publication.md"
+    source.write_text("# Stable\n\nThe deterministic tree remains available.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    capability_identity = "page-tree-publication-capability"
+
+    class CapabilityProfile:
+        identity = capability_identity
+
+    class ExecutionProfile:
+        capability_evidence_profile = CapabilityProfile()
+
+    class RetryGateway:
+        provider_name = "provider-a"
+        model_name = "model-a"
+
+        def execution_profile_for_operation(self, _operation):
+            return ExecutionProfile()
+
+    gateway = RetryGateway()
+    service = DesktopPageTreeEnrichmentService(kb_dir)
+    assert service.queue_eligible(gateway) == 1
+    store = DesktopModelOperationContractStore(kb_dir)
+    store.suspend(
+        operation="page_tree_enrichment",
+        capability_identity=capability_identity,
+        prompt_contract_digest=prompt_contract_for("page_tree_enrichment").digest,
+        failure_code="model_response_invalid",
+        reason="Original failure.",
+        failure_stage="domain_validation",
+    )
+    observed: list[tuple[bool, str | None, str]] = []
+
+    def observe_authorization(connection, *, retry_scope, **kwargs):
+        row = connection.execute(
+            "SELECT retry_scope FROM document_page_tree_enrichment_tasks "
+            "WHERE document_id = ?",
+            (imported.document.document_id,),
+        ).fetchone()
+        observed.append(
+            (
+                connection.in_transaction,
+                str(row[0]) if row is not None and row[0] is not None else None,
+                retry_scope,
+            )
+        )
+        return authorize_model_operation_retry_in(
+            connection, retry_scope=retry_scope, **kwargs
+        )
+
+    monkeypatch.setattr(
+        "openkb.desktop_model_result_failure._authorize_model_operation_retry_in",
+        observe_authorization,
+    )
+
+    assert service.retry_document(imported.document.document_id, gateway)
+    assert len(observed) == 2
+    assert all(
+        in_transaction and stored_scope == requested_scope
+        for in_transaction, stored_scope, requested_scope in observed
+    )
+
+
+def test_page_tree_retry_result_does_not_clear_a_newer_in_flight_suspension(tmp_path):
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "newer-suspension.md"
+    source.write_text("# Stable\n\nThe deterministic tree remains available.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    capability_identity = "page-tree-in-flight-capability"
+    contract = prompt_contract_for("page_tree_enrichment")
+    store = DesktopModelOperationContractStore(kb_dir)
+
+    class CapabilityProfile:
+        identity = capability_identity
+
+    class ExecutionProfile:
+        capability_evidence_profile = CapabilityProfile()
+
+    class SuspendingGateway:
+        provider_name = "provider-a"
+        model_name = "model-a"
+
+        def execution_profile_for_operation(self, _operation):
+            return ExecutionProfile()
+
+        def analyze(self, request, *, on_event, is_cancelled):
+            del on_event
+            assert is_cancelled is None or not is_cancelled()
+            payload = json.loads(request.content)
+            target = next(node for node in payload["nodes"] if node["evidence"])
+            store.suspend(
+                operation="page_tree_enrichment",
+                capability_identity=capability_identity,
+                prompt_contract_digest=contract.digest,
+                failure_code="model_response_invalid",
+                reason="A concurrent document created a newer suspension.",
+                failure_stage="domain_validation",
+                failure_signature="page-tree:newer",
+            )
+            return DesktopModelResult(
+                "page-tree-retry-call",
+                json.dumps(
+                    {
+                        "schema_version": "openkb.page-tree-enrichment.v1",
+                        "summaries": [
+                            {
+                                "node_id": target["node_id"],
+                                "summary": "Validated without clearing newer state.",
+                            }
+                        ],
+                    }
+                ),
+                1,
+                diagnostic_context={
+                    "operation": request.operation,
+                    "capability_identity": capability_identity,
+                    "prompt_contract_digest": request.prompt_contract_digest,
+                },
+            )
+
+    gateway = SuspendingGateway()
+    service = DesktopPageTreeEnrichmentService(kb_dir)
+    assert service.queue_eligible(gateway) == 1
+    store.suspend(
+        operation="page_tree_enrichment",
+        capability_identity=capability_identity,
+        prompt_contract_digest=contract.digest,
+        failure_code="model_response_invalid",
+        reason="Original suspension.",
+        failure_stage="domain_validation",
+        failure_signature="page-tree:original",
+    )
+    assert service.retry_document(imported.document.document_id, gateway)
+
+    assert service.run_document(
+        imported.document.document_id,
+        gateway,
+        should_stop=lambda: False,
+    )
+    state = store.state(
+        operation="page_tree_enrichment",
+        capability_identity=capability_identity,
+        prompt_contract_digest=contract.digest,
+    )
+    assert state.status == "suspended"
+    assert state.failure_signature == "page-tree:newer"
+
+
 def test_model_change_creates_a_new_enrichment_generation_without_overwriting_base(tmp_path):
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "rerun.md"
@@ -360,6 +607,43 @@ def test_recovered_task_rejects_a_late_model_result(tmp_path):
         assert connection.execute(
             "SELECT COUNT(*) FROM document_page_tree_enrichment_generations"
         ).fetchone() == (0,)
+
+
+def test_recovery_pauses_a_legacy_scope_less_explicit_retry(tmp_path):
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "legacy-retry.md"
+    source.write_text("# Restart\n\nLegacy retry state needs a new user action.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    gateway = _gateway("provider-a", "model-a", "Summary.")
+    service = DesktopPageTreeEnrichmentService(kb_dir)
+    assert service.queue_eligible(gateway) == 1
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        connection.execute(
+            """
+            UPDATE document_page_tree_enrichment_tasks
+            SET status = 'pending', reason = 'explicit_retry', retry_scope = NULL,
+                error_code = NULL, error_reason = NULL
+            WHERE document_id = ?
+            """,
+            (imported.document.document_id,),
+        )
+        connection.commit()
+
+    assert service.recover_interrupted() == 1
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            """
+            SELECT status, reason, retry_scope, error_code
+            FROM document_page_tree_enrichment_tasks WHERE document_id = ?
+            """,
+            (imported.document.document_id,),
+        ).fetchone() == (
+            "pending",
+            "explicit_retry",
+            None,
+            "page_tree_enrichment_interrupted",
+        )
 
 
 def test_unavailable_document_terminalizes_queued_and_running_enrichment(tmp_path):
@@ -606,6 +890,61 @@ def test_interrupted_page_tree_enrichment_stays_paused_after_engine_restart(tmp_
         "pending",
         "page_tree_enrichment_interrupted",
     )
+
+
+def test_running_cancel_invalidates_claim_before_a_late_publish(tmp_path, monkeypatch):
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "cancel-before-publish.md"
+    source.write_text("# Cancel\n\nA cancelled result must not become current.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    gateway = _gateway("provider-a", "model-a", "Late summary.")
+    service = DesktopPageTreeEnrichmentService(kb_dir)
+    assert service.queue_eligible(gateway) == 1
+    publish_entered = threading.Event()
+    release_publish = threading.Event()
+    original_publish = service._publish
+
+    def delayed_publish(claim, summaries):
+        publish_entered.set()
+        assert release_publish.wait(timeout=2)
+        return original_publish(claim, summaries)
+
+    monkeypatch.setattr(service, "_publish", delayed_publish)
+    results: list[bool] = []
+    worker = threading.Thread(
+        target=lambda: results.append(
+            service.run_document(
+                imported.document.document_id,
+                gateway,
+                should_stop=lambda: False,
+            )
+        )
+    )
+    worker.start()
+    assert publish_entered.wait(timeout=2)
+    assert service.request_cancel(imported.document.document_id)
+    release_publish.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+
+    assert results == [False]
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        assert connection.execute(
+            """
+            SELECT status, execution_token, retry_scope, error_code
+            FROM document_page_tree_enrichment_tasks WHERE document_id = ?
+            """,
+            (imported.document.document_id,),
+        ).fetchone() == (
+            "pending",
+            None,
+            None,
+            "page_tree_enrichment_interrupted",
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM document_page_tree_enrichment_generations"
+        ).fetchone() == (0,)
 
 
 def test_page_tree_control_serializes_with_active_workspace_switch(tmp_path, monkeypatch):

@@ -8,7 +8,10 @@ import pytest
 from jsonschema import validate as validate_json_schema
 from jsonschema.exceptions import ValidationError
 
-from openkb.desktop_knowledge_graph import validate_knowledge_graph_response
+from openkb.desktop_knowledge_graph_interpretation import (
+    GraphEvidence,
+    GraphExtractionBoundary,
+)
 from openkb.desktop_model_gateway import DesktopModelRequest, DesktopModelResult
 from openkb.desktop_prompt_contracts import (
     canonical_prompt_contract_snapshot,
@@ -76,7 +79,7 @@ def test_every_structured_contract_has_a_canonical_schema_valid_json_example() -
         assert snapshot["output_example"] == contract.output_example
 
 
-def test_knowledge_graph_canonical_example_passes_the_operation_validator() -> None:
+def test_knowledge_graph_canonical_example_passes_the_interpretation_boundary() -> None:
     contract = prompt_contract_for("knowledge_graph_extraction")
 
     schema = contract.output_schema
@@ -102,23 +105,29 @@ def test_knowledge_graph_canonical_example_passes_the_operation_validator() -> N
     assert label["maxLength"] == 320
 
     assert contract.output_example is not None
-    payload = validate_knowledge_graph_response(
+    interpretation = GraphExtractionBoundary.interpret(
         json.dumps(contract.output_example),
-        known_evidence_ids=("evidence-1",),
+        (GraphEvidence("evidence-1", "OpenKB is a knowledge base."),),
     )
 
-    assert len(payload.nodes) == 2
-    assert len(payload.edges) == 1
+    assert interpretation.lifecycle == "completed"
+    assert interpretation.quality == "full"
+    assert interpretation.payload is not None
+    assert len(interpretation.payload.nodes) == 2
+    assert len(interpretation.payload.edges) == 1
 
 
-def test_knowledge_graph_operation_validator_accepts_an_empty_result() -> None:
-    payload = validate_knowledge_graph_response(
+def test_knowledge_graph_interpretation_boundary_accepts_an_empty_result() -> None:
+    interpretation = GraphExtractionBoundary.interpret(
         json.dumps({"nodes": [], "edges": []}),
-        known_evidence_ids=("evidence-1",),
+        (GraphEvidence("evidence-1", "OpenKB is a knowledge base."),),
     )
 
-    assert payload.nodes == ()
-    assert payload.edges == ()
+    assert interpretation.lifecycle == "completed_empty"
+    assert interpretation.quality == "full"
+    assert interpretation.payload is not None
+    assert interpretation.payload.nodes == ()
+    assert interpretation.payload.edges == ()
 
 
 @pytest.mark.parametrize(
@@ -132,19 +141,32 @@ def test_knowledge_graph_operation_validator_accepts_an_empty_result() -> None:
                     "evidence_id": "evidence-1",
                     "type": "entity",
                     "label": "OpenKB",
-                    "properties": {},
+                    "support_quote": "OpenKB",
+                    "confidence": 0.9,
                 }
             ],
             "edges": [],
         },
     ),
 )
-def test_knowledge_graph_operation_validator_rejects_unknown_fields(payload: object) -> None:
-    with pytest.raises(ValueError, match="unexpected fields"):
-        validate_knowledge_graph_response(
-            json.dumps(payload),
-            known_evidence_ids=("evidence-1",),
-        )
+def test_knowledge_graph_schema_rejects_but_boundary_reports_unknown_fields(
+    payload: object,
+) -> None:
+    schema = prompt_contract_for("knowledge_graph_extraction").output_schema
+    assert schema is not None
+    with pytest.raises(ValidationError):
+        validate_json_schema(payload, schema)
+
+    interpretation = GraphExtractionBoundary.interpret(
+        json.dumps(payload),
+        (GraphEvidence("evidence-1", "OpenKB is a knowledge base."),),
+    )
+    assert isinstance(payload, dict)
+    has_candidates = bool(payload.get("nodes") or payload.get("edges"))
+    assert interpretation.lifecycle == ("completed" if has_candidates else "failed")
+    assert interpretation.quality == ("degraded" if has_candidates else None)
+    assert interpretation.repairable is not has_candidates
+    assert {issue.code for issue in interpretation.issues} == {"unexpected_field"}
 
 
 @pytest.mark.parametrize(
@@ -157,6 +179,7 @@ def test_knowledge_graph_operation_validator_rejects_unknown_fields(payload: obj
                     "evidence_id": "evidence-1",
                     "type": "ENTITY",
                     "label": "OpenKB",
+                    "support_quote": "OpenKB",
                 }
             ],
             "edges": [],
@@ -168,6 +191,7 @@ def test_knowledge_graph_operation_validator_rejects_unknown_fields(payload: obj
                     "evidence_id": "evidence-1",
                     "type": "entity",
                     "label": "OpenKB",
+                    "support_quote": "OpenKB",
                 }
             ],
             "edges": [],
@@ -179,48 +203,69 @@ def test_knowledge_graph_operation_validator_rejects_unknown_fields(payload: obj
                     "evidence_id": "evidence-1",
                     "type": "entity",
                     "label": " OpenKB ",
+                    "support_quote": "OpenKB",
                 }
             ],
             "edges": [],
         },
-        {
-            "nodes": [
-                {
-                    "id": "entity-1",
-                    "evidence_id": "evidence-1",
-                    "type": "entity",
-                    "label": "OpenKB",
-                },
-                {
-                    "id": "concept-1",
-                    "evidence_id": "evidence-1",
-                    "type": "concept",
-                    "label": "Knowledge base",
-                },
-            ],
-            "edges": [
-                {
-                    "evidence_id": "evidence-1",
-                    "source_id": "entity-1",
-                    "target_id": "concept-1",
-                    "type": "uses",
-                }
-            ],
-        },
     ),
 )
-def test_knowledge_graph_schema_and_operation_validator_reject_same_shapes(
+def test_knowledge_graph_schema_and_boundary_reject_unsafe_scalar_shapes(
     payload: object,
 ) -> None:
     schema = prompt_contract_for("knowledge_graph_extraction").output_schema
     assert schema is not None
     with pytest.raises(ValidationError):
         validate_json_schema(payload, schema)
-    with pytest.raises(ValueError):
-        validate_knowledge_graph_response(
-            json.dumps(payload),
-            known_evidence_ids=("evidence-1",),
-        )
+    interpretation = GraphExtractionBoundary.interpret(
+        json.dumps(payload),
+        (GraphEvidence("evidence-1", "OpenKB is a knowledge base."),),
+    )
+    assert interpretation.lifecycle == "failed"
+    assert interpretation.payload is None
+
+
+def test_candidate_boundary_losslessly_normalizes_a_relation_alias_rejected_by_schema() -> None:
+    payload = {
+        "nodes": [
+            {
+                "id": "entity-1",
+                "evidence_id": "evidence-1",
+                "type": "entity",
+                "label": "OpenKB",
+                "support_quote": "OpenKB",
+            },
+            {
+                "id": "concept-1",
+                "evidence_id": "evidence-1",
+                "type": "concept",
+                "label": "Knowledge base",
+                "support_quote": "knowledge base",
+            },
+        ],
+        "edges": [
+            {
+                "evidence_id": "evidence-1",
+                "source_id": "entity-1",
+                "target_id": "concept-1",
+                "type": "uses",
+                "support_quote": "OpenKB uses a knowledge base.",
+            }
+        ],
+    }
+    schema = prompt_contract_for("knowledge_graph_extraction").output_schema
+    assert schema is not None
+    with pytest.raises(ValidationError):
+        validate_json_schema(payload, schema)
+
+    interpretation = GraphExtractionBoundary.interpret(
+        json.dumps(payload),
+        (GraphEvidence("evidence-1", "OpenKB uses a knowledge base."),),
+    )
+    assert interpretation.lifecycle == "completed"
+    assert interpretation.quality == "full"
+    assert interpretation.payload is not None
+    assert interpretation.payload.edges[0].edge_type == "USES"
 
 
 def test_normalization_removes_only_one_transport_fence() -> None:

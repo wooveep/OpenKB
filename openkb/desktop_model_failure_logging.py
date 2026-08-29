@@ -312,28 +312,77 @@ def own_structured_model_failure(
     second_error: Exception,
 ) -> str:
     """Own terminal local validation only after the single repair also fails."""
-    context = repaired.diagnostic_context
+    return _own_structured_model_failure(
+        operation=operation,
+        document_name=document_name,
+        source_material=source_material,
+        initial=initial,
+        final=repaired,
+        first_error=first_error,
+        final_error=second_error,
+        repair_attempted=True,
+    )
+
+
+def own_unrepaired_structured_model_failure(
+    *,
+    operation: str,
+    document_name: str,
+    source_material: str,
+    initial: DesktopModelResult,
+    error: Exception,
+) -> str:
+    """Own terminal validation when operation policy forbids model repair."""
+    return _own_structured_model_failure(
+        operation=operation,
+        document_name=document_name,
+        source_material=source_material,
+        initial=initial,
+        final=initial,
+        first_error=error,
+        final_error=error,
+        repair_attempted=False,
+    )
+
+
+def _own_structured_model_failure(
+    *,
+    operation: str,
+    document_name: str,
+    source_material: str,
+    initial: DesktopModelResult,
+    final: DesktopModelResult,
+    first_error: Exception,
+    final_error: Exception,
+    repair_attempted: bool,
+) -> str:
+    """Own one structured validation failure and its optional sensitive trace."""
+    context = final.diagnostic_context
     fields = failure_context_fields(
-        error=second_error,
+        error=final_error,
         error_code="model_response_invalid",
         component="model",
         stage=operation,
         phase="local_schema_validation",
         outcome="failed",
         retryable=False,
-        attempt=initial.attempt_count + repaired.attempt_count,
+        attempt=(
+            initial.attempt_count + final.attempt_count
+            if repair_attempted
+            else initial.attempt_count
+        ),
         correlations={
             "job_id": context.get("job_id"),
             "stage_run_id": context.get("stage_run_id"),
             "batch_id": context.get("batch_id"),
-            "call_id": repaired.call_id,
-            "provider_request_id": repaired.provider_request_id,
+            "call_id": final.call_id,
+            "provider_request_id": final.provider_request_id,
         },
         observations={
             **context,
-            "repair_attempted": True,
-            "validation_error_code": type(second_error).__name__,
-            **_observations(repaired.observations, repaired.usage),
+            "repair_attempted": repair_attempted,
+            "validation_error_code": type(final_error).__name__,
+            **_observations(final.observations, final.usage),
         },
     )
     failure_event_id = str(fields["failure_event_id"])
@@ -341,46 +390,63 @@ def own_structured_model_failure(
         logger,
         logging.WARNING,
         "model_result_validation_failed",
-        "A model result and its single repair both failed local validation.",
+        (
+            "A model result and its single repair both failed local validation."
+            if repair_attempted
+            else "A model result failed local validation and was not eligible for repair."
+        ),
         component="model",
         fields=fields,
         terminal=True,
     )
     if sensitive_trace_component_enabled("model"):
         try:
-            payloads = {
+            payloads: dict[str, str | bytes] = {
                 "source-material": source_material,
                 "initial-response": initial.content,
-                "repaired-response": repaired.content,
-                "initial-validation-error": "".join(
-                    traceback.format_exception(
-                        type(first_error), first_error, first_error.__traceback__
-                    )
-                ),
-                "final-validation-error": "".join(
-                    traceback.format_exception(
-                        type(second_error), second_error, second_error.__traceback__
-                    )
-                ),
             }
+            if repair_attempted:
+                payloads.update(
+                    {
+                        "repaired-response": final.content,
+                        "initial-validation-error": "".join(
+                            traceback.format_exception(
+                                type(first_error), first_error, first_error.__traceback__
+                            )
+                        ),
+                        "final-validation-error": "".join(
+                            traceback.format_exception(
+                                type(final_error), final_error, final_error.__traceback__
+                            )
+                        ),
+                    }
+                )
+            else:
+                payloads["validation-error"] = "".join(
+                    traceback.format_exception(
+                        type(final_error), final_error, final_error.__traceback__
+                    )
+                )
             if initial.sensitive_request_payload is not None:
                 payloads["initial-provider-request"] = initial.sensitive_request_payload
-            if repaired.sensitive_request_payload is not None:
-                payloads["repair-provider-request"] = repaired.sensitive_request_payload
+            if repair_attempted and final.sensitive_request_payload is not None:
+                payloads["repair-provider-request"] = final.sensitive_request_payload
             if initial.sensitive_reasoning_content:
                 payloads["initial-raw-reasoning"] = initial.sensitive_reasoning_content
-            if repaired.sensitive_reasoning_content:
-                payloads["repair-raw-reasoning"] = repaired.sensitive_reasoning_content
+            if repair_attempted and final.sensitive_reasoning_content:
+                payloads["repair-raw-reasoning"] = final.sensitive_reasoning_content
+            metadata: dict[str, object] = {
+                "failure_event_id": failure_event_id,
+                "operation": operation,
+                "document_name": document_name,
+                "initial_call_id": initial.call_id,
+                **context,
+            }
+            if repair_attempted:
+                metadata["final_call_id"] = final.call_id
             record_sensitive_trace_failure(
                 "model_result_validation_failed",
-                metadata={
-                    "failure_event_id": failure_event_id,
-                    "operation": operation,
-                    "document_name": document_name,
-                    "initial_call_id": initial.call_id,
-                    "final_call_id": repaired.call_id,
-                    **context,
-                },
+                metadata=metadata,
                 payloads=payloads,
             )
         except Exception:

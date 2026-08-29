@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import re
+import logging
 import sqlite3
 import time
 import uuid
@@ -18,19 +18,22 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from openkb.desktop_knowledge_graph_contract import validate_knowledge_graph_response
-from openkb.desktop_knowledge_graph_store import (
-    GraphEdge as _GraphEdge,
-)
-from openkb.desktop_knowledge_graph_store import (
-    GraphNode as _GraphNode,
+from openkb.desktop_knowledge_graph_deterministic import deterministic_graph_payload
+from openkb.desktop_knowledge_graph_interpretation import (
+    GraphEvidence,
+    GraphExtractionBoundary,
+    GraphInterpretation,
+    KnowledgeGraphInterpretationError,
 )
 from openkb.desktop_knowledge_graph_store import (
     GraphPayload as _GraphPayload,
 )
 from openkb.desktop_knowledge_graph_store import (
+    persist_failed_graph_interpretation_in,
+    persist_graph_interpretation_in,
     persist_graph_payload_in,
 )
+from openkb.desktop_logging import log_event
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -39,14 +42,14 @@ from openkb.desktop_model_gateway import (
     gateway_analysis_capability_verified,
 )
 from openkb.desktop_model_result_failure import (
+    DesktopModelOperationCompletionAuthority,
     DesktopModelOperationSuspendedError,
-    authorize_model_operation_retry,
     mark_structured_output_operations_ready,
     model_operation_dispatch_possible,
+    record_structured_model_result_failure,
     require_model_operation_dispatch,
     suspend_analysis_operation_failure,
     suspend_model_operation_contract,
-    suspend_structured_model_operation,
 )
 from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_structured_output import (
@@ -62,20 +65,25 @@ _MAX_EXTRACTION_EVIDENCE = 12
 _MAX_MODEL_EVIDENCE_CHARS = 1_200
 _MAX_MODEL_INPUT_CHARS = 12_000
 _MAX_LABEL_CHARS = 320
-_MAX_CLAIM_CHARS = 900
 _MAX_GRAPH_HOPS = 2
 _MAX_GRAPH_ROOTS = 12
 _MAX_GRAPH_EXPANDED_NODES = 32
 _MAX_GRAPH_CANDIDATES = 8
 _GRAPH_QUERY_BUDGET_SECONDS = 0.075
-_ENTITY_PATTERN = re.compile(r"\b[A-Z][A-Za-z0-9_-]*(?:\s+[A-Z][A-Za-z0-9_-]*){0,2}\b")
-_WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u3400-\u9fff]{2,}")
-_NON_ENTITY_WORDS = frozenset(("The", "This", "That", "These", "Those", "Document"))
+_MAX_LOGGED_GRAPH_ISSUES = 32
+_CONFIRMED_GRAPH_PROTOCOL_FAILURES = frozenset(
+    {
+        "model_authentication_failed",
+        "model_configuration_invalid",
+        "model_response_invalid",
+    }
+)
 CancellationCallback = Callable[[], bool]
 ModelEventCallback = Callable[[object], None]
 FailureCallback = Callable[[str, str], None]
 PublishOperation = Callable[[sqlite3.Connection], bool]
 PublishTransaction = Callable[[PublishOperation], bool]
+logger = logging.getLogger(__name__)
 
 
 class DesktopKnowledgeGraphQueryError(RuntimeError):
@@ -134,7 +142,8 @@ class DesktopKnowledgeGraphService:
         ):
             return False
 
-        model_output: DesktopValidatedStructuredOutput[_GraphPayload] | None = None
+        model_output: DesktopValidatedStructuredOutput[GraphInterpretation] | None = None
+        interpretation: GraphInterpretation | None = None
         try:
             if self._model_gateway is not None:
                 model_output = self._model_payload(
@@ -143,13 +152,20 @@ class DesktopKnowledgeGraphService:
                     on_model_event=on_model_event,
                     retry_scope=retry_scope,
                 )
-                payload = model_output.value
+                interpretation = model_output.value
+                _log_graph_interpretation(interpretation)
+                if interpretation.payload is None:
+                    raise KnowledgeGraphInterpretationError(interpretation)
+                payload = interpretation.payload
             else:
-                payload = _deterministic_payload(evidence)
+                payload = deterministic_graph_payload(evidence)
         except DesktopModelCancelledError:
             return False
         except DesktopModelCallError as error:
-            if self._model_gateway is not None:
+            if (
+                self._model_gateway is not None
+                and error.failure.code in _CONFIRMED_GRAPH_PROTOCOL_FAILURES
+            ):
                 suspend_analysis_operation_failure(self._kb_dir, self._model_gateway, error)
             _report_failure(on_failure, error.failure.code, error.failure.reason)
             self._record_diagnostic("extraction", error.failure.code, document_id)
@@ -159,30 +175,40 @@ class DesktopKnowledgeGraphService:
             return False
         except DesktopStructuredOutputInvalidError as error:
             if self._model_gateway is not None:
-                suspend_structured_model_operation(
-                    self._kb_dir,
-                    self._model_gateway,
-                    error,
-                    operation="knowledge_graph_extraction",
-                    failure_code="knowledge_graph_response_invalid",
-                    reason=(
-                        "Knowledge Graph response did not satisfy its evidence-bound contract."
-                    ),
-                )
+                record_structured_model_result_failure(self._model_gateway, error)
+                failed_interpretation = _failed_interpretation(error)
+                if failed_interpretation is not None:
+                    _log_graph_interpretation(
+                        failed_interpretation,
+                        failure_event_id=error.failure_event_id,
+                    )
+                try:
+                    corroboration_count = (
+                        self._persist_failed_interpretation(document_id, failed_interpretation)
+                        if failed_interpretation is not None
+                        else 0
+                    )
+                except (OSError, sqlite3.Error):
+                    corroboration_count = 0
+                    self._record_diagnostic(
+                        "extraction", "knowledge_graph_attempt_persistence_failed", document_id
+                    )
+                if corroboration_count >= 2 and failed_interpretation is not None:
+                    suspend_model_operation_contract(
+                        self._kb_dir,
+                        self._model_gateway,
+                        operation="knowledge_graph_extraction",
+                        failure_code="knowledge_graph_response_invalid",
+                        reason=(
+                            "The same structural Knowledge Graph failure was confirmed "
+                            "across independent documents."
+                        ),
+                        failure_signature=failed_interpretation.failure_signature,
+                    )
             _report_failure(on_failure, "knowledge_graph_response_invalid")
             self._record_diagnostic("extraction", "knowledge_graph_response_invalid", document_id)
             return False
         except (ValueError, json.JSONDecodeError):
-            if self._model_gateway is not None:
-                suspend_model_operation_contract(
-                    self._kb_dir,
-                    self._model_gateway,
-                    operation="knowledge_graph_extraction",
-                    failure_code="knowledge_graph_response_invalid",
-                    reason=(
-                        "Knowledge Graph response did not satisfy its evidence-bound contract."
-                    ),
-                )
             _report_failure(on_failure, "knowledge_graph_response_invalid")
             self._record_diagnostic("extraction", "knowledge_graph_response_invalid", document_id)
             return False
@@ -194,11 +220,15 @@ class DesktopKnowledgeGraphService:
                 self._kb_dir,
                 self._model_gateway,
                 model_output,
+                authority=DesktopModelOperationCompletionAuthority.for_retry_scope(
+                    retry_scope
+                ),
             )
         try:
             return self._persist(
                 document_id,
                 payload,
+                interpretation=interpretation,
                 publish_transaction=publish_transaction,
             )
         except (OSError, sqlite3.Error):
@@ -248,22 +278,13 @@ class DesktopKnowledgeGraphService:
         is_cancelled: CancellationCallback | None,
         on_model_event: ModelEventCallback | None,
         retry_scope: str | None,
-    ) -> DesktopValidatedStructuredOutput[_GraphPayload]:
+    ) -> DesktopValidatedStructuredOutput[GraphInterpretation]:
         if self._model_gateway is None:
             raise ValueError("Knowledge graph model is unavailable.")
         gateway = self._model_gateway
         source_material, prompt_evidence = _model_input(evidence)
 
         def invoke(request: DesktopModelRequest):
-            if retry_scope is not None:
-                authorize_model_operation_retry(
-                    self._kb_dir,
-                    gateway,
-                    operation=request.operation,
-                    retry_scope=retry_scope,
-                    capability_identity=request.capability_identity,
-                    prompt_contract_digest=request.prompt_contract_digest,
-                )
             require_model_operation_dispatch(
                 self._kb_dir,
                 gateway,
@@ -281,14 +302,37 @@ class DesktopKnowledgeGraphService:
             document_name=evidence[0].document_name,
             source_material=source_material,
             invoke=invoke,
-            validate=lambda content: _model_payload_from_text(content, prompt_evidence),
+            validate=lambda content: _model_interpretation_from_text(content, prompt_evidence),
+            should_repair=_knowledge_graph_repair_allowed,
         )
+
+    def _persist_failed_interpretation(
+        self,
+        document_id: str,
+        interpretation: GraphInterpretation,
+    ) -> int:
+        with kb_ingest_lock(self._state_dir):
+            connection = self._connect()
+            try:
+                with connection:
+                    return persist_failed_graph_interpretation_in(
+                        connection,
+                        document_id,
+                        interpretation,
+                        capability_identity=self._capability_identity(),
+                        prompt_contract_digest=prompt_contract_for(
+                            "knowledge_graph_extraction"
+                        ).digest,
+                    )
+            finally:
+                connection.close()
 
     def _persist(
         self,
         document_id: str,
         payload: _GraphPayload,
         *,
+        interpretation: GraphInterpretation | None = None,
         publish_transaction: PublishTransaction | None = None,
     ) -> bool:
         capability_identity = self._capability_identity()
@@ -300,6 +344,14 @@ class DesktopKnowledgeGraphService:
         extraction_method = "model" if self._model_gateway is not None else "deterministic"
 
         def persist(connection: sqlite3.Connection) -> bool:
+            if interpretation is not None:
+                return persist_graph_interpretation_in(
+                    connection,
+                    document_id,
+                    interpretation,
+                    capability_identity=capability_identity,
+                    prompt_contract_digest=prompt_digest,
+                )
             return persist_graph_payload_in(
                 connection,
                 document_id,
@@ -548,7 +600,14 @@ def _model_input(
         if remaining <= 0:
             break
         text = item.text[: min(_MAX_MODEL_EVIDENCE_CHARS, remaining)]
-        included.append(item)
+        included.append(
+            _EvidenceInput(
+                evidence_id=item.evidence_id,
+                text=text,
+                document_name=item.document_name,
+                section=item.section,
+            )
+        )
         values.append(
             {
                 "evidence_id": item.evidence_id,
@@ -561,70 +620,36 @@ def _model_input(
 
 
 def _model_payload_from_text(content: str, evidence: tuple[_EvidenceInput, ...]) -> _GraphPayload:
-    return validate_knowledge_graph_response(
+    interpretation = _model_interpretation_from_text(content, evidence)
+    if interpretation.payload is None:
+        raise KnowledgeGraphInterpretationError(interpretation)
+    return interpretation.payload
+
+
+def _model_interpretation_from_text(
+    content: str,
+    evidence: tuple[_EvidenceInput, ...],
+) -> GraphInterpretation:
+    interpretation = GraphExtractionBoundary.interpret(
         content,
-        known_evidence_ids=(item.evidence_id for item in evidence),
+        tuple(GraphEvidence(item.evidence_id, item.text) for item in evidence),
     )
+    if interpretation.lifecycle == "failed":
+        raise KnowledgeGraphInterpretationError(interpretation)
+    return interpretation
 
 
-def _deterministic_payload(evidence: tuple[_EvidenceInput, ...]) -> _GraphPayload:
-    nodes: list[_GraphNode] = []
-    edges: list[_GraphEdge] = []
-    for ordinal, item in enumerate(evidence):
-        claim_id = f"deterministic-claim-{ordinal}"
-        concept_id = f"deterministic-concept-{ordinal}"
-        nodes.extend(
-            (
-                _GraphNode(
-                    claim_id,
-                    item.evidence_id,
-                    "claim",
-                    _claim_label(item.text),
-                    "deterministic",
-                ),
-                _GraphNode(
-                    concept_id,
-                    item.evidence_id,
-                    "concept",
-                    item.section or "Document",
-                    "deterministic",
-                ),
-            )
-        )
-        edges.append(
-            _GraphEdge(
-                item.evidence_id,
-                concept_id,
-                claim_id,
-                "SUPPORTS",
-                0.8,
-                "deterministic",
-            )
-        )
-        for entity_ordinal, label in enumerate(_entity_labels(item.text), start=1):
-            entity_id = f"deterministic-entity-{ordinal}-{entity_ordinal}"
-            nodes.append(_GraphNode(entity_id, item.evidence_id, "entity", label, "deterministic"))
-            edges.extend(
-                (
-                    _GraphEdge(
-                        item.evidence_id,
-                        entity_id,
-                        concept_id,
-                        "RELATED_TO",
-                        0.7,
-                        "deterministic",
-                    ),
-                    _GraphEdge(
-                        item.evidence_id,
-                        entity_id,
-                        claim_id,
-                        "SUPPORTS",
-                        0.7,
-                        "deterministic",
-                    ),
-                )
-            )
-    return _GraphPayload(nodes=tuple(nodes), edges=tuple(edges))
+def _knowledge_graph_repair_allowed(error: Exception) -> bool:
+    return isinstance(error, KnowledgeGraphInterpretationError) and error.interpretation.repairable
+
+
+def _failed_interpretation(
+    error: DesktopStructuredOutputInvalidError,
+) -> GraphInterpretation | None:
+    cause = error.__cause__
+    if isinstance(cause, KnowledgeGraphInterpretationError):
+        return cause.interpretation
+    return None
 
 
 def bounded_graph_rows(
@@ -669,6 +694,38 @@ def _insert_diagnostic(
     )
 
 
+def _log_graph_interpretation(
+    interpretation: GraphInterpretation,
+    *,
+    failure_event_id: str | None = None,
+) -> None:
+    if not interpretation.issues:
+        return
+    logged_issues = interpretation.issues[:_MAX_LOGGED_GRAPH_ISSUES]
+    log_event(
+        logger,
+        logging.WARNING if interpretation.lifecycle == "failed" else logging.INFO,
+        "knowledge_graph_interpreted",
+        "Knowledge Graph candidates were interpreted at the local publication boundary.",
+        component="knowledge",
+        fields={
+            "failure_event_id": failure_event_id,
+            "result_status": interpretation.lifecycle,
+            "result_quality": interpretation.quality,
+            "retained_count": interpretation.counts.retained,
+            "weakened_count": interpretation.counts.weakened,
+            "rejected_count": interpretation.counts.rejected,
+            "issue_count": len(interpretation.issues),
+            "issues_truncated": len(logged_issues) < len(interpretation.issues),
+            "issue_codes": [issue.code for issue in logged_issues],
+            "issue_paths": [issue.path for issue in logged_issues],
+            "issue_dispositions": [issue.disposition for issue in logged_issues],
+            "issue_failure_classes": [issue.failure_class for issue in logged_issues],
+        },
+        terminal=False,
+    )
+
+
 def _section_label(value: str) -> str:
     try:
         parsed = json.loads(value)
@@ -677,28 +734,6 @@ def _section_label(value: str) -> str:
     if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
         return ""
     return " / ".join(item.strip() for item in parsed if item.strip())[:_MAX_LABEL_CHARS]
-
-
-def _entity_labels(text: str) -> tuple[str, ...]:
-    labels: list[str] = []
-    for match in _ENTITY_PATTERN.finditer(text):
-        label = match.group(0).strip()
-        if label not in _NON_ENTITY_WORDS:
-            _append_unique(labels, (label,))
-        if len(labels) == 2:
-            return tuple(labels)
-    for match in _WORD_PATTERN.finditer(text):
-        label = match.group(0).strip()
-        if label.casefold() not in {"the", "this", "that", "document"}:
-            _append_unique(labels, (label,))
-        if len(labels) == 2:
-            break
-    return tuple(labels)
-
-
-def _claim_label(text: str) -> str:
-    normalized = " ".join(text.split())
-    return normalized[:_MAX_CLAIM_CHARS] or "Evidence claim"
 
 
 def _normalized_label(value: str) -> str:

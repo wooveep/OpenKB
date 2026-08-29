@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
@@ -18,7 +20,15 @@ from openkb.desktop_model_gateway import (
     invalidate_corroborated_analysis_capability,
     record_model_result_failure,
 )
-from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
+from openkb.desktop_model_operation_state import (
+    DesktopModelOperationContractStore,
+)
+from openkb.desktop_model_operation_state import (
+    authorize_model_operation_retry_in as _authorize_model_operation_retry_in,
+)
+from openkb.desktop_model_operation_state import (
+    revoke_model_operation_retry_scope_in as _revoke_model_operation_retry_scope_in,
+)
 from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
@@ -34,6 +44,31 @@ class DesktopModelOperationSuspendedError(RuntimeError):
     def __init__(self, operation: str) -> None:
         super().__init__(f"The {operation} model operation contract is suspended.")
         self.operation = operation
+
+
+@dataclass(frozen=True)
+class DesktopModelOperationCompletionAuthority:
+    """Choose ordinary or revision-bound readiness without an unsafe default."""
+
+    retry_scope: str | None
+
+    def __post_init__(self) -> None:
+        if self.retry_scope is not None and not self.retry_scope:
+            raise ValueError("Model operation retry scope must not be empty.")
+
+    @classmethod
+    def ordinary(cls) -> DesktopModelOperationCompletionAuthority:
+        return cls(None)
+
+    @classmethod
+    def retry(cls, retry_scope: str) -> DesktopModelOperationCompletionAuthority:
+        return cls(retry_scope)
+
+    @classmethod
+    def for_retry_scope(
+        cls, retry_scope: str | None
+    ) -> DesktopModelOperationCompletionAuthority:
+        return cls.ordinary() if retry_scope is None else cls.retry(retry_scope)
 
 
 def is_model_result_failure(failure_code: str) -> bool:
@@ -269,6 +304,8 @@ def mark_model_result_operation_ready(
     kb_dir: Path,
     gateway: object,
     result: DesktopModelResult,
+    *,
+    authority: DesktopModelOperationCompletionAuthority,
 ) -> None:
     """Mark only the exact request whose result passed local/domain validation."""
     operation = result.diagnostic_context.get("operation")
@@ -276,14 +313,29 @@ def mark_model_result_operation_ready(
         return
     capability_identity = result.diagnostic_context.get("capability_identity")
     prompt_contract_digest = result.diagnostic_context.get("prompt_contract_digest")
-    mark_model_operation_ready(
-        kb_dir,
+    identity = capability_identity if isinstance(capability_identity, str) else None
+    digest = prompt_contract_digest if isinstance(prompt_contract_digest, str) else None
+    key = _operation_contract_key(
         gateway,
+        operation,
+        capability_identity=identity,
+        prompt_contract_digest=digest,
+    )
+    if key is None:
+        return
+    resolved_identity, resolved_digest = key
+    if authority.retry_scope is not None:
+        DesktopModelOperationContractStore(kb_dir).mark_ready_for_retry(
+            operation=operation,
+            capability_identity=resolved_identity,
+            prompt_contract_digest=resolved_digest,
+            retry_scope=authority.retry_scope,
+        )
+        return
+    DesktopModelOperationContractStore(kb_dir).mark_ready_unless_suspended(
         operation=operation,
-        capability_identity=(capability_identity if isinstance(capability_identity, str) else None),
-        prompt_contract_digest=(
-            prompt_contract_digest if isinstance(prompt_contract_digest, str) else None
-        ),
+        capability_identity=resolved_identity,
+        prompt_contract_digest=resolved_digest,
     )
 
 
@@ -291,11 +343,23 @@ def mark_structured_output_operations_ready(
     kb_dir: Path,
     gateway: object,
     output: DesktopValidatedStructuredOutput[ValidatedValue],
+    *,
+    authority: DesktopModelOperationCompletionAuthority,
 ) -> None:
     """Mark the parent and, when used, its bound repair contract after validation."""
     if output.initial_result is not None:
-        mark_model_result_operation_ready(kb_dir, gateway, output.initial_result)
-    mark_model_result_operation_ready(kb_dir, gateway, output.result)
+        mark_model_result_operation_ready(
+            kb_dir,
+            gateway,
+            output.initial_result,
+            authority=authority,
+        )
+    mark_model_result_operation_ready(
+        kb_dir,
+        gateway,
+        output.result,
+        authority=authority,
+    )
 
 
 def authorize_model_operation_retry(
@@ -325,9 +389,68 @@ def authorize_model_operation_retry(
     )
 
 
+def authorize_model_operation_retry_group(
+    kb_dir: Path,
+    gateway: object,
+    *,
+    retry_scope: str,
+    contracts: tuple[tuple[str, str | None], ...],
+) -> None:
+    """Atomically bind a non-task user action to its observed exact contracts."""
+    resolved = _resolved_retry_contracts(gateway, contracts)
+    DesktopModelOperationContractStore(kb_dir).authorize_retry_group(
+        retry_scope=retry_scope,
+        contracts=resolved,
+    )
+
+
+def authorize_model_operation_retry_group_in(
+    connection: sqlite3.Connection,
+    gateway: object,
+    *,
+    retry_scope: str,
+    contracts: tuple[tuple[str, str | None], ...],
+) -> None:
+    """Bind an action's exact contracts inside the task publication transaction."""
+    for operation, capability_identity, digest in _resolved_retry_contracts(
+        gateway, contracts
+    ):
+        _authorize_model_operation_retry_in(
+            connection,
+            operation=operation,
+            capability_identity=capability_identity,
+            prompt_contract_digest=digest,
+            retry_scope=retry_scope,
+        )
+
+
+def _resolved_retry_contracts(
+    gateway: object,
+    contracts: tuple[tuple[str, str | None], ...],
+) -> tuple[tuple[str, str, str], ...]:
+    resolved: list[tuple[str, str, str]] = []
+    for operation, prompt_contract_digest in contracts:
+        key = _operation_contract_key(
+            gateway,
+            operation,
+            capability_identity=None,
+            prompt_contract_digest=prompt_contract_digest,
+        )
+        if key is not None:
+            resolved.append((operation, key[0], key[1]))
+    return tuple(resolved)
+
+
 def revoke_model_operation_retry_scope(kb_dir: Path, retry_scope: str) -> None:
     """End one explicit retry action and discard any unused contract permits."""
     DesktopModelOperationContractStore(kb_dir).revoke_retry_scope(retry_scope)
+
+
+def revoke_model_operation_retry_scope_in(
+    connection: sqlite3.Connection, retry_scope: str
+) -> None:
+    """Revoke a retry action in the caller's task-state transaction."""
+    _revoke_model_operation_retry_scope_in(connection, retry_scope)
 
 
 def suspend_model_call_operation(

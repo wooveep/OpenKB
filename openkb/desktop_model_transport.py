@@ -19,6 +19,7 @@ from openkb.desktop_model_active_streams import DesktopActiveModelStreams
 from openkb.desktop_model_active_streams import once as _once
 from openkb.desktop_model_analysis_gate import DesktopAnalysisCapabilityGate
 from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
+from openkb.desktop_model_contract_renderer import render_provider_visible_contract
 from openkb.desktop_model_dispatch import (
     _concurrency_gate_for,
     _ConcurrentDesktopModelTransport,
@@ -554,14 +555,13 @@ def _messages_for(request: DesktopModelRequest) -> list[dict[str, str]]:
         if request.prompt_contract_snapshot is not None
         else None
     )
+    instructions = (
+        snapshot_instructions if isinstance(snapshot_instructions, str) else contract.instructions
+    )
     return [
         {
             "role": "system",
-            "content": (
-                snapshot_instructions
-                if isinstance(snapshot_instructions, str)
-                else contract.instructions
-            ),
+            "content": render_provider_visible_contract(request, instructions),
         },
         {"role": "user", "content": request.content},
     ]

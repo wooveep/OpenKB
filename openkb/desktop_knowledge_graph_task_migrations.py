@@ -25,3 +25,11 @@ KNOWLEDGE_GRAPH_TASK_MIGRATION_STATEMENTS: tuple[str, ...] = (
         ON knowledge_graph_extraction_tasks(status, updated_at)
     """,
 )
+
+
+KNOWLEDGE_GRAPH_RETRY_SCOPE_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    ALTER TABLE knowledge_graph_extraction_tasks
+    ADD COLUMN retry_scope TEXT
+    """,
+)

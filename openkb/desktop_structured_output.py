@@ -8,7 +8,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from openkb.desktop_model_failure_logging import own_structured_model_failure
+from openkb.desktop_model_failure_logging import (
+    own_structured_model_failure,
+    own_unrepaired_structured_model_failure,
+)
 from openkb.desktop_model_gateway import (
     DesktopModelRequest,
     DesktopModelResult,
@@ -20,22 +23,34 @@ from openkb.desktop_prompt_contracts import minimal_json_example, prompt_contrac
 ValidatedValue = TypeVar("ValidatedValue")
 StructuredInvoker = Callable[[DesktopModelRequest], DesktopModelResult]
 StructuredValidator = Callable[[str], ValidatedValue]
+StructuredRepairDecision = Callable[[Exception], bool]
 
 
 class DesktopStructuredOutputInvalidError(ValueError):
-    """The initial output and its sole automatic repair both failed validation."""
+    """Structured output remained invalid under the operation's repair policy."""
 
     def __init__(
         self,
         *,
         initial_result: DesktopModelResult,
         final_result: DesktopModelResult,
+        repair_attempted: bool = True,
         failure_event_id: str | None = None,
     ) -> None:
-        super().__init__("The model returned invalid structured output after one automatic repair.")
+        message = (
+            "The model returned invalid structured output after one automatic repair."
+            if repair_attempted
+            else "The model returned invalid structured output that was not eligible for repair."
+        )
+        super().__init__(message)
         self.initial_result = initial_result
         self.final_result = final_result
-        self.attempt_count = initial_result.attempt_count + final_result.attempt_count
+        self.repair_attempted = repair_attempted
+        self.attempt_count = (
+            initial_result.attempt_count + final_result.attempt_count
+            if repair_attempted
+            else initial_result.attempt_count
+        )
         self.failure_event_id = failure_event_id
 
 
@@ -56,6 +71,7 @@ def run_structured_output(
     validate: StructuredValidator[ValidatedValue],
     contract_snapshot: dict[str, object] | None = None,
     repair_contract_snapshot: dict[str, object] | None = None,
+    should_repair: StructuredRepairDecision | None = None,
 ) -> DesktopValidatedStructuredOutput[ValidatedValue]:
     """Validate the original result, then make exactly one separately tracked repair call."""
     contract = prompt_contract_for(operation)
@@ -97,6 +113,20 @@ def run_structured_output(
             failure_code="model_response_invalid",
             reason="Local schema validation rejected the model result.",
         )
+        if should_repair is not None and not should_repair(first_error):
+            failure_event_id = own_unrepaired_structured_model_failure(
+                operation=operation,
+                document_name=document_name,
+                source_material=source_material,
+                initial=initial,
+                error=first_error,
+            )
+            raise DesktopStructuredOutputInvalidError(
+                initial_result=initial,
+                final_result=initial,
+                repair_attempted=False,
+                failure_event_id=failure_event_id,
+            ) from first_error
         repair_contract = prompt_contract_for("structured_output_repair")
         repair_snapshot = repair_contract_snapshot or repair_contract.snapshot()
         repair_generation = repair_snapshot.get("generation_parameters")
@@ -168,6 +198,17 @@ def normalize_structured_output(content: str) -> str:
     if len(lines) < 2 or not lines[-1].strip().startswith("```"):
         return normalized
     return "\n".join(lines[1:-1]).strip()
+
+
+def structured_output_repair_contract_digest(parent_operation: str) -> str:
+    """Return the exact default repair digest bound to one parent contract."""
+    parent_contract = prompt_contract_for(parent_operation)
+    return _repair_contract_digest(
+        prompt_contract_for("structured_output_repair").snapshot(),
+        parent_operation=parent_operation,
+        parent_prompt_contract_digest=parent_contract.digest,
+        output_schema=parent_contract.output_schema,
+    )
 
 
 def _repair_contract_digest(

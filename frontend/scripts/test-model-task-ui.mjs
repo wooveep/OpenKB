@@ -279,6 +279,23 @@ try {
   )
   assert.match(emptyGraphMarkup, /Completed \(no supported relations\)/)
   assert.match(emptyGraphMarkup, /0 nodes · 0 edges/)
+  const degradedGraphMarkup = render(
+    React.createElement(DesktopKnowledgeGraphExtractionTasks, {
+      bridge: {},
+      tasks: [{
+        documentId: "document-degraded", documentName: "partial.md",
+        status: "completed", nodeCount: 2, edgeCount: 1, quality: "degraded",
+        retainedCount: 3, weakenedCount: 1, rejectedCount: 2, reason: "initial",
+        provider: "deepseek", model: "deepseek-chat", attemptCount: 1, modelAttempt: 1,
+        callId: "graph-call-degraded", errorCode: null, errorReason: null,
+        updatedAt: "2026-08-29T00:00:00Z", completedAt: "2026-08-29T00:00:00Z",
+        modelActivity: null,
+      }],
+    }),
+  )
+  assert.match(degradedGraphMarkup, /Degraded/)
+  assert.match(degradedGraphMarkup, /3 retained · 1 weakened · 2 rejected/)
+  assert.match(degradedGraphMarkup, /Retry extraction/)
   const degradationMarkup = render(
     React.createElement(DesktopCapabilityDegradationNotice, {
       codes: [

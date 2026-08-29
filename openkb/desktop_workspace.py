@@ -18,6 +18,9 @@ from openkb.desktop_knowledge_analysis_migrations import (
 from openkb.desktop_model_capability_compatibility import (
     migrate_legacy_analysis_capability_profiles_in,
 )
+from openkb.desktop_model_operation_recovery import (
+    discard_model_operation_retry_permits_in,
+)
 from openkb.desktop_workspace_backup import migrate_existing_database
 from openkb.desktop_workspace_feature_migrations import (
     DESKTOP_FEATURE_MIGRATIONS,
@@ -725,6 +728,8 @@ def _load_desktop_knowledge_base(kb_dir: Path) -> DesktopKnowledgeBase:
                     raise DesktopKnowledgeBaseStateError(
                         "Desktop Knowledge Base is missing its display name."
                     )
+                with connection:
+                    discard_model_operation_retry_permits_in(connection)
                 _recover_interrupted_import_jobs(connection)
                 row = connection.execute(
                     "SELECT created_at FROM runtime_checkpoints ORDER BY checkpoint_id DESC LIMIT 1"

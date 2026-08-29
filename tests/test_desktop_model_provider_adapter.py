@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from litellm.utils import get_optional_params
 
@@ -20,6 +22,7 @@ from openkb.desktop_model_provider_adapter import (
 from openkb.desktop_model_roles import DesktopRoleModelGateway
 from openkb.desktop_model_settings import DesktopModelSettings, DesktopModelSettingsError
 from openkb.desktop_model_terminal import DesktopTerminalModelGateway
+from openkb.desktop_prompt_contracts import prompt_contract_for
 
 
 def test_deepseek_resolves_role_reasoning_and_structured_protocol_explicitly() -> None:
@@ -131,6 +134,117 @@ def test_deepseek_structured_request_uses_json_object_and_disables_thinking(monk
         custom_llm_provider="deepseek",
         extra_body=captured[0]["extra_body"],
     )["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_deepseek_initial_graph_request_renders_its_complete_output_contract(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    def completion(**kwargs):
+        captured.append(kwargs)
+        return {"choices": [{"message": {"content": '{"nodes":[],"edges":[]}'}}]}
+
+    monkeypatch.setattr("litellm.completion", completion)
+    transport = desktop_model_transport.DesktopLiteLLMTransport(
+        model="deepseek/deepseek-v4-pro",
+        bundle=LlmCredentialBundle(
+            api_key="test-key",
+            base_url="https://api.deepseek.com",
+        ),
+    )
+    contract = prompt_contract_for("knowledge_graph_extraction")
+
+    transport(
+        DesktopModelRequest(
+            "knowledge_graph_extraction",
+            "guide.md",
+            json.dumps(
+                {
+                    "evidence": [
+                        {
+                            "evidence_id": "evidence-1",
+                            "text": "Atlas uses Gateway.",
+                        }
+                    ]
+                }
+            ),
+            reasoning_effort="off",
+            provider_adapter="deepseek",
+            provider_adapter_version="deepseek.v1",
+            structured_output_mode="json_object",
+            response_schema=contract.output_schema,
+            response_example=contract.output_example,
+            prompt_contract_version=contract.version,
+            prompt_contract_snapshot=contract.snapshot(),
+        ),
+        30,
+    )
+
+    messages = captured[0]["messages"]
+    assert isinstance(messages, list)
+    system_message = messages[0]["content"]
+    assert "STRUCTURED OUTPUT CONTRACT" in system_message
+    assert '"output_schema"' in system_message
+    assert '"RELATED_TO"' in system_message
+    assert '"support_quote"' in system_message
+    assert '"output_example"' in system_message
+    assert "evidence-1" in system_message
+    assert captured[0]["response_format"] == {"type": "json_object"}
+
+
+def test_deepseek_graph_repair_request_keeps_the_parent_contract_visible(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    def completion(**kwargs):
+        captured.append(kwargs)
+        return {"choices": [{"message": {"content": '{"nodes":[],"edges":[]}'}}]}
+
+    monkeypatch.setattr("litellm.completion", completion)
+    transport = desktop_model_transport.DesktopLiteLLMTransport(
+        model="deepseek/deepseek-v4-pro",
+        bundle=LlmCredentialBundle(
+            api_key="test-key",
+            base_url="https://api.deepseek.com",
+        ),
+    )
+    graph_contract = prompt_contract_for("knowledge_graph_extraction")
+    repair_contract = prompt_contract_for("structured_output_repair")
+
+    transport(
+        DesktopModelRequest(
+            "structured_output_repair",
+            "guide.md",
+            "content-free repair input",
+            reasoning_effort="off",
+            provider_adapter="deepseek",
+            provider_adapter_version="deepseek.v1",
+            structured_output_mode="json_object",
+            response_schema=graph_contract.output_schema,
+            response_example=graph_contract.output_example,
+            parent_operation="knowledge_graph_extraction",
+            parent_prompt_contract_digest=graph_contract.digest,
+            prompt_contract_version=repair_contract.version,
+            prompt_contract_snapshot=repair_contract.snapshot(),
+        ),
+        30,
+    )
+
+    messages = captured[0]["messages"]
+    assert isinstance(messages, list)
+    system_message = messages[0]["content"]
+    assert "STRUCTURED OUTPUT CONTRACT" in system_message
+    assert '"parent_contract_version"' in system_message
+    assert '"parent_instructions"' in system_message
+    assert '"parent_validation_rules"' in system_message
+    assert '"exact_support_quote_required"' in system_message
+    assert '"same_evidence_edge_endpoints"' in system_message
+    assert '"RELATED_TO"' in system_message
+    assert '"support_quote"' in system_message
+    assert '"output_example"' in system_message
+    assert captured[0]["response_format"] == {"type": "json_object"}
 
 
 def test_deepseek_grounded_answer_omits_structured_format_and_provider_default_thinking(
