@@ -726,6 +726,7 @@ def test_experimental_dependency_is_exact_isolated_and_vectorless() -> None:
     assert "pyinstaller==6.22.0" in build_lock
     assert "--onedir" in package_script
     assert "--copy-metadata pageindex" in package_script
+    assert "uv run --directory $repoRoot --extra desktop-build python -c" in package_script
     assert "uv run --directory $repoRoot python -c" in package_script
     assert "defaultEnabled = $false" in package_script
     assert (root / "desktop" / "licenses" / "PageIndex-MIT.txt").is_file()

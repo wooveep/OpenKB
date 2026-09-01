@@ -175,7 +175,7 @@ if (-not (Test-Path -LiteralPath $tauriCli)) {
     throw "Tauri CLI is not installed. Run without -SkipDependencyInstall or install frontend dependencies."
 }
 
-$enginePythonVersion = (& uv run --extra desktop-build python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+$enginePythonVersion = (& uv run --directory $repoRoot --extra desktop-build python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
 if ($LASTEXITCODE -ne 0) {
     throw "Desktop Engine Python version check failed with exit code $LASTEXITCODE."
 }
