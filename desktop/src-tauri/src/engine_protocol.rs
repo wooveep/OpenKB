@@ -20,11 +20,13 @@ pub use crate::engine_wire::{
     PageTreeEnrichmentControlResult, RawDocument, RecoveryOverride,
     SaveAndVerifyModelConfiguration, TextDocumentImportResult,
 };
+pub use crate::engine_wire_knowledge_export::{
+    KnowledgeExportMode, KnowledgeExportPreview, KnowledgeExportResult,
+};
 pub use crate::engine_wire_knowledge_pages::{
-    KnowledgeAdoptionDecision, KnowledgeAdoptionResult, KnowledgeExportMode, KnowledgeExportResult,
-    KnowledgePage, KnowledgePageDeletionResult, KnowledgePagesResult, KnowledgeSourcesResult,
-    KnowledgeWorkspaceHistory, KnowledgeWorkspaceItemDetail, KnowledgeWorkspaceItemRequest,
-    KnowledgeWorkspaceResult,
+    KnowledgeAdoptionDecision, KnowledgeAdoptionResult, KnowledgePage, KnowledgePageDeletionResult,
+    KnowledgePagesResult, KnowledgeSourcesResult, KnowledgeWorkspaceHistory,
+    KnowledgeWorkspaceItemDetail, KnowledgeWorkspaceItemRequest, KnowledgeWorkspaceResult,
 };
 use engine_response_wait::{receive_response, ResponseWaitError};
 use serde::de::DeserializeOwned;

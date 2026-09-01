@@ -13,18 +13,39 @@ from openkb.desktop_answer_types import (
     DesktopKnowledgeGuidance,
     DesktopKnowledgeRouteOption,
 )
-from openkb.desktop_knowledge_routes import knowledge_route, summary_route
+from openkb.desktop_knowledge_inventory import eligible_knowledge_routes_in
+from openkb.desktop_knowledge_navigation_routes import (
+    _catalog_descriptors_in,
+    _index_descriptors,
+    _inventory_descriptor,
+    _phase_diverse_route_descriptors,
+    _ReadDescriptor,
+    _select_read_descriptors,
+    _summary_descriptors_in,
+    _unique_preserving_descriptors,
+    _unique_ranked_descriptors,
+)
+from openkb.desktop_knowledge_navigation_windows import (
+    consolidate_seed_source_windows as _consolidate_seed_source_windows,
+)
+from openkb.desktop_knowledge_navigation_windows import (
+    phase_diverse_source_window as _phase_diverse_source_window,
+)
+from openkb.desktop_knowledge_navigation_windows import (
+    round_robin_source_windows as _round_robin_source_windows,
+)
+from openkb.desktop_navigation_ranking import (
+    broad_source_outline_anchor_in as _broad_source_outline_anchor_in,
+)
+from openkb.desktop_navigation_ranking import source_relevance_in as _source_relevance_in
+from openkb.desktop_navigation_ranking import (
+    unrequested_scope_penalty as _unrequested_scope_penalty,
+)
 from openkb.desktop_source_sections import (
     is_administrative_section as _is_administrative_section,
 )
 from openkb.desktop_source_sections import (
     section_from_heading_path as _section,
-)
-from openkb.desktop_source_sections import (
-    source_occurrence_sort_key as _source_occurrence_sort_key,
-)
-from openkb.desktop_source_sections import (
-    source_occurrences_in as _source_occurrences_in,
 )
 from openkb.desktop_source_sections import (
     source_section_evidence_in,
@@ -35,9 +56,29 @@ from openkb.desktop_source_sections import (
 
 NAVIGATION_MAX_READS = 8
 NAVIGATION_MAX_SOURCE_WINDOWS = 4
-NAVIGATION_MAX_LINK_HOPS = 1
+NAVIGATION_REPEAT_ROUTE_PENALTY = 4
+NAVIGATION_MAX_STRUCTURAL_ANCHORS = 2
 
 _KNOWLEDGE_KINDS = ("concept", "entity", "procedure")
+_PROCEDURE_QUERY_MARKERS = (
+    "build",
+    "configure",
+    "deploy",
+    "how to",
+    "install",
+    "migrate",
+    "procedure",
+    "setup",
+    "step",
+    "安装",
+    "搭建",
+    "步骤",
+    "流程",
+    "迁移",
+    "配置",
+    "部署",
+    "如何",
+)
 
 
 @dataclass(frozen=True)
@@ -55,20 +96,6 @@ class _NavigationRead:
     title: str
     units: tuple[_GuidanceUnit, ...]
     hop: int
-    snapshot_token: str
-
-
-@dataclass(frozen=True)
-class _ReadDescriptor:
-    score: int
-    hop: int
-    descriptor_kind: str
-    authority: str
-    authority_id: str
-    kind: str
-    title: str
-    metadata_json: str
-    route: str
     snapshot_token: str
 
 
@@ -164,19 +191,92 @@ def build_knowledge_navigation_in(
     normalized_terms = tuple(
         dict.fromkeys(term.strip().casefold() for term in terms if term.strip())
     )
-    descriptors = (
-        *_catalog_descriptors_in(connection, catalog_generation_id, normalized_terms),
-        *_summary_descriptors_in(connection, normalized_terms, baseline_evidence),
+    inventory = eligible_knowledge_routes_in(connection)
+    matching_inventory = _phase_diverse_route_descriptors(
+        _unique_ranked_descriptors(
+            tuple(
+                _inventory_descriptor(item, normalized_terms)
+                for item in inventory
+                if any(term in item.title.casefold() for term in normalized_terms)
+            )
+        )
+    )
+    summary_descriptors = _summary_descriptors_in(
+        connection,
+        normalized_terms,
+        baseline_evidence,
+        inventory,
+    )
+    summary_document_ids = {item.authority_id for item in summary_descriptors}
+    source_outlines = tuple(
+        _inventory_descriptor(item, normalized_terms)
+        for item in inventory
+        if item.authority == "source_document" and item.identity in summary_document_ids
+    )
+    matched_descriptors = _unique_ranked_descriptors(
+        (
+            *_catalog_descriptors_in(
+                connection,
+                catalog_generation_id,
+                normalized_terms,
+                inventory,
+            ),
+            *matching_inventory,
+            *summary_descriptors,
+            *source_outlines,
+        )
+    )
+    index_descriptors = _index_descriptors(inventory)
+    requested_inventory = tuple(
+        _inventory_descriptor(item, normalized_terms)
+        for item in inventory
+        if item.route in requested_routes
+    )
+    descriptors = _unique_ranked_descriptors(
+        (
+            *matched_descriptors,
+            *requested_inventory,
+            *(item for item in index_descriptors if item.route in requested_routes),
+        )
+    )
+    requested_index_kinds = {
+        item.authority_id for item in index_descriptors if item.route in requested_routes
+    }
+    root_index_requested = "root" in requested_index_kinds
+    expanded_inventory = tuple(
+        _inventory_descriptor(item, normalized_terms)
+        for item in inventory
+        if item.kind in requested_index_kinds
+    )
+    advertised = _unique_preserving_descriptors(
+        (
+            *_phase_diverse_route_descriptors(
+                _unique_ranked_descriptors(
+                    tuple(_inventory_descriptor(item, normalized_terms) for item in inventory)
+                )
+            ),
+            *index_descriptors,
+        )
+        if root_index_requested
+        else _prioritized_advertised_descriptors(
+            matched_descriptors=matched_descriptors,
+            matching_inventory=matching_inventory,
+            summary_descriptors=summary_descriptors,
+            source_outlines=source_outlines,
+            expanded_inventory=expanded_inventory,
+            requested_inventory=requested_inventory,
+            index_descriptors=index_descriptors,
+        )
     )
     route_options = tuple(
-        DesktopKnowledgeRouteOption(item.route, item.kind, item.title)
-        for item in sorted(descriptors, key=_descriptor_sort_key)
+        DesktopKnowledgeRouteOption(item.route, item.kind, item.title) for item in advertised
     )
     selected = _select_read_descriptors(
         descriptors,
         max_reads=max(0, max_reads),
         excluded_routes=excluded_routes,
         requested_routes=requested_routes,
+        requested_only=bool(requested_routes or requested_evidence_ids),
     )
     reads = tuple(
         read
@@ -184,20 +284,35 @@ def build_knowledge_navigation_in(
         if (read := _resolve_read_in(connection, descriptor)) is not None and read.units
     )
     baseline_ids = {reference.evidence_id for reference in baseline_evidence}
+    automatic_source_expansion = _automatic_source_expansion(normalized_terms, reads)
+    structural_anchors = (
+        _structural_anchor_evidence_ids(baseline_evidence, terms=normalized_terms)
+        if automatic_source_expansion
+        and not excluded_routes
+        and not requested_routes
+        and not requested_evidence_ids
+        else ()
+    )
+    routed_source_ids = (
+        _rank_source_evidence_ids_in(
+            connection,
+            reads,
+            terms=normalized_terms,
+            baseline_ids=frozenset(baseline_ids),
+        )
+        if automatic_source_expansion or requested_routes
+        else ()
+    )
     missing_ids = tuple(
         dict.fromkeys(
             (
                 *requested_evidence_ids,
-                *_rank_source_evidence_ids_in(
-                    connection,
-                    reads,
-                    terms=normalized_terms,
-                    baseline_ids=frozenset(baseline_ids),
-                ),
+                *routed_source_ids,
+                *structural_anchors,
             )
         )
     )
-    windows: list[DesktopEvidenceRef] = []
+    source_windows: list[tuple[DesktopEvidenceRef, ...]] = []
     source_read_count = 0
     for evidence_id in missing_ids:
         if source_read_count == max(0, max_source_windows):
@@ -209,7 +324,13 @@ def build_knowledge_navigation_in(
         )
         if section_evidence:
             source_read_count += 1
-            windows.extend(section_evidence)
+            source_windows.append(
+                _phase_diverse_source_window(section_evidence, terms=normalized_terms)
+            )
+    ordered_windows = tuple(source_windows)
+    if not requested_routes and not requested_evidence_ids:
+        ordered_windows = _consolidate_seed_source_windows(ordered_windows)
+    windows = _round_robin_source_windows(ordered_windows)
     snapshot_material = "\n".join(
         (catalog_generation_id, *(f"{read.route}:{read.snapshot_token}" for read in reads))
     )
@@ -217,196 +338,42 @@ def build_knowledge_navigation_in(
     return DesktopKnowledgeNavigationResult(
         snapshot_id=snapshot_id,
         reads=reads,
-        source_windows=tuple(windows),
+        source_windows=windows,
         source_read_count=source_read_count,
         route_options=route_options,
     )
 
 
-def _descriptor_sort_key(item: _ReadDescriptor) -> tuple[int, int, str, str]:
-    return (-item.score, item.hop, item.route, item.authority_id)
-
-
-def _select_read_descriptors(
-    descriptors: tuple[_ReadDescriptor, ...],
-    *,
-    max_reads: int,
-    excluded_routes: frozenset[str],
-    requested_routes: tuple[str, ...] = (),
-) -> tuple[_ReadDescriptor, ...]:
-    """Keep one relevant source-backed summary when catalog pages fill the budget."""
-    if max_reads <= 0:
-        return ()
-    by_route = {item.route: item for item in descriptors}
-    requested = [by_route[route] for route in dict.fromkeys(requested_routes) if route in by_route][
-        :max_reads
-    ]
-    requested_ids = {item.route for item in requested}
-    ranked = sorted(
-        (
-            item
-            for item in descriptors
-            if item.route not in excluded_routes and item.route not in requested_ids
-        ),
-        key=_descriptor_sort_key,
-    )
-    selected = [*requested, *ranked[: max_reads - len(requested)]]
-    if any(item.descriptor_kind == "summary" for item in selected):
-        return tuple(selected)
-    best_summary = next(
-        (item for item in ranked if item.descriptor_kind == "summary"),
-        None,
-    )
-    if best_summary is None:
-        return tuple(selected)
-    if len(requested) == max_reads:
-        return tuple(selected)
-    if len(selected) == max_reads:
-        selected[-1] = best_summary
-    else:
-        selected.append(best_summary)
-    return tuple(sorted(selected, key=_descriptor_sort_key))
-
-
-def _catalog_descriptors_in(
-    connection: sqlite3.Connection,
-    generation_id: str,
+def _automatic_source_expansion(
     terms: tuple[str, ...],
-) -> tuple[_ReadDescriptor, ...]:
-    if not terms:
-        return ()
-    score_expression = " + ".join(
-        "CASE WHEN instr(nodes.search_text, ?) > 0 THEN 1 ELSE 0 END" for _term in terms
+    reads: tuple[_NavigationRead, ...],
+) -> bool:
+    """Reserve broad source reads for procedural routes or action-shaped queries."""
+    return any(read.kind == "procedure" for read in reads) or any(
+        marker in term for term in terms for marker in _PROCEDURE_QUERY_MARKERS
     )
-    qualification = """
-        (
-            nodes.authority = 'user_revision'
-            AND json_extract(nodes.metadata_json, '$.provenance') = 'source_backed'
-        ) OR (
-            nodes.authority = 'published_generation'
-            AND EXISTS (
-                SELECT 1 FROM knowledge_generations AS generations
-                WHERE generations.generation_id = CAST(
-                    json_extract(nodes.metadata_json, '$.generation_id') AS INTEGER
-                ) AND generations.qualification_state = 'qualified'
-            )
-        )
-    """
-    target_qualification = qualification.replace("nodes.", "targets.")
-    rows = connection.execute(
-        f"""
-        WITH scored AS (
-            SELECT nodes.node_id, nodes.kind, nodes.authority, nodes.authority_id,
-                nodes.title, nodes.metadata_json, nodes.normalized_title,
-                ({score_expression}) AS match_score
-            FROM knowledge_catalog_nodes AS nodes
-            WHERE nodes.generation_id = ?
-                AND nodes.kind IN ('concept', 'entity', 'procedure')
-                AND COALESCE(nodes.lifecycle_state, 'stable') != 'deprecated'
-                AND ({qualification})
-        ), direct AS (
-            SELECT *, 0 AS hop FROM scored WHERE match_score > 0
-        ), routed AS (
-            SELECT * FROM direct
-            UNION ALL
-            SELECT targets.node_id, targets.kind, targets.authority,
-                targets.authority_id, targets.title, targets.metadata_json,
-                targets.normalized_title, direct.match_score, 1 AS hop
-            FROM direct
-            JOIN knowledge_catalog_links AS links
-                ON links.generation_id = ? AND links.from_node_id = direct.node_id
-            JOIN knowledge_catalog_nodes AS targets
-                ON targets.generation_id = links.generation_id
-                AND targets.node_id = links.to_node_id
-                AND targets.kind IN ('concept', 'entity', 'procedure')
-                AND COALESCE(targets.lifecycle_state, 'stable') != 'deprecated'
-                AND ({target_qualification})
-        )
-        SELECT node_id, kind, authority, authority_id, title, metadata_json,
-            match_score, hop
-        FROM routed
-        ORDER BY match_score DESC, hop, normalized_title, node_id
-        LIMIT 24
-        """,
-        (*terms, generation_id, generation_id),
-    ).fetchall()
-    descriptors: list[_ReadDescriptor] = []
-    seen: set[str] = set()
-    for row in rows:
-        node_id = str(row[0])
-        if node_id in seen:
-            continue
-        seen.add(node_id)
-        kind, authority, authority_id = str(row[1]), str(row[2]), str(row[3])
-        title, metadata_json = str(row[4]), str(row[5])
-        hop = min(int(row[7]), NAVIGATION_MAX_LINK_HOPS)
-        route = knowledge_route(kind, authority, title, authority_id)
-        descriptors.append(
-            _ReadDescriptor(
-                score=100 + int(row[6]) * 10 - hop * 20,
-                hop=hop,
-                descriptor_kind="catalog",
-                authority=authority,
-                authority_id=authority_id,
-                kind=kind,
-                title=title,
-                metadata_json=metadata_json,
-                route=route,
-                snapshot_token=metadata_json,
-            )
-        )
-    return tuple(descriptors)
-
-
-def _summary_descriptors_in(
-    connection: sqlite3.Connection,
-    terms: tuple[str, ...],
-    baseline_evidence: tuple[DesktopEvidenceRef, ...],
-) -> tuple[_ReadDescriptor, ...]:
-    baseline_documents = {reference.document_id for reference in baseline_evidence}
-    rows = connection.execute(
-        """
-        SELECT summaries.document_id, documents.display_name, summaries.updated_at,
-            GROUP_CONCAT(units.unit_text, ' ')
-        FROM document_summaries AS summaries
-        JOIN source_documents AS documents ON documents.document_id = summaries.document_id
-        JOIN document_summary_units AS units ON units.document_id = summaries.document_id
-        WHERE summaries.provenance_state = 'source_backed'
-            AND documents.availability = 'available'
-        GROUP BY summaries.document_id, documents.display_name, summaries.updated_at
-        ORDER BY documents.display_name, summaries.document_id
-        """
-    ).fetchall()
-    descriptors: list[_ReadDescriptor] = []
-    for row in rows:
-        document_id, title, updated_at = str(row[0]), str(row[1]), str(row[2])
-        search_text = f"{title} {row[3] or ''}".casefold()
-        term_score = sum(1 for term in terms if term in search_text)
-        baseline_bonus = 3 if document_id in baseline_documents else 0
-        if term_score == 0 and baseline_bonus == 0:
-            continue
-        descriptors.append(
-            _ReadDescriptor(
-                score=60 + term_score * 8 + baseline_bonus,
-                hop=0,
-                descriptor_kind="summary",
-                authority="document_summary",
-                authority_id=document_id,
-                kind="summary",
-                title=title,
-                metadata_json="{}",
-                route=summary_route(title, document_id),
-                snapshot_token=updated_at,
-            )
-        )
-    return tuple(descriptors)
 
 
 def _resolve_read_in(
     connection: sqlite3.Connection, descriptor: _ReadDescriptor
 ) -> _NavigationRead | None:
-    if descriptor.descriptor_kind == "summary":
+    units: tuple[_GuidanceUnit, ...]
+    if descriptor.descriptor_kind == "index":
+        units = (
+            _GuidanceUnit(
+                f"Browse the current {descriptor.title.casefold()} routes.",
+                (),
+                "route_index",
+            ),
+        )
+    elif descriptor.descriptor_kind == "summary":
         units = _summary_units_in(connection, descriptor.authority_id)
+        if not units:
+            units = _source_structure_units_in(connection, descriptor.authority_id)
+    elif descriptor.authority == "source_section":
+        units = _source_section_units_in(connection, descriptor)
+    elif descriptor.descriptor_kind == "source":
+        units = _source_structure_units_in(connection, descriptor.authority_id)
     elif descriptor.authority == "published_generation":
         units = _generated_units_in(connection, descriptor)
     elif descriptor.authority == "user_revision":
@@ -448,6 +415,68 @@ def _summary_units_in(
         evidence_index=3,
         role_index=2,
     )
+
+
+def _source_structure_units_in(
+    connection: sqlite3.Connection, document_id: str
+) -> tuple[_GuidanceUnit, ...]:
+    rows = connection.execute(
+        """
+        SELECT blocks.heading_path, occurrences.evidence_id
+        FROM document_ir_blocks AS blocks
+        LEFT JOIN evidence_occurrences AS occurrences
+          ON occurrences.document_id = blocks.document_id
+         AND occurrences.block_id = blocks.block_id
+        WHERE blocks.document_id = ?
+        ORDER BY blocks.ordinal, occurrences.ordinal
+        """,
+        (document_id,),
+    ).fetchall()
+    units: list[_GuidanceUnit] = []
+    seen: set[str] = set()
+    fallback_evidence_id: str | None = None
+    for heading_value, evidence_value in rows:
+        if evidence_value is not None and fallback_evidence_id is None:
+            fallback_evidence_id = str(evidence_value)
+        heading = _section(str(heading_value))
+        key = heading.casefold()
+        if not heading or key in seen or evidence_value is None:
+            continue
+        seen.add(key)
+        units.append(_GuidanceUnit(heading, (str(evidence_value),), "section"))
+    if units:
+        return tuple(units)
+    if fallback_evidence_id is None:
+        return ()
+    return (_GuidanceUnit("Document source", (fallback_evidence_id,), "source"),)
+
+
+def _source_section_units_in(
+    connection: sqlite3.Connection, descriptor: _ReadDescriptor
+) -> tuple[_GuidanceUnit, ...]:
+    metadata = _json_object(descriptor.metadata_json)
+    document_id = metadata.get("document_id")
+    heading_path_json = metadata.get("heading_path_json")
+    if not isinstance(document_id, str) or not isinstance(heading_path_json, str):
+        return ()
+    rows = connection.execute(
+        """
+        SELECT occurrences.evidence_id
+        FROM document_ir_blocks AS blocks
+        JOIN evidence_occurrences AS occurrences
+          ON occurrences.document_id = blocks.document_id
+         AND occurrences.block_id = blocks.block_id
+        JOIN source_documents AS documents ON documents.document_id = blocks.document_id
+        WHERE blocks.document_id = ? AND blocks.heading_path = ?
+          AND documents.availability = 'available'
+        ORDER BY blocks.ordinal, occurrences.ordinal, occurrences.evidence_id
+        """,
+        (document_id, heading_path_json),
+    ).fetchall()
+    evidence_ids = tuple(dict.fromkeys(str(row[0]) for row in rows))
+    if not evidence_ids:
+        return ()
+    return (_GuidanceUnit(descriptor.title, evidence_ids, "section"),)
 
 
 def _generated_units_in(
@@ -569,19 +598,18 @@ def _rank_source_evidence_ids_in(
     terms: tuple[str, ...],
     baseline_ids: frozenset[str],
 ) -> tuple[str, ...]:
-    """Rank missing sources by query fit while preserving semantic-unit diversity."""
-    streams: list[tuple[tuple[int, int, int, int, str], tuple[str, ...]]] = []
+    """Prefer new routes over similarly relevant extra units without admitting noise."""
+    ranked_candidates: list[tuple[tuple[int, int, int, int, str], str, tuple[str, ...]]] = []
+    source_outline_anchors: list[str] = []
     for read_ordinal, read in enumerate(reads):
+        read_candidates: list[tuple[tuple[int, int, int, int, str], str, tuple[str, ...]]] = []
         for unit_ordinal, unit in enumerate(read.units):
             unit_matches = _term_match_count(unit.text, terms)
-            candidates: list[tuple[tuple[int, int, int, int, str], str]] = []
             for evidence_ordinal, evidence_id in enumerate(unit.evidence_ids):
-                if evidence_id in baseline_ids:
-                    continue
                 relevance = _source_relevance_in(connection, evidence_id, terms)
                 if relevance is None:
                     continue
-                section_matches, administrative, section = relevance
+                section_matches, administrative, section, document_id = relevance
                 # The original section is the routing authority. Summary prose can be broad
                 # or multilingual, so it may refine but must not outweigh its own source.
                 effective_score = (
@@ -591,6 +619,11 @@ def _rank_source_evidence_ids_in(
                     section,
                     terms,
                 )
+                if evidence_id in baseline_ids:
+                    # The baseline pack is bounded again after routed fusion. Keep an
+                    # existing anchor eligible for section expansion, but prefer a
+                    # genuinely new anchor when both are equally relevant.
+                    effective_score -= 1
                 if administrative:
                     effective_score -= 8
                 key = (
@@ -600,70 +633,134 @@ def _rank_source_evidence_ids_in(
                     evidence_ordinal,
                     evidence_id,
                 )
-                candidates.append((key, evidence_id))
-            if candidates:
-                candidates.sort(key=lambda item: item[0])
-                streams.append((candidates[0][0], tuple(item[1] for item in candidates)))
-    streams.sort(key=lambda item: item[0])
-    ranked: list[str] = []
-    positions = [0] * len(streams)
-    while True:
-        added = False
-        for stream_ordinal, (_key, evidence_ids) in enumerate(streams):
-            while positions[stream_ordinal] < len(evidence_ids):
-                evidence_id = evidence_ids[positions[stream_ordinal]]
-                positions[stream_ordinal] += 1
-                if evidence_id in ranked:
+                phase = (document_id, *_source_anchor_phase_key(section))
+                read_candidates.append((key, evidence_id, phase))
+        if read_candidates:
+            read_candidates.sort(key=lambda item: item[0])
+            seen_evidence: set[str] = set()
+            unique_candidates: list[
+                tuple[tuple[int, int, int, int, str], str, tuple[str, ...]]
+            ] = []
+            for item in read_candidates:
+                if item[1] in seen_evidence:
                     continue
-                ranked.append(evidence_id)
-                added = True
-                break
-        if not added:
-            break
-    return tuple(ranked)
-
-
-def _source_relevance_in(
-    connection: sqlite3.Connection,
-    evidence_id: str,
-    terms: tuple[str, ...],
-) -> tuple[int, bool, str] | None:
-    rows = _source_occurrences_in(connection, evidence_id)
-    if not rows:
-        return None
-    best = min(rows, key=lambda row: _source_occurrence_sort_key(row, terms))
-    section = _section(str(best[3]))
-    return (
-        _term_match_count(section, terms),
-        _is_administrative_section(section),
-        section,
+                seen_evidence.add(item[1])
+                unique_candidates.append(item)
+            if read.authority == "source_document":
+                outline_anchor = _broad_source_outline_anchor_in(
+                    connection,
+                    tuple(item[1] for item in unique_candidates),
+                    terms,
+                )
+                if outline_anchor is not None:
+                    source_outline_anchors.append(outline_anchor)
+            for route_position, (key, evidence_id, phase) in enumerate(unique_candidates):
+                repeat_penalty = min(route_position, 3) * NAVIGATION_REPEAT_ROUTE_PENALTY
+                ranked_candidates.append(((key[0] + repeat_penalty, *key[1:]), evidence_id, phase))
+    ranked_candidates.sort(key=lambda item: item[0])
+    phase_representatives: list[tuple[tuple[int, int, int, int, str], str, tuple[str, ...]]] = []
+    deferred: list[tuple[tuple[int, int, int, int, str], str, tuple[str, ...]]] = []
+    seen_phases: set[tuple[str, ...]] = set()
+    for candidate in ranked_candidates:
+        if candidate[2] in seen_phases:
+            deferred.append(candidate)
+            continue
+        seen_phases.add(candidate[2])
+        phase_representatives.append(candidate)
+    return tuple(
+        dict.fromkeys(
+            (
+                *source_outline_anchors,
+                *(item[1] for item in (*phase_representatives, *deferred)),
+            )
+        )
     )
+
+
+def _source_anchor_phase_key(section: str) -> tuple[str, ...]:
+    """Group adjacent detail anchors under their document-level major phase."""
+    parts = tuple(
+        " ".join(part.split()).casefold() for part in section.split(" / ") if " ".join(part.split())
+    )
+    return parts[:2] or ("",)
+
+
+def _prioritized_advertised_descriptors(
+    *,
+    matched_descriptors: tuple[_ReadDescriptor, ...],
+    matching_inventory: tuple[_ReadDescriptor, ...],
+    summary_descriptors: tuple[_ReadDescriptor, ...],
+    source_outlines: tuple[_ReadDescriptor, ...],
+    expanded_inventory: tuple[_ReadDescriptor, ...],
+    requested_inventory: tuple[_ReadDescriptor, ...],
+    index_descriptors: tuple[_ReadDescriptor, ...],
+) -> tuple[_ReadDescriptor, ...]:
+    """Put an original-like navigation ladder inside the 24-route prompt window."""
+    generated = tuple(
+        item
+        for item in matched_descriptors
+        if item.authority
+        not in {"source_section", "source_document", "document_summary", "navigation_index"}
+    )
+    source_sections = tuple(
+        item for item in matching_inventory if item.authority == "source_section"
+    )
+    priority = _unique_preserving_descriptors(
+        (
+            *generated[:4],
+            *summary_descriptors[:2],
+            *source_outlines[:2],
+            *source_sections[:10],
+            *index_descriptors[:6],
+        )
+    )
+    return _unique_preserving_descriptors(
+        (
+            *priority,
+            *matching_inventory,
+            *expanded_inventory,
+            *matched_descriptors,
+            *requested_inventory,
+            *index_descriptors,
+        )
+    )
+
+
+def _structural_anchor_evidence_ids(
+    evidence: tuple[DesktopEvidenceRef, ...],
+    *,
+    terms: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Reserve the strongest matching PageTree anchor from each relevant document."""
+    by_document: dict[str, tuple[tuple[int, int, int, str], str]] = {}
+    seen_sections: set[tuple[str, str]] = set()
+    for ordinal, reference in enumerate(evidence):
+        normalized_section = " ".join(reference.section.split())
+        section_key = (reference.document_id, normalized_section.casefold())
+        if section_key in seen_sections or _is_administrative_section(normalized_section):
+            continue
+        seen_sections.add(section_key)
+        leaf = normalized_section.rsplit(" / ", 1)[-1]
+        excerpt = " ".join(reference.excerpt.split())
+        if excerpt.casefold() != leaf.casefold() and "document_page_tree" not in reference.channels:
+            continue
+        matches = _term_match_count(normalized_section, terms)
+        if matches <= 0:
+            continue
+        depth = normalized_section.count(" / ")
+        candidate = (
+            (-matches, depth, ordinal, reference.evidence_id),
+            reference.evidence_id,
+        )
+        existing = by_document.get(reference.document_id)
+        if existing is None or candidate[0] < existing[0]:
+            by_document[reference.document_id] = candidate
+    candidates = sorted(by_document.values(), key=lambda item: item[0])
+    return tuple(item[1] for item in candidates[:NAVIGATION_MAX_STRUCTURAL_ANCHORS])
 
 
 def _guidance_role_bonus(role: str | None) -> int:
     return {"key_topic": 3, "purpose": 1}.get(role or "", 0)
-
-
-def _unrequested_scope_penalty(section: str, terms: tuple[str, ...]) -> int:
-    normalized = section.casefold()
-    markers = (
-        "扩容",
-        "缩容",
-        "运维",
-        "故障",
-        "恢复",
-        "升级",
-        "附录",
-        "faq",
-        "maintenance",
-        "recovery",
-        "upgrade",
-        "troubleshoot",
-    )
-    unmatched = sum(
-        marker in normalized and not any(marker in term for term in terms) for marker in markers
-    )
-    return min(12, unmatched * 6)
 
 
 def _json_object(value: str) -> dict[str, object]:

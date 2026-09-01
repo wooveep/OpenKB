@@ -19,6 +19,8 @@ def navigator_evaluation_gate(
     metrics: dict[DesktopEvaluationVariant, DesktopRetrievalEvaluationMetrics],
     *,
     knowledge_snapshot_stable: bool,
+    source_integrity_healthy: bool,
+    model_profile_bound: bool = False,
 ) -> DesktopNavigatorEvaluationGate:
     """Compare Navigator to baseline and to the suite's frozen behavioral oracle."""
     baseline = metrics["baseline"]
@@ -34,15 +36,60 @@ def navigator_evaluation_gate(
         if result.variant == "navigator"
     }
     navigator_results = tuple(navigator_by_case.values())
+    observations = {
+        case.case_id: case.original_observation
+        for case in suite.cases
+        if case.original_observation is not None
+    }
     no_critical_loss = bool(baseline_by_case) and all(
         key in navigator_by_case
         and navigator_by_case[key].evidence_recall_at_k >= baseline_result.evidence_recall_at_k
         for key, baseline_result in baseline_by_case.items()
     )
-    frozen_reference_complete = bool(navigator_results) and all(
+    original_reference_bound = (
+        suite.schema_version >= 3
+        and len(observations) == len(suite.cases)
+        and len(
+            {
+                observation.original_commit_sha
+                for observation in observations.values()
+                if observation is not None
+            }
+        )
+        == 1
+        and len(
+            {
+                observation.model_profile_digest
+                for observation in observations.values()
+                if observation is not None
+            }
+        )
+        == 1
+        and all(
+            observation is not None
+            and observation.sample_count >= suite.minimum_navigator_repetitions
+            for observation in observations.values()
+        )
+    )
+    frozen_reference_complete = original_reference_bound and bool(navigator_results)
+    original_evidence_complete = frozen_reference_complete and all(
         result.absent_answer_correct
         if result.category == "absent_answer"
-        else result.evidence_recall_at_k == 1.0 and result.answer_faithfulness == 1.0
+        else result.original_evidence_recall_at_k == 1.0
+        for result in navigator_results
+    )
+    original_answer_points_non_regression = frozen_reference_complete and all(
+        result.absent_answer_correct
+        if result.category == "absent_answer"
+        else result.original_answer_point_coverage == 1.0
+        for result in navigator_results
+    )
+    unsupported_claim_non_regression = frozen_reference_complete and all(
+        result.unsupported_claim_count <= observations[result.case_id].unsupported_claim_count
+        for result in navigator_results
+    )
+    original_citation_non_regression = frozen_reference_complete and all(
+        result.original_citation_precision >= observations[result.case_id].citation_precision
         for result in navigator_results
     )
     evidence_recall_non_regression = navigator.evidence_recall_at_k >= baseline.evidence_recall_at_k
@@ -58,15 +105,29 @@ def navigator_evaluation_gate(
     retrieval_p95_within_budget = (
         navigator.retrieval_p95_ms - baseline.retrieval_p95_ms <= latency_budget
     )
+    original_latency_within_budget = frozen_reference_complete and all(
+        result.latency_ms <= observations[result.case_id].latency_ms + latency_budget
+        for result in navigator_results
+    )
     model_cost_within_budget = (
         navigator.model_cost.model_calls - baseline.model_cost.model_calls
         <= suite.max_navigator_model_calls_per_case * navigator.case_runs
+    )
+    original_model_cost_within_budget = frozen_reference_complete and all(
+        result.model_cost.model_calls
+        <= observations[result.case_id].model_calls + suite.max_navigator_model_calls_per_case
+        for result in navigator_results
     )
     degradation_free = bool(navigator_results) and all(
         not result.degradation_reasons and result.answer_status == "completed"
         for result in navigator_results
     )
     repetitions = {result.repetition for result in navigator_results}
+    repetitions_complete = len(
+        repetitions
+    ) >= suite.minimum_navigator_repetitions and repetitions == set(
+        range(1, max(repetitions, default=0) + 1)
+    )
     fixed_suite_complete = (
         bool(repetitions)
         and {case.category for case in suite.cases} == EVALUATION_CATEGORIES
@@ -74,13 +135,23 @@ def navigator_evaluation_gate(
     )
     checks = (
         frozen_reference_complete,
+        original_evidence_complete,
+        original_answer_points_non_regression,
+        unsupported_claim_non_regression,
+        original_citation_non_regression,
         evidence_recall_non_regression,
         no_critical_loss,
         citation_precision_non_regression,
         absent_answer_non_regression,
         faithfulness_non_regression,
         retrieval_p95_within_budget,
+        original_latency_within_budget,
         model_cost_within_budget,
+        original_model_cost_within_budget,
+        source_integrity_healthy,
+        original_reference_bound,
+        model_profile_bound,
+        repetitions_complete,
         degradation_free,
         knowledge_snapshot_stable,
         fixed_suite_complete,
@@ -98,4 +169,14 @@ def navigator_evaluation_gate(
         degradation_free=degradation_free,
         knowledge_snapshot_stable=knowledge_snapshot_stable,
         fixed_suite_complete=fixed_suite_complete,
+        original_evidence_complete=original_evidence_complete,
+        original_answer_points_non_regression=original_answer_points_non_regression,
+        unsupported_claim_non_regression=unsupported_claim_non_regression,
+        original_citation_non_regression=original_citation_non_regression,
+        original_latency_within_budget=original_latency_within_budget,
+        original_model_cost_within_budget=original_model_cost_within_budget,
+        source_integrity_healthy=source_integrity_healthy,
+        original_reference_bound=original_reference_bound,
+        model_profile_bound=model_profile_bound,
+        repetitions_complete=repetitions_complete,
     )

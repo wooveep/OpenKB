@@ -17,6 +17,7 @@ from openkb.desktop_knowledge_export import (
     DesktopKnowledgeExportService,
 )
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
+from openkb.desktop_portable_wiki_validation import validate_portable_wiki
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
@@ -131,7 +132,7 @@ def test_portable_wiki_export_uses_semantic_routes_and_snapshot_checksums(
     destination = tmp_path / "exports"
     destination.mkdir()
 
-    exported = DesktopKnowledgeExportService(kb_dir).export(destination, mode="portable_wiki")
+    exported = _portable_wiki_export(kb_dir, destination)
 
     root = Path(exported.path)
     assert exported.mode == "portable_wiki"
@@ -139,6 +140,10 @@ def test_portable_wiki_export_uses_semantic_routes_and_snapshot_checksums(
     assert exported.source_image_count == 2
     assert not (root / "raw").exists()
     assert (root / "index.md").is_file()
+    assert (root / "summaries" / "index.md").is_file()
+    assert (root / "concepts" / "index.md").is_file()
+    assert (root / "procedures" / "index.md").is_file()
+    assert (root / "sources" / "index.md").is_file()
     assert (root / "summaries" / "referenced.md").is_file()
     assert (root / "concepts" / "routing.md").is_file()
     procedure = root / "generated" / "procedure" / "双节点超融合部署.md"
@@ -148,7 +153,10 @@ def test_portable_wiki_export_uses_semantic_routes_and_snapshot_checksums(
     source_markdown = (root / "sources" / "referenced.md").read_text(encoding="utf-8")
     assert f'<a id="evidence-{evidence_id}"></a>' in source_markdown
     assert "../images/" in source_markdown
-    assert "sources/referenced.md" in (root / "index.md").read_text(encoding="utf-8")
+    root_index = (root / "index.md").read_text(encoding="utf-8")
+    assert "summaries/index.md" in root_index
+    assert "sources/index.md" in root_index
+    assert "sources/referenced.md" not in root_index
     assert "../../sources/referenced.md#evidence-" in procedure.read_text(encoding="utf-8")
 
     manifest_path = root / "wiki-manifest.json"
@@ -160,10 +168,23 @@ def test_portable_wiki_export_uses_semantic_routes_and_snapshot_checksums(
     assert manifest["snapshot_id"] == expected_snapshot_id
     assert manifest["snapshot"]["knowledge_qualification_state"] == "qualified"
     routes = {entry["route"]: entry for entry in manifest["routes"]}
+    assert routes["index"]["authority"] == "navigation_index"
+    assert routes["summaries/index"]["identity"] == "index:summary"
+    assert routes["procedures/index"]["identity"] == "index:procedure"
     assert routes["summaries/referenced"]["identity"] == imported.document.document_id
     assert routes["concepts/routing"]["identity"] == page_id
     assert routes["generated/procedure/双节点超融合部署"]["identity"] == ("portable-procedure")
     assert routes["sources/referenced"]["identity"] == imported.document.document_id
+    section_routes = [
+        entry for entry in manifest["routes"] if entry["authority"] == "source_section"
+    ]
+    assert {entry["title"] for entry in section_routes} == {
+        "Routing",
+        "Routing / Appendix",
+    }
+    assert all(entry["path"] == "sources/referenced.md" for entry in section_routes)
+    assert all(entry["anchor"].startswith("section-") for entry in section_routes)
+    assert all(f'id="{entry["anchor"]}"' in source_markdown for entry in section_routes)
     assert manifest["aliases"] == [
         {
             "alias": "双节点超融合安装",
@@ -176,25 +197,139 @@ def test_portable_wiki_export_uses_semantic_routes_and_snapshot_checksums(
         assert hashlib.sha256((root / relative).read_bytes()).hexdigest() == digest
 
 
+def test_portable_wiki_preview_reports_available_documents_without_writing(
+    tmp_path: Path,
+) -> None:
+    kb_dir, imported, _page_id = _knowledge_base_with_referenced_image(tmp_path)
+    _qualify_portable_wiki_fixture(kb_dir, document_id=imported.document.document_id)
+
+    preview = DesktopKnowledgeExportService(kb_dir).preview(mode="portable_wiki")
+
+    assert preview.mode == "portable_wiki"
+    assert preview.document_count == 1
+    assert preview.estimated_size_bytes >= 4096
+    assert len(preview.snapshot_id) == 64
+    assert not tuple(tmp_path.glob("OpenKB-Portable-Wiki-*"))
+
+
+def test_portable_wiki_export_rejects_a_previewed_snapshot_after_view_changes(
+    tmp_path: Path,
+) -> None:
+    kb_dir, imported, _page_id = _knowledge_base_with_referenced_image(tmp_path)
+    service = DesktopKnowledgeExportService(kb_dir)
+    preview = service.preview(mode="portable_wiki")
+    destination = tmp_path / "exports"
+    destination.mkdir()
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        connection.execute(
+            "UPDATE source_documents SET availability = 'failed' WHERE document_id = ?",
+            (imported.document.document_id,),
+        )
+        connection.commit()
+
+    with pytest.raises(DesktopKnowledgeExportError, match="preview has changed"):
+        service.export(
+            destination,
+            mode="portable_wiki",
+            expected_snapshot_id=preview.snapshot_id,
+        )
+
+    assert not tuple(destination.iterdir())
+
+
+def test_portable_wiki_reserves_index_routes_from_semantic_title_collisions(
+    tmp_path: Path,
+) -> None:
+    kb_dir = tmp_path / "desktop-kb"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    source = tmp_path / "index.md"
+    source.write_text("# Index\n\nSource content.\n", encoding="utf-8")
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    destination = tmp_path / "exports"
+    destination.mkdir()
+
+    exported = _portable_wiki_export(kb_dir, destination)
+
+    manifest = json.loads((Path(exported.path) / "wiki-manifest.json").read_text(encoding="utf-8"))
+    routes = {entry["route"]: entry for entry in manifest["routes"]}
+    assert routes["summaries/index"]["identity"] == "index:summary"
+    summary_route = next(
+        route
+        for route, entry in routes.items()
+        if entry["kind"] == "summary" and entry["identity"] == imported.document.document_id
+    )
+    assert summary_route.startswith("summaries/index-")
+
+
 def test_portable_wiki_rejects_a_broken_internal_link_before_publication(
     tmp_path: Path,
 ) -> None:
-    kb_dir, _imported, _page_id = _knowledge_base_with_referenced_image(tmp_path)
+    kb_dir, imported, _page_id = _knowledge_base_with_referenced_image(tmp_path)
     pages = DesktopKnowledgePageService(kb_dir)
+    claim = "Routing is supported by the manual."
+    content = f"{claim}\n\nSee [missing page](missing-page.md)."
     page = pages.save_draft(
         page_id=None,
         kind="concept",
         title="Broken route",
-        content_markdown="See [missing page](missing-page.md).",
+        content_markdown=content,
     )
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        evidence_id = str(
+            connection.execute(
+                "SELECT evidence_id FROM evidence_occurrences WHERE document_id = ? "
+                "ORDER BY ordinal LIMIT 1",
+                (imported.document.document_id,),
+            ).fetchone()[0]
+        )
+    pages.bind_source(page.page_id, claim, evidence_id)
     pages.publish(page.page_id)
     destination = tmp_path / "exports"
     destination.mkdir()
 
     with pytest.raises(DesktopKnowledgeExportError):
-        DesktopKnowledgeExportService(kb_dir).export(destination, mode="portable_wiki")
+        _portable_wiki_export(kb_dir, destination)
 
     assert not tuple(destination.iterdir())
+
+
+def test_portable_wiki_uses_the_runtime_eligible_user_page_set(tmp_path: Path) -> None:
+    kb_dir, imported, _page_id = _knowledge_base_with_referenced_image(tmp_path)
+    pages = DesktopKnowledgePageService(kb_dir)
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        evidence_id = str(
+            connection.execute(
+                "SELECT evidence_id FROM evidence_occurrences WHERE document_id = ? "
+                "ORDER BY ordinal LIMIT 1",
+                (imported.document.document_id,),
+            ).fetchone()[0]
+        )
+    structural = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Structural only",
+        content_markdown="# Navigation",
+    )
+    pages.publish(structural.page_id)
+    deprecated_claim = "A formerly supported fact."
+    deprecated = pages.save_draft(
+        page_id=None,
+        kind="entity",
+        title="Deprecated source-backed",
+        content_markdown=deprecated_claim,
+    )
+    pages.bind_source(deprecated.page_id, deprecated_claim, evidence_id)
+    pages.publish(deprecated.page_id)
+    pages.deprecate(deprecated.page_id)
+    destination = tmp_path / "exports"
+    destination.mkdir()
+
+    exported = _portable_wiki_export(kb_dir, destination)
+
+    manifest = json.loads((Path(exported.path) / "wiki-manifest.json").read_text(encoding="utf-8"))
+    identities = {entry["identity"] for entry in manifest["routes"]}
+    assert structural.page_id not in identities
+    assert deprecated.page_id not in identities
 
 
 def test_portable_wiki_excludes_legacy_unqualified_generated_items(tmp_path: Path) -> None:
@@ -203,12 +338,67 @@ def test_portable_wiki_excludes_legacy_unqualified_generated_items(tmp_path: Pat
     destination = tmp_path / "exports"
     destination.mkdir()
 
-    exported = DesktopKnowledgeExportService(kb_dir).export(destination, mode="portable_wiki")
+    exported = _portable_wiki_export(kb_dir, destination)
 
     generated = Path(exported.path) / "generated"
     assert not generated.exists() or not tuple(generated.rglob("*.md"))
     manifest = json.loads((Path(exported.path) / "wiki-manifest.json").read_text(encoding="utf-8"))
     assert not any(entry["identity"] == "legacy-generated" for entry in manifest["routes"])
+
+
+def test_portable_wiki_omits_knowledge_whose_source_bindings_are_unavailable(
+    tmp_path: Path,
+) -> None:
+    kb_dir, imported, page_id = _knowledge_base_with_referenced_image(tmp_path)
+    _qualify_portable_wiki_fixture(kb_dir, document_id=imported.document.document_id)
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        connection.execute(
+            "UPDATE source_documents SET availability = 'failed' WHERE document_id = ?",
+            (imported.document.document_id,),
+        )
+        connection.commit()
+    destination = tmp_path / "exports"
+    destination.mkdir()
+
+    exported = _portable_wiki_export(kb_dir, destination)
+
+    root = Path(exported.path)
+    manifest = json.loads((root / "wiki-manifest.json").read_text(encoding="utf-8"))
+    identities = {entry["identity"] for entry in manifest["routes"]}
+    assert page_id not in identities
+    assert "portable-procedure" not in identities
+    content = "\n".join(path.read_text(encoding="utf-8") for path in root.rglob("*.md"))
+    assert "初始化双节点超融合环境" not in content
+
+
+def test_portable_wiki_validator_rejects_a_knowledge_page_without_sources(
+    tmp_path: Path,
+) -> None:
+    kb_dir, imported, _page_id = _knowledge_base_with_referenced_image(tmp_path)
+    _qualify_portable_wiki_fixture(kb_dir, document_id=imported.document.document_id)
+    destination = tmp_path / "exports"
+    destination.mkdir()
+    root = Path(_portable_wiki_export(kb_dir, destination).path)
+    manifest_path = root / "wiki-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    procedure = next(
+        entry
+        for entry in manifest["routes"]
+        if entry["authority"] == "published_generation" and entry["kind"] == "procedure"
+    )
+    page_path = root / procedure["path"]
+    page_path.write_text(
+        page_path.read_text(encoding="utf-8").split("\n## Sources\n", maxsplit=1)[0] + "\n",
+        encoding="utf-8",
+    )
+    manifest["checksums"][procedure["path"]] = hashlib.sha256(page_path.read_bytes()).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="source bindings"):
+        validate_portable_wiki(root)
 
 
 def test_portable_wiki_disambiguates_same_named_document_versions(tmp_path: Path) -> None:
@@ -227,7 +417,7 @@ def test_portable_wiki_disambiguates_same_named_document_versions(tmp_path: Path
     destination = tmp_path / "exports"
     destination.mkdir()
 
-    exported = DesktopKnowledgeExportService(kb_dir).export(destination, mode="portable_wiki")
+    exported = _portable_wiki_export(kb_dir, destination)
 
     root = Path(exported.path)
     manifest = json.loads((root / "wiki-manifest.json").read_text(encoding="utf-8"))
@@ -335,6 +525,16 @@ def _knowledge_base_with_referenced_image(tmp_path: Path) -> tuple[Path, object,
     pages.bind_source(page.page_id, claim, evidence.evidence_id)
     pages.publish(page.page_id)
     return kb_dir, imported, page.page_id
+
+
+def _portable_wiki_export(kb_dir: Path, destination: Path):
+    service = DesktopKnowledgeExportService(kb_dir)
+    preview = service.preview(mode="portable_wiki")
+    return service.export(
+        destination,
+        mode="portable_wiki",
+        expected_snapshot_id=preview.snapshot_id,
+    )
 
 
 def _qualify_portable_wiki_fixture(kb_dir: Path, *, document_id: str) -> str:

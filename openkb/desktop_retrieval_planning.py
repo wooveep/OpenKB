@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from openkb.desktop_answer_types import DesktopRetrievalModelCost, DesktopRetrievalPlan
+from openkb.desktop_model_deadlines import request_with_response_deadline
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -50,6 +51,8 @@ def build_retrieval_plan(
     is_cancelled: Callable[[], bool] | None = None,
     on_model_event: Callable[[object], None] | None = None,
     retry_scope: str | None = None,
+    bounded_model_attempts: bool = False,
+    response_deadline: float | None = None,
 ) -> DesktopRetrievalPlanningResult:
     """Build one plan while retaining every physical retry in its cost."""
     fallback = deterministic_plan(question)
@@ -71,6 +74,7 @@ def build_retrieval_plan(
 
         def invoke(request: DesktopModelRequest):
             nonlocal attempts, response
+            request = request_with_response_deadline(request, response_deadline)
             if kb_dir is not None:
                 require_model_operation_dispatch(
                     kb_dir,
@@ -93,7 +97,10 @@ def build_retrieval_plan(
                     on_model_event(event)
 
             try:
-                result = model_gateway.analyze(
+                call = (
+                    model_gateway.analyze_once if bounded_model_attempts else model_gateway.analyze
+                )
+                result = call(
                     request,
                     on_event=observe,
                     is_cancelled=is_cancelled,
@@ -117,9 +124,7 @@ def build_retrieval_plan(
                 kb_dir,
                 model_gateway,
                 output,
-                authority=DesktopModelOperationCompletionAuthority.for_retry_scope(
-                    retry_scope
-                ),
+                authority=DesktopModelOperationCompletionAuthority.for_retry_scope(retry_scope),
             )
         return DesktopRetrievalPlanningResult(
             with_baseline_terms(fallback, output.value),

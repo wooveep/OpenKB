@@ -706,6 +706,7 @@
         "exporting": "正在导出…",
         "portableWiki": "可移植 Wiki",
         "portableWikiDescription": "导出可读摘要、语义知识页、来源 Markdown、图片、别名与快照校验和。",
+        "portableWikiPreview": "{{count}} 个可用文档 · 预计 {{size}}",
         "projection": "知识投影包",
         "projectionDescription": "包含 OKF Markdown 与来源清单，不包含原始文件。",
         "selfContained": "自包含知识包",

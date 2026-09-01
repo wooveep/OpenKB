@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+
+from openkb.desktop_source_structure_expectations import expected_structure_kinds
 
 SOURCE_INTEGRITY_SCHEMA_VERSION = "openkb.source-integrity.v2"
 
@@ -141,6 +142,15 @@ def audit_source_integrity_in(
             expected=list,
             string_items=True,
         ),
+        "evidence_locator_mismatches": _count(
+            connection,
+            """
+            SELECT COUNT(*) FROM evidence_refs AS evidence
+            JOIN document_ir_blocks AS blocks ON blocks.block_id = evidence.block_id
+            WHERE evidence.locator_json <> blocks.locator_json
+            """,
+        ),
+        **_locator_issue_counts(connection),
         **_missing_expected_structure_counts(connection, kb_dir),
     }
     block_kind_counts = {
@@ -195,10 +205,11 @@ def _missing_expected_structure_counts(
         )
     }
     for document_id, source_format, raw_path in rows:
-        expected = _expected_structure_kinds(
-            kb_dir,
-            source_format=str(source_format),
-            raw_path=str(raw_path),
+        relative = Path(str(raw_path))
+        expected = (
+            set()
+            if relative.is_absolute() or ".." in relative.parts
+            else expected_structure_kinds(str(source_format), kb_dir / relative)
         )
         present = actual.get(str(document_id), set())
         for kind in expected - present:
@@ -206,29 +217,78 @@ def _missing_expected_structure_counts(
     return missing
 
 
-def _expected_structure_kinds(
-    kb_dir: Path,
-    *,
-    source_format: str,
-    raw_path: str,
-) -> set[str]:
-    if source_format not in {"markdown", "md"}:
-        return set()
-    relative = Path(raw_path)
-    if relative.is_absolute() or ".." in relative.parts:
-        return set()
-    try:
-        content = (kb_dir / relative).read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return set()
-    expected: set[str] = set()
-    if re.search(r"(?m)^\s{0,3}#{1,6}\s+\S", content):
-        expected.add("heading")
-    if re.search(r"(?m)^\s{0,3}(?:```|~~~)", content):
-        expected.add("code")
-    if re.search(r"(?m)^\s*\|?.+\|.+\n\s*\|?\s*:?-{3,}", content):
-        expected.add("table")
-    return expected
+def _locator_issue_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    invalid_ranges = 0
+    regressed_documents: set[str] = set()
+    prior_position: dict[str, tuple[int, ...]] = {}
+    rows = connection.execute(
+        """
+        SELECT blocks.document_id, blocks.locator_json
+        FROM document_ir_blocks AS blocks
+        JOIN source_documents AS documents USING(document_id)
+        WHERE documents.availability = 'available'
+        ORDER BY blocks.document_id, blocks.ordinal
+        """
+    )
+    for document_id_value, encoded in rows:
+        try:
+            locator = json.loads(str(encoded))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if not isinstance(locator, dict):
+            continue
+        if _locator_has_invalid_range(locator):
+            invalid_ranges += 1
+        position = _locator_position(locator)
+        document_id = str(document_id_value)
+        if position is not None and position < prior_position.get(document_id, position):
+            regressed_documents.add(document_id)
+        if position is not None:
+            prior_position[document_id] = position
+    return {
+        "invalid_locator_ranges": invalid_ranges,
+        "documents_with_locator_regressions": len(regressed_documents),
+    }
+
+
+def _locator_has_invalid_range(locator: dict[str, object]) -> bool:
+    for start_key, end_key in (
+        ("line_start", "line_end"),
+        ("paragraph_start", "paragraph_end"),
+        ("row_start", "row_end"),
+    ):
+        start, end = locator.get(start_key), locator.get(end_key)
+        if start is not None or end is not None:
+            if (
+                isinstance(start, bool)
+                or isinstance(end, bool)
+                or not isinstance(start, int)
+                or not isinstance(end, int)
+                or start < 0
+                or end < start
+            ):
+                return True
+    return False
+
+
+def _locator_position(locator: dict[str, object]) -> tuple[int, ...] | None:
+    for keys in (
+        ("line_start",),
+        ("body_order",),
+        ("page_index", "block_index"),
+        ("slide_index", "shape_index", "paragraph_start"),
+        ("sheet_index", "row_start"),
+    ):
+        values = tuple(locator.get(key, 0) for key in keys)
+        if any(key in locator for key in keys) and all(
+            isinstance(value, int) and not isinstance(value, bool) for value in values
+        ):
+            positions: list[int] = []
+            for value in values:
+                assert isinstance(value, int) and not isinstance(value, bool)
+                positions.append(value)
+            return tuple(positions)
+    return None
 
 
 def _count(connection: sqlite3.Connection, statement: str) -> int:

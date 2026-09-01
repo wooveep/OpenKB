@@ -8,6 +8,7 @@ changing any runtime default.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import time
 from collections.abc import Callable, Sequence
@@ -34,7 +35,6 @@ from openkb.desktop_navigator_evaluation_gate import navigator_evaluation_gate
 from openkb.desktop_page_tree import PageTreeGeneration
 from openkb.desktop_readonly import connect_desktop_read_only
 from openkb.desktop_retrieval import (
-    DESKTOP_EVIDENCE_RECALL_K,
     DesktopEvidenceRetriever,
 )
 from openkb.desktop_retrieval_channels import (
@@ -42,6 +42,16 @@ from openkb.desktop_retrieval_channels import (
     PAGE_TREE_EVALUATION_VARIANTS,
     DesktopEvaluationVariant,
 )
+from openkb.desktop_retrieval_evaluation_scoring import (
+    case_result as _case_result,
+)
+from openkb.desktop_retrieval_evaluation_scoring import (
+    cited_evidence_ids as _cited_evidence_ids,
+)
+from openkb.desktop_retrieval_evaluation_scoring import (
+    metrics_for as _metrics_for,
+)
+from openkb.desktop_retrieval_evaluation_stability import stability_for
 from openkb.desktop_retrieval_evaluation_types import (
     EVALUATION_CATEGORIES,
     PAGE_TREE_MAX_ADDITIONAL_RETRIEVAL_P95_MS,
@@ -58,9 +68,18 @@ from openkb.desktop_retrieval_evaluation_types import (
     evaluation_corpus_digest,
     evaluation_derived_snapshot_digest,
 )
+from openkb.desktop_source_integrity import audit_source_integrity_in
 from openkb.desktop_workspace import desktop_state_database_path
 
 AnswerGenerator = Callable[[str, DesktopEvidencePack], DesktopEvaluationAnswer]
+
+
+def _gateway_profile_digest(model_gateway: DesktopModelGateway | None) -> str | None:
+    """Bind scripted evaluators when no settings-derived execution profile is supplied."""
+    if model_gateway is None:
+        return None
+    material = f"{model_gateway.provider_name}\x1f{model_gateway.model_name}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 class EvaluationPageTreeProvider(Protocol):
@@ -115,6 +134,7 @@ class DesktopRetrievalEvaluator:
         answer_generator: AnswerGenerator | None = None,
         page_tree_provider: EvaluationPageTreeProvider | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        model_profile_digest: str | None = None,
     ) -> None:
         self._kb_dir = kb_dir.expanduser().resolve()
         if page_tree_provider is None:
@@ -129,22 +149,26 @@ class DesktopRetrievalEvaluator:
         self._answer_generator = answer_generator or _production_answer_generator(model_gateway)
         self._page_tree_provider = page_tree_provider
         self._clock = clock
+        self._model_profile_digest = model_profile_digest or _gateway_profile_digest(model_gateway)
 
     def evaluate(
         self,
         suite: DesktopRetrievalEvaluationSuite,
         *,
-        repetitions: int = 1,
+        repetitions: int | None = None,
         pageindex_worker_sha256: str | None = None,
     ) -> DesktopRetrievalEvaluationReport:
         """Measure every fixed case without enabling deferred graph capabilities."""
+        repetitions = repetitions or suite.minimum_navigator_repetitions
         if repetitions < 1:
             raise ValueError("Desktop retrieval evaluation repetitions must be at least one.")
         snapshot = self._derived_snapshot()
+        source_integrity_healthy = self._source_integrity_healthy()
         corpus_digest = self._evaluated_corpus_digest(suite)
         results: list[DesktopRetrievalEvaluationCaseResult] = []
         for case in suite.cases:
             expected_evidence_ids = self._expected_evidence_ids(case)
+            original_evidence_ids = self._original_evidence_ids(case)
             for repetition in range(1, repetitions + 1):
                 planning_started = self._clock()
                 planning = self._retriever.build_plan_with_cost(case.question)
@@ -199,10 +223,14 @@ class DesktopRetrievalEvaluator:
                             variant_planning_cost.plus(_retrieval_cost(pack)).plus(
                                 answer.model_cost
                             ),
+                            original_evidence_ids=original_evidence_ids,
                         )
                     )
         metrics = {
             variant: _metrics_for(results, variant) for variant in DESKTOP_EVALUATION_VARIANT_ORDER
+        }
+        stability = {
+            variant: stability_for(results, variant) for variant in DESKTOP_EVALUATION_VARIANT_ORDER
         }
         final_snapshot = self._derived_snapshot()
         knowledge_snapshot_stable = (
@@ -213,6 +241,7 @@ class DesktopRetrievalEvaluator:
             snapshot.catalog_generation_ids == final_snapshot.catalog_generation_ids
             and snapshot.page_tree_generations == final_snapshot.page_tree_generations
         )
+        source_integrity_stable = source_integrity_healthy and self._source_integrity_healthy()
         return DesktopRetrievalEvaluationReport(
             suite_snapshot_id=suite.snapshot_id,
             suite_digest=suite.digest,
@@ -243,7 +272,14 @@ class DesktopRetrievalEvaluator:
                 results,
                 metrics,
                 knowledge_snapshot_stable=knowledge_snapshot_stable,
+                source_integrity_healthy=source_integrity_stable,
+                model_profile_bound=(
+                    self._model_profile_digest is not None
+                    and self._model_profile_digest == suite.navigator_model_profile_digest
+                ),
             ),
+            source_integrity_healthy=source_integrity_stable,
+            model_profile_digest=self._model_profile_digest,
             corpus_digest=corpus_digest,
             pageindex_worker_sha256=pageindex_worker_sha256,
             final_knowledge_snapshot_digest=final_snapshot.knowledge_snapshot_digest,
@@ -252,6 +288,7 @@ class DesktopRetrievalEvaluator:
                 final_snapshot.catalog_generation_ids,
                 final_snapshot.page_tree_generations,
             ),
+            stability=stability,
         )
 
     def promote_local_graph(self, report: DesktopRetrievalEvaluationReport) -> None:
@@ -382,15 +419,33 @@ class DesktopRetrievalEvaluator:
             ),
         )
 
+    def _source_integrity_healthy(self) -> bool:
+        connection = connect_desktop_read_only(self._database_path)
+        try:
+            connection.execute("BEGIN")
+            return audit_source_integrity_in(connection, kb_dir=self._kb_dir).status == "healthy"
+        finally:
+            connection.rollback()
+            connection.close()
+
     def _expected_evidence_ids(self, case: DesktopRetrievalEvaluationCase) -> tuple[str, ...]:
         """Resolve immutable suite anchors without relying on random import IDs."""
         if case.expect_absent_answer:
             return ()
+        return self._evidence_ids(case.case_id, case.expected_evidence)
+
+    def _original_evidence_ids(self, case: DesktopRetrievalEvaluationCase) -> tuple[str, ...]:
+        observation = case.original_observation
+        if observation is None or case.expect_absent_answer:
+            return ()
+        return self._evidence_ids(case.case_id, observation.critical_evidence)
+
+    def _evidence_ids(self, case_id: str, selectors) -> tuple[str, ...]:
         connection = connect_desktop_read_only(self._database_path)
         try:
             connection.execute("BEGIN")
             resolved: list[str] = []
-            for selector in case.expected_evidence:
+            for selector in selectors:
                 rows = connection.execute(
                     """
                     SELECT DISTINCT evidence_occurrences.evidence_id
@@ -408,7 +463,7 @@ class DesktopRetrievalEvaluator:
                 ).fetchall()
                 if len(rows) != 1:
                     raise ValueError(
-                        f"Evaluation evidence selector for case {case.case_id} is not unique."
+                        f"Evaluation evidence selector for case {case_id} is not unique."
                     )
                 resolved.append(str(rows[0][0]))
         except sqlite3.Error as error:
@@ -425,7 +480,14 @@ class DesktopRetrievalEvaluator:
                 {
                     selector.document_name
                     for case in suite.cases
-                    for selector in case.expected_evidence
+                    for selector in (
+                        *case.expected_evidence,
+                        *(
+                            case.original_observation.critical_evidence
+                            if case.original_observation is not None
+                            else ()
+                        ),
+                    )
                 }
             )
         )
@@ -488,6 +550,7 @@ def _production_answer_generator(
                 if generation.degradations
                 else "completed"
             ),
+            cited_evidence_ids=_cited_evidence_ids(generation.answer_text or "", pack.evidence),
         )
 
     return generate
@@ -502,109 +565,6 @@ def _safe_answer(
         # A report must not persist an adapter/provider exception, which could
         # contain remote details.  The failed answer simply cannot be faithful.
         return DesktopEvaluationAnswer("", status="failed")
-
-
-def _case_result(
-    case: DesktopRetrievalEvaluationCase,
-    repetition: int,
-    variant: DesktopEvaluationVariant,
-    expected_evidence_ids: tuple[str, ...],
-    pack: DesktopEvidencePack,
-    answer: DesktopEvaluationAnswer,
-    latency_ms: float,
-    retrieval_latency_ms: float,
-    answer_latency_ms: float,
-    model_cost: DesktopEvaluationModelCost,
-) -> DesktopRetrievalEvaluationCaseResult:
-    cited = {reference.evidence_id for reference in pack.evidence}
-    retrieved_at_k = {
-        reference.evidence_id for reference in pack.evidence[:DESKTOP_EVIDENCE_RECALL_K]
-    }
-    expected = set(expected_evidence_ids)
-    if expected:
-        evidence_recall = len(retrieved_at_k & expected) / len(expected)
-        citation_precision = len(cited & expected) / len(cited) if cited else 0.0
-    else:
-        evidence_recall = 1.0 if not retrieved_at_k else 0.0
-        citation_precision = 1.0 if not cited else 0.0
-    faithful = _answer_is_faithful(case, expected, cited, answer.text)
-    trace = pack.retrieval_trace
-    selection_triggered = (
-        any(
-            channel.channel == "document_page_tree" and bool(channel.trigger_reasons)
-            for channel in trace.channels
-        )
-        and bool(trace.selected_node_ids)
-        and any("document_page_tree" in reference.channels for reference in pack.evidence)
-    )
-    return DesktopRetrievalEvaluationCaseResult(
-        case_id=case.case_id,
-        category=case.category,
-        repetition=repetition,
-        variant=variant,
-        expected_evidence_ids=expected_evidence_ids,
-        evidence_recall_at_k=evidence_recall,
-        citation_precision=citation_precision,
-        absent_answer_correct=case.expect_absent_answer and faithful,
-        answer_faithfulness=1.0 if faithful else 0.0,
-        latency_ms=latency_ms,
-        retrieval_latency_ms=retrieval_latency_ms,
-        answer_latency_ms=answer_latency_ms,
-        model_cost=model_cost,
-        answer_status=answer.status,
-        long_document=case.long_document,
-        page_tree_selection_triggered=selection_triggered,
-        degradation_reasons=tuple(dict.fromkeys((*pack.degradations, *trace.degradation_reasons))),
-        catalog_generation_ids=trace.catalog_generation_ids,
-        page_tree_generation_ids=trace.page_tree_generation_ids,
-    )
-
-
-def _answer_is_faithful(
-    case: DesktopRetrievalEvaluationCase,
-    expected: set[str],
-    cited: set[str],
-    answer_text: str,
-) -> bool:
-    normalized_answer = answer_text.casefold()
-    if case.expect_absent_answer:
-        return not cited and "no available source evidence" in normalized_answer
-    if not expected.issubset(cited):
-        return False
-    return all(term.casefold() in normalized_answer for term in case.expected_answer_terms)
-
-
-def _metrics_for(
-    results: list[DesktopRetrievalEvaluationCaseResult], variant: DesktopEvaluationVariant
-) -> DesktopRetrievalEvaluationMetrics:
-    selected = [result for result in results if result.variant == variant]
-    if not selected:
-        raise ValueError("Desktop retrieval evaluation has no results for a variant.")
-    total = len(selected)
-    cost = DesktopEvaluationModelCost()
-    for result in selected:
-        cost = cost.plus(result.model_cost)
-    long_document = [
-        result for result in selected if result.long_document and result.category != "absent_answer"
-    ]
-    absent_answers = [result for result in selected if result.category == "absent_answer"]
-    return DesktopRetrievalEvaluationMetrics(
-        case_runs=total,
-        evidence_recall_k=DESKTOP_EVIDENCE_RECALL_K,
-        evidence_recall_at_k=sum(result.evidence_recall_at_k for result in selected) / total,
-        long_document_evidence_recall_at_k=(
-            sum(result.evidence_recall_at_k for result in long_document) / len(long_document)
-        ),
-        citation_precision=sum(result.citation_precision for result in selected) / total,
-        absent_answer_accuracy=(
-            sum(result.absent_answer_correct for result in absent_answers) / len(absent_answers)
-        ),
-        answer_faithfulness=sum(result.answer_faithfulness for result in selected) / total,
-        mean_latency_ms=sum(result.latency_ms for result in selected) / total,
-        retrieval_p95_ms=_p95(tuple(result.retrieval_latency_ms for result in selected)),
-        model_cost=cost,
-        degradation_runs=sum(bool(result.degradation_reasons) for result in selected),
-    )
 
 
 def recompute_page_tree_evaluation_gate(
@@ -643,13 +603,6 @@ def recompute_page_tree_evaluation_gate(
         derived_generations_stable=derived_generations_stable,
         derived_identity_bound=derived_identity_bound,
     )
-
-
-def _p95(values: Sequence[float]) -> float:
-    ordered = sorted(values)
-    if not ordered:
-        raise ValueError("Desktop retrieval evaluation latency samples are unavailable.")
-    return ordered[max(0, ((95 * len(ordered) + 99) // 100) - 1)]
 
 
 def _page_tree_gate(

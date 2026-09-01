@@ -253,7 +253,7 @@ class DesktopLiteLLMTransport:
     def call_until_terminal(
         self, request: DesktopModelRequest, connect_timeout_seconds: float
     ) -> object:
-        """Call LiteLLM with a bound connect phase and unbounded response phases."""
+        """Call LiteLLM with a bound connect phase and an optional request deadline."""
         return self.call_until_terminal_with_lifecycle(
             request,
             connect_timeout_seconds,
@@ -283,7 +283,7 @@ class DesktopLiteLLMTransport:
         connect_timeout_seconds: float,
         on_delta: Callable[[object], None],
     ) -> object:
-        """Stream with no first-byte, read, reasoning, generation, or total deadline."""
+        """Stream with an optional caller-owned response deadline."""
         return self.stream_until_terminal_with_lifecycle(
             request,
             connect_timeout_seconds,
@@ -417,11 +417,16 @@ class DesktopLiteLLMTransport:
 
         try:
             model = self._validated_model()
+            response_timeout = request.response_timeout_seconds
             timeout = Timeout(
-                connect=connect_timeout_seconds,
-                read=None,
-                write=None,
-                pool=None,
+                connect=(
+                    min(connect_timeout_seconds, response_timeout)
+                    if response_timeout is not None
+                    else connect_timeout_seconds
+                ),
+                read=response_timeout,
+                write=response_timeout,
+                pool=response_timeout,
             )
             completion_client, raw_close = terminal_completion_client(
                 model=model,
@@ -430,10 +435,9 @@ class DesktopLiteLLMTransport:
                 on_request_sent=on_request_sent,
             )
             close = _once(raw_close)
-            release = self._active_streams.register(id(request), close) if stream else close
+            release = self._active_streams.register(id(request), close)
         except BaseException:
-            if stream:
-                self._active_streams.abandon(id(request))
+            self._active_streams.abandon(id(request))
             raise
 
         try:

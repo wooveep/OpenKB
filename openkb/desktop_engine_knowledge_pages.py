@@ -80,6 +80,12 @@ def dispatch_knowledge_page_request(
                     for source in service.search_sources(_required_string_param(request, "query"))
                 ]
             }
+        if request.method == "workbench.preview_knowledge_bundle":
+            return (
+                DesktopKnowledgeExportService(Path(active.kb_dir))
+                .preview(mode=_required_export_mode(request))
+                .as_dict()
+            )
         server._begin_workspace_mutation(request, cancel_event)
         if request.method == "workbench.adopt_knowledge_item":
             try:
@@ -102,6 +108,7 @@ def dispatch_knowledge_page_request(
                 .export(
                     Path(_required_string_param(request, "destination")),
                     mode=_required_export_mode(request),
+                    expected_snapshot_id=_optional_string_param(request, "expected_snapshot_id"),
                 )
                 .as_dict()
             )

@@ -23,6 +23,7 @@ from openkb.desktop_knowledge_generations import (
     current_generation_id_in,
     knowledge_content_sha256,
     publish_corpus_generation_in,
+    publish_incremental_corpus_generation_in,
 )
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels, encode_knowledge_labels
 from openkb.desktop_knowledge_rendering import (
@@ -40,6 +41,16 @@ _APPLICABILITY_DIMENSIONS = (
     "platform",
     "deployment_scenario",
     "time_boundary",
+)
+_CONFLICT_VALUE = re.compile(
+    r"(?<![0-9a-z_])(?:v?\d+(?:\.\d+){0,3}|true|false|enabled?|disabled?|on|off)"
+    r"(?![0-9a-z_])",
+    re.IGNORECASE,
+)
+_CONFLICT_VALUE_CONTEXT = re.compile(
+    r"port|default|timeout|version|address|gateway|mask|replica|端口|默认|超时|版本|"
+    r"地址|网关|掩码|副本|数值|取值",
+    re.IGNORECASE,
 )
 
 
@@ -106,18 +117,44 @@ def synthesize_qualified_corpus_in(
     *,
     now: str,
     preferred_language: str | None = None,
+    affected_document_ids: tuple[str, ...] = (),
 ) -> int | None:
-    """Consolidate every admitted Available-document candidate into one snapshot."""
-    candidates = _load_admitted_candidates_in(connection)
-    if not candidates:
+    """Consolidate the full corpus or only identities affected by new documents."""
+    all_candidates = _load_admitted_candidates_in(connection)
+    if not all_candidates:
         return current_generation_id_in(connection)
+    blocked_candidate_ids = _record_uncertain_identity_reviews_in(
+        connection, all_candidates, now=now
+    )
+    candidates = all_candidates
+    if affected_document_ids:
+        affected = frozenset(affected_document_ids)
+        affected_keys = {
+            (candidate.kind, candidate.normalized_title)
+            for candidate in all_candidates
+            if candidate.document_id in affected
+        }
+        candidates = tuple(
+            candidate
+            for candidate in all_candidates
+            if (candidate.kind, candidate.normalized_title) in affected_keys
+        )
+        if not candidates:
+            return current_generation_id_in(connection)
     clusters = _candidate_clusters(candidates)
-    connection.execute("DELETE FROM knowledge_identity_candidates")
+    if not affected_document_ids:
+        connection.execute("DELETE FROM knowledge_identity_candidates")
     changes: list[KnowledgeGenerationChange] = []
     included_documents = {candidate.document_id for candidate in candidates}
     carry_forward_identity_ids: set[str] = set()
     language = _corpus_language(candidates, preferred_language=preferred_language)
     for cluster in clusters:
+        if any(candidate.candidate_id in blocked_candidate_ids for candidate in cluster):
+            carry_forward_identity_ids.update(
+                str(row[0])
+                for row in _matching_identity_rows_in(connection, cluster[0].kind, cluster)
+            )
+            continue
         change = _synthesize_cluster_in(
             connection,
             cluster,
@@ -130,6 +167,15 @@ def synthesize_qualified_corpus_in(
         changes.append(change)
     if not changes:
         return current_generation_id_in(connection)
+    if affected_document_ids:
+        return publish_incremental_corpus_generation_in(
+            connection,
+            current_generation_id=current_generation_id_in(connection),
+            changes=tuple(changes),
+            document_ids=tuple(sorted(included_documents)),
+            synthesis_schema_version=CORPUS_SYNTHESIS_SCHEMA_VERSION,
+            now=now,
+        )
     return publish_corpus_generation_in(
         connection,
         current_generation_id=current_generation_id_in(connection),
@@ -363,15 +409,10 @@ def _candidate_clusters(candidates: tuple[_Candidate, ...]) -> tuple[tuple[_Cand
 def _same_identity(left: _Candidate, right: _Candidate) -> bool:
     if left.kind != right.kind or _identity_contradiction(left, right):
         return False
-    if left.normalized_title == right.normalized_title:
-        return True
-    shared_names = _identity_tokens(left) & _identity_tokens(right)
-    if len(shared_names) >= 2:
-        return True
-    shared_tags = {tag.casefold() for tag in left.tags if tag.strip()} & {
-        tag.casefold() for tag in right.tags if tag.strip()
-    }
-    return bool(shared_names and shared_tags and _shared_applicability(left, right))
+    # Knowledge Analysis aliases and tags are model proposals, not independent
+    # identity proof. Only the exact canonical title is safe to auto-consolidate;
+    # plausible semantic matches are retained for explicit review below.
+    return left.normalized_title == right.normalized_title
 
 
 def _identity_contradiction(left: _Candidate, right: _Candidate) -> bool:
@@ -381,30 +422,55 @@ def _identity_contradiction(left: _Candidate, right: _Candidate) -> bool:
         and left.entity_subtype.casefold() != right.entity_subtype.casefold()
     ):
         return True
-    left_scope = _applicability_values(left)
-    right_scope = _applicability_values(right)
-    return any(
-        left_scope[dimension].isdisjoint(right_scope[dimension])
-        for dimension in left_scope.keys() & right_scope.keys()
-    )
+    return False
 
 
-def _shared_applicability(left: _Candidate, right: _Candidate) -> bool:
-    left_scope = _applicability_values(left)
-    right_scope = _applicability_values(right)
-    return any(
-        not left_scope[dimension].isdisjoint(right_scope[dimension])
-        for dimension in left_scope.keys() & right_scope.keys()
-    )
-
-
-def _applicability_values(candidate: _Candidate) -> dict[str, set[str]]:
-    values: defaultdict[str, set[str]] = defaultdict(set)
-    for claim in candidate.claims:
-        for dimension, scope in claim.applicability:
-            if scope.strip() and scope != UNSPECIFIED_APPLICABILITY:
-                values[dimension.casefold()].add(scope.casefold())
-    return dict(values)
+def _record_uncertain_identity_reviews_in(
+    connection: sqlite3.Connection,
+    candidates: tuple[_Candidate, ...],
+    *,
+    now: str,
+) -> frozenset[str]:
+    """Queue plausible model-proposed matches without changing canonical identity."""
+    blocked: set[str] = set()
+    for index, left in enumerate(candidates):
+        for right in candidates[index + 1 :]:
+            if left.kind != right.kind:
+                continue
+            if left.normalized_title == right.normalized_title:
+                if _identity_contradiction(left, right):
+                    _record_identity_review_in(
+                        connection,
+                        left.kind,
+                        (left, right),
+                        reason="identity_contradiction",
+                        now=now,
+                    )
+                    blocked.update((left.candidate_id, right.candidate_id))
+                continue
+            left_aliases = {
+                normalize_knowledge_title(value)[1] for value in left.aliases if value.strip()
+            }
+            right_aliases = {
+                normalize_knowledge_title(value)[1] for value in right.aliases if value.strip()
+            }
+            reciprocal_alias = (
+                left.normalized_title in right_aliases and right.normalized_title in left_aliases
+            )
+            shared_names = _identity_tokens(left) & _identity_tokens(right)
+            shared_tags = {tag.casefold() for tag in left.tags if tag.strip()} & {
+                tag.casefold() for tag in right.tags if tag.strip()
+            }
+            if reciprocal_alias or (len(shared_names) >= 2 and shared_tags):
+                _record_identity_review_in(
+                    connection,
+                    left.kind,
+                    (left, right),
+                    reason="semantic_identity_confirmation_required",
+                    now=now,
+                )
+                blocked.update((left.candidate_id, right.candidate_id))
+    return frozenset(blocked)
 
 
 def _synthesize_cluster_in(
@@ -459,7 +525,10 @@ def _synthesize_cluster_in(
         """
         INSERT INTO knowledge_identity_candidates (
             identity_id, candidate_id, match_basis, created_at
-        ) VALUES (?, ?, 'exact_title_or_multi_signal', ?)
+        ) VALUES (?, ?, 'exact_title', ?)
+        ON CONFLICT(identity_id, candidate_id) DO UPDATE SET
+            match_basis = excluded.match_basis,
+            created_at = excluded.created_at
         """,
         ((identity_id, candidate.candidate_id, now) for candidate in cluster),
     )
@@ -493,36 +562,20 @@ def _matching_identity_rows_in(
     kind: str,
     cluster: tuple[_Candidate, ...],
 ) -> list[tuple[object, ...]]:
-    tokens = frozenset(token for candidate in cluster for token in _identity_tokens(candidate))
     titles = frozenset(candidate.normalized_title for candidate in cluster)
-    token_placeholders = ", ".join("?" for _ in tokens)
     title_placeholders = ", ".join("?" for _ in titles)
     return connection.execute(
         """
-        WITH identity_names AS (
-            SELECT identity_id, normalized_title AS token FROM knowledge_identities
-            UNION
-            SELECT identity_id, normalized_alias AS token FROM knowledge_identity_aliases
-        ), matched AS (
-            SELECT identity_id, COUNT(DISTINCT token) AS overlap_count
-            FROM identity_names
-            WHERE token IN ({token_placeholders})
-            GROUP BY identity_id
-        )
         SELECT identities.identity_id, identities.canonical_title,
             identities.normalized_title
         FROM knowledge_identities AS identities
-        JOIN matched ON matched.identity_id = identities.identity_id
-        WHERE identities.kind = ? AND (
-            identities.normalized_title IN ({title_placeholders})
-            OR matched.overlap_count >= 2
-        )
+        WHERE identities.kind = ?
+          AND identities.normalized_title IN ({title_placeholders})
         ORDER BY identities.identity_id
         """.format(
-            token_placeholders=token_placeholders,
             title_placeholders=title_placeholders,
         ),
-        (*tokens, kind, *titles),
+        (kind, *titles),
     ).fetchall()
 
 
@@ -572,7 +625,10 @@ def _claim_conflicts(cluster: tuple[_Candidate, ...]) -> bool:
                 left.role == right.role
                 and _normalized_text(left.text) != _normalized_text(right.text)
                 and _claim_scopes_overlap(left, right)
-                and _opposed_claims(left.text, right.text)
+                and (
+                    _opposed_claims(left.text, right.text)
+                    or _incompatible_claim_values(left.text, right.text)
+                )
             ):
                 return True
     return False
@@ -611,6 +667,18 @@ def _opposed_claims(left: str, right: str) -> bool:
     left_key, left_negative = _claim_polarity(left)
     right_key, right_negative = _claim_polarity(right)
     return bool(left_key and left_key == right_key and left_negative != right_negative)
+
+
+def _incompatible_claim_values(left: str, right: str) -> bool:
+    if not _CONFLICT_VALUE_CONTEXT.search(left) or not _CONFLICT_VALUE_CONTEXT.search(right):
+        return False
+    left_values = tuple(value.casefold() for value in _CONFLICT_VALUE.findall(left))
+    right_values = tuple(value.casefold() for value in _CONFLICT_VALUE.findall(right))
+    if not left_values or not right_values or left_values == right_values:
+        return False
+    left_skeleton = _normalized_text(_CONFLICT_VALUE.sub(" VALUE ", left))
+    right_skeleton = _normalized_text(_CONFLICT_VALUE.sub(" VALUE ", right))
+    return bool(left_skeleton and left_skeleton == right_skeleton)
 
 
 def _claim_polarity(value: str) -> tuple[str, bool]:

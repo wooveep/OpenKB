@@ -104,6 +104,7 @@ def apply_import_knowledge_analysis_in(
             connection,
             now=timestamp(),
             preferred_language=preferred_language,
+            affected_document_ids=(document_id,),
         )
     else:
         reconciliation.record_analysis_changes_in(connection, document_id, changes)

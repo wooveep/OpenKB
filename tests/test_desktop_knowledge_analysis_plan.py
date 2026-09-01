@@ -130,7 +130,7 @@ def test_plan_is_committed_before_first_batch_model_call(tmp_path) -> None:
     assert len(plan["prompt_contract_digest"]) == 64
     assert plan["prompt_contract_snapshot"]["contracts"]["knowledge_analysis_batch"][
         "version"
-    ].endswith(".v6")
+    ].endswith(".v7")
     assert plan["document_ir_digest"]
     assert plan["batches"]
     assert plan["merge_topology"]

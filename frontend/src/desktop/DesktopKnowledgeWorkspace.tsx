@@ -1,5 +1,5 @@
 import { BookOpen, Download, Loader2, PackageOpen } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -11,7 +11,10 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useDesktopBridge } from "./bridge-context"
-import type { DesktopKnowledgeExportMode } from "./contracts"
+import type {
+  DesktopKnowledgeExportMode,
+  DesktopKnowledgeExportPreview,
+} from "./contracts"
 import { DesktopDocumentVersionCandidatePanel } from "./DesktopDocumentVersionCandidatePanel"
 import { DesktopKnowledgeWorkspacePanel } from "./DesktopKnowledgeWorkspacePanel"
 import { DesktopKnowledgeReconciliationPanel } from "./DesktopKnowledgeReconciliationPanel"
@@ -33,7 +36,33 @@ export function DesktopKnowledgeWorkspace({
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
   const [exporting, setExporting] = useState(false)
+  const [portablePreview, setPortablePreview] = useState<DesktopKnowledgeExportPreview | null>(null)
+  const [portablePreviewRevision, setPortablePreviewRevision] = useState(-1)
+  const [portablePreviewRefreshing, setPortablePreviewRefreshing] = useState(false)
   const [knowledgeReviewRevision, setKnowledgeReviewRevision] = useState(0)
+  const portablePreviewLoading =
+    portablePreviewRefreshing || portablePreviewRevision !== knowledgeReviewRevision
+
+  useEffect(() => {
+    let current = true
+    void bridge.previewKnowledgeBundle("portable_wiki").then(
+      (preview) => {
+        if (current) {
+          setPortablePreview(preview)
+          setPortablePreviewRevision(knowledgeReviewRevision)
+        }
+      },
+      () => {
+        if (current) {
+          setPortablePreview(null)
+          setPortablePreviewRevision(knowledgeReviewRevision)
+        }
+      },
+    )
+    return () => {
+      current = false
+    }
+  }, [bridge, knowledgeReviewRevision])
 
   const handleMissingSourceResolved = () => {
     setKnowledgeReviewRevision((revision) => revision + 1)
@@ -42,6 +71,25 @@ export function DesktopKnowledgeWorkspace({
 
   const exportKnowledge = async (mode: DesktopKnowledgeExportMode) => {
     if (exporting) return
+    let expectedSnapshotId: string | undefined
+    if (mode === "portable_wiki") {
+      setPortablePreviewRefreshing(true)
+      try {
+        const preview = await bridge.previewKnowledgeBundle("portable_wiki")
+        setPortablePreview(preview)
+        setPortablePreviewRevision(knowledgeReviewRevision)
+        expectedSnapshotId = preview.snapshotId
+      } catch (error) {
+        setPortablePreview(null)
+        setPortablePreviewRevision(knowledgeReviewRevision)
+        toast.error(
+          error instanceof Error ? error.message : t("desktop.knowledge.export.failed"),
+        )
+        return
+      } finally {
+        setPortablePreviewRefreshing(false)
+      }
+    }
     const destination = await bridge.chooseKnowledgeBaseDirectory()
     if (!destination) return
     setExporting(true)
@@ -50,6 +98,7 @@ export function DesktopKnowledgeWorkspace({
         destination,
         mode,
         nextDesktopRequestId("knowledge-export"),
+        expectedSnapshotId,
       )
       toast.success(t("desktop.knowledge.export.success", { path: exported.path }))
     } catch (error) {
@@ -85,6 +134,7 @@ export function DesktopKnowledgeWorkspace({
             <DropdownMenuContent align="end" className="w-72">
               <DropdownMenuItem
                 className="items-start py-2"
+                disabled={portablePreviewLoading || portablePreview === null}
                 onSelect={() => void exportKnowledge("portable_wiki")}
               >
                 <BookOpen className="mt-0.5 size-4" />
@@ -95,6 +145,14 @@ export function DesktopKnowledgeWorkspace({
                   <span className="block text-xs text-muted-foreground">
                     {t("desktop.knowledge.export.portableWikiDescription")}
                   </span>
+                  {portablePreview ? (
+                    <span className="mt-1 block text-xs font-medium text-muted-foreground">
+                      {t("desktop.knowledge.export.portableWikiPreview", {
+                        count: portablePreview.documentCount,
+                        size: formatByteEstimate(portablePreview.estimatedSizeBytes),
+                      })}
+                    </span>
+                  ) : null}
                 </span>
               </DropdownMenuItem>
               <DropdownMenuItem
@@ -158,4 +216,10 @@ export function DesktopKnowledgeWorkspace({
       </Tabs>
     </div>
   )
+}
+
+function formatByteEstimate(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }

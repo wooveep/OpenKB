@@ -430,6 +430,51 @@ def _persist_snapshot_in(
                 for link in snapshot.links
             ),
         )
+        connection.executemany(
+            """
+            INSERT INTO knowledge_catalog_relationships (
+                generation_id, source_node_id, target_node_id, relation_kind,
+                source_route, target_route, provenance, lifecycle_eligible, weight
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                (
+                    generation_id,
+                    link.from_node_id,
+                    link.to_node_id,
+                    link.relation_kind,
+                    link.source_route,
+                    link.target_route,
+                    link.provenance,
+                    int(link.lifecycle_eligible),
+                    link.weight,
+                )
+                for link in snapshot.links
+            ),
+        )
+        connection.executemany(
+            """
+            INSERT INTO knowledge_catalog_relationship_sources (
+                generation_id, source_node_id, target_node_id, relation_kind,
+                binding_role, source_id, evidence_id, document_id, availability
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                (
+                    generation_id,
+                    link.from_node_id,
+                    link.to_node_id,
+                    link.relation_kind,
+                    source.binding_role,
+                    source.source_id,
+                    source.evidence_id,
+                    source.document_id,
+                    source.availability,
+                )
+                for link in snapshot.links
+                for source in link.source_bindings
+            ),
+        )
     elif str(existing[0]) != snapshot.snapshot_digest:
         raise RuntimeError("Knowledge Catalog generation identity collision.")
     previous = connection.execute(

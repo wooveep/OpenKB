@@ -144,6 +144,9 @@ def _bounded_source_rows(
         None,
     )
     order = _nearby_block_indexes(len(logical), anchor_index)
+    phase_outline = _phase_diverse_block_indexes(logical, anchor_path)
+    if phase_outline:
+        order = (*phase_outline, *(index for index in order if index not in phase_outline))
     if heading_index is not None:
         order = (heading_index, *(index for index in order if index != heading_index))
     required = {anchor_index}
@@ -183,6 +186,34 @@ def _nearby_block_indexes(length: int, anchor_index: int) -> tuple[int, ...]:
         if left >= 0:
             values.append(left)
     return tuple(values)
+
+
+def _phase_diverse_block_indexes(
+    rows: tuple[tuple[object, ...], ...],
+    anchor_path: tuple[str, ...],
+) -> tuple[int, ...]:
+    """Read one substantive block per child phase before spending depth on any one."""
+    groups: dict[tuple[str, ...], list[int]] = {}
+    for index, row in enumerate(rows):
+        path = _heading_path(str(row[3]))
+        if len(path) <= len(anchor_path) or path[: len(anchor_path)] != anchor_path:
+            continue
+        groups.setdefault(path, []).append(index)
+    if len(groups) < 2:
+        return ()
+    ranked_groups = tuple(
+        tuple(
+            sorted(
+                indexes,
+                key=lambda index: (str(rows[index][1]) == "heading", index),
+            )
+        )
+        for _path, indexes in sorted(groups.items(), key=lambda item: (len(item[0]), item[1][0]))
+    )
+    selected: list[int] = []
+    for depth in range(max(len(indexes) for indexes in ranked_groups)):
+        selected.extend(indexes[depth] for indexes in ranked_groups if depth < len(indexes))
+    return tuple(selected)
 
 
 def _heading_path(value: str) -> tuple[str, ...]:

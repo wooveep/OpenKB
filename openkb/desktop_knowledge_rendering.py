@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 _CJK = re.compile(r"[\u3400-\u9fff]")
 UNSPECIFIED_APPLICABILITY = "Unspecified"
+_OPERATIONAL_LIST_ROLES = frozenset({"prerequisite", "validation", "rollback", "troubleshooting"})
 
 
 @dataclass(frozen=True)
@@ -115,12 +116,14 @@ def render_generated_knowledge(
                 f"{ordinal}. {_claim_text(claim, chinese=chinese)}"
                 for ordinal, claim in enumerate(values, 1)
             )
-        else:
+        elif kind in {"entity", "procedure"} and _OPERATIONAL_LIST_ROLES.intersection(roles):
             output.extend(f"- {_claim_text(claim, chinese=chinese)}" for claim in values)
+        else:
+            output.append(" ".join(_claim_text(claim, chinese=chinese) for claim in values))
     leftovers = [claim for values in by_role.values() for claim in values]
     if leftovers:
         output.append("## 补充信息" if chinese else "## Details")
-        output.extend(f"- {_claim_text(claim, chinese=chinese)}" for claim in leftovers)
+        output.append(" ".join(_claim_text(claim, chinese=chinese) for claim in leftovers))
     return "\n\n".join(output)
 
 

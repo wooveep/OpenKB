@@ -21,6 +21,8 @@ from openkb.desktop_okf_projection import (
     stage_okf_projection_in,
 )
 from openkb.desktop_portable_wiki_export import render_portable_wiki_in
+from openkb.desktop_portable_wiki_preview import portable_wiki_preview_in, portable_wiki_snapshot_in
+from openkb.desktop_portable_wiki_validation import portable_wiki_snapshot_id
 from openkb.desktop_source_image_locator import source_image_matches_evidence
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
@@ -54,6 +56,22 @@ class DesktopKnowledgeExport:
             "files": list(self.files),
             "raw_asset_count": self.raw_asset_count,
             "source_image_count": self.source_image_count,
+        }
+
+
+@dataclass(frozen=True)
+class DesktopKnowledgeExportPreview:
+    mode: DesktopKnowledgeExportMode
+    document_count: int
+    estimated_size_bytes: int
+    snapshot_id: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "document_count": self.document_count,
+            "estimated_size_bytes": self.estimated_size_bytes,
+            "snapshot_id": self.snapshot_id,
         }
 
 
@@ -96,8 +114,35 @@ class DesktopKnowledgeExportService:
         self._state_dir = desktop_state_dir(self._kb_dir)
         self._database_path = desktop_state_database_path(self._kb_dir)
 
+    def preview(self, *, mode: DesktopKnowledgeExportMode) -> DesktopKnowledgeExportPreview:
+        """Return the user-visible size/count estimate before Portable Wiki export."""
+        if mode != "portable_wiki":
+            raise DesktopKnowledgeExportError("Preview is available for Portable Wiki export.")
+        if not self._database_path.is_file():
+            raise DesktopKnowledgeExportError(
+                "Open a Desktop Knowledge Base before previewing its knowledge."
+            )
+        with kb_ingest_lock(self._state_dir):
+            connection = sqlite3.connect(self._database_path)
+            try:
+                connection.execute("BEGIN")
+                preview = portable_wiki_preview_in(connection, self._kb_dir)
+            finally:
+                connection.rollback()
+                connection.close()
+        return DesktopKnowledgeExportPreview(
+            mode=mode,
+            document_count=preview.document_count,
+            estimated_size_bytes=preview.estimated_size_bytes,
+            snapshot_id=preview.snapshot_id,
+        )
+
     def export(
-        self, destination_directory: Path, *, mode: DesktopKnowledgeExportMode
+        self,
+        destination_directory: Path,
+        *,
+        mode: DesktopKnowledgeExportMode,
+        expected_snapshot_id: str | None = None,
     ) -> DesktopKnowledgeExport:
         parent = destination_directory.expanduser().resolve()
         if mode not in {"knowledge_projection", "self_contained", "portable_wiki"}:
@@ -112,6 +157,8 @@ class DesktopKnowledgeExportService:
             raise DesktopKnowledgeExportError(
                 "Open a Desktop Knowledge Base before exporting its knowledge."
             )
+        if mode == "portable_wiki" and not expected_snapshot_id:
+            raise DesktopKnowledgeExportError("Preview the Portable Wiki before exporting it.")
 
         staging: Path | None = None
         final = parent / _export_directory_name(mode)
@@ -128,6 +175,13 @@ class DesktopKnowledgeExportService:
                 try:
                     connection.execute("BEGIN")
                     if mode == "portable_wiki":
+                        current_snapshot_id = portable_wiki_snapshot_id(
+                            portable_wiki_snapshot_in(connection)
+                        )
+                        if current_snapshot_id != expected_snapshot_id:
+                            raise DesktopKnowledgeExportError(
+                                "The Portable Wiki preview has changed. Refresh it and retry."
+                            )
                         portable = render_portable_wiki_in(connection, self._kb_dir, staging)
                         source_image_count = portable.source_image_count
                     else:

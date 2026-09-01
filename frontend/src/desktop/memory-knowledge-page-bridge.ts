@@ -5,6 +5,7 @@ import type {
   DesktopKnowledgePages,
   DesktopKnowledgeExport,
   DesktopKnowledgeExportMode,
+  DesktopKnowledgeExportPreview,
   DesktopKnowledgeSourceCandidate,
   DesktopKnowledgeWorkspace,
   DesktopKnowledgeWorkspaceHistory,
@@ -164,8 +165,10 @@ export abstract class MemoryKnowledgePageBridge {
     destination: string,
     mode: DesktopKnowledgeExportMode,
     requestId: string,
+    expectedSnapshotId?: string,
   ): Promise<DesktopKnowledgeExport> {
     void requestId
+    void expectedSnapshotId
     const portable = mode === "portable_wiki"
     return {
       path: `${destination}/OpenKB-Knowledge-Export`,
@@ -175,6 +178,17 @@ export abstract class MemoryKnowledgePageBridge {
         : ["index.md", "log.md", "source-manifest.json"],
       rawAssetCount: mode === "self_contained" ? 1 : 0,
       sourceImageCount: mode === "self_contained" ? 1 : 0,
+    }
+  }
+
+  async previewKnowledgeBundle(
+    mode: DesktopKnowledgeExportMode,
+  ): Promise<DesktopKnowledgeExportPreview> {
+    return {
+      mode,
+      documentCount: 1,
+      estimatedSizeBytes: 4096,
+      snapshotId: "memory-portable-wiki-snapshot",
     }
   }
 }

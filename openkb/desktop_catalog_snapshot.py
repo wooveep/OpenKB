@@ -8,11 +8,12 @@ import posixpath
 import re
 import sqlite3
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urlsplit
 
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels
+from openkb.desktop_knowledge_inventory import eligible_knowledge_routes_in
 
 _MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 
@@ -45,9 +46,24 @@ class CatalogSource:
 
 
 @dataclass(frozen=True)
+class CatalogRelationshipSource:
+    binding_role: str
+    source_id: str
+    evidence_id: str
+    document_id: str
+    availability: str
+
+
+@dataclass(frozen=True)
 class CatalogLink:
     from_node_id: str
     to_node_id: str
+    source_route: str
+    target_route: str
+    relation_kind: str
+    provenance: str
+    lifecycle_eligible: bool
+    source_bindings: tuple[CatalogRelationshipSource, ...]
     weight: float = 0.2
 
 
@@ -83,13 +99,17 @@ def build_catalog_snapshot_in(
     values = tuple((*page_values, *generated_values))
     leaves = tuple(value.node for value in values) + document_values
     nodes = _ordered_nodes(leaves)
-    links = _knowledge_links(values)
     sources = tuple(
         sorted(
             (*page_sources, *generated_sources, *document_sources),
             key=lambda item: (item.node_id, item.order, item.evidence_id),
         )
     )
+    inventory = eligible_knowledge_routes_in(connection)
+    routes = {
+        (item.authority, item.kind, item.identity): item.route for item in inventory
+    }
+    links = _knowledge_links(values, nodes, sources, routes)
     digest = _snapshot_digest(nodes, sources, links)
     return CatalogSnapshot(source_revision, digest, nodes, sources, links)
 
@@ -430,16 +450,120 @@ def _ordered_nodes(leaves: tuple[CatalogNode, ...]) -> tuple[CatalogNode, ...]:
     )
 
 
-def _knowledge_links(values: tuple[_KnowledgeValue, ...]) -> tuple[CatalogLink, ...]:
+def _knowledge_links(
+    values: tuple[_KnowledgeValue, ...],
+    nodes: tuple[CatalogNode, ...],
+    sources: tuple[CatalogSource, ...],
+    routes: dict[tuple[str, str, str], str],
+) -> tuple[CatalogLink, ...]:
     node_by_path = {value.relative_path: value.node.node_id for value in values}
-    links: set[tuple[str, str]] = set()
+    node_by_id = {node.node_id: node for node in nodes}
+    sources_by_node: defaultdict[str, list[CatalogSource]] = defaultdict(list)
+    for source in sources:
+        if source.availability == "available":
+            sources_by_node[source.node_id].append(source)
+    links: dict[tuple[str, str, str], CatalogLink] = {}
+
     for value in values:
+        source_route_value = _catalog_route(value.node, routes)
+        source_bindings = sources_by_node[value.node.node_id]
+        if source_route_value is None or not source_bindings:
+            continue
+        by_document: defaultdict[str, list[CatalogSource]] = defaultdict(list)
+        for source in source_bindings:
+            by_document[source.document_id].append(source)
+        for document_id, bindings in sorted(by_document.items()):
+            target_node = node_by_id.get(f"document:{document_id}")
+            target_route_value = (
+                _catalog_route(target_node, routes) if target_node is not None else None
+            )
+            if target_node is None or target_route_value is None:
+                continue
+            relationship_sources = tuple(
+                _relationship_source("supporting", source) for source in bindings
+            )
+            link = CatalogLink(
+                from_node_id=value.node.node_id,
+                to_node_id=target_node.node_id,
+                source_route=source_route_value,
+                target_route=target_route_value,
+                relation_kind="supported_by",
+                provenance="knowledge_source_binding",
+                lifecycle_eligible=True,
+                source_bindings=relationship_sources,
+                weight=0.25,
+            )
+            links[(link.from_node_id, link.to_node_id, link.relation_kind)] = link
+
         for match in _MARKDOWN_LINK.finditer(value.content_markdown):
             target = _resolved_link(value.relative_path, match.group(1))
-            to_node_id = node_by_path.get(target) if target is not None else None
-            if to_node_id is not None and to_node_id != value.node.node_id:
-                links.add((value.node.node_id, to_node_id))
-    return tuple(CatalogLink(source, target) for source, target in sorted(links))
+            target_node_id = node_by_path.get(target) if target is not None else None
+            target_node = node_by_id.get(target_node_id or "")
+            target_route_value = (
+                _catalog_route(target_node, routes) if target_node is not None else None
+            )
+            target_bindings = sources_by_node[target_node_id or ""]
+            if (
+                target_node is None
+                or target_node.node_id == value.node.node_id
+                or target_route_value is None
+                or not target_bindings
+            ):
+                continue
+            relationship_sources = tuple(
+                sorted(
+                    (
+                        *(
+                            _relationship_source("source", source)
+                            for source in source_bindings
+                        ),
+                        *(
+                            _relationship_source("target", source)
+                            for source in target_bindings
+                        ),
+                    ),
+                    key=lambda item: (
+                        item.binding_role,
+                        item.document_id,
+                        item.evidence_id,
+                        item.source_id,
+                    ),
+                )
+            )
+            link = CatalogLink(
+                from_node_id=value.node.node_id,
+                to_node_id=target_node.node_id,
+                source_route=source_route_value,
+                target_route=target_route_value,
+                relation_kind="references",
+                provenance="published_markdown_with_source_bindings",
+                lifecycle_eligible=True,
+                source_bindings=relationship_sources,
+            )
+            links[(link.from_node_id, link.to_node_id, link.relation_kind)] = link
+    return tuple(links[key] for key in sorted(links))
+
+
+def _catalog_route(
+    node: CatalogNode | None,
+    routes: dict[tuple[str, str, str], str],
+) -> str | None:
+    if node is None:
+        return None
+    kind = "source" if node.kind == "source_document" else node.kind
+    return routes.get((node.authority, kind, node.authority_id))
+
+
+def _relationship_source(
+    binding_role: str, source: CatalogSource
+) -> CatalogRelationshipSource:
+    return CatalogRelationshipSource(
+        binding_role=binding_role,
+        source_id=source.source_id,
+        evidence_id=source.evidence_id,
+        document_id=source.document_id,
+        availability=source.availability,
+    )
 
 
 def _resolved_link(source_path: str, raw_target: str) -> str | None:
@@ -467,7 +591,7 @@ def _snapshot_digest(
     payload = {
         "nodes": [node.__dict__ for node in nodes],
         "sources": [source.__dict__ for source in sources],
-        "links": [link.__dict__ for link in links],
+        "links": [asdict(link) for link in links],
     }
     return hashlib.sha256(_json(payload).encode()).hexdigest()
 

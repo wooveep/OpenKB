@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from openkb.desktop_corpus_benchmark_migrations import CORPUS_BENCHMARK_COLUMNS
 from openkb.desktop_corpus_knowledge_migrations import (
     pending_corpus_knowledge_migration_statements,
 )
@@ -16,6 +17,7 @@ from openkb.desktop_knowledge_analysis_migrations import (
 from openkb.desktop_model_observability_migrations import MODEL_LIFECYCLE_COLUMNS
 from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
 from openkb.desktop_workspace_feature_migrations import (
+    CORPUS_BENCHMARK_MIGRATION_VERSION,
     CORPUS_KNOWLEDGE_MIGRATION_VERSION,
     KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_VERSION,
     KNOWLEDGE_ANALYSIS_MIGRATION_VERSION,
@@ -24,6 +26,7 @@ from openkb.desktop_workspace_feature_migrations import (
 )
 
 _REPAIRABLE_COLUMN_MIGRATIONS = {
+    CORPUS_BENCHMARK_MIGRATION_VERSION: CORPUS_BENCHMARK_COLUMNS,
     KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_VERSION: (KNOWLEDGE_ADOPTION_REQUEST_INPUT_COLUMNS),
     MODEL_LIFECYCLE_MIGRATION_VERSION: MODEL_LIFECYCLE_COLUMNS,
     MODEL_RESULT_OBSERVATION_MIGRATION_VERSION: MODEL_RESULT_OBSERVATION_COLUMNS,

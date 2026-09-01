@@ -12,6 +12,7 @@ mod desktop_model_settings_commands;
 mod desktop_runtime;
 mod engine_protocol;
 mod engine_wire;
+mod engine_wire_knowledge_export;
 mod engine_wire_knowledge_pages;
 mod external_url;
 mod process_tree;
@@ -25,9 +26,9 @@ use desktop_knowledge_page_commands::{
     desktop_deprecate_knowledge_page, desktop_export_knowledge_bundle, desktop_get_knowledge_page,
     desktop_get_knowledge_workspace_item, desktop_knowledge_pages, desktop_knowledge_workspace,
     desktop_knowledge_workspace_history, desktop_permanently_delete_knowledge_page,
-    desktop_publish_knowledge_page, desktop_restore_knowledge_page, desktop_save_knowledge_page,
-    desktop_search_knowledge_sources, desktop_set_knowledge_page_stale_after,
-    desktop_verify_knowledge_page,
+    desktop_preview_knowledge_bundle, desktop_publish_knowledge_page,
+    desktop_restore_knowledge_page, desktop_save_knowledge_page, desktop_search_knowledge_sources,
+    desktop_set_knowledge_page_stale_after, desktop_verify_knowledge_page,
 };
 use desktop_knowledge_reanalysis_commands::{
     desktop_knowledge_reanalysis, desktop_retry_knowledge_reanalysis,
@@ -735,6 +736,7 @@ fn main() {
             desktop_permanently_delete_knowledge_page,
             desktop_search_knowledge_sources,
             desktop_bind_knowledge_page_source,
+            desktop_preview_knowledge_bundle,
             desktop_export_knowledge_bundle,
             desktop_document_version_candidates,
             desktop_knowledge_reconciliation_conflicts,

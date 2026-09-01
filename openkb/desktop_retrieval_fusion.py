@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from openkb.desktop_answer_types import DesktopEvidenceRef
 
 BASELINE_EVIDENCE_PACK_LIMIT = 6
-ROUTED_EVIDENCE_PACK_LIMIT = 16
+ROUTED_EVIDENCE_PACK_LIMIT = 40
 BASELINE_MINIMUM_QUOTA = 4
-PAGE_TREE_MINIMUM_QUOTA = 12
+ROUTED_MINIMUM_QUOTA = 36
+NAVIGATION_SOURCE_MINIMUM_QUOTA = 34
 GRAPH_CANDIDATE_LIMIT = 2
 _RRF_OFFSET = 60
 
@@ -48,21 +49,61 @@ def fuse_candidates(
 
     evidence_limit = ROUTED_EVIDENCE_PACK_LIMIT if routed else BASELINE_EVIDENCE_PACK_LIMIT
     selected = list(_rank_protected_candidate_ids(protected)[:BASELINE_MINIMUM_QUOTA])
-    for evidence_id in _rank_candidate_ids(routed)[:PAGE_TREE_MINIMUM_QUOTA]:
+    routed_target = min(evidence_limit, len(selected) + ROUTED_MINIMUM_QUOTA)
+    navigation_source = tuple(
+        candidate
+        for candidate in routed
+        if candidate.channel == "knowledge_navigation_source_window"
+    )
+    page_tree = tuple(
+        candidate for candidate in routed if candidate.channel == "document_page_tree"
+    )
+    for evidence_id in _rank_candidate_ids(navigation_source)[:NAVIGATION_SOURCE_MINIMUM_QUOTA]:
+        if evidence_id not in selected:
+            selected.append(evidence_id)
+    for evidence_id in _rank_candidate_ids(page_tree):
+        if len(selected) == routed_target:
+            break
+        if evidence_id not in selected:
+            selected.append(evidence_id)
+    for evidence_id in _rank_candidate_ids(routed):
+        if len(selected) == routed_target:
+            break
         if evidence_id not in selected:
             selected.append(evidence_id)
     for channel in ("fts", "structure_lexical", "wiki"):
         if len(selected) == evidence_limit:
             break
-        first_evidence_id = channel_first.get(channel)
+        first_evidence_id = next(
+            (
+                candidate.reference.evidence_id
+                for candidate in candidates
+                if candidate.channel == channel
+                and _has_substantive_excerpt(candidate.reference.excerpt)
+            ),
+            channel_first.get(channel),
+        )
         if first_evidence_id is not None and first_evidence_id not in selected:
             selected.append(first_evidence_id)
-    ranked = sorted(scores, key=lambda evidence_id: (-scores[evidence_id], evidence_id))
+    ranked = sorted(
+        (
+            evidence_id
+            for evidence_id in scores
+            if _has_substantive_excerpt(references[evidence_id].excerpt)
+        ),
+        key=lambda evidence_id: (-scores[evidence_id], evidence_id),
+    )
     for evidence_id in ranked:
         if len(selected) == evidence_limit:
             break
         if evidence_id not in selected:
             selected.append(evidence_id)
+    if len(selected) < min(evidence_limit, BASELINE_MINIMUM_QUOTA):
+        for evidence_id in sorted(scores, key=lambda key: (-scores[key], key)):
+            if len(selected) == min(evidence_limit, BASELINE_MINIMUM_QUOTA):
+                break
+            if evidence_id not in selected:
+                selected.append(evidence_id)
     return tuple(
         DesktopEvidenceRef(
             **{

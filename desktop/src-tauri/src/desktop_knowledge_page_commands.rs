@@ -2,8 +2,8 @@
 
 use crate::engine_protocol::{
     BridgeError, KnowledgeAdoptionDecision, KnowledgeAdoptionResult, KnowledgeExportMode,
-    KnowledgeExportResult, KnowledgePage, KnowledgePageDeletionResult, KnowledgePageKind,
-    KnowledgePagesResult, KnowledgeSourcesResult, KnowledgeWorkspaceHistory,
+    KnowledgeExportPreview, KnowledgeExportResult, KnowledgePage, KnowledgePageDeletionResult,
+    KnowledgePageKind, KnowledgePagesResult, KnowledgeSourcesResult, KnowledgeWorkspaceHistory,
     KnowledgeWorkspaceItemDetail, KnowledgeWorkspaceItemRequest, KnowledgeWorkspaceResult,
 };
 use crate::DesktopState;
@@ -219,13 +219,25 @@ pub(crate) async fn desktop_export_knowledge_bundle(
     destination: String,
     mode: KnowledgeExportMode,
     request_id: String,
+    expected_snapshot_id: Option<String>,
 ) -> Result<KnowledgeExportResult, BridgeError> {
     let engine = Arc::clone(&state.engine);
     tauri::async_runtime::spawn_blocking(move || {
-        engine.export_knowledge_bundle(destination, mode, request_id)
+        engine.export_knowledge_bundle(destination, mode, request_id, expected_snapshot_id)
     })
     .await
     .map_err(join_error("export"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn desktop_preview_knowledge_bundle(
+    state: State<'_, DesktopState>,
+    mode: KnowledgeExportMode,
+) -> Result<KnowledgeExportPreview, BridgeError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.preview_knowledge_bundle(mode))
+        .await
+        .map_err(join_error("export preview"))?
 }
 
 fn join_error(operation: &'static str) -> impl FnOnce(tauri::Error) -> BridgeError {

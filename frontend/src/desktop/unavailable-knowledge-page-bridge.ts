@@ -5,6 +5,7 @@ import type {
   DesktopKnowledgePages,
   DesktopKnowledgeExport,
   DesktopKnowledgeExportMode,
+  DesktopKnowledgeExportPreview,
   DesktopKnowledgeSourceCandidate,
   DesktopKnowledgeWorkspace,
   DesktopKnowledgeWorkspaceHistory,
@@ -163,10 +164,19 @@ export abstract class UnavailableKnowledgePageBridge {
     destination: string,
     mode: DesktopKnowledgeExportMode,
     requestId: string,
+    expectedSnapshotId?: string,
   ): Promise<DesktopKnowledgeExport> {
     void destination
     void mode
     void requestId
+    void expectedSnapshotId
+    return this.unavailable()
+  }
+
+  previewKnowledgeBundle(
+    mode: DesktopKnowledgeExportMode,
+  ): Promise<DesktopKnowledgeExportPreview> {
+    void mode
     return this.unavailable()
   }
 }

@@ -96,11 +96,13 @@ def knowledge_analysis_batch_prompt(
     *,
     batch_total: int,
     input_budget_tokens: int = 8_000,
+    knowledge_language: str | None = None,
 ) -> str:
     payload = {
         "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
         "analysis_scope": KNOWLEDGE_ANALYSIS_BATCH_SCOPE,
         "document_name": Path(document_name).name,
+        "knowledge_language": knowledge_language,
         "batch_ordinal": batch.ordinal,
         "batch_total": batch_total,
         "section_paths": [list(path) for path in batch.section_paths],
@@ -138,6 +140,7 @@ def knowledge_analysis_merge_prompt(
     node_id: str = "merge",
     conflicts: tuple[str, ...] = (),
     input_budget_tokens: int = 8_000,
+    knowledge_language: str | None = None,
 ) -> str:
     """Build a bounded description/conflict input without exact candidate payloads."""
     descriptions = tuple(
@@ -147,6 +150,7 @@ def knowledge_analysis_merge_prompt(
     payload: dict[str, object] = {
         "schema_version": "openkb.knowledge-analysis-description-merge.v1",
         "document_name": Path(document_name).name,
+        "knowledge_language": knowledge_language,
         "merge_node_id": node_id,
         "descriptions": list(descriptions),
         "semantic_conflicts": list(conflicts),
@@ -215,10 +219,7 @@ def _batch_fits(
     )
     if max_prompt_characters is not None and len(content) > max_prompt_characters:
         return False
-    return (
-        estimate_model_tokens(content) + _BATCH_ENVELOPE_RESERVE_TOKENS
-        <= input_budget_tokens
-    )
+    return estimate_model_tokens(content) + _BATCH_ENVELOPE_RESERVE_TOKENS <= input_budget_tokens
 
 
 def _evidence_payload(item: tuple[str, DocumentIRBlock]) -> dict[str, object]:

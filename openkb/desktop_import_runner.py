@@ -15,6 +15,7 @@ from openkb import __version__
 from openkb import desktop_import_logging as importlog
 from openkb import desktop_page_tree as page_tree_runtime
 from openkb import desktop_page_tree_store as page_tree_store
+from openkb.config import ensure_preferred_knowledge_language
 from openkb.desktop_document_parsers import parse_structured_document
 from openkb.desktop_document_usability import require_usable_document_ir
 from openkb.desktop_document_versions import DesktopDocumentVersionService
@@ -449,6 +450,10 @@ class DesktopTextImportService:
                         execution_profile=analysis_gate.profile,
                         on_operation_validated=lambda request: self._analysis_dispatch.mark_ready(
                             gateway, request
+                        ),
+                        knowledge_language=ensure_preferred_knowledge_language(
+                            self._store.kb_dir,
+                            (block.text for _evidence_id, block in evidence),
                         ),
                     )
                     knowledge_analysis = run.analysis

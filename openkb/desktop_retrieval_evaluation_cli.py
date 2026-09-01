@@ -10,6 +10,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
+from openkb.desktop_model_execution_profile import analysis_execution_profile_for_settings
+from openkb.desktop_model_settings import read_desktop_model_settings
 from openkb.desktop_model_transport import desktop_model_gateway_for
 from openkb.desktop_retrieval_evaluation import (
     DesktopRetrievalEvaluator,
@@ -23,7 +25,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Evaluate Desktop vectorless retrieval variants.")
     parser.add_argument("kb_dir", type=Path)
     parser.add_argument("suite", type=Path)
-    parser.add_argument("--repetitions", type=int, default=1)
+    parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--promote-local-graph", action="store_true")
     parser.add_argument("--validate-page-tree-promotion", action="store_true")
@@ -52,6 +54,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         args.kb_dir,
         model_gateway=desktop_model_gateway_for(args.kb_dir),
         page_tree_provider=cast(EvaluationPageTreeProvider | None, page_tree_provider),
+        model_profile_digest=_model_profile_digest(args.kb_dir),
     )
     suite = DesktopRetrievalEvaluationSuite.from_json(args.suite)
     report = evaluator.evaluate(
@@ -73,6 +76,13 @@ def run(argv: Sequence[str] | None = None) -> int:
         report.navigator_gate.passed if args.validate_navigator_promotion else report.gate.passed
     )
     return 0 if gate_passed else 2
+
+
+def _model_profile_digest(kb_dir: Path) -> str | None:
+    try:
+        return analysis_execution_profile_for_settings(read_desktop_model_settings(kb_dir)).identity
+    except (OSError, ValueError):
+        return None
 
 
 def _page_tree_provider(args: argparse.Namespace) -> object | None:

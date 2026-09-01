@@ -22,6 +22,19 @@ uses its package-local Tika helper only on loopback and only while it is needed.
 5. Ask questions from the **Ask** workspace. Answers show their cited document
    sections and relevant source images.
 
+Imported documents are also compiled into a virtual **Knowledge Navigation
+View**. It gives question answering stable routes across document summaries,
+entities, concepts, procedures, and source sections without making a second
+copy of the knowledge base authoritative. Complex procedural questions can
+open a bounded number of related pages and source checkpoints to fill missing
+scope, safety, or validation details; narrow lookups stay on their exact route.
+
+From the **Knowledge** workspace, an optional **Portable Wiki Export** can write
+a read-only snapshot containing an index, summaries, entities, concepts,
+procedures, source pages, and a checksum manifest. OpenKB previews and validates
+the snapshot before publishing it; the SQLite knowledge base remains the source
+of truth.
+
 Imports are staged and resumable. A model-analysis timeout retries with a
 longer request timeout; configuration, authentication, and format errors are
 isolated immediately. Failed documents remain unavailable to question answering

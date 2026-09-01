@@ -30,6 +30,7 @@ def validate_portable_wiki(staging: Path) -> None:
         raise ValueError("Portable Wiki snapshot identity is invalid.")
     routes = _route_index(manifest.get("routes"), staging)
     _validate_aliases(manifest.get("aliases"), routes)
+    _validate_knowledge_sources(manifest.get("routes"), staging)
     _validate_links(staging)
     _validate_resources(manifest.get("source_images"), staging)
     _validate_checksums(manifest.get("checksums"), staging)
@@ -39,7 +40,7 @@ def _route_index(value: object, staging: Path) -> dict[str, tuple[str, str]]:
     if not isinstance(value, list):
         raise ValueError("Portable Wiki routes are invalid.")
     routes: dict[str, tuple[str, str]] = {}
-    paths: set[str] = set()
+    targets: set[tuple[str, str | None]] = set()
     for item in value:
         if not isinstance(item, dict):
             raise ValueError("Portable Wiki route entry is invalid.")
@@ -48,13 +49,24 @@ def _route_index(value: object, staging: Path) -> dict[str, tuple[str, str]]:
         if not all(isinstance(field, str) and field for field in (route, path, identity)):
             raise ValueError("Portable Wiki route fields are invalid.")
         assert isinstance(route, str) and isinstance(path, str) and isinstance(identity, str)
-        if route in routes or path in paths or path != f"{route}.md":
+        authority, anchor = item.get("authority"), item.get("anchor")
+        section_route = authority == "source_section"
+        if anchor is not None and not isinstance(anchor, str):
+            raise ValueError("Portable Wiki route anchor is invalid.")
+        if (
+            route in routes
+            or (path, anchor) in targets
+            or (not section_route and (path != f"{route}.md" or anchor is not None))
+            or (section_route and not anchor)
+        ):
             raise ValueError("Portable Wiki routes are duplicated or inconsistent.")
         target = _safe_target(staging, path)
         if not target.is_file():
             raise ValueError("Portable Wiki route target is missing.")
+        if anchor is not None and f'id="{anchor}"' not in target.read_text(encoding="utf-8"):
+            raise ValueError("Portable Wiki route anchor is missing.")
         routes[route] = (identity, path)
-        paths.add(path)
+        targets.add((path, anchor))
     return routes
 
 
@@ -73,6 +85,26 @@ def _validate_aliases(value: object, routes: dict[str, tuple[str, str]]) -> None
         if normalized in aliases or routes.get(route, (None,))[0] != identity:
             raise ValueError("Portable Wiki alias is ambiguous or points to another identity.")
         aliases.add(normalized)
+
+
+def _validate_knowledge_sources(value: object, staging: Path) -> None:
+    if not isinstance(value, list):
+        raise ValueError("Portable Wiki routes are invalid.")
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Portable Wiki route entry is invalid.")
+        if item.get("authority") not in {"user_revision", "published_generation"}:
+            continue
+        if item.get("kind") not in {"concept", "entity", "procedure"}:
+            continue
+        path = item.get("path")
+        if not isinstance(path, str):
+            raise ValueError("Portable Wiki knowledge route is invalid.")
+        content = _safe_target(staging, path).read_text(encoding="utf-8")
+        _prefix, marker, sources = content.partition("\n## Sources\n")
+        links = [match.group(1).strip("<>") for match in _MARKDOWN_LINK.finditer(sources)]
+        if not marker or not any("#evidence-" in link for link in links):
+            raise ValueError("Portable Wiki knowledge page has no resolvable source bindings.")
 
 
 def _validate_links(staging: Path) -> None:

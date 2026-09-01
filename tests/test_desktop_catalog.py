@@ -141,6 +141,62 @@ def test_catalog_uses_published_snapshot_and_routes_one_low_weight_link(
     assert beta_evidence not in {item.evidence_id for item in without_deprecated_hop.evidence}
 
 
+def test_catalog_persists_typed_links_with_routes_and_source_bindings(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kb_dir = _controlled_kb(tmp_path, monkeypatch)
+    pages, alpha, beta, alpha_evidence, beta_evidence = _source_backed_pages(
+        kb_dir, tmp_path
+    )
+    pages.publish(alpha.page_id)
+    assert rebuild_pending_catalog(kb_dir)
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        generation_id = str(
+            connection.execute(
+                "SELECT current_generation_id FROM knowledge_catalog_state"
+            ).fetchone()[0]
+        )
+        reference = connection.execute(
+            """
+            SELECT source_route, target_route, relation_kind, provenance,
+                lifecycle_eligible
+            FROM knowledge_catalog_relationships
+            WHERE generation_id = ? AND source_node_id = ? AND target_node_id = ?
+            """,
+            (generation_id, f"page:{alpha.page_id}", f"page:{beta.page_id}"),
+        ).fetchone()
+        assert reference is not None
+        assert reference[0].startswith("concepts/")
+        assert reference[1].startswith("concepts/")
+        assert reference[2:] == ("references", "published_markdown_with_source_bindings", 1)
+        bound_evidence = {
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT evidence_id FROM knowledge_catalog_relationship_sources
+                WHERE generation_id = ? AND source_node_id = ? AND target_node_id = ?
+                    AND relation_kind = 'references'
+                """,
+                (generation_id, f"page:{alpha.page_id}", f"page:{beta.page_id}"),
+            ).fetchall()
+        }
+        supported_by = connection.execute(
+            """
+            SELECT target_route, relation_kind, provenance, lifecycle_eligible
+            FROM knowledge_catalog_relationships
+            WHERE generation_id = ? AND source_node_id = ?
+                AND relation_kind = 'supported_by'
+            """,
+            (generation_id, f"page:{alpha.page_id}"),
+        ).fetchone()
+
+    assert bound_evidence == {alpha_evidence, beta_evidence}
+    assert supported_by is not None
+    assert supported_by[0].startswith("sources/")
+    assert supported_by[1:] == ("supported_by", "knowledge_source_binding", 1)
+
+
 def test_catalog_failure_serves_previous_generation_and_task_reason(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

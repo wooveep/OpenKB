@@ -43,6 +43,7 @@ WORKSPACE_METHODS = frozenset(
         "workbench.permanently_delete_knowledge_page",
         "workbench.search_knowledge_sources",
         "workbench.bind_knowledge_page_source",
+        "workbench.preview_knowledge_bundle",
         "workbench.export_knowledge_bundle",
         "workbench.document_version_candidates",
         "workbench.resolve_document_version_candidate",
@@ -76,9 +77,7 @@ ANSWER_METHODS = frozenset(
     }
 )
 
-INTERRUPTION_PRESERVING_METHODS = ANSWER_METHODS | {
-    "workbench.save_and_verify_model_settings"
-}
+INTERRUPTION_PRESERVING_METHODS = ANSWER_METHODS | {"workbench.save_and_verify_model_settings"}
 
 MODEL_SETTINGS_METHODS = frozenset(
     method for method in WORKSPACE_METHODS if "model_settings" in method
@@ -92,6 +91,7 @@ KNOWLEDGE_PAGE_METHODS = frozenset(
     "workbench.knowledge_workspace_history",
     "workbench.adopt_knowledge_item",
     "workbench.search_knowledge_sources",
+    "workbench.preview_knowledge_bundle",
     "workbench.export_knowledge_bundle",
 }
 

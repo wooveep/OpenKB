@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from openkb import __version__
+from openkb.config import ensure_preferred_knowledge_language
 from openkb.desktop_catalog_store import queue_catalog_rebuild_in, start_catalog_rebuilds
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
 from openkb.desktop_import_clock import timestamp
@@ -424,6 +425,10 @@ class DesktopKnowledgeReanalysisService:
                         operation=request.operation,
                         capability_identity=request.capability_identity,
                         prompt_contract_digest=request.prompt_contract_digest,
+                    ),
+                    knowledge_language=ensure_preferred_knowledge_language(
+                        self._kb_dir,
+                        (block.text for _evidence_id, block in evidence),
                     ),
                 )
                 honor_control()

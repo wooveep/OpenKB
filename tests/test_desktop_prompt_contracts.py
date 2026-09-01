@@ -62,6 +62,40 @@ def test_retrieval_plan_contract_requests_atomic_semantic_terms() -> None:
     assert terms_schema["maxItems"] == 8
 
 
+def test_navigation_action_schema_exposes_exact_kind_specific_shapes() -> None:
+    contract = prompt_contract_for("knowledge_navigation_step")
+
+    assert contract.output_schema is not None
+    actions = contract.output_schema["properties"]["actions"]
+    assert isinstance(actions, dict)
+    action_schema = actions["items"]
+    assert isinstance(action_schema, dict)
+    variants = action_schema["oneOf"]
+    assert isinstance(variants, list)
+    assert [set(variant["required"]) for variant in variants] == [
+        {"kind", "aspect", "terms"},
+        {"kind", "aspect", "routes"},
+        {"kind", "aspect", "evidence_ids"},
+    ]
+    assert all(variant["additionalProperties"] is False for variant in variants)
+
+
+def test_navigation_contract_prioritizes_end_to_end_how_to_coverage() -> None:
+    instructions = prompt_contract_for("knowledge_navigation_step").instructions
+
+    assert "end-to-end phase outline" in instructions
+    assert "prefer read_source_sections" in instructions
+    assert "exact missing phase" in instructions
+    assert "use search_routes" in instructions
+    assert "already-covered phase" in instructions
+    assert "Never repeat the same terms, routes, or Evidence IDs" in instructions
+    assert "span distinct missing phases" in instructions
+    assert "generic start route" in instructions
+    assert "whole-source outline" in instructions
+    assert "adjacent detail routes" in instructions
+    assert "omit an Evidence ID unless it appears exactly" in instructions
+
+
 def test_grounded_answer_contract_preserves_evidence_backed_how_to_detail() -> None:
     instructions = prompt_contract_for("grounded_answer").instructions
 
@@ -71,6 +105,27 @@ def test_grounded_answer_contract_preserves_evidence_backed_how_to_detail() -> N
     assert "commands or configuration values" in instructions
     assert "validation and safety warnings" in instructions
     assert "Do not omit an evidence-backed phase merely to be concise" in instructions
+    assert "Evidence Phase Index" in instructions
+    assert "navigation-unconfirmed aspect is not a source gap" in instructions
+    assert "Do not add generic validation, backup, or safety advice" in instructions
+    assert "architecture and scope" in instructions
+    assert "system preparation" in instructions
+    assert "cluster or resource-pool registration" in instructions
+    assert "preserve consecutive evidence-backed substeps" in instructions
+    assert "cited core checklist first" in instructions
+    assert "question-relevant Source steps label" in instructions
+    assert "expansion, recovery, NTP, or optional detail" in instructions
+    assert "Every validation or warning list item requires its own citation" in instructions
+    assert "Never emit a Knowledge Guidance citation" in instructions
+
+
+def test_grounded_answer_contract_surfaces_source_conflicts_without_resolving_them() -> None:
+    instructions = prompt_contract_for("grounded_answer").instructions
+
+    assert "conflicting Original Evidence" in instructions
+    assert "document and scope" in instructions
+    assert "cite every conflicting statement" in instructions
+    assert "Do not silently choose" in instructions
 
 
 def test_knowledge_analysis_contract_bounds_structured_output_size() -> None:
@@ -148,9 +203,9 @@ def test_knowledge_analysis_schema_requires_the_complete_locally_validated_shape
 
 def test_changed_knowledge_analysis_prompt_versions_are_pinned() -> None:
     expected_versions = {
-        "knowledge_analysis": 6,
-        "knowledge_analysis_batch": 6,
-        "knowledge_analysis_merge": 5,
+        "knowledge_analysis": 7,
+        "knowledge_analysis_batch": 7,
+        "knowledge_analysis_merge": 6,
     }
     for operation, version in expected_versions.items():
         assert prompt_contract_for(operation).version == f"openkb.prompt.{operation}.v{version}"

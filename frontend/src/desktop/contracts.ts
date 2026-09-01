@@ -578,6 +578,13 @@ export interface DesktopKnowledgeExport {
   sourceImageCount: number
 }
 
+export interface DesktopKnowledgeExportPreview {
+  mode: DesktopKnowledgeExportMode
+  documentCount: number
+  estimatedSizeBytes: number
+  snapshotId: string
+}
+
 export interface DesktopBridge {
   handshake(): Promise<DesktopBridgeHandshake>
   health(): Promise<DesktopEngineHealth>
@@ -609,7 +616,11 @@ export interface DesktopBridge {
     destination: string,
     mode: DesktopKnowledgeExportMode,
     requestId: string,
+    expectedSnapshotId?: string,
   ): Promise<DesktopKnowledgeExport>
+  previewKnowledgeBundle(
+    mode: DesktopKnowledgeExportMode,
+  ): Promise<DesktopKnowledgeExportPreview>
   inspectImportSources(
     sourcePaths: string[],
     requestId: string,

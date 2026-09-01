@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from openkb.desktop_corpus_benchmark import (
+    CORPUS_BENCHMARK_SCHEMA_VERSION,
+    corpus_benchmark_report_in,
+)
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels, encode_knowledge_labels
 from openkb.desktop_knowledge_sources import merge_claim_source_markers
 from openkb.desktop_okf_projection import (
@@ -240,6 +245,7 @@ def publish_corpus_generation_in(
         """,
         ((generation_id, document_id) for document_id in dict.fromkeys(document_ids)),
     )
+    _record_corpus_benchmark_in(connection, generation_id)
     if corpus_generation_qualification_issues_in(connection, generation_id):
         connection.execute(
             "UPDATE knowledge_generations SET qualification_state = 'failed' "
@@ -260,6 +266,74 @@ def publish_corpus_generation_in(
         VALUES (1, ?)
         ON CONFLICT(singleton) DO UPDATE SET current_generation_id = excluded.current_generation_id
         """,
+        (generation_id,),
+    )
+    return generation_id
+
+
+def publish_incremental_corpus_generation_in(
+    connection: sqlite3.Connection,
+    *,
+    current_generation_id: int | None,
+    changes: tuple[KnowledgeGenerationChange, ...],
+    document_ids: tuple[str, ...],
+    synthesis_schema_version: str,
+    now: str,
+) -> int | None:
+    """Qualify affected identities while preserving every unaffected current item."""
+    if not changes:
+        return current_generation_id
+    if any(not change.sources or change.identity_id is None for change in changes):
+        raise ValueError("Qualified corpus knowledge requires identities and source bindings.")
+    generation_id = publish_generation_changes_in(
+        connection,
+        current_generation_id=current_generation_id,
+        changes=changes,
+        now=now,
+    )
+    connection.execute(
+        """
+        UPDATE knowledge_generations
+        SET qualification_state = 'candidate', synthesis_schema_version = ?
+        WHERE generation_id = ?
+        """,
+        (synthesis_schema_version, generation_id),
+    )
+    if current_generation_id is not None:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO knowledge_generation_documents (generation_id, document_id)
+            SELECT ?, document_id FROM knowledge_generation_documents
+            WHERE generation_id = ?
+            """,
+            (generation_id, current_generation_id),
+        )
+    connection.executemany(
+        """
+        INSERT OR IGNORE INTO knowledge_generation_documents (generation_id, document_id)
+        VALUES (?, ?)
+        """,
+        ((generation_id, document_id) for document_id in dict.fromkeys(document_ids)),
+    )
+    _record_corpus_benchmark_in(connection, generation_id)
+    if corpus_generation_qualification_issues_in(connection, generation_id):
+        connection.execute(
+            "UPDATE knowledge_generations SET qualification_state = 'failed' "
+            "WHERE generation_id = ?",
+            (generation_id,),
+        )
+        if current_generation_id is None:
+            connection.execute("DELETE FROM knowledge_generation_state WHERE singleton = 1")
+        else:
+            connection.execute(
+                "UPDATE knowledge_generation_state SET current_generation_id = ? "
+                "WHERE singleton = 1",
+                (current_generation_id,),
+            )
+        return current_generation_id
+    connection.execute(
+        "UPDATE knowledge_generations SET qualification_state = 'qualified' "
+        "WHERE generation_id = ?",
         (generation_id,),
     )
     return generation_id
@@ -333,7 +407,31 @@ def corpus_generation_qualification_issues_in(
     ).fetchone()
     if duplicates is not None and int(duplicates[0]) > 0:
         issues.append("duplicate_identity")
+    benchmark_row = connection.execute(
+        "SELECT qualification_report_json FROM knowledge_generations WHERE generation_id = ?",
+        (generation_id,),
+    ).fetchone()
+    try:
+        benchmark = (
+            json.loads(str(benchmark_row[0])) if benchmark_row and benchmark_row[0] else None
+        )
+    except json.JSONDecodeError:
+        benchmark = None
+    if (
+        not isinstance(benchmark, dict)
+        or benchmark.get("schema_version") != CORPUS_BENCHMARK_SCHEMA_VERSION
+        or benchmark.get("passed") is not True
+    ):
+        issues.append("corpus_benchmark_failed")
     return tuple(issues)
+
+
+def _record_corpus_benchmark_in(connection: sqlite3.Connection, generation_id: int) -> None:
+    report = corpus_benchmark_report_in(connection, generation_id)
+    connection.execute(
+        "UPDATE knowledge_generations SET qualification_report_json = ? WHERE generation_id = ?",
+        (report.as_json(), generation_id),
+    )
 
 
 def _carry_forward_generation_identities_in(

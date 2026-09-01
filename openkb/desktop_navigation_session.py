@@ -38,6 +38,12 @@ from openkb.desktop_answer_types import (
     DesktopRetrievalPlan,
 )
 from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_navigation_evidence import NAVIGATION_MAX_EVIDENCE_REFS
+from openkb.desktop_navigation_evidence import allocate_evidence as _allocate_evidence
+from openkb.desktop_navigation_evidence import (
+    section_diverse_evidence_ids as _section_diverse_evidence_ids,
+)
+from openkb.desktop_navigation_validation import NavigationAction
 from openkb.desktop_retrieval_trace import (
     DesktopAnswerCoverageTrace,
     DesktopRetrievalChannelTrace,
@@ -73,12 +79,19 @@ def run_navigation_session(
     is_cancelled: Callable[[], bool] | None = None,
     on_model_event: Callable[[object], None] | None = None,
     retry_scope: str | None = None,
+    initial_stop_reason: str | None = None,
+    initial_degradations: tuple[str, ...] = (),
+    session_started_at: float | None = None,
+    session_deadline: float | None = None,
 ) -> DesktopEvidencePack:
     """Observe, replan, retrieve and stop within one immutable session envelope."""
-    started_at = time.monotonic()
-    objective = initial_navigation_objective(question, initial_pack.retrieval_plan)
-    coverage = deterministic_seed_coverage(objective, initial_pack)
-    pack = initial_pack
+    started_at = time.monotonic() if session_started_at is None else session_started_at
+    deadline = (
+        started_at + NAVIGATION_MAX_WALL_SECONDS if session_deadline is None else session_deadline
+    )
+    pack, source_budget_reduced = _bounded_initial_pack(initial_pack)
+    objective = initial_navigation_objective(question, pack.retrieval_plan)
+    coverage = deterministic_seed_coverage(objective, pack)
     rounds = 0
     model_calls = initial_pack.retrieval_model_cost.model_calls
     logical_reads = _logical_reads(pack.retrieval_trace)
@@ -86,8 +99,39 @@ def run_navigation_session(
     search_actions = 0
     visited_action_ids: set[str] = set()
     action_kinds: list[str] = []
-    degradations: list[str] = []
+    degradations = list(initial_degradations)
+    if source_budget_reduced:
+        degradations.append("knowledge_navigation_source_budget_exhausted")
 
+    if time.monotonic() >= deadline:
+        return _finalize(
+            pack,
+            pinned_snapshot_id=pinned_snapshot_id,
+            objective=objective,
+            coverage=coverage,
+            rounds=rounds,
+            action_kinds=action_kinds,
+            stop_reason="budget_exhausted",
+            model_calls=model_calls,
+            logical_reads=logical_reads,
+            source_tokens=source_tokens,
+            degradations=degradations,
+        )
+    if is_cancelled is not None and is_cancelled():
+        degradations.append("knowledge_navigation_cancelled")
+        return _finalize(
+            pack,
+            pinned_snapshot_id=pinned_snapshot_id,
+            objective=objective,
+            coverage=coverage,
+            rounds=rounds,
+            action_kinds=action_kinds,
+            stop_reason="cancelled",
+            model_calls=model_calls,
+            logical_reads=logical_reads,
+            source_tokens=source_tokens,
+            degradations=degradations,
+        )
     if current_navigation_snapshot_id(database_path) != pinned_snapshot_id:
         degradations.append("knowledge_navigation_snapshot_changed")
         return _finalize(
@@ -98,6 +142,20 @@ def run_navigation_session(
             rounds=rounds,
             action_kinds=action_kinds,
             stop_reason="snapshot_degraded",
+            model_calls=model_calls,
+            logical_reads=logical_reads,
+            source_tokens=source_tokens,
+            degradations=degradations,
+        )
+    if initial_stop_reason is not None:
+        return _finalize(
+            pack,
+            pinned_snapshot_id=pinned_snapshot_id,
+            objective=objective,
+            coverage=coverage,
+            rounds=rounds,
+            action_kinds=action_kinds,
+            stop_reason=initial_stop_reason,
             model_calls=model_calls,
             logical_reads=logical_reads,
             source_tokens=source_tokens,
@@ -121,7 +179,7 @@ def run_navigation_session(
     stop_reason = "partial"
     while True:
         budget_stop = _budget_stop_reason(
-            started_at=started_at,
+            deadline=deadline,
             rounds=rounds,
             model_calls=model_calls,
             logical_reads=logical_reads,
@@ -161,9 +219,13 @@ def run_navigation_session(
             is_cancelled=is_cancelled,
             on_model_event=on_model_event,
             retry_scope=retry_scope,
+            response_deadline=deadline,
         )
         model_calls += step.model_cost.model_calls
         pack = _with_added_cost(pack, step.model_cost)
+        if step.stop_reason == "cancelled" and time.monotonic() >= deadline:
+            stop_reason = "budget_exhausted"
+            break
         degradations.extend(step.degradations)
         if step.decision is None:
             stop_reason = step.stop_reason or "model_degraded"
@@ -179,22 +241,9 @@ def run_navigation_session(
             break
 
         actions = step.decision.actions
-        new_terms = tuple(
-            term
-            for action in actions
-            for term in action.terms
-            if term.casefold()
-            not in {existing.casefold() for existing in pack.retrieval_plan.terms}
-        )
-        requested_routes = _unique(route for action in actions for route in action.routes)
-        source_anchors = _unique(
-            evidence_id for action in actions for evidence_id in action.evidence_ids
-        )
-        if not new_terms and not requested_routes and not source_anchors:
-            stop_reason = "no_progress"
-            break
-        if rounds >= NAVIGATION_MAX_ROUNDS:
-            stop_reason = "budget_exhausted"
+        action_groups = _actions_by_aspect(actions)
+        if not any(action.terms or action.routes or action.evidence_ids for action in actions):
+            stop_reason = _incomplete_stop_reason(coverage)
             break
         for action in actions:
             visited_action_ids.add(action.identity)
@@ -210,36 +259,75 @@ def run_navigation_session(
             degradations.append("knowledge_navigation_snapshot_changed")
             break
 
-        expanded_plan = _expanded_plan(pack.retrieval_plan, new_terms)
-        remaining_reads = max(0, NAVIGATION_MAX_LOGICAL_READS - logical_reads)
-        source_read_limit = min(
-            NAVIGATION_MAX_BATCH_SOURCE_READS,
-            remaining_reads // 3,
-        )
-        knowledge_read_limit = min(
-            NAVIGATION_MAX_BATCH_KNOWLEDGE_READS,
-            remaining_reads - source_read_limit,
-        )
-        supplement = retrieve_round(
-            retrieval_plan=expanded_plan,
-            _navigation_max_reads=knowledge_read_limit,
-            _navigation_max_source_windows=source_read_limit,
-            _navigation_excluded_routes=frozenset(pack.retrieval_trace.navigation_routes),
-            _navigation_prior_evidence=pack.evidence,
-            _navigation_requested_routes=requested_routes,
-            _navigation_source_anchors=source_anchors,
-        )
-        model_calls += supplement.retrieval_model_cost.model_calls
-        if current_navigation_snapshot_id(database_path) != pinned_snapshot_id:
-            stop_reason = "snapshot_degraded"
-            degradations.append("knowledge_navigation_snapshot_changed")
-            break
         prior_ids = frozenset(item.evidence_id for item in pack.evidence)
-        pack = _merge_packs(pack, supplement, coverage)
-        logical_reads += _logical_reads(supplement.retrieval_trace)
-        source_tokens = estimated_source_tokens(pack)
-        if not frozenset(item.evidence_id for item in pack.evidence) - prior_ids:
-            stop_reason = "no_progress"
+        prior_routes = frozenset(pack.retrieval_trace.navigation_routes)
+        prior_options = frozenset(item.route for item in pack.route_options)
+        aspect_evidence_ids: dict[str, tuple[str, ...]] = {}
+        round_stop_reason: str | None = None
+        for group_index, (aspect, group) in enumerate(action_groups):
+            if is_cancelled is not None and is_cancelled():
+                degradations.append("knowledge_navigation_cancelled")
+                round_stop_reason = "cancelled"
+                break
+            if current_navigation_snapshot_id(database_path) != pinned_snapshot_id:
+                degradations.append("knowledge_navigation_snapshot_changed")
+                round_stop_reason = "snapshot_degraded"
+                break
+            remaining_reads = max(0, NAVIGATION_MAX_LOGICAL_READS - logical_reads)
+            groups_left = len(action_groups) - group_index
+            group_read_budget = (remaining_reads + groups_left - 1) // groups_left
+            source_read_limit = min(
+                NAVIGATION_MAX_BATCH_SOURCE_READS,
+                group_read_budget // 3,
+            )
+            knowledge_read_limit = min(
+                NAVIGATION_MAX_BATCH_KNOWLEDGE_READS,
+                group_read_budget - source_read_limit,
+            )
+            group_prior_ids = frozenset(item.evidence_id for item in pack.evidence)
+            new_terms = _new_action_terms(group, pack.retrieval_plan)
+            supplement = retrieve_round(
+                retrieval_plan=_expanded_plan(pack.retrieval_plan, new_terms),
+                _navigation_max_reads=knowledge_read_limit,
+                _navigation_max_source_windows=source_read_limit,
+                _navigation_excluded_routes=frozenset(pack.retrieval_trace.navigation_routes),
+                _navigation_prior_evidence=pack.evidence,
+                _navigation_requested_routes=_unique(
+                    route for action in group for route in action.routes
+                ),
+                _navigation_source_anchors=_unique(
+                    evidence_id for action in group for evidence_id in action.evidence_ids
+                ),
+            )
+            if current_navigation_snapshot_id(database_path) != pinned_snapshot_id:
+                degradations.append("knowledge_navigation_snapshot_changed")
+                round_stop_reason = "snapshot_degraded"
+                break
+            model_calls += supplement.retrieval_model_cost.model_calls
+            logical_reads += _logical_reads(supplement.retrieval_trace)
+            aspect_evidence_ids[aspect] = tuple(
+                evidence_id
+                for evidence_id in _section_diverse_evidence_ids(supplement.evidence)
+                if evidence_id not in group_prior_ids
+            )
+            pack = _merge_packs(
+                pack,
+                supplement,
+                coverage,
+                aspect_evidence_ids=aspect_evidence_ids,
+            )
+            source_tokens = estimated_source_tokens(pack)
+        if round_stop_reason is not None:
+            stop_reason = round_stop_reason
+            break
+        coverage = _bind_observed_aspect_evidence(coverage, aspect_evidence_ids)
+        observation_progress = (
+            frozenset(item.evidence_id for item in pack.evidence) - prior_ids
+            or frozenset(pack.retrieval_trace.navigation_routes) - prior_routes
+            or frozenset(item.route for item in pack.route_options) - prior_options
+        )
+        if not observation_progress:
+            stop_reason = _incomplete_stop_reason(coverage)
             break
 
     return _finalize(
@@ -276,7 +364,7 @@ def _remaining_budget(
 
 def _budget_stop_reason(
     *,
-    started_at: float,
+    deadline: float,
     rounds: int,
     model_calls: int,
     logical_reads: int,
@@ -289,10 +377,14 @@ def _budget_stop_reason(
         or logical_reads >= NAVIGATION_MAX_LOGICAL_READS
         or source_tokens >= NAVIGATION_MAX_SOURCE_TOKENS
         or search_actions >= NAVIGATION_MAX_SEARCH_ACTIONS
-        or time.monotonic() - started_at >= NAVIGATION_MAX_WALL_SECONDS
+        or time.monotonic() >= deadline
     ):
         return "budget_exhausted"
     return None
+
+
+def _incomplete_stop_reason(coverage: tuple[DesktopAnswerCoverageTrace, ...]) -> str:
+    return "absent" if coverage_gate_state(coverage) == "uncovered" else "partial"
 
 
 def _expanded_plan(plan: DesktopRetrievalPlan, new_terms: tuple[str, ...]) -> DesktopRetrievalPlan:
@@ -311,12 +403,59 @@ def _expanded_plan(plan: DesktopRetrievalPlan, new_terms: tuple[str, ...]) -> De
     return DesktopRetrievalPlan(query=plan.query, terms=tuple(terms), source="adaptive")
 
 
+def _actions_by_aspect(
+    actions: tuple[NavigationAction, ...],
+) -> tuple[tuple[str, tuple[NavigationAction, ...]], ...]:
+    grouped: dict[str, list[NavigationAction]] = {}
+    for action in actions:
+        grouped.setdefault(action.aspect, []).append(action)
+    return tuple((aspect, tuple(values)) for aspect, values in grouped.items())
+
+
+def _bind_observed_aspect_evidence(
+    coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    evidence_ids_by_aspect: dict[str, tuple[str, ...]],
+) -> tuple[DesktopAnswerCoverageTrace, ...]:
+    """Retain last-round candidate support without claiming model-confirmed coverage."""
+    updated: list[DesktopAnswerCoverageTrace] = []
+    for item in coverage:
+        observed = _unique(evidence_ids_by_aspect.get(item.aspect, ()))[:16]
+        if item.status in {"missing", "partial"} and observed:
+            updated.append(
+                DesktopAnswerCoverageTrace(
+                    item.aspect,
+                    "partial",
+                    _unique((*item.evidence_ids, *observed))[:16],
+                )
+            )
+        else:
+            updated.append(item)
+    return tuple(updated)
+
+
+def _new_action_terms(
+    actions: tuple[NavigationAction, ...], plan: DesktopRetrievalPlan
+) -> tuple[str, ...]:
+    known = {existing.casefold() for existing in plan.terms}
+    return _unique(
+        term for action in actions for term in action.terms if term.casefold() not in known
+    )
+
+
 def _merge_packs(
     current: DesktopEvidencePack,
     supplement: DesktopEvidencePack,
     coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    *,
+    aspect_evidence_ids: dict[str, tuple[str, ...]] | None = None,
 ) -> DesktopEvidencePack:
-    evidence = _allocate_evidence(current.evidence, supplement.evidence, coverage)
+    evidence = _allocate_evidence(
+        current.evidence,
+        supplement.evidence,
+        coverage,
+        aspect_evidence_ids=aspect_evidence_ids,
+        terms=supplement.retrieval_plan.terms,
+    )
     evidence_ids = frozenset(item.evidence_id for item in evidence)
     guidance = _merge_guidance(current.guidance, supplement.guidance, evidence_ids)
     images = _merge_images(current.source_images, supplement.source_images, evidence_ids)
@@ -335,42 +474,34 @@ def _merge_packs(
     )
 
 
-def _allocate_evidence(
-    current: tuple[DesktopEvidenceRef, ...],
-    supplement: tuple[DesktopEvidenceRef, ...],
-    coverage: tuple[DesktopAnswerCoverageTrace, ...],
-) -> tuple[DesktopEvidenceRef, ...]:
-    by_id: dict[str, DesktopEvidenceRef] = {}
-    for reference in (*current, *supplement):
-        existing = by_id.get(reference.evidence_id)
-        if existing is None:
-            by_id[reference.evidence_id] = reference
-        else:
-            by_id[reference.evidence_id] = _merge_reference(existing, reference)
-    ordered_ids = _unique(
-        (
-            *(evidence_id for item in coverage for evidence_id in item.evidence_ids),
-            *(item.evidence_id for item in supplement),
-            *(item.evidence_id for item in current),
-        )
+def _bounded_initial_pack(pack: DesktopEvidencePack) -> tuple[DesktopEvidencePack, bool]:
+    """Apply the session source envelope before seed coverage can finish the request."""
+    if (
+        len(pack.evidence) <= NAVIGATION_MAX_EVIDENCE_REFS
+        and estimated_source_tokens(pack) <= NAVIGATION_MAX_SOURCE_TOKENS
+    ):
+        return pack, False
+    evidence = _allocate_evidence((), pack.evidence, (), terms=pack.retrieval_plan.terms)
+    source_budget_reduced = len(evidence) < len(pack.evidence)
+    if not source_budget_reduced and tuple(item.evidence_id for item in evidence) == tuple(
+        item.evidence_id for item in pack.evidence
+    ):
+        return pack, False
+    evidence_ids = frozenset(item.evidence_id for item in evidence)
+    return (
+        replace(
+            pack,
+            evidence=evidence,
+            source_images=tuple(
+                item for item in pack.source_images if item.evidence_id in evidence_ids
+            ),
+            guidance=_merge_guidance((), pack.guidance, evidence_ids),
+            retrieval_trace=pack.retrieval_trace.with_canonical_evidence_ids(
+                tuple(item.evidence_id for item in evidence)
+            ),
+        ),
+        source_budget_reduced,
     )
-    selected: list[DesktopEvidenceRef] = []
-    used_tokens = 0
-    for evidence_id in ordered_ids:
-        reference = by_id[evidence_id]
-        tokens = max(1, (len(reference.excerpt) + 3) // 4)
-        if selected and used_tokens + tokens > NAVIGATION_MAX_SOURCE_TOKENS:
-            continue
-        selected.append(reference)
-        used_tokens += tokens
-        if len(selected) == 32:
-            break
-    return tuple(selected)
-
-
-def _merge_reference(first: DesktopEvidenceRef, second: DesktopEvidenceRef) -> DesktopEvidenceRef:
-    preferred = second if len(second.excerpt) > len(first.excerpt) else first
-    return replace(preferred, channels=_unique((*first.channels, *second.channels)))
 
 
 def _merge_guidance(
@@ -416,8 +547,12 @@ def _merge_route_options(
     first: DesktopEvidencePack,
     second: DesktopEvidencePack,
 ) -> tuple[DesktopKnowledgeRouteOption, ...]:
-    by_route = {item.route: item for item in (*first.route_options, *second.route_options)}
-    return tuple(by_route[route] for route in sorted(by_route))
+    # The latest read can reveal routes from an index. Keep those discoveries ahead of
+    # older advertisements so the next bounded model prompt can actually observe them.
+    by_route: dict[str, DesktopKnowledgeRouteOption] = {}
+    for item in (*second.route_options, *first.route_options):
+        by_route.setdefault(item.route, item)
+    return tuple(by_route.values())
 
 
 def _merge_trace(

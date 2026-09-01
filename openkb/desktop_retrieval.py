@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
+import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import TypeAlias
 
-from openkb.desktop_adaptive_navigation import current_navigation_snapshot_id
+from openkb import desktop_retrieval_rows as retrieval_rows
+from openkb.desktop_adaptive_navigation import (
+    NAVIGATION_MAX_WALL_SECONDS,
+    current_navigation_snapshot_id,
+)
 from openkb.desktop_answer_types import (
     DesktopAnswerError,
     DesktopEvidencePack,
@@ -62,7 +66,7 @@ from openkb.desktop_retrieval_fusion import (
     fuse_candidates,
 )
 from openkb.desktop_retrieval_images import source_images_for_evidence
-from openkb.desktop_retrieval_plan import validate_question
+from openkb.desktop_retrieval_plan import deterministic_plan, validate_question
 from openkb.desktop_retrieval_planning import (
     DesktopRetrievalPlanningResult,
     build_retrieval_plan,
@@ -81,7 +85,6 @@ _fuse_candidates = fuse_candidates
 
 _CHANNEL_LIMIT = 12
 DESKTOP_EVIDENCE_RECALL_K = BASELINE_EVIDENCE_PACK_LIMIT
-_SCORE_COLUMNS = frozenset(("display_name", "heading_path", "text"))
 logger = logging.getLogger(__name__)
 
 
@@ -116,6 +119,14 @@ class DesktopEvidenceRetriever:
         operation_retry_scopes: Mapping[str, str] | None = None,
     ) -> DesktopEvidencePack:
         """Run one bounded adaptive session with deterministic evidence as its fallback."""
+        navigation_started_at = time.monotonic()
+        navigation_deadline = navigation_started_at + NAVIGATION_MAX_WALL_SECONDS
+
+        def session_cancelled() -> bool:
+            return bool(is_cancelled is not None and is_cancelled()) or (
+                time.monotonic() >= navigation_deadline
+            )
+
         variant: DesktopEvaluationVariant = (
             "local_graph" if local_graph_default_enabled(self._kb_dir) else "baseline"
         )
@@ -123,22 +134,68 @@ class DesktopEvidenceRetriever:
         initial_pack = self.retrieve_variant(
             question,
             variant=variant,
-            is_cancelled=is_cancelled,
+            is_cancelled=session_cancelled,
             on_model_event=on_model_event,
             operation_retry_scopes=operation_retry_scopes,
             _enable_page_tree_selection=True,
             _enable_navigation=True,
+            _bounded_model_attempts=True,
+            _model_response_deadline=navigation_deadline,
         )
         retrieve_round = partial(
             self.retrieve_variant,
             question,
             variant=variant,
-            is_cancelled=is_cancelled,
+            is_cancelled=session_cancelled,
             on_model_event=on_model_event,
             operation_retry_scopes=operation_retry_scopes,
             _enable_page_tree_selection=False,
             _enable_navigation=True,
+            _model_response_deadline=navigation_deadline,
         )
+        if current_navigation_snapshot_id(self._database_path) != pinned_snapshot_id:
+            fallback_snapshot_id = current_navigation_snapshot_id(self._database_path)
+            fallback = self.retrieve_variant(
+                question,
+                variant=variant,
+                retrieval_plan=deterministic_plan(validate_question(question)),
+            )
+            if current_navigation_snapshot_id(self._database_path) != fallback_snapshot_id:
+                fallback_snapshot_id = current_navigation_snapshot_id(self._database_path)
+                fallback = replace(
+                    fallback,
+                    evidence=(),
+                    source_images=(),
+                    retrieval_trace=DesktopRetrievalTrace(),
+                    guidance=(),
+                    route_options=(),
+                )
+            fallback = replace(
+                fallback,
+                retrieval_model_cost=_sum_model_cost(
+                    initial_pack.retrieval_model_cost,
+                    fallback.retrieval_model_cost,
+                ),
+            )
+            return run_navigation_session(
+                kb_dir=self._kb_dir,
+                database_path=self._database_path,
+                question=question,
+                pinned_snapshot_id=fallback_snapshot_id,
+                initial_pack=fallback,
+                model_gateway=self._model_gateway,
+                retrieve_round=retrieve_round,
+                is_cancelled=session_cancelled,
+                on_model_event=on_model_event,
+                retry_scope=(operation_retry_scopes or {}).get("knowledge_navigation_step"),
+                initial_stop_reason="snapshot_degraded",
+                initial_degradations=(
+                    *initial_pack.degradations,
+                    "knowledge_navigation_snapshot_changed",
+                ),
+                session_started_at=navigation_started_at,
+                session_deadline=navigation_deadline,
+            )
         return run_navigation_session(
             kb_dir=self._kb_dir,
             database_path=self._database_path,
@@ -147,9 +204,11 @@ class DesktopEvidenceRetriever:
             initial_pack=initial_pack,
             model_gateway=self._model_gateway,
             retrieve_round=retrieve_round,
-            is_cancelled=is_cancelled,
+            is_cancelled=session_cancelled,
             on_model_event=on_model_event,
             retry_scope=(operation_retry_scopes or {}).get("knowledge_navigation_step"),
+            session_started_at=navigation_started_at,
+            session_deadline=navigation_deadline,
         )
 
     def build_plan(
@@ -191,6 +250,8 @@ class DesktopEvidenceRetriever:
         _navigation_prior_evidence: tuple[DesktopEvidenceRef, ...] = (),
         _navigation_requested_routes: tuple[str, ...] = (),
         _navigation_source_anchors: tuple[str, ...] = (),
+        _bounded_model_attempts: bool = False,
+        _model_response_deadline: float | None = None,
     ) -> DesktopEvidencePack:
         if variant not in DESKTOP_EVALUATION_VARIANTS or variant == "navigator":
             raise ValueError(f"Unsupported Desktop retrieval variant: {variant}")
@@ -203,6 +264,8 @@ class DesktopEvidenceRetriever:
                 is_cancelled=is_cancelled,
                 on_model_event=on_model_event,
                 retry_scope=(operation_retry_scopes or {}).get("retrieval_plan"),
+                bounded_model_attempts=_bounded_model_attempts,
+                response_deadline=_model_response_deadline,
             )
             plan = planning.plan
             planning_cost = planning.model_cost
@@ -250,7 +313,8 @@ class DesktopEvidenceRetriever:
             page_tree_enabled = variant in PAGE_TREE_EVALUATION_VARIANTS or (
                 _enable_page_tree_selection and variant in {"baseline", "local_graph"}
             )
-            if page_tree_enabled:
+            cancelled_before_derived_reads = bool(is_cancelled is not None and is_cancelled())
+            if page_tree_enabled and not cancelled_before_derived_reads:
                 selection = select_page_tree_evidence(
                     self._kb_dir,
                     normalized_question,
@@ -261,11 +325,13 @@ class DesktopEvidenceRetriever:
                     on_model_event=on_model_event,
                     lease_tree=self._page_tree_lease,
                     retry_scope=(operation_retry_scopes or {}).get("page_tree_selection"),
+                    bounded_model_attempts=_bounded_model_attempts,
+                    response_deadline=_model_response_deadline,
                 )
             connection = _connect(self._database_path)
             try:
                 page_tree_candidates = _page_tree_candidates(connection, selection.evidence_ids)
-                if _enable_navigation:
+                if _enable_navigation and not (is_cancelled is not None and is_cancelled()):
                     try:
                         navigation = build_knowledge_navigation_in(
                             connection,
@@ -420,6 +486,16 @@ def _connect(database_path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _sum_model_cost(
+    first: DesktopRetrievalModelCost, second: DesktopRetrievalModelCost
+) -> DesktopRetrievalModelCost:
+    return DesktopRetrievalModelCost(
+        model_calls=first.model_calls + second.model_calls,
+        input_characters=first.input_characters + second.input_characters,
+        output_characters=first.output_characters + second.output_characters,
+    )
+
+
 def _fts_candidates(
     connection: sqlite3.Connection, terms: tuple[str, ...]
 ) -> tuple[_Candidate, ...]:
@@ -448,7 +524,7 @@ def _fts_candidates(
         ).fetchall()
     except sqlite3.OperationalError:
         rows = _like_rows(connection, terms)
-    return _ranked_candidates(rows, "fts")
+    return retrieval_rows.ranked_candidates(rows, "fts")
 
 
 def _like_rows(connection: sqlite3.Connection, terms: tuple[str, ...]) -> list[tuple[object, ...]]:
@@ -471,8 +547,8 @@ def _structure_lexical_candidates(
 ) -> tuple[_Candidate, ...]:
     if not terms:
         return ()
-    return _ranked_candidates(
-        _scored_rows(
+    return retrieval_rows.ranked_candidates(
+        retrieval_rows.scored_rows(
             connection,
             terms,
             weighted_columns=(("heading_path", 2), ("text", 1)),
@@ -492,8 +568,8 @@ def _wiki_candidates(
     """
     if not terms:
         return ()
-    return _ranked_candidates(
-        _scored_rows(
+    return retrieval_rows.ranked_candidates(
+        retrieval_rows.scored_rows(
             connection,
             terms,
             weighted_columns=(
@@ -509,7 +585,7 @@ def _knowledge_source_candidates(
     connection: sqlite3.Connection, terms: tuple[str, ...]
 ) -> tuple[_Candidate, ...]:
     """Use published claim wording only to route back to its mapped original evidence."""
-    return _ranked_candidates(
+    return retrieval_rows.ranked_candidates(
         knowledge_source_rows_in(connection, terms, limit=_CHANNEL_LIMIT),
         "knowledge_source",
     )
@@ -529,8 +605,8 @@ def _catalog_candidates(
             evidence_id=str(row[0]),
             document_id=str(row[1]),
             document_name=str(row[2]),
-            section=_section_from_json(str(row[3])),
-            locator=_json_object(str(row[4])),
+            section=retrieval_rows.section_from_json(str(row[3])),
+            locator=retrieval_rows.json_object(str(row[4])),
             excerpt=str(row[5]),
             channels=("catalog",),
         )
@@ -589,7 +665,7 @@ def _graph_candidates(
         {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
         SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
         FROM available_evidence_occurrences
-        WHERE occurrence_rank = 1 AND evidence_id IN ({_placeholders(evidence_ids)})
+        WHERE occurrence_rank = 1 AND evidence_id IN ({retrieval_rows.placeholders(evidence_ids)})
         """,
         evidence_ids,
         deadline,
@@ -600,7 +676,7 @@ def _graph_candidates(
         for evidence_id in evidence_ids
         if evidence_id in rows_by_evidence_id
     ]
-    return _ranked_candidates(ordered_rows, "knowledge_graph")
+    return retrieval_rows.ranked_candidates(ordered_rows, "knowledge_graph")
 
 
 def _variant_evidence(
@@ -690,7 +766,7 @@ def _page_tree_candidates(
         {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
         SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
         FROM available_evidence_occurrences
-        WHERE occurrence_rank = 1 AND evidence_id IN ({_placeholders(evidence_ids)})
+        WHERE occurrence_rank = 1 AND evidence_id IN ({retrieval_rows.placeholders(evidence_ids)})
         """,
         evidence_ids,
     ).fetchall()
@@ -700,7 +776,7 @@ def _page_tree_candidates(
         for evidence_id in evidence_ids
         if evidence_id in rows_by_evidence_id
     ]
-    return _ranked_candidates(ordered_rows, "document_page_tree")
+    return retrieval_rows.ranked_candidates(ordered_rows, "document_page_tree")
 
 
 def _catalog_degradation(
@@ -716,81 +792,3 @@ def _catalog_degradation(
         "SELECT status FROM knowledge_catalog_rebuild_tasks WHERE singleton = 1"
     ).fetchone()
     return ("catalog_unavailable",) if row is not None else ()
-
-
-def _scored_rows(
-    connection: sqlite3.Connection,
-    terms: tuple[str, ...],
-    *,
-    weighted_columns: tuple[tuple[str, int], ...],
-) -> list[tuple[object, ...]]:
-    """Select a bounded channel ranking from every Available Knowledge occurrence.
-
-    Column names are internal constants supplied by the two retrieval routes;
-    only user-derived terms are bound as SQLite parameters.
-    """
-    score_parts: list[str] = []
-    parameters: list[object] = []
-    for term in terms:
-        for column, weight in weighted_columns:
-            if column not in _SCORE_COLUMNS:
-                raise ValueError(f"Unsupported Desktop retrieval score column: {column}")
-            score_parts.append(f"CASE WHEN instr(lower({column}), ?) > 0 THEN {weight} ELSE 0 END")
-            parameters.append(term)
-    score_expression = " + ".join(score_parts)
-    return connection.execute(
-        f"""
-        {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
-        SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
-        FROM (
-            SELECT evidence_id, document_id, display_name, heading_path, locator_json, text,
-                ({score_expression}) AS channel_score
-            FROM available_evidence_occurrences
-            WHERE occurrence_rank = 1
-        )
-        WHERE channel_score > 0
-        ORDER BY channel_score DESC, document_id, evidence_id
-        LIMIT ?
-        """,
-        (*parameters, _CHANNEL_LIMIT),
-    ).fetchall()
-
-
-def _ranked_candidates(rows: list[tuple[object, ...]], channel: str) -> tuple[_Candidate, ...]:
-    values: list[_Candidate] = []
-    for rank, row in enumerate(rows, start=1):
-        reference = DesktopEvidenceRef(
-            evidence_id=str(row[0]),
-            document_id=str(row[1]),
-            document_name=str(row[2]),
-            section=_section_from_json(str(row[3])),
-            locator=_json_object(str(row[4])),
-            excerpt=str(row[5]),
-            channels=(channel,),
-        )
-        values.append(_Candidate(reference=reference, channel=channel, rank=rank))
-    return tuple(values)
-
-
-def _section_from_json(value: str) -> str:
-    try:
-        path = json.loads(value)
-    except json.JSONDecodeError:
-        return "Document"
-    if not isinstance(path, list) or not all(isinstance(item, str) for item in path):
-        return "Document"
-    return " / ".join(path) if path else "Document"
-
-
-def _json_object(value: str) -> dict[str, object]:
-    try:
-        decoded = json.loads(value)
-    except json.JSONDecodeError:
-        return {}
-    return dict(decoded) if isinstance(decoded, dict) else {}
-
-
-def _placeholders(values: tuple[str, ...]) -> str:
-    if not values:
-        raise ValueError("Evidence lookup requires at least one identifier.")
-    return ", ".join("?" for _ in values)

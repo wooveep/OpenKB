@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
@@ -62,9 +63,14 @@ class DesktopModelRequest:
     stage_run_id: str | None = None
     batch_id: str | None = None
     execution_lane: ExecutionLane = "background"
+    response_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         require_execution_lane(self.execution_lane)
+        if self.response_timeout_seconds is not None and (
+            not math.isfinite(self.response_timeout_seconds) or self.response_timeout_seconds <= 0
+        ):
+            raise ValueError("Model response timeout must be finite and positive.")
 
 
 @dataclass(frozen=True)

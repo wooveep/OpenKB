@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
@@ -25,6 +26,7 @@ from openkb.desktop_knowledge_generations import (
 )
 from openkb.desktop_knowledge_graph import DesktopKnowledgeGraphService
 from openkb.desktop_model_gateway import DesktopModelCancelledError, DesktopModelGateway
+from openkb.desktop_navigator_evaluation_gate import navigator_evaluation_gate
 from openkb.desktop_page_tree_selection import PageTreeSelectionResult
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_retrieval_evaluation import (
@@ -37,7 +39,9 @@ from openkb.desktop_retrieval_evaluation import (
 from openkb.desktop_retrieval_evaluation_types import (
     EVALUATION_CATEGORIES,
     DesktopEvaluationAnswer,
+    DesktopEvaluationEvidenceSelector,
     DesktopEvaluationModelCost,
+    DesktopOriginalAgentObservation,
     DesktopRetrievalEvaluationCase,
     DesktopRetrievalEvaluationCaseResult,
     DesktopRetrievalEvaluationMetrics,
@@ -88,6 +92,380 @@ def test_evidence_recall_at_six_ignores_routed_answer_context_beyond_six() -> No
     assert result.evidence_recall_at_k == 0.0
     assert result.citation_precision == pytest.approx(1 / 7)
     assert result.answer_faithfulness == 1.0
+
+
+def test_case_result_scores_actual_answer_citations_and_reviewed_unsupported_claims() -> None:
+    expected = DesktopEvidenceRef(
+        evidence_id="expected",
+        document_id="document",
+        document_name="guide.md",
+        section="Expected",
+        locator={},
+        excerpt="The supported fact.",
+        channels=("fts",),
+    )
+    distractor = DesktopEvidenceRef(
+        evidence_id="distractor",
+        document_id="document",
+        document_name="guide.md",
+        section="Distractor",
+        locator={},
+        excerpt="An unrelated fact.",
+        channels=("fts",),
+    )
+    observation = DesktopOriginalAgentObservation(
+        critical_evidence=(),
+        answer_points=("supported fact",),
+        unsupported_claim_markers=("invented default",),
+        citation_precision=1.0,
+        unsupported_claim_count=0,
+        latency_ms=1_000.0,
+        model_calls=3,
+    )
+    case = DesktopRetrievalEvaluationCase(
+        "actual-citations",
+        "local_fact",
+        "question",
+        (),
+        ("supported fact",),
+        original_observation=observation,
+    )
+    pack = DesktopEvidencePack(
+        DesktopRetrievalPlan("question", ("question",), "deterministic"),
+        (expected, distractor),
+    )
+
+    result = _case_result(
+        case,
+        1,
+        "navigator",
+        (expected.evidence_id,),
+        pack,
+        DesktopEvaluationAnswer(
+            "The supported fact, plus an invented default.",
+            cited_evidence_ids=(expected.evidence_id,),
+        ),
+        1.0,
+        1.0,
+        0.0,
+        DesktopEvaluationModelCost(),
+        original_evidence_ids=(expected.evidence_id,),
+    )
+
+    assert result.cited_evidence_ids == (expected.evidence_id,)
+    assert result.citation_precision == 1.0
+    assert result.original_evidence_recall_at_k == 1.0
+    assert result.original_answer_point_coverage == 1.0
+    assert result.unsupported_claim_count == 1
+
+
+def test_case_result_detects_a_new_uncited_or_unsupported_claim_without_a_marker() -> None:
+    evidence = DesktopEvidenceRef(
+        evidence_id="expected",
+        document_id="document",
+        document_name="guide.md",
+        section="Expected",
+        locator={},
+        excerpt="The relay forwards supported deliveries.",
+        channels=("fts",),
+    )
+    observation = DesktopOriginalAgentObservation(
+        critical_evidence=(DesktopEvaluationEvidenceSelector("guide.md", "relay forwards"),),
+        answer_points=("relay forwards",),
+        unsupported_claim_markers=(),
+        citation_precision=1.0,
+        unsupported_claim_count=0,
+        latency_ms=1_000.0,
+        model_calls=3,
+    )
+    case = DesktopRetrievalEvaluationCase(
+        "novel-claim",
+        "local_fact",
+        "question",
+        (),
+        ("relay forwards",),
+        original_observation=observation,
+    )
+    pack = DesktopEvidencePack(
+        DesktopRetrievalPlan("question", ("question",), "deterministic"),
+        (evidence,),
+    )
+
+    result = _case_result(
+        case,
+        1,
+        "navigator",
+        (evidence.evidence_id,),
+        pack,
+        DesktopEvaluationAnswer(
+            "The relay forwards supported deliveries [1]. The moon controls routing [1].",
+            cited_evidence_ids=(evidence.evidence_id,),
+        ),
+        1.0,
+        1.0,
+        0.0,
+        DesktopEvaluationModelCost(),
+        original_evidence_ids=(evidence.evidence_id,),
+    )
+
+    assert result.unsupported_claim_count >= 1
+
+
+def test_case_result_rejects_a_cited_claim_with_a_conflicting_numeric_value() -> None:
+    evidence = DesktopEvidenceRef(
+        evidence_id="expected",
+        document_id="document",
+        document_name="guide.md",
+        section="Network",
+        locator={},
+        excerpt="Configure the management service to listen on port 443.",
+        channels=("fts",),
+    )
+    observation = DesktopOriginalAgentObservation(
+        critical_evidence=(DesktopEvaluationEvidenceSelector("guide.md", "port 443"),),
+        answer_points=("management service",),
+        unsupported_claim_markers=(),
+        citation_precision=1.0,
+        unsupported_claim_count=0,
+        latency_ms=1_000.0,
+        model_calls=3,
+    )
+    case = DesktopRetrievalEvaluationCase(
+        "conflicting-value",
+        "local_fact",
+        "question",
+        (),
+        ("management service",),
+        original_observation=observation,
+    )
+    pack = DesktopEvidencePack(
+        DesktopRetrievalPlan("question", ("question",), "deterministic"),
+        (evidence,),
+    )
+
+    result = _case_result(
+        case,
+        1,
+        "navigator",
+        (evidence.evidence_id,),
+        pack,
+        DesktopEvaluationAnswer(
+            "Configure the management service to listen on port 999 [1].",
+            cited_evidence_ids=(evidence.evidence_id,),
+        ),
+        1.0,
+        1.0,
+        0.0,
+        DesktopEvaluationModelCost(),
+        original_evidence_ids=(evidence.evidence_id,),
+    )
+
+    assert result.unsupported_claim_count == 1
+
+
+@pytest.mark.parametrize(
+    ("source_text", "answer_text"),
+    (
+        ("Enable swap before installation.", "Disable swap before installation [1]."),
+        ("Do not enable swap before installation.", "Enable swap before installation [1]."),
+    ),
+)
+def test_case_result_rejects_a_cited_claim_with_the_opposite_operation(
+    source_text: str, answer_text: str
+) -> None:
+    evidence = DesktopEvidenceRef(
+        evidence_id="expected",
+        document_id="document",
+        document_name="guide.md",
+        section="Installation",
+        locator={},
+        excerpt=source_text,
+        channels=("fts",),
+    )
+    case = DesktopRetrievalEvaluationCase(
+        "opposite-operation",
+        "local_fact",
+        "How should swap be configured?",
+        (),
+        ("swap",),
+    )
+    pack = DesktopEvidencePack(
+        DesktopRetrievalPlan("question", ("swap",), "deterministic"),
+        (evidence,),
+    )
+
+    result = _case_result(
+        case,
+        1,
+        "navigator",
+        (evidence.evidence_id,),
+        pack,
+        DesktopEvaluationAnswer(
+            answer_text,
+            cited_evidence_ids=(evidence.evidence_id,),
+        ),
+        1.0,
+        1.0,
+        0.0,
+        DesktopEvaluationModelCost(),
+    )
+
+    assert result.unsupported_claim_count == 1
+
+
+def test_original_citation_precision_uses_original_critical_evidence() -> None:
+    expected = DesktopEvidenceRef(
+        evidence_id="new-expected",
+        document_id="document",
+        document_name="guide.md",
+        section="New",
+        locator={},
+        excerpt="New expected detail.",
+        channels=("fts",),
+    )
+    original = replace(
+        expected,
+        evidence_id="original-critical",
+        section="Original",
+        excerpt="Original critical detail.",
+    )
+    observation = DesktopOriginalAgentObservation(
+        critical_evidence=(DesktopEvaluationEvidenceSelector("guide.md", "Original critical"),),
+        answer_points=("expected detail",),
+        unsupported_claim_markers=(),
+        citation_precision=1.0,
+        unsupported_claim_count=0,
+        latency_ms=1_000.0,
+        model_calls=3,
+    )
+    case = DesktopRetrievalEvaluationCase(
+        "original-precision",
+        "local_fact",
+        "question",
+        (),
+        ("expected detail",),
+        original_observation=observation,
+    )
+    pack = DesktopEvidencePack(
+        DesktopRetrievalPlan("question", ("question",), "deterministic"),
+        (expected, original),
+    )
+
+    result = _case_result(
+        case,
+        1,
+        "navigator",
+        (expected.evidence_id,),
+        pack,
+        DesktopEvaluationAnswer(
+            "New expected detail.",
+            cited_evidence_ids=(expected.evidence_id,),
+        ),
+        1.0,
+        1.0,
+        0.0,
+        DesktopEvaluationModelCost(),
+        original_evidence_ids=(original.evidence_id,),
+    )
+
+    assert result.citation_precision == 1.0
+    assert result.original_citation_precision == 0.0
+
+
+def test_schema_two_suite_requires_a_frozen_original_observation(tmp_path) -> None:
+    suite_path = tmp_path / "suite.json"
+    payload = _minimal_suite_payload()
+    payload["schema_version"] = 2
+    suite_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="original_observation"):
+        DesktopRetrievalEvaluationSuite.from_json(suite_path)
+
+
+def test_schema_three_suite_requires_pinned_original_and_navigator_profiles(tmp_path) -> None:
+    suite_path = tmp_path / "suite.json"
+    payload = _minimal_suite_payload()
+    payload["schema_version"] = 3
+    payload["navigator_model_profile_digest"] = "3" * 64
+    payload["minimum_navigator_repetitions"] = 3
+    for case in payload["cases"]:
+        assert isinstance(case, dict)
+        absent = bool(case.get("expect_absent_answer"))
+        case["original_observation"] = {
+            "critical_evidence": [] if absent else case["expected_evidence"],
+            "answer_points": [] if absent else case["expected_answer_terms"],
+            "unsupported_claim_markers": [],
+            "citation_precision": 1.0,
+            "unsupported_claim_count": 0,
+            "latency_ms": 1_000.0,
+            "model_calls": 3,
+            "absent_answer_correct": absent,
+        }
+    suite_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="original_commit_sha"):
+        DesktopRetrievalEvaluationSuite.from_json(suite_path)
+
+    for case in payload["cases"]:
+        observation = case["original_observation"]
+        assert isinstance(observation, dict)
+        observation.update(
+            {
+                "original_commit_sha": "1" * 40,
+                "model_profile_digest": "2" * 64,
+                "sample_count": 3,
+                "latency_variance_ms": 25.0,
+            }
+        )
+    suite_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    suite = DesktopRetrievalEvaluationSuite.from_json(suite_path)
+
+    assert suite.schema_version == 3
+    assert suite.minimum_navigator_repetitions == 3
+    assert suite.navigator_model_profile_digest == "3" * 64
+
+
+def test_corpus_identity_includes_original_only_critical_evidence(tmp_path, monkeypatch) -> None:
+    expected = DesktopEvaluationEvidenceSelector("expected.txt", "expected fact")
+    original_only = DesktopEvaluationEvidenceSelector("original-only.txt", "critical fact")
+    observation = DesktopOriginalAgentObservation(
+        critical_evidence=(original_only,),
+        answer_points=("critical fact",),
+        unsupported_claim_markers=(),
+        citation_precision=1.0,
+        unsupported_claim_count=0,
+        latency_ms=1.0,
+        model_calls=1,
+    )
+    suite = DesktopRetrievalEvaluationSuite(
+        snapshot_id="snapshot",
+        cases=(
+            DesktopRetrievalEvaluationCase(
+                "identity",
+                "local_fact",
+                "question",
+                (expected,),
+                ("expected fact",),
+                original_observation=observation,
+            ),
+        ),
+        digest="suite-digest",
+        schema_version=2,
+    )
+    monkeypatch.setattr(
+        DesktopRetrievalEvaluationSuite,
+        "from_json",
+        classmethod(lambda _cls, _path: suite),
+    )
+    suite_path = tmp_path / "suite.json"
+    suite_path.write_text("{}", encoding="utf-8")
+    (tmp_path / "expected.txt").write_text("expected fact", encoding="utf-8")
+    (tmp_path / "original-only.txt").write_text("critical fact", encoding="utf-8")
+
+    _digest, names = evaluation_corpus_identity(suite_path)
+
+    assert names == ("expected.txt", "original-only.txt")
 
 
 def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_path, monkeypatch):
@@ -195,15 +573,22 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
             )
         assert request.operation == "grounded_answer"
         answer_requests.append(request)
-        if request.content.rstrip().endswith("Evidence:"):
+        evidence_material = request.content.split("Evidence:\n", 1)[1]
+        if not evidence_material.strip():
             return "No available source evidence was found for this question."
-        return request.content
+        lines = evidence_material.splitlines()
+        claims = []
+        for index, line in enumerate(lines):
+            if line.startswith("[") and "]" in line and index + 1 < len(lines):
+                ordinal = line.split("]", 1)[0][1:]
+                claims.append(f"{lines[index + 1]} [{ordinal}].")
+        return " ".join(claims)
 
     suite_path = tmp_path / "fixed-suite.json"
     suite_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "snapshot_id": "desktop-vectorless-fixture-v1",
                 "max_graph_latency_ms": 1_000,
                 "max_graph_model_calls": 20,
@@ -219,6 +604,20 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
                             },
                         ],
                         "expected_answer_terms": ["Relay", "forwards"],
+                        "original_observation": {
+                            "critical_evidence": [
+                                {
+                                    "document_name": "delivery-system.txt",
+                                    "text_contains": "The Relay forwards deliveries.",
+                                }
+                            ],
+                            "answer_points": ["Relay", "forwards"],
+                            "unsupported_claim_markers": ["fabricated-original-claim"],
+                            "citation_precision": 0.0,
+                            "unsupported_claim_count": 0,
+                            "latency_ms": 1_000_000,
+                            "model_calls": 100,
+                        },
                     },
                     {
                         "case_id": "control-path",
@@ -236,6 +635,24 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
                         ],
                         "expected_answer_terms": ["Relay", "Gate"],
                         "long_document": True,
+                        "original_observation": {
+                            "critical_evidence": [
+                                {
+                                    "document_name": "delivery-system.txt",
+                                    "text_contains": "The Relay forwards deliveries.",
+                                },
+                                {
+                                    "document_name": "delivery-system.txt",
+                                    "text_contains": "The Gate validates deliveries.",
+                                },
+                            ],
+                            "answer_points": ["Relay", "Gate"],
+                            "unsupported_claim_markers": ["fabricated-original-claim"],
+                            "citation_precision": 0.0,
+                            "unsupported_claim_count": 0,
+                            "latency_ms": 1_000_000,
+                            "model_calls": 100,
+                        },
                     },
                     {
                         "case_id": "policy-conflict",
@@ -246,6 +663,24 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
                             {"document_name": "policy-b.txt", "text_contains": "rejects plaintext"},
                         ],
                         "expected_answer_terms": ["permits", "rejects"],
+                        "original_observation": {
+                            "critical_evidence": [
+                                {
+                                    "document_name": "policy-a.txt",
+                                    "text_contains": "permits encrypted",
+                                },
+                                {
+                                    "document_name": "policy-b.txt",
+                                    "text_contains": "rejects plaintext",
+                                },
+                            ],
+                            "answer_points": ["permits", "rejects"],
+                            "unsupported_claim_markers": ["fabricated-original-claim"],
+                            "citation_precision": 0.0,
+                            "unsupported_claim_count": 0,
+                            "latency_ms": 1_000_000,
+                            "model_calls": 100,
+                        },
                     },
                     {
                         "case_id": "retention-theme",
@@ -256,6 +691,24 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
                             {"document_name": "ledger.txt", "text_contains": "carries audit"},
                         ],
                         "expected_answer_terms": ["Archive", "Ledger"],
+                        "original_observation": {
+                            "critical_evidence": [
+                                {
+                                    "document_name": "archive.txt",
+                                    "text_contains": "keeps records",
+                                },
+                                {
+                                    "document_name": "ledger.txt",
+                                    "text_contains": "carries audit",
+                                },
+                            ],
+                            "answer_points": ["Archive", "Ledger"],
+                            "unsupported_claim_markers": ["fabricated-original-claim"],
+                            "citation_precision": 0.0,
+                            "unsupported_claim_count": 0,
+                            "latency_ms": 1_000_000,
+                            "model_calls": 100,
+                        },
                     },
                     {
                         "case_id": "not-present",
@@ -264,6 +717,16 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
                         "expected_evidence": [],
                         "expected_answer_terms": [],
                         "expect_absent_answer": True,
+                        "original_observation": {
+                            "critical_evidence": [],
+                            "answer_points": [],
+                            "unsupported_claim_markers": ["fabricated-original-claim"],
+                            "citation_precision": 1.0,
+                            "unsupported_claim_count": 0,
+                            "latency_ms": 1_000_000,
+                            "model_calls": 100,
+                            "absent_answer_correct": True,
+                        },
                     },
                 ],
             }
@@ -271,9 +734,27 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
         encoding="utf-8",
     )
 
+    suite_payload = json.loads(suite_path.read_text(encoding="utf-8"))
+    suite_payload["schema_version"] = 3
+    suite_payload["navigator_model_profile_digest"] = "3" * 64
+    suite_payload["minimum_navigator_repetitions"] = 3
+    suite_payload["max_graph_model_calls"] = 100
+    for case in suite_payload["cases"]:
+        observation = case["original_observation"]
+        observation.update(
+            {
+                "original_commit_sha": "1" * 40,
+                "model_profile_digest": "2" * 64,
+                "sample_count": 3,
+                "latency_variance_ms": 25.0,
+            }
+        )
+    suite_path.write_text(json.dumps(suite_payload), encoding="utf-8")
+
     evaluator = DesktopRetrievalEvaluator(
         kb_dir,
         model_gateway=DesktopModelGateway(answer_response),
+        model_profile_digest="3" * 64,
     )
     report = evaluator.evaluate(DesktopRetrievalEvaluationSuite.from_json(suite_path))
 
@@ -312,6 +793,10 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
         if result.variant == "catalog + document_page_tree" and result.category == "absent_answer"
     ]
     assert report.metrics["catalog + document_page_tree"].model_cost.model_calls > 0
+    assert report.stability["navigator"].latency_stddev_ms >= 0
+    assert 0 <= report.stability["navigator"].stable_case_rate <= 1
+    assert len(report.stability["navigator"].cases) == len(suite_payload["cases"])
+    assert all(item.repetitions == 3 for item in report.stability["navigator"].cases)
     assert any(
         result.page_tree_selection_triggered
         and result.page_tree_generation_ids
@@ -331,8 +816,9 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     assert report.gate.page_tree_selection_exercised
     assert report.gate.derived_identity_bound
     assert report.local_graph_gate.passed
+    assert report.source_integrity_healthy
     assert not report.navigator_gate.passed
-    assert not report.navigator_gate.frozen_reference_complete
+    assert report.navigator_gate.frozen_reference_complete
     assert report.catalog_generation_ids
     assert report.page_tree_providers
     suite = DesktopRetrievalEvaluationSuite.from_json(suite_path)
@@ -412,13 +898,26 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
         for channel in reference.channels
     }
     report = evaluator.evaluate(suite)
-    assert report.navigator_gate.passed, [
-        (result.case_id, result.evidence_recall_at_k, result.answer_faithfulness)
-        for result in report.results
-        if result.variant == "navigator"
-    ]
+    assert report.navigator_gate.passed, {
+        field: value for field, value in report.navigator_gate.as_dict().items() if not value
+    }
     assert report.navigator_gate.frozen_reference_complete
     evaluator.require_navigator_promotion_eligible(report, suite)
+    tainted_results = [
+        replace(result, unsupported_claim_count=1)
+        if result.variant == "navigator" and result.category != "absent_answer"
+        else result
+        for result in report.results
+    ]
+    tainted_gate = navigator_evaluation_gate(
+        suite,
+        tainted_results,
+        report.metrics,
+        knowledge_snapshot_stable=True,
+        source_integrity_healthy=True,
+    )
+    assert not tainted_gate.unsupported_claim_non_regression
+    assert not tainted_gate.passed
     report_path = tmp_path / "report.json"
     report.write(report_path)
     payload = json.loads(report_path.read_text(encoding="utf-8"))
@@ -428,6 +927,8 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     assert payload["corpus_digest"] == report.corpus_digest
     assert payload["final_derived_snapshot_digest"] == report.final_derived_snapshot_digest
     assert payload["metrics"]["local_graph"]["evidence_recall_k"] == 6
+    assert "latency_stddev_ms" in payload["stability"]["navigator"]
+    assert len(payload["stability"]["navigator"]["cases"]) == len(suite_payload["cases"])
     assert payload["gate"]["passed"] is True
     assert payload["local_graph_gate"]["passed"] is True
     assert payload["navigator_gate"]["passed"] is True

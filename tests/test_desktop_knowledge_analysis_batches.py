@@ -15,8 +15,11 @@ from openkb.desktop_import_types import DesktopRecoveryOverride
 from openkb.desktop_knowledge_analysis import (
     KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
     DesktopKnowledgeAnalysis,
+    knowledge_analysis_prompt,
     parse_knowledge_analysis,
 )
+from openkb.desktop_knowledge_analysis_batch_planning import knowledge_analysis_batch_prompt
+from openkb.desktop_knowledge_analysis_batch_store import KnowledgeAnalysisBatch
 from openkb.desktop_knowledge_analysis_batches import (
     _run_hierarchical_description_merge,
     knowledge_analysis_merge_prompt,
@@ -76,6 +79,36 @@ def test_merge_description_is_deterministically_bounded_at_a_readable_boundary()
 
     assert len(description) <= 4_000
     assert description.endswith("。")
+
+
+def test_all_analysis_prompts_carry_the_pinned_knowledge_language() -> None:
+    block = DocumentIRBlock(
+        block_id="block-1",
+        ordinal=0,
+        kind="paragraph",
+        text="Install the cluster.",
+        heading_path=("Installation",),
+        line_start=1,
+        line_end=1,
+    )
+    evidence = (("evidence-1", block),)
+    batch = KnowledgeAnalysisBatch(
+        batch_id="batch-1",
+        ordinal=0,
+        section_paths=(("Installation",),),
+        evidence=evidence,
+        status="pending",
+    )
+
+    prompts = (
+        knowledge_analysis_prompt("guide.md", evidence, knowledge_language="zh"),
+        knowledge_analysis_batch_prompt("guide.md", batch, batch_total=1, knowledge_language="zh"),
+        knowledge_analysis_merge_prompt(
+            "guide.md", ("Installation guide.",), knowledge_language="zh"
+        ),
+    )
+
+    assert all(json.loads(prompt)["knowledge_language"] == "zh" for prompt in prompts)
 
 
 def test_aggregate_summary_is_bounded_while_covering_the_document_edges() -> None:
@@ -242,7 +275,7 @@ def test_output_limited_direct_analysis_is_split_instead_of_repaired(
     assert checkpoint["output_limit_split_leaf_count"] == 2
     assert checkpoint["output_limit_recovery_count"] == 1
     assert checkpoint["prompt_contract_snapshot"]["version"].endswith(
-        ".knowledge_analysis_batch.v6"
+        ".knowledge_analysis_batch.v7"
     )
 
 
@@ -833,7 +866,7 @@ def test_merge_prompt_stays_bounded_without_sending_validated_claims() -> None:
     assert "concepts" not in payload
 
 
-def test_document_merge_scope_can_represent_the_full_batch_union() -> None:
+def test_document_merge_scope_can_represent_the_full_batch_union_with_bounded_claims() -> None:
     candidates = [
         {
             "title": f"Concept {candidate_ordinal}",
@@ -843,7 +876,7 @@ def test_document_merge_scope_can_represent_the_full_batch_union() -> None:
                 {
                     "text": f"Claim {candidate_ordinal}-{claim_ordinal}.",
                     "source_evidence_ids": (
-                        [f"evidence-{source_ordinal}" for source_ordinal in range(17)]
+                        [f"evidence-{source_ordinal}" for source_ordinal in range(16)]
                         if candidate_ordinal == 0 and claim_ordinal == 0
                         else []
                     ),
@@ -870,4 +903,31 @@ def test_document_merge_scope_can_represent_the_full_batch_union() -> None:
 
     assert len(analysis.concepts) == 33
     assert len(analysis.concepts[0].claims) == 65
-    assert len(analysis.concepts[0].claims[0].source_evidence_ids) == 17
+    assert len(analysis.concepts[0].claims[0].source_evidence_ids) == 16
+
+
+def test_document_merge_scope_rejects_more_than_shared_claim_source_limit() -> None:
+    payload = json.dumps(
+        {
+            "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+            "analysis_scope": "document",
+            "document_description": "Aggregate result.",
+            "concepts": [
+                {
+                    "title": "Bounded concept",
+                    "aliases": [],
+                    "tags": [],
+                    "claims": [
+                        {
+                            "text": "One claim cannot absorb an unbounded source union.",
+                            "source_evidence_ids": [f"evidence-{ordinal}" for ordinal in range(17)],
+                        }
+                    ],
+                }
+            ],
+            "entities": [],
+        }
+    )
+
+    with pytest.raises(DesktopImportError, match="at most 16"):
+        parse_knowledge_analysis(payload, aggregate=True)

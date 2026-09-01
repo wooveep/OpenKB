@@ -10,12 +10,20 @@ import re
 import shutil
 import sqlite3
 from collections import defaultdict
-from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from openkb.desktop_knowledge_inventory import (
+    ROUTE_INDEX_KINDS,
+    DesktopKnowledgeRoute,
+    eligible_knowledge_routes_in,
+    index_route,
+    route_kind_spec,
+    source_section_anchor,
+)
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels
-from openkb.desktop_knowledge_routes import knowledge_route, source_route, summary_route
+from openkb.desktop_knowledge_routes import knowledge_route
+from openkb.desktop_portable_wiki_preview import portable_wiki_snapshot_in
 from openkb.desktop_portable_wiki_validation import (
     portable_wiki_snapshot_id,
     validate_portable_wiki,
@@ -67,6 +75,7 @@ class _RouteEntry:
     authority: str
     identity: str
     title: str
+    anchor: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,47 +93,25 @@ def render_portable_wiki_in(
     connection: sqlite3.Connection, kb_dir: Path, staging: Path
 ) -> PortableWikiExport:
     """Materialize a generic Markdown wiki without copying complete Raw Assets."""
-    documents = _documents_in(connection)
+    inventory = eligible_knowledge_routes_in(connection)
+    documents = _documents_in(connection, inventory)
     evidence_locations = _evidence_locations_in(connection)
     images = _source_images_in(connection)
     image_resources = _copy_source_images(kb_dir, staging, images)
     user_pages = _user_pages_in(connection)
     generated_pages = _generated_pages_in(connection)
-    pages = _assign_page_routes((*user_pages, *generated_pages))
-
-    route_entries: list[_RouteEntry] = []
-    for document in documents:
-        route_entries.extend(
-            (
-                _route_entry(
-                    document.summary_route,
-                    kind="summary",
-                    authority="document_summary",
-                    identity=document.document_id,
-                    title=document.title,
-                ),
-                _route_entry(
-                    document.source_route,
-                    kind="source",
-                    authority="source_document",
-                    identity=document.document_id,
-                    title=document.title,
-                ),
-            )
-        )
-    route_entries.extend(
-        _route_entry(
-            page.route,
-            kind=page.kind,
-            authority=page.authority,
-            identity=page.identity,
-            title=page.title,
-        )
-        for page in pages
-    )
-    routes = tuple(sorted(route_entries, key=lambda entry: (entry.route, entry.identity)))
+    pages = _assign_page_routes((*user_pages, *generated_pages), inventory)
     source_paths = {document.document_id: f"{document.source_route}.md" for document in documents}
 
+    content_routes = tuple(
+        _inventory_route_entry(item, source_paths=source_paths) for item in inventory
+    )
+    routes = tuple(
+        sorted(
+            (*content_routes, *_index_route_entries(content_routes)),
+            key=lambda entry: (entry.route, entry.identity),
+        )
+    )
     for document in documents:
         _write_source_page(
             connection,
@@ -148,9 +135,16 @@ def render_portable_wiki_in(
             source_paths=source_paths,
         )
 
-    atomic_write_text(staging / "index.md", _index_markdown(routes))
+    atomic_write_text(staging / "index.md", _index_markdown(content_routes))
+    for kind in ROUTE_INDEX_KINDS:
+        entries = tuple(entry for entry in content_routes if entry.kind == kind)
+        if entries:
+            atomic_write_text(
+                staging / f"{index_route(kind)}.md",
+                _kind_index_markdown(kind, entries),
+            )
     checksums = _checksums_in(staging)
-    snapshot = _snapshot_in(connection)
+    snapshot = portable_wiki_snapshot_in(connection)
     manifest = {
         "format": "openkb-portable-wiki-v1",
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -180,7 +174,10 @@ def render_portable_wiki_in(
     return PortableWikiExport(source_image_count=len(set(image_resources.values())))
 
 
-def _documents_in(connection: sqlite3.Connection) -> tuple[_Document, ...]:
+def _documents_in(
+    connection: sqlite3.Connection,
+    inventory: tuple[DesktopKnowledgeRoute, ...],
+) -> tuple[_Document, ...]:
     rows = connection.execute(
         """
         SELECT document_id, display_name, source_format
@@ -189,19 +186,14 @@ def _documents_in(connection: sqlite3.Connection) -> tuple[_Document, ...]:
         ORDER BY display_name, created_at, document_id
         """
     ).fetchall()
-    summary_routes = _unique_routes(
-        (str(row[0]), summary_route(str(row[1]), str(row[0]))) for row in rows
-    )
-    source_routes = _unique_routes(
-        (str(row[0]), source_route(str(row[1]), str(row[0]))) for row in rows
-    )
+    routes = {(item.kind, item.identity): item.route for item in inventory}
     return tuple(
         _Document(
             document_id=str(row[0]),
             title=str(row[1]),
             source_format=str(row[2]),
-            source_route=source_routes[str(row[0])],
-            summary_route=summary_routes[str(row[0])],
+            source_route=routes[("source", str(row[0]))],
+            summary_route=routes[("summary", str(row[0]))],
         )
         for row in rows
     )
@@ -239,7 +231,8 @@ def _user_pages_in(connection: sqlite3.Connection) -> tuple[_KnowledgePage, ...]
         FROM knowledge_pages AS pages
         JOIN knowledge_page_revisions AS revisions
           ON revisions.revision_id = pages.current_revision_id
-        WHERE pages.lifecycle_state IN ('stable', 'deprecated')
+        WHERE pages.lifecycle_state = 'stable'
+          AND revisions.provenance_state = 'source_backed'
         ORDER BY pages.kind, pages.normalized_title, pages.page_id
         """
     ).fetchall()
@@ -336,12 +329,14 @@ def _group_evidence(rows: list[tuple[object, ...]]) -> dict[str, tuple[str, ...]
     return {identity: tuple(values) for identity, values in grouped.items()}
 
 
-def _assign_page_routes(pages: tuple[_KnowledgePage, ...]) -> tuple[_KnowledgePage, ...]:
-    keys = tuple(f"{page.authority}:{page.identity}" for page in pages)
-    assigned = _unique_routes((key, page.route) for key, page in zip(keys, pages, strict=True))
+def _assign_page_routes(
+    pages: tuple[_KnowledgePage, ...],
+    inventory: tuple[DesktopKnowledgeRoute, ...],
+) -> tuple[_KnowledgePage, ...]:
+    assigned = {(item.authority, item.kind, item.identity): item.route for item in inventory}
     return tuple(
         _KnowledgePage(
-            route=assigned[key],
+            route=assigned[(page.authority, page.kind, page.identity)],
             kind=page.kind,
             authority=page.authority,
             identity=page.identity,
@@ -352,26 +347,9 @@ def _assign_page_routes(pages: tuple[_KnowledgePage, ...]) -> tuple[_KnowledgePa
             evidence_ids=page.evidence_ids,
             aliases=page.aliases,
         )
-        for key, page in zip(keys, pages, strict=True)
+        for page in pages
+        if (page.authority, page.kind, page.identity) in assigned
     )
-
-
-def _unique_routes(candidates: Iterable[tuple[str, str]]) -> dict[str, str]:
-    values: tuple[tuple[str, str], ...] = tuple(candidates)
-    result: dict[str, str] = {}
-    used: set[str] = set()
-    for identity, base in sorted(values, key=lambda value: (value[1], value[0])):
-        route = base
-        if route in used:
-            suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
-            route = f"{base}-{suffix}"
-            ordinal = 2
-            while route in used:
-                route = f"{base}-{suffix}-{ordinal}"
-                ordinal += 1
-        used.add(route)
-        result[identity] = route
-    return result
 
 
 def _write_knowledge_page(
@@ -513,10 +491,15 @@ def _write_source_page(
         f"# {document.title}",
     ]
     anchored: set[str] = set()
+    anchored_sections: set[str] = set()
     for row in rows:
         kind, value = str(row[1]), str(row[2]).strip()
         if not value:
             continue
+        section_anchor = source_section_anchor(document.document_id, str(row[3]))
+        if str(row[3]).strip() not in {"", "[]"} and section_anchor not in anchored_sections:
+            anchored_sections.add(section_anchor)
+            lines.extend(("", f'<a id="{section_anchor}"></a>'))
         evidence_id = str(row[4]) if row[4] is not None else None
         if evidence_id is not None and evidence_id not in anchored:
             anchored.add(evidence_id)
@@ -611,43 +594,6 @@ def _copy_source_images(
     return resources
 
 
-def _snapshot_in(connection: sqlite3.Connection) -> dict[str, object]:
-    knowledge = connection.execute(
-        """
-        SELECT state.current_generation_id, generations.qualification_state,
-            generations.synthesis_schema_version
-        FROM knowledge_generation_state AS state
-        JOIN knowledge_generations AS generations
-          ON generations.generation_id = state.current_generation_id
-        WHERE state.singleton = 1
-        """
-    ).fetchone()
-    catalog = connection.execute(
-        """
-        SELECT state.current_generation_id, state.source_revision,
-            generations.snapshot_digest
-        FROM knowledge_catalog_state AS state
-        LEFT JOIN knowledge_catalog_generations AS generations
-          ON generations.generation_id = state.current_generation_id
-        WHERE state.singleton = 1
-        """
-    ).fetchone()
-    return {
-        "knowledge_generation_id": int(knowledge[0]) if knowledge is not None else None,
-        "knowledge_qualification_state": str(knowledge[1]) if knowledge is not None else None,
-        "knowledge_synthesis_schema_version": (
-            str(knowledge[2]) if knowledge is not None and knowledge[2] is not None else None
-        ),
-        "catalog_generation_id": (
-            str(catalog[0]) if catalog is not None and catalog[0] is not None else None
-        ),
-        "catalog_source_revision": int(catalog[1]) if catalog is not None else None,
-        "catalog_snapshot_digest": (
-            str(catalog[2]) if catalog is not None and catalog[2] is not None else None
-        ),
-    }
-
-
 def _aliases(pages: tuple[_KnowledgePage, ...]) -> list[dict[str, str]]:
     return sorted(
         (
@@ -660,37 +606,101 @@ def _aliases(pages: tuple[_KnowledgePage, ...]) -> list[dict[str, str]]:
 
 
 def _index_markdown(routes: tuple[_RouteEntry, ...]) -> str:
-    headings = (
-        ("summary", "Document summaries"),
-        ("procedure", "Procedures"),
-        ("concept", "Concepts"),
-        ("entity", "Entities"),
-        ("source", "Source documents"),
-    )
     lines = [
         "# OpenKB Portable Wiki",
         "",
         "This immutable export mirrors OpenKB's semantic Knowledge Navigation routes.",
     ]
-    for kind, heading in headings:
-        values = tuple(entry for entry in routes if entry.kind == kind)
-        if not values:
+    present = {entry.kind for entry in routes}
+    for kind in ROUTE_INDEX_KINDS:
+        if kind not in present:
             continue
-        lines.extend(("", f"## {heading}", ""))
-        for entry in values:
-            authority = {
-                "published_generation": "generated",
-                "user_revision": "user",
-            }.get(entry.authority)
-            label = f" ({authority})" if authority else ""
-            lines.append(f"- [{entry.title}]({entry.path}){label}")
+        spec = route_kind_spec(kind)
+        lines.extend(("", f"- [{spec.title}]({index_route(kind)}.md)"))
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _kind_index_markdown(kind: str, routes: tuple[_RouteEntry, ...]) -> str:
+    heading = route_kind_spec(kind).title
+    page_path = f"{index_route(kind)}.md"
+    lines = [f"# {heading}", "", "Current eligible routes in this snapshot.", ""]
+    for entry in routes:
+        relative = posixpath.relpath(entry.path, posixpath.dirname(page_path))
+        if entry.anchor is not None:
+            relative = f"{relative}#{entry.anchor}"
+        lines.append(f"- [{entry.title}]({relative})")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _index_route_entries(routes: tuple[_RouteEntry, ...]) -> tuple[_RouteEntry, ...]:
+    entries = [
+        _route_entry(
+            index_route(),
+            kind="index",
+            authority="navigation_index",
+            identity="index:root",
+            title="OpenKB Portable Wiki",
+        )
+    ]
+    present = {entry.kind for entry in routes}
+    entries.extend(
+        _route_entry(
+            index_route(kind),
+            kind="index",
+            authority="navigation_index",
+            identity=f"index:{kind}",
+            title=route_kind_spec(kind).title,
+        )
+        for kind in ROUTE_INDEX_KINDS
+        if kind in present
+    )
+    return tuple(entries)
+
+
 def _route_entry(
-    route: str, *, kind: str, authority: str, identity: str, title: str
+    route: str,
+    *,
+    kind: str,
+    authority: str,
+    identity: str,
+    title: str,
+    path: str | None = None,
+    anchor: str | None = None,
 ) -> _RouteEntry:
-    return _RouteEntry(route, f"{route}.md", kind, authority, identity, title)
+    return _RouteEntry(route, path or f"{route}.md", kind, authority, identity, title, anchor)
+
+
+def _inventory_route_entry(
+    item: DesktopKnowledgeRoute, *, source_paths: dict[str, str]
+) -> _RouteEntry:
+    if item.authority != "source_section":
+        return _route_entry(
+            item.route,
+            kind=item.kind,
+            authority=item.authority,
+            identity=item.identity,
+            title=item.title,
+        )
+    try:
+        metadata = json.loads(item.metadata_json)
+    except json.JSONDecodeError as error:
+        raise ValueError("Source section route metadata is invalid.") from error
+    document_id = metadata.get("document_id") if isinstance(metadata, dict) else None
+    anchor = metadata.get("anchor") if isinstance(metadata, dict) else None
+    if not isinstance(document_id, str) or not isinstance(anchor, str):
+        raise ValueError("Source section route metadata is incomplete.")
+    path = source_paths.get(document_id)
+    if path is None:
+        raise ValueError("Source section route has no Portable Source View.")
+    return _route_entry(
+        item.route,
+        kind=item.kind,
+        authority=item.authority,
+        identity=item.identity,
+        title=item.title,
+        path=path,
+        anchor=anchor,
+    )
 
 
 def _checksums_in(staging: Path) -> dict[str, str]:

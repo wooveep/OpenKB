@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 from collections.abc import Callable, Iterable
@@ -12,9 +13,12 @@ from pathlib import Path
 
 from openkb.desktop_answer_types import (
     DesktopEvidencePack,
+    DesktopEvidenceRef,
+    DesktopKnowledgeRouteOption,
     DesktopRetrievalModelCost,
     DesktopRetrievalPlan,
 )
+from openkb.desktop_model_deadlines import request_with_response_deadline
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -32,11 +36,20 @@ from openkb.desktop_model_result_failure import (
     suspend_model_operation_contract,
     suspend_structured_model_operation,
 )
+from openkb.desktop_navigation_validation import (
+    NavigationAction,
+    bounded_string,
+    bounded_string_array,
+    require_exact_object_fields,
+    validated_navigation_actions,
+)
 from openkb.desktop_retrieval_trace import DesktopAnswerCoverageTrace
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
     run_structured_output,
 )
+
+logger = logging.getLogger(__name__)
 
 NAVIGATION_STEP_SCHEMA_VERSION = "openkb.knowledge-navigation-step.v1"
 NAVIGATION_MAX_ROUNDS = 3
@@ -47,6 +60,7 @@ NAVIGATION_MAX_SEARCH_ACTIONS = 6
 NAVIGATION_MAX_WALL_SECONDS = 120.0
 NAVIGATION_MAX_BATCH_KNOWLEDGE_READS = 8
 NAVIGATION_MAX_BATCH_SOURCE_READS = 4
+NAVIGATION_MAX_ADVERTISED_ROUTES = 24
 
 _COVERAGE_STATES = frozenset({"covered", "partial", "missing", "not_applicable"})
 _ANSWER_KINDS = frozenset(
@@ -101,10 +115,6 @@ _LOOKUP_STOP_WORDS = frozenset(
         "were",
     }
 )
-_SQL_TERM = re.compile(
-    r"^\s*(?:pragma\b|select\s+(?:\*|\d+|['\"])|select\b.+\b(?:from|where|join)\b)",
-    re.IGNORECASE,
-)
 
 
 class _NavigationModelBudgetExhausted(Exception):
@@ -135,22 +145,6 @@ class NavigationObjective:
             "constraints": list(self.constraints),
             "required_aspects": list(self.required_aspects),
         }
-
-
-@dataclass(frozen=True)
-class NavigationAction:
-    """One validated query-scoped expansion request."""
-
-    kind: str
-    terms: tuple[str, ...] = ()
-    routes: tuple[str, ...] = ()
-    evidence_ids: tuple[str, ...] = ()
-
-    @property
-    def identity(self) -> str:
-        values = (*self.terms, *self.routes, *self.evidence_ids)
-        normalized = tuple(sorted(value.casefold() for value in values))
-        return f"{self.kind}:{'|'.join(normalized)}"
 
 
 @dataclass(frozen=True)
@@ -213,15 +207,14 @@ def initial_navigation_objective(question: str, plan: DesktopRetrievalPlan) -> N
 
 def navigation_requires_model(objective: NavigationObjective, pack: DesktopEvidencePack) -> bool:
     """Let a supported simple fact finish from the deterministic seed."""
-    return not _simple_lookup_supported(objective, pack)
+    return not _simple_lookup_evidence_ids(objective, pack)
 
 
 def deterministic_seed_coverage(
     objective: NavigationObjective, pack: DesktopEvidencePack
 ) -> tuple[DesktopAnswerCoverageTrace, ...]:
     """Record only the one coverage conclusion deterministic retrieval can prove."""
-    if _simple_lookup_supported(objective, pack):
-        evidence_ids = tuple(item.evidence_id for item in pack.evidence)
+    if evidence_ids := _simple_lookup_evidence_ids(objective, pack):
         return tuple(
             DesktopAnswerCoverageTrace(
                 aspect=aspect,
@@ -289,6 +282,7 @@ def run_navigation_step(
     is_cancelled: Callable[[], bool] | None = None,
     on_model_event: Callable[[object], None] | None = None,
     retry_scope: str | None = None,
+    response_deadline: float | None = None,
 ) -> NavigationStepResult:
     """Request and validate exactly one bounded adaptive navigation decision."""
     if model_gateway is None:
@@ -311,11 +305,16 @@ def run_navigation_step(
             degradations=("knowledge_navigation_step_suspended",),
             stop_reason="model_degraded",
         )
+    already_read = frozenset(pack.retrieval_trace.navigation_routes)
+    available_routes = tuple(item for item in pack.route_options if item.route not in already_read)[
+        :NAVIGATION_MAX_ADVERTISED_ROUTES
+    ]
     prompt = _navigation_prompt(
         question=question,
         snapshot_id=snapshot_id,
         objective=objective,
         pack=pack,
+        available_routes=available_routes,
         current_coverage=current_coverage,
         visited_action_ids=visited_action_ids,
         budget=budget,
@@ -329,6 +328,7 @@ def run_navigation_step(
             nonlocal attempts, response_characters
             if attempts >= budget.model_calls:
                 raise _NavigationModelBudgetExhausted
+            request = request_with_response_deadline(request, response_deadline)
             require_model_operation_dispatch(
                 kb_dir,
                 model_gateway,
@@ -373,7 +373,8 @@ def run_navigation_step(
                 seed_objective=objective,
                 known_evidence_ids=frozenset(item.evidence_id for item in pack.evidence),
                 visited_action_ids=visited_action_ids,
-                available_routes=frozenset(item.route for item in pack.route_options),
+                available_routes=frozenset(item.route for item in available_routes),
+                completed_routes=already_read,
                 budget=budget,
             ),
         )
@@ -412,6 +413,10 @@ def run_navigation_step(
             stop_reason="model_degraded",
         )
     except DesktopStructuredOutputInvalidError as error:
+        logger.warning(
+            "Knowledge Navigation Step structured output validation failed: %s",
+            error.__cause__ or error,
+        )
         suspend_structured_model_operation(
             kb_dir,
             model_gateway,
@@ -425,7 +430,8 @@ def run_navigation_step(
             model_cost=_model_cost(prompt, attempts, response_characters),
             stop_reason="model_degraded",
         )
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, json.JSONDecodeError) as error:
+        logger.warning("Knowledge Navigation Step validation failed: %s", error)
         suspend_model_operation_contract(
             kb_dir,
             model_gateway,
@@ -464,6 +470,7 @@ def _navigation_prompt(
     snapshot_id: str,
     objective: NavigationObjective,
     pack: DesktopEvidencePack,
+    available_routes: tuple[DesktopKnowledgeRouteOption, ...],
     current_coverage: tuple[DesktopAnswerCoverageTrace, ...],
     visited_action_ids: frozenset[str],
     budget: NavigationBudget,
@@ -484,7 +491,7 @@ def _navigation_prompt(
                 "section": item.section,
                 "excerpt": item.excerpt[:2_400],
             }
-            for item in pack.evidence[:24]
+            for item in _diverse_evidence(pack.evidence, maximum=24)
         ],
         "guidance": [
             {
@@ -499,12 +506,38 @@ def _navigation_prompt(
         ],
         "available_routes": [
             {"route": item.route, "kind": item.kind, "title": item.title}
-            for item in pack.route_options[:24]
+            for item in available_routes
         ],
         "visited_action_ids": sorted(visited_action_ids),
         "remaining_budget": budget.as_dict(),
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _diverse_evidence(
+    evidence: tuple[DesktopEvidenceRef, ...], *, maximum: int
+) -> tuple[DesktopEvidenceRef, ...]:
+    """Expose each source section once before spending observation slots on more blocks."""
+    if maximum <= 0:
+        return ()
+    selected: list[DesktopEvidenceRef] = []
+    seen_sections: set[tuple[str, str]] = set()
+    for item in evidence:
+        section_key = (item.document_id, " ".join(item.section.split()).casefold())
+        if section_key in seen_sections:
+            continue
+        seen_sections.add(section_key)
+        selected.append(item)
+        if len(selected) == maximum:
+            return tuple(selected)
+    selected_ids = {item.evidence_id for item in selected}
+    for item in evidence:
+        if item.evidence_id in selected_ids:
+            continue
+        selected.append(item)
+        if len(selected) == maximum:
+            break
+    return tuple(selected)
 
 
 def _navigation_decision(
@@ -515,12 +548,14 @@ def _navigation_decision(
     known_evidence_ids: frozenset[str],
     visited_action_ids: frozenset[str],
     available_routes: frozenset[str],
+    completed_routes: frozenset[str] = frozenset(),
     budget: NavigationBudget,
 ) -> NavigationDecision:
     payload = json.loads(content)
-    _require_keys(
+    require_exact_object_fields(
         payload,
         {"schema_version", "snapshot_id", "objective", "coverage", "actions", "decision"},
+        context="Navigation decision",
     )
     if payload["schema_version"] != NAVIGATION_STEP_SCHEMA_VERSION:
         raise ValueError("Navigation schema version is invalid.")
@@ -528,18 +563,20 @@ def _navigation_decision(
         raise ValueError("Navigation Snapshot is stale.")
     objective = _objective(payload["objective"], seed_objective)
     coverage = _coverage(payload["coverage"], objective, known_evidence_ids)
-    actions = _actions(
+    actions = validated_navigation_actions(
         payload["actions"],
-        visited_action_ids,
-        available_routes,
-        known_evidence_ids,
-        budget,
+        visited_action_ids=visited_action_ids,
+        available_routes=available_routes,
+        completed_routes=completed_routes,
+        known_evidence_ids=known_evidence_ids,
+        maximum_actions=min(3, budget.search_actions),
+        coverage=coverage,
     )
     decision = payload["decision"]
     if decision not in {"continue", "stop"}:
         raise ValueError("Navigation decision is invalid.")
     if decision == "continue" and not actions:
-        raise ValueError("A continue decision requires at least one action.")
+        decision = "stop"
     if decision == "stop" and actions:
         raise ValueError("A stop decision cannot request more actions.")
     if coverage_complete(coverage) and decision != "stop":
@@ -548,7 +585,7 @@ def _navigation_decision(
 
 
 def _objective(value: object, seed: NavigationObjective) -> NavigationObjective:
-    _require_keys(
+    require_exact_object_fields(
         value,
         {
             "answer_kind",
@@ -560,22 +597,23 @@ def _objective(value: object, seed: NavigationObjective) -> NavigationObjective:
             "constraints",
             "required_aspects",
         },
+        context="Navigation objective",
     )
     assert isinstance(value, dict)
-    answer_kind = _bounded_string(value["answer_kind"], 40)
+    answer_kind = bounded_string(value["answer_kind"], 40)
     if answer_kind not in _ANSWER_KINDS or answer_kind != seed.answer_kind:
         raise ValueError("Navigation answer kind cannot drift.")
-    required_aspects = _string_array(value["required_aspects"], maximum=12, item_limit=80)
+    required_aspects = bounded_string_array(value["required_aspects"], maximum=12, item_limit=80)
     if not set(seed.required_aspects) <= set(required_aspects):
         raise ValueError("Navigation removed a code-owned required aspect.")
     return NavigationObjective(
         answer_kind=answer_kind,
-        subject=_bounded_string(value["subject"], 240),
-        requested_scope=_bounded_string(value["requested_scope"], 400),
-        named_entities=_string_array(value["named_entities"], maximum=12, item_limit=120),
-        concepts=_string_array(value["concepts"], maximum=12, item_limit=120),
-        user_actions=_string_array(value["user_actions"], maximum=12, item_limit=120),
-        constraints=_string_array(value["constraints"], maximum=12, item_limit=120),
+        subject=bounded_string(value["subject"], 240),
+        requested_scope=bounded_string(value["requested_scope"], 400),
+        named_entities=bounded_string_array(value["named_entities"], maximum=12, item_limit=120),
+        concepts=bounded_string_array(value["concepts"], maximum=12, item_limit=120),
+        user_actions=bounded_string_array(value["user_actions"], maximum=12, item_limit=120),
+        constraints=bounded_string_array(value["constraints"], maximum=12, item_limit=120),
         required_aspects=required_aspects,
     )
 
@@ -589,124 +627,62 @@ def _coverage(
         raise ValueError("Navigation coverage must describe every required aspect exactly once.")
     by_aspect: dict[str, DesktopAnswerCoverageTrace] = {}
     for item in value:
-        _require_keys(item, {"aspect", "status", "evidence_ids"})
+        require_exact_object_fields(
+            item,
+            {"aspect", "status", "evidence_ids"},
+            context="Navigation coverage",
+        )
         assert isinstance(item, dict)
-        aspect = _bounded_string(item["aspect"], 80)
+        aspect = bounded_string(item["aspect"], 80)
         status = item["status"]
         if aspect in by_aspect or aspect not in objective.required_aspects:
             raise ValueError("Navigation coverage aspect is unknown or duplicated.")
         if status not in _COVERAGE_STATES:
             raise ValueError("Navigation coverage state is invalid.")
-        evidence_ids = _string_array(item["evidence_ids"], maximum=16, item_limit=160)
-        if not set(evidence_ids) <= known_evidence_ids:
-            raise ValueError("Navigation coverage cites unknown Evidence.")
+        proposed_evidence_ids = bounded_string_array(
+            item["evidence_ids"], maximum=16, item_limit=160
+        )
+        evidence_ids = tuple(
+            evidence_id
+            for evidence_id in proposed_evidence_ids
+            if evidence_id in known_evidence_ids
+        )
         if status in {"covered", "partial"} and not evidence_ids:
-            raise ValueError("Source-supported coverage requires Evidence IDs.")
+            status = "missing"
         if status in {"missing", "not_applicable"} and evidence_ids:
             raise ValueError("Missing or inapplicable coverage cannot cite Evidence.")
         by_aspect[aspect] = DesktopAnswerCoverageTrace(aspect, str(status), evidence_ids)
     return tuple(by_aspect[aspect] for aspect in objective.required_aspects)
 
 
-def _actions(
-    value: object,
-    visited_action_ids: frozenset[str],
-    available_routes: frozenset[str],
-    known_evidence_ids: frozenset[str],
-    budget: NavigationBudget,
-) -> tuple[NavigationAction, ...]:
-    if not isinstance(value, list) or len(value) > min(3, budget.search_actions):
-        raise ValueError("Navigation action batch exceeds its remaining budget.")
-    actions: list[NavigationAction] = []
-    seen: set[str] = set()
-    for item in value:
-        if not isinstance(item, dict):
-            raise ValueError("Navigation action is invalid.")
-        kind = item.get("kind")
-        if kind == "search_routes":
-            _require_keys(item, {"kind", "terms"})
-            terms = _string_array(item["terms"], maximum=8, item_limit=120)
-            if not terms:
-                raise ValueError("Route search requires terms.")
-            if any(_unsafe_term(term) for term in terms):
-                raise ValueError("Route search term is unsafe.")
-            action = NavigationAction("search_routes", terms=terms)
-        elif kind == "read_routes":
-            _require_keys(item, {"kind", "routes"})
-            routes = _string_array(item["routes"], maximum=4, item_limit=320)
-            if not routes or not set(routes) <= available_routes:
-                raise ValueError("Navigation route is unavailable or unpublished.")
-            action = NavigationAction("read_routes", routes=routes)
-        elif kind == "read_source_sections":
-            _require_keys(item, {"kind", "evidence_ids"})
-            evidence_ids = _string_array(item["evidence_ids"], maximum=4, item_limit=160)
-            if not evidence_ids or not set(evidence_ids) <= known_evidence_ids:
-                raise ValueError("Source section anchor is not known Available Evidence.")
-            action = NavigationAction(
-                "read_source_sections",
-                evidence_ids=evidence_ids,
-            )
-        else:
-            raise ValueError("Navigation action kind is not allowed.")
-        if action.identity in seen or action.identity in visited_action_ids:
-            raise ValueError("Navigation action was already visited.")
-        seen.add(action.identity)
-        actions.append(action)
-    return tuple(actions)
-
-
-def _require_keys(value: object, expected: set[str]) -> None:
-    if not isinstance(value, dict) or set(value) != expected:
-        raise ValueError("Navigation object fields are invalid.")
-
-
-def _string_array(value: object, *, maximum: int, item_limit: int) -> tuple[str, ...]:
-    if not isinstance(value, list) or len(value) > maximum:
-        raise ValueError("Navigation string array is invalid.")
-    items = tuple(_bounded_string(item, item_limit) for item in value)
-    if len(items) != len(set(item.casefold() for item in items)):
-        raise ValueError("Navigation string array contains duplicates.")
-    return items
-
-
-def _bounded_string(value: object, maximum: int) -> str:
-    if not isinstance(value, str):
-        raise ValueError("Navigation string is invalid.")
-    normalized = " ".join(value.split())
-    if not normalized or len(normalized) > maximum:
-        raise ValueError("Navigation string is empty or too long.")
-    return normalized
-
-
-def _unsafe_term(term: str) -> bool:
-    normalized = term.casefold()
-    return (
-        len(term) > 120
-        or term.startswith(("/", "\\"))
-        or ":\\" in term
-        or "file://" in normalized
-        or _SQL_TERM.search(normalized) is not None
-        or "../" in term
-        or "..\\" in term
-    )
-
-
-def _simple_lookup_supported(objective: NavigationObjective, pack: DesktopEvidencePack) -> bool:
+def _simple_lookup_evidence_ids(
+    objective: NavigationObjective, pack: DesktopEvidencePack
+) -> tuple[str, ...]:
     if objective.answer_kind != "factual_lookup" or not pack.evidence:
-        return False
+        return ()
     subject = objective.subject.strip()
     if len(subject) > 160 or objective.constraints:
-        return False
-    evidence_text = " ".join(
-        f"{item.document_name} {item.section} {item.excerpt}" for item in pack.evidence
-    ).casefold()
+        return ()
     question_terms = tuple(
-        token.casefold()
-        for token in _LOOKUP_TOKEN.findall(subject)
-        if token.casefold() not in _LOOKUP_STOP_WORDS and _QUESTION_FORM.fullmatch(token) is None
+        dict.fromkeys(
+            token.casefold()
+            for token in _LOOKUP_TOKEN.findall(subject)
+            if token.casefold() not in _LOOKUP_STOP_WORDS
+            and _QUESTION_FORM.fullmatch(token) is None
+        )
     )
-    supported = sum(term in evidence_text for term in dict.fromkeys(question_terms))
-    return bool(question_terms) and supported >= min(2, len(set(question_terms)))
+    if not question_terms:
+        return ()
+    required_matches = 1 if len(question_terms) == 1 else max(2, (len(question_terms) * 3 + 3) // 4)
+    return tuple(
+        item.evidence_id
+        for item in pack.evidence
+        if sum(
+            term in f"{item.document_name} {item.section} {item.excerpt}".casefold()
+            for term in question_terms
+        )
+        >= required_matches
+    )
 
 
 def _answer_kind(question: str) -> str:

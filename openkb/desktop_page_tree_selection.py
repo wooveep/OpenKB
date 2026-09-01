@@ -16,6 +16,7 @@ from openkb.desktop_answer_types import (
     DesktopRetrievalModelCost,
     DesktopRetrievalPlan,
 )
+from openkb.desktop_model_deadlines import request_with_response_deadline
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -88,6 +89,8 @@ def select_page_tree_evidence(
     on_model_event: Callable[[object], None] | None = None,
     lease_tree: PageTreeLeaseFactory = lease_current_page_tree,
     retry_scope: str | None = None,
+    bounded_model_attempts: bool = False,
+    response_deadline: float | None = None,
 ) -> PageTreeSelectionResult:
     """Call PageTree Selection at most once, then return only bound Evidence identities."""
     try:
@@ -138,6 +141,7 @@ def select_page_tree_evidence(
 
                 def invoke(request: DesktopModelRequest):
                     nonlocal attempts, response_characters
+                    request = request_with_response_deadline(request, response_deadline)
                     require_model_operation_dispatch(
                         kb_dir,
                         model_gateway,
@@ -160,7 +164,7 @@ def select_page_tree_evidence(
 
                     call = (
                         model_gateway.analyze_once
-                        if request.operation == "page_tree_selection"
+                        if bounded_model_attempts or request.operation == "page_tree_selection"
                         else model_gateway.analyze
                     )
                     try:

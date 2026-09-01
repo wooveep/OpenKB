@@ -41,6 +41,17 @@ def test_gateway_factory_has_no_response_timeout_constructor() -> None:
         )
 
 
+@pytest.mark.parametrize("timeout", (0.0, -1.0, float("nan"), float("inf")))
+def test_request_scoped_response_timeout_must_be_finite_and_positive(timeout: float) -> None:
+    with pytest.raises(ValueError, match="timeout must be finite and positive"):
+        DesktopModelRequest(
+            "retrieval_plan",
+            "Question",
+            "{}",
+            response_timeout_seconds=timeout,
+        )
+
+
 @pytest.mark.parametrize(
     ("error", "code"),
     (

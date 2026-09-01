@@ -33,6 +33,7 @@ from openkb.desktop_model_gateway import (
     classify_model_error,
     require_execution_lane,
 )
+from openkb.desktop_model_response_wait import wait_for_model_response
 from openkb.desktop_sensitive_trace import sensitive_trace_component_enabled
 
 MODEL_CONNECT_TIMEOUT_SECONDS = 30.0
@@ -281,7 +282,7 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
 
             try:
                 self._prepare_active_stream(request)
-                return self._call_without_response_deadline(
+                return wait_for_model_response(
                     lambda: self._call_terminal_stream_transport(
                         request,
                         queue_delta,
@@ -290,8 +291,10 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
                         stream_transport=stream_transport,
                     ),
                     is_cancelled=is_cancelled,
+                    clock=self._clock,
                     on_wait=flush_stream_activity,
                     on_cancel=lambda: self._cancel_active_stream(request),
+                    response_timeout_seconds=request.response_timeout_seconds,
                 )
             finally:
                 active.clear()
@@ -317,16 +320,25 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
         is_cancelled: CancellationCallback | None,
         max_attempts: int = MAX_TERMINAL_MODEL_ATTEMPTS,
     ) -> DesktopModelResult:
+        def call_non_streaming(
+            _context: _TerminalAttemptContext,
+            on_request_sent: RequestSentCallback,
+            flush_request_sent: RequestSentCallback,
+        ) -> object:
+            self._prepare_active_stream(request)
+            return wait_for_model_response(
+                lambda: self._call_terminal_transport(request, on_request_sent),
+                is_cancelled=is_cancelled,
+                clock=self._clock,
+                on_wait=flush_request_sent,
+                on_cancel=lambda: self._cancel_active_stream(request),
+                response_timeout_seconds=request.response_timeout_seconds,
+            )
+
         return self._run(
             request,
             on_event=on_event,
-            attempt_call=lambda _context, on_request_sent, flush_request_sent: (
-                self._call_without_response_deadline(
-                    lambda: self._call_terminal_transport(request, on_request_sent),
-                    is_cancelled=is_cancelled,
-                    on_wait=flush_request_sent,
-                )
-            ),
+            attempt_call=call_non_streaming,
             is_cancelled=is_cancelled,
             on_retry=None,
             max_attempts=max_attempts,
@@ -539,46 +551,6 @@ class DesktopTerminalModelGateway(DesktopModelGateway):
                 _lifecycle_finalizer=lifecycle_finalizer,
             )
         raise AssertionError("Terminal Model Call exhausted attempts without a result.")
-
-    def _call_without_response_deadline(
-        self,
-        call: Callable[[], object],
-        *,
-        is_cancelled: CancellationCallback | None,
-        on_wait: Callable[[], None] | None = None,
-        on_cancel: Callable[[], None] | None = None,
-    ) -> object:
-        completed = threading.Event()
-        outcome: dict[str, object] = {}
-
-        def invoke() -> None:
-            try:
-                outcome["response"] = call()
-            except Exception as error:
-                outcome["error"] = error
-            finally:
-                completed.set()
-
-        threading.Thread(
-            target=invoke,
-            daemon=True,
-            name="openkb-terminal-model-attempt",
-        ).start()
-        while not completed.wait(0.05):
-            if on_wait is not None:
-                on_wait()
-            if _is_cancelled(is_cancelled):
-                if on_cancel is not None:
-                    on_cancel()
-                raise DesktopModelCancelledError()
-        if on_wait is not None:
-            on_wait()
-        if _is_cancelled(is_cancelled):
-            raise DesktopModelCancelledError()
-        error = outcome.get("error")
-        if isinstance(error, Exception):
-            raise error
-        return outcome.get("response")
 
     def _cancel_active_stream(self, request: DesktopModelRequest) -> None:
         cancel = getattr(self._transport, "cancel_active_stream", None)

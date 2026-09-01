@@ -126,6 +126,7 @@ def run_knowledge_analysis(
     capability_profile: DesktopModelCapabilityProfile | None = None,
     execution_profile: DesktopModelExecutionProfile | None = None,
     on_operation_validated: Callable[[DesktopModelRequest], None] = lambda _request: None,
+    knowledge_language: str | None = None,
 ) -> KnowledgeAnalysisRun:
     """Execute a direct analysis or resume a persisted long-document batch plan."""
     natural_sections = (
@@ -171,7 +172,9 @@ def run_knowledge_analysis(
         proposed_plan=proposed_plan,
     )
     if not batches:
-        prompt = knowledge_analysis_prompt(document_name, evidence)
+        prompt = knowledge_analysis_prompt(
+            document_name, evidence, knowledge_language=knowledge_language
+        )
         direct_batch = KnowledgeAnalysisBatch(
             batch_id="document",
             ordinal=0,
@@ -205,6 +208,7 @@ def run_knowledge_analysis(
                         plan=plan,
                         honor_control=honor_control,
                         on_operation_validated=on_operation_validated,
+                        knowledge_language=knowledge_language,
                     )
                 ),
                 merge=_merge_split_batch_analyses,
@@ -281,6 +285,7 @@ def run_knowledge_analysis(
                         plan=plan,
                         honor_control=honor_control,
                         on_operation_validated=on_operation_validated,
+                        knowledge_language=knowledge_language,
                     ),
                     merge=_merge_split_batch_analyses,
                 )
@@ -360,6 +365,7 @@ def run_knowledge_analysis(
                 honor_control=honor_control,
                 max_parallel_batches=max_parallel_batches,
                 on_operation_validated=on_operation_validated,
+                knowledge_language=knowledge_language,
             )
             merged = DesktopKnowledgeAnalysis(
                 description,
@@ -476,6 +482,7 @@ def _analyze_batch(
     plan: KnowledgeAnalysisPlan,
     honor_control: Callable[[], None],
     on_operation_validated: Callable[[DesktopModelRequest], None],
+    knowledge_language: str | None = None,
 ) -> tuple[DesktopModelResult, DesktopKnowledgeAnalysis]:
     honor_control()
     prompt = knowledge_analysis_batch_prompt(
@@ -483,6 +490,7 @@ def _analyze_batch(
         batch,
         batch_total=batch_total,
         input_budget_tokens=plan.input_budget_tokens,
+        knowledge_language=knowledge_language,
     )
     return _validated_analysis_call(
         operation="knowledge_analysis_batch",
@@ -530,6 +538,7 @@ def _run_hierarchical_description_merge(
     honor_control: Callable[[], None],
     max_parallel_batches: int,
     on_operation_validated: Callable[[DesktopModelRequest], None] = lambda _request: None,
+    knowledge_language: str | None = None,
 ) -> tuple[str, DesktopModelResult, tuple[dict[str, object], ...]]:
     if not plan.merge_topology:
         description = _deterministic_description(analyses)
@@ -554,6 +563,7 @@ def _run_hierarchical_description_merge(
             child_descriptions,
             node_id=node.node_id,
             input_budget_tokens=plan.input_budget_tokens,
+            knowledge_language=knowledge_language,
         )
         honor_control()
         store.start_merge_node(job_id, node.node_id)

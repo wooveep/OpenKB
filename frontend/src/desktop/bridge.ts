@@ -28,6 +28,7 @@ import {
   type DesktopKnowledgeGraphExtractionControlResult,
   type DesktopKnowledgeExport,
   type DesktopKnowledgeExportMode,
+  type DesktopKnowledgeExportPreview,
   type DesktopKnowledgeReconciliationCommit,
   type DesktopKnowledgeReconciliationConflicts,
   type DesktopKnowledgeReconciliationDecision,
@@ -138,12 +139,22 @@ export class TauriDesktopBridge extends TauriKnowledgePageBridge implements Desk
     })
   }
 
-  async exportKnowledgeBundle(destination: string, mode: DesktopKnowledgeExportMode, requestId: string): Promise<DesktopKnowledgeExport> {
+  async exportKnowledgeBundle(
+    destination: string,
+    mode: DesktopKnowledgeExportMode,
+    requestId: string,
+    expectedSnapshotId?: string,
+  ): Promise<DesktopKnowledgeExport> {
     return this.call<DesktopKnowledgeExport>("desktop_export_knowledge_bundle", {
       destination,
       mode,
       requestId,
+      expectedSnapshotId,
     })
+  }
+
+  async previewKnowledgeBundle(mode: DesktopKnowledgeExportMode): Promise<DesktopKnowledgeExportPreview> {
+    return this.call<DesktopKnowledgeExportPreview>("desktop_preview_knowledge_bundle", { mode })
   }
 
   async inspectImportSources(

@@ -52,7 +52,7 @@ def catalog_route_rows_in(
         ), routed_candidates AS (
             SELECT node_id, node_score, route_weight, hop FROM direct_nodes
             UNION ALL
-            SELECT links.to_node_id, direct.node_score,
+            SELECT links.target_node_id, direct.node_score,
                 {CATALOG_LINK_WEIGHT} * MIN(
                     direct.lifecycle_weight,
                     CASE
@@ -65,11 +65,13 @@ def catalog_route_rows_in(
                 ) AS route_weight,
                 1 AS hop
             FROM direct_nodes AS direct
-            JOIN knowledge_catalog_links AS links
-                ON links.generation_id = ? AND links.from_node_id = direct.node_id
+            JOIN knowledge_catalog_relationships AS links
+                ON links.generation_id = ?
+                AND links.source_node_id = direct.node_id
+                AND links.lifecycle_eligible = 1
             JOIN knowledge_catalog_nodes AS targets
                 ON targets.generation_id = links.generation_id
-                AND targets.node_id = links.to_node_id
+                AND targets.node_id = links.target_node_id
                 AND COALESCE(targets.lifecycle_state, 'stable') != 'deprecated'
                 AND COALESCE(targets.availability, 'available') = 'available'
         ), routed_nodes AS (

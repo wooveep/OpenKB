@@ -18,8 +18,10 @@ the complete report. Its JSON suite is versioned and corpus-snapshot-bound:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "snapshot_id": "support-corpus-2026-08-15",
+  "navigator_model_profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "minimum_navigator_repetitions": 3,
   "max_graph_latency_ms": 250,
   "max_graph_model_calls": 20,
   "max_navigator_model_calls_per_case": 8,
@@ -31,7 +33,24 @@ the complete report. Its JSON suite is versioned and corpus-snapshot-bound:
       "expected_evidence": [
         {"document_name": "architecture.md", "text_contains": "Release coordinator"}
       ],
-      "expected_answer_terms": ["Release coordinator"]
+      "expected_answer_terms": ["Release coordinator"],
+      "long_document": true,
+      "original_observation": {
+        "critical_evidence": [
+          {"document_name": "architecture.md", "text_contains": "Release coordinator"}
+        ],
+        "answer_points": ["Release coordinator"],
+        "unsupported_claim_markers": ["invented release default"],
+        "citation_precision": 1.0,
+        "unsupported_claim_count": 0,
+        "latency_ms": 1800,
+        "model_calls": 5,
+        "absent_answer_correct": false,
+        "original_commit_sha": "1111111111111111111111111111111111111111",
+        "model_profile_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sample_count": 3,
+        "latency_variance_ms": 125
+      }
     }
   ]
 }
@@ -43,6 +62,24 @@ Include at least one case in each category: `local_fact`, `multi_hop`,
 `"expect_absent_answer": true`. Selectors are resolved against available
 document names and original evidence text so the suite remains valid when an
 import assigns new random Evidence IDs.
+
+Schema 3 is required for Navigator promotion. Its `original_observation` is a
+reviewed, privacy-safe behavioral oracle: durable Evidence selectors, answer
+points, unsupported-claim markers, citation precision, latency, and model-call
+count. It also binds the reference to the original commit, exact model profile,
+sample count, and observed latency variance. The suite separately pins the
+Navigator model profile and requires at least two consecutive repetitions.
+It deliberately stores neither the original answer nor the raw agent trace. The
+evaluated corpus identity covers every document named by either the current
+expectations or the frozen original observation.
+
+Collect the oracle from repeated original-agent runs over the same immutable
+source snapshot, commit, and model profile. A reviewer then records only stable
+answer points, critical Evidence selectors, known unsupported markers, citation
+precision, absent-answer correctness, the mean latency/model-call count, and
+latency variance. `sample_count` must be at least two; use at least three runs for
+release evidence. Do not average results across commits, model profiles, or
+corpus snapshots. Re-run collection whenever any of those identities changes.
 
 Each report records FTS, PageTree, Wiki, fused baseline, local-graph, and Navigator
 Recall@K (including the active K), citation precision, grounded-answer
@@ -79,11 +116,54 @@ uv run python -m openkb.desktop_retrieval_evaluation <kb-dir> <suite.json> \
 ```
 
 This mode exits with code `2` unless Navigator recalls every reviewed critical
-Evidence expectation, preserves baseline recall/citation/faithfulness and
-absent-answer behavior, stays within the configured model/latency envelope,
-finishes without degradation, and keeps the pinned knowledge snapshot stable.
+Evidence expectation and answer point, does not add unsupported claims, preserves
+the original citation precision plus baseline recall/citation/faithfulness and
+absent-answer behavior, stays within both the original and configured
+model/latency envelopes, passes source-integrity checks, finishes without
+degradation, and keeps the pinned knowledge snapshot stable.
 Python callers may enforce the same stale-report check with
 `DesktopRetrievalEvaluator.require_navigator_promotion_eligible(report, suite)`.
+
+## Fixed real-corpus release attestation
+
+Corpus qualification also fails closed unless
+`openkb/benchmarks/real-corpus-attestation.json` validates. The aggregate-only
+version 2 attestation is bound to the three-document corpus digest, the
+non-secret model profile digest, every prompt contract used by import,
+navigation, and the grounded answer, the current Python/Rust/TypeScript
+implementation digest, and the implementation commit. A companion embedded
+implementation manifest keeps that check available inside the frozen Engine,
+where repository source trees do not exist. Changing bound code or a contract
+invalidates the report instead of silently reusing older quality evidence.
+
+The fixed OCloudware suite asks three equivalent dual-node hyperconverged
+deployment questions three times each. Review scores thirteen required facts per
+answer, including node roles, system-disk and swap handling, management HA,
+storage, network safety, and failover validation. The shipped nine-run result is
+115/117 answer points (98.3%), with two source documents and forty bounded
+EvidenceRefs in every answer, no degradation run, no unsupported material claim,
+and successful retrieval replay after restart. The attestation stores only
+aggregate scores and opaque digests; raw private documents, answers, credentials,
+and model traces remain outside the repository.
+
+The release gate requires at least 85% completeness, 95% correctness and citation
+precision, zero unsupported claims and degradation runs, passing structural
+corpus metrics, replay success, and a passing automated regression suite. It
+also records the fixed original-agent commit and model profile and rejects a
+current result that loses more than ten completeness points, correctness,
+citation precision, or degradation behavior against that baseline.
+
+Windows acceptance binds the exact `windows-portable-x64` candidate through two
+independently calculated normalized inventories: hashes and byte counts read
+from the package payload, and the same entries read from `release-manifest.json`.
+The inventories exclude only `release-manifest.json`, `openkb.local.json`, and
+the attestation JSON itself to avoid a circular hash. They must agree before the
+digest is recorded. The Windows record also requires a passing packaged smoke
+test, at least three questions without degradation, cancellation returning
+`answer_cancelled`, a completed regeneration, preserved Answer Versions, and a
+successful read after restart. Re-run the fixed suite and Windows acceptance
+whenever the corpus, model profile, implementation, candidate payload, or a
+bound prompt contract changes.
 
 ## Experimental official PageIndex provider
 

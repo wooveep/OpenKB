@@ -1198,6 +1198,9 @@ def test_engine_emits_sanitized_interactive_answer_model_lifecycle(tmp_path):
                 )
             return DesktopModelResult("retrieval-call", '{"terms":["evidence"]}', 1)
 
+        def analyze_once(self, request, *, on_event, is_cancelled):
+            return self.analyze(request, on_event=on_event, is_cancelled=is_cancelled)
+
         def stream(self, request, *, on_event, on_delta, on_reset, is_cancelled):
             assert request.operation == "grounded_answer"
             assert is_cancelled is not None
@@ -2097,15 +2100,32 @@ def test_engine_exports_an_explicit_portable_wiki_snapshot(tmp_path):
     server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
     server._handshake_complete = True
 
-    exported = server._dispatch(
+    preview = server._dispatch(
         DesktopRequest(
-            request_id="export-portable-wiki",
-            method="workbench.export_knowledge_bundle",
-            params={"destination": str(destination), "mode": "portable_wiki"},
+            request_id="preview-portable-wiki",
+            method="workbench.preview_knowledge_bundle",
+            params={"mode": "portable_wiki"},
         ),
         cancel_event=None,
     )
 
+    exported = server._dispatch(
+        DesktopRequest(
+            request_id="export-portable-wiki",
+            method="workbench.export_knowledge_bundle",
+            params={
+                "destination": str(destination),
+                "mode": "portable_wiki",
+                "expected_snapshot_id": preview["snapshot_id"],
+            },
+        ),
+        cancel_event=None,
+    )
+
+    assert preview["mode"] == "portable_wiki"
+    assert preview["document_count"] == 0
+    assert preview["estimated_size_bytes"] == 4096
+    assert len(preview["snapshot_id"]) == 64
     assert exported["mode"] == "portable_wiki"
     assert exported["raw_asset_count"] == 0
     assert "index.md" in exported["files"]

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import math
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from openkb.locks import atomic_write_text
+from openkb.locks import atomic_write_text, kb_ingest_lock
 
 DEFAULT_CONFIG: dict[str, Any] = {"model": "gpt-5.4"}
 DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
+_CJK = re.compile(r"[\u3400-\u9fff]")
 
 
 def load_config_mapping(config_path: Path) -> dict[str, Any]:
@@ -63,6 +66,30 @@ def preferred_knowledge_language(kb_dir: Path) -> str | None:
     values = knowledge if isinstance(knowledge, dict) else {}
     language = _configured_text(values.get("language"))
     return language if language in {"zh", "en"} else None
+
+
+def ensure_preferred_knowledge_language(kb_dir: Path, texts: Iterable[str]) -> str:
+    """Persist one corpus-derived language when the KB has no explicit choice."""
+    resolved = kb_dir.expanduser().resolve()
+    config_path = resolved / ".openkb" / "config.yaml"
+    language = _dominant_knowledge_language(texts)
+    with kb_ingest_lock(config_path.parent):
+        config = load_config_mapping(config_path)
+        knowledge = config.get("knowledge")
+        values = dict(knowledge) if isinstance(knowledge, dict) else {}
+        configured = _configured_text(values.get("language"))
+        if configured in {"zh", "en"}:
+            return configured
+        values.update({"language": language, "language_origin": "corpus_default"})
+        config["knowledge"] = values
+        save_config(config_path, config)
+    return language
+
+
+def _dominant_knowledge_language(texts: Iterable[str]) -> str:
+    samples = tuple(text.strip() for text in texts if text.strip())
+    chinese = sum(bool(_CJK.search(text)) for text in samples)
+    return "zh" if chinese and chinese * 2 >= max(1, len(samples)) else "en"
 
 
 def _configured_text(value: object) -> str | None:

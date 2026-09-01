@@ -16,6 +16,12 @@ from openkb.desktop_answer_types import (
     DesktopGroundedAnswer,
     DesktopKnowledgeGuidance,
 )
+from openkb.desktop_grounded_answer_outline import (
+    citation_guarded_answer as _citation_guarded_answer,
+)
+from openkb.desktop_grounded_answer_outline import (
+    evidence_phase_index as _evidence_phase_index,
+)
 from openkb.desktop_model_execution_profile import estimate_model_tokens
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
@@ -40,6 +46,9 @@ AnswerDeltaCallback = Callable[[str, str, bool, int], None]
 AnswerCancellationCallback = Callable[[], bool]
 AnswerModelEventCallback = Callable[[object], None]
 _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS = 4_096
+_DEFAULT_ANSWER_OUTPUT_TOKENS = 2_048
+_EXPANDED_ANSWER_OUTPUT_TOKENS = 4_096
+_EXPANDED_ANSWER_CONTEXT_THRESHOLD_TOKENS = 32_768
 _EVIDENCE_GROUNDING_SHARE = 0.75
 _STREAM_CHUNK_CHARS = 96
 
@@ -261,8 +270,9 @@ class DesktopGroundedAnswerService:
             )
         with stream_state_lock:
             final_attempt = max(visible_attempt, 1)
-            needs_fallback_stream = not emitted or bool(generation.degradations)
-            if generation.degradations and visible_attempt:
+            answer_changed = visible_answer_text.strip() != generation.answer_text.strip()
+            needs_fallback_stream = not emitted or bool(generation.degradations) or answer_changed
+            if (generation.degradations or answer_changed) and visible_attempt:
                 final_attempt = visible_attempt + 1
         if needs_fallback_stream:
             for ordinal, chunk in enumerate(_stream_chunks(generation.answer_text)):
@@ -271,7 +281,7 @@ class DesktopGroundedAnswerService:
                 emit(
                     chunk,
                     final_attempt,
-                    replace=bool(generation.degradations and ordinal == 0),
+                    replace=bool((generation.degradations or answer_changed) and ordinal == 0),
                 )
                 if _is_cancelled(is_cancelled):
                     return interrupted_answer("answer_cancelled", "Answer generation was stopped.")
@@ -315,7 +325,10 @@ def prepare_grounded_evidence_pack(
     policy = prompt_contract_for("grounded_answer").token_budget_policy
     reserve_value = policy.get("reserve_output_tokens")
     share_value = policy.get("document_input_share")
-    reserve = reserve_value if isinstance(reserve_value, int) else 2_048
+    configured_reserve = (
+        reserve_value if isinstance(reserve_value, int) else _DEFAULT_ANSWER_OUTPUT_TOKENS
+    )
+    reserve = max(configured_reserve, _answer_output_token_budget(capacity))
     document_share = float(share_value) if isinstance(share_value, (int, float)) else 0.7
     grounding_budget = max(0, int(max(0, capacity - reserve) * document_share))
     evidence_budget = int(grounding_budget * _EVIDENCE_GROUNDING_SHARE)
@@ -415,14 +428,25 @@ def generate_grounded_answer(
 
     try:
         result = model_gateway.stream(
-            DesktopModelRequest("grounded_answer", "Grounded answer", prompt),
+            DesktopModelRequest(
+                "grounded_answer",
+                "Grounded answer",
+                prompt,
+                generation_parameters={
+                    "max_tokens": _answer_output_token_budget(
+                        _answer_context_capacity(model_gateway)
+                    )
+                },
+            ),
             on_event=observe,
             on_delta=on_delta or (lambda _attempt, _delta: None),
             on_reset=on_reset,
             is_cancelled=is_cancelled,
         )
         attempts = max(attempts, result.attempt_count)
-        answer_text = result.content.strip()
+        answer_text = _citation_guarded_answer(
+            result.content.strip(), evidence_count=len(pack.evidence)
+        )
         if _is_cancelled(is_cancelled):
             return _cancelled_generation(model_calls=attempts, prompt=prompt)
         if answer_text:
@@ -514,8 +538,20 @@ def _answer_prompt(
         if blueprint
         else ""
     )
+    phase_index = (
+        _evidence_phase_index(evidence)
+        if retrieval_trace.navigation_answer_kind == "how_to"
+        else ""
+    )
+    phase_section = (
+        "Evidence Phase Index (source headings only; inspect and cite Original Evidence):\n"
+        f"{phase_index}\n\n"
+        if phase_index
+        else ""
+    )
     return (
         f"{history}Current question: {question}\n\n{guidance_section}{blueprint_section}"
+        f"{phase_section}"
         "Original Evidence is the only factual authority; cite it by number.\n"
         f"Evidence:\n{context}"
     )
@@ -530,7 +566,6 @@ def _answer_blueprint(
     ordinals = {item.evidence_id: ordinal for ordinal, item in enumerate(evidence, start=1)}
     lines = [
         f"Answer kind: {trace.navigation_answer_kind or 'unspecified'}",
-        f"Stop reason: {trace.navigation_stop_reason or 'unspecified'}",
     ]
     for ordinal, item in enumerate(trace.coverage_aspects, start=1):
         citations = [
@@ -538,7 +573,11 @@ def _answer_blueprint(
             for evidence_id in item.evidence_ids
             if evidence_id in ordinals
         ]
-        support = ", ".join(citations) if citations else "source gap"
+        support = (
+            ", ".join(citations)
+            if citations
+            else "navigation unconfirmed; inspect Original Evidence before declaring a gap"
+        )
         lines.append(f"{ordinal}. {item.aspect} — {item.status} — {support}")
     return "\n".join(lines)
 
@@ -571,9 +610,15 @@ def _coverage_state(coverage: tuple[DesktopAnswerCoverageTrace, ...]) -> str:
 
 
 def _guidance_text(item: DesktopKnowledgeGuidance) -> str:
+    headings = tuple(
+        heading
+        for line in item.content_markdown.splitlines()
+        if line.startswith("#") and (heading := line.lstrip("#").strip())
+    )
+    outline = f"\nOutline: {' > '.join(headings[:12])}" if headings else ""
     return (
         f"Route: {item.route}\nTitle: {item.title}\nKind: {item.kind}\n"
-        f"Authority: {item.authority}\n{item.content_markdown}"
+        f"Authority: {item.authority}{outline}"
     )
 
 
@@ -593,6 +638,13 @@ def _answer_context_capacity(gateway: DesktopModelGateway | None) -> int:
         if isinstance(capacity, int) and capacity >= _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
         else _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
     )
+
+
+def _answer_output_token_budget(context_capacity_tokens: int) -> int:
+    """Use a larger answer ceiling only when it cannot crowd out source evidence."""
+    if context_capacity_tokens >= _EXPANDED_ANSWER_CONTEXT_THRESHOLD_TOKENS:
+        return _EXPANDED_ANSWER_OUTPUT_TOKENS
+    return _DEFAULT_ANSWER_OUTPUT_TOKENS
 
 
 def _deterministic_answer(question: str, evidence) -> str:

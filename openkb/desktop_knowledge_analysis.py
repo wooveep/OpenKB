@@ -61,7 +61,6 @@ _MAX_CLAIM_CHARACTERS = 4_000
 _MAX_EVIDENCE_PER_CLAIM = KNOWLEDGE_ANALYSIS_MAX_EVIDENCE_IDS_PER_CLAIM
 _MAX_AGGREGATE_CANDIDATES_PER_KIND = 4_096
 _MAX_AGGREGATE_CLAIMS_PER_CANDIDATE = 4_096
-_MAX_AGGREGATE_EVIDENCE_PER_CLAIM = 4_096
 _MAX_EVIDENCE_TEXT_CHARACTERS = 12_000
 _MAX_SUMMARY_UNITS = 32
 _MAX_AGGREGATE_SUMMARY_UNITS = 4_096
@@ -404,7 +403,7 @@ def parse_knowledge_analysis(
         _MAX_AGGREGATE_CANDIDATES_PER_KIND if aggregate else _MAX_CANDIDATES_PER_KIND
     )
     maximum_claims = _MAX_AGGREGATE_CLAIMS_PER_CANDIDATE if aggregate else _MAX_CLAIMS_PER_CANDIDATE
-    maximum_sources = _MAX_AGGREGATE_EVIDENCE_PER_CLAIM if aggregate else _MAX_EVIDENCE_PER_CLAIM
+    maximum_sources = _MAX_EVIDENCE_PER_CLAIM
     corpus_ready = extended_fields <= fields
     concepts = _candidates(
         payload.get("concepts"),
@@ -523,12 +522,15 @@ def knowledge_analysis_provenance_from_checkpoint(payload: object) -> str:
 def knowledge_analysis_prompt(
     document_name: str,
     evidence: tuple[tuple[str, DocumentIRBlock], ...],
+    *,
+    knowledge_language: str | None = None,
 ) -> str:
     """Build the non-secret model input with stable Evidence IDs and source locators."""
     payload = {
         "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
         "analysis_scope": KNOWLEDGE_ANALYSIS_SCOPE,
         "document_name": Path(document_name).name,
+        "knowledge_language": knowledge_language,
         "evidence": [
             {
                 "evidence_id": evidence_id,

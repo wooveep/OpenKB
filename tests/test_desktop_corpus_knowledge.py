@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sqlite3
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from openkb import desktop_catalog_store as catalog_store
 from openkb.desktop_catalog_store import rebuild_pending_catalog
+from openkb.desktop_corpus_benchmark import _multi_document_topic_coverage
 from openkb.desktop_corpus_knowledge import (
     _applicability_pairs,
     _Candidate,
@@ -34,6 +36,14 @@ from openkb.desktop_knowledge_navigation import (
     _select_read_descriptors,
 )
 from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_real_corpus_benchmark import (
+    current_real_corpus_contract_digest,
+    current_real_corpus_implementation_digest,
+    load_real_corpus_benchmark,
+    parse_real_corpus_benchmark,
+    portable_artifact_digest,
+    portable_manifest_digest,
+)
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
@@ -43,6 +53,143 @@ _APPLICABILITY = {
     "deployment_scenario": "双节点超融合",
     "time_boundary": "",
 }
+
+
+def test_shipped_real_corpus_attestation_is_fixed_complete_and_tamper_evident() -> None:
+    attestation = load_real_corpus_benchmark()
+
+    assert attestation.passed
+    assert attestation.contract_digest == current_real_corpus_contract_digest()
+    assert attestation.implementation_digest == current_real_corpus_implementation_digest()
+    assert len(attestation.implementation_commit_sha) == 40
+    assert attestation.original_baseline.sample_count >= 3
+    assert attestation.original_baseline.fallback_runs == 0
+    assert attestation.windows_acceptance.artifact_kind == "windows-portable-x64"
+    assert attestation.windows_acceptance.packaged_smoke_passed
+    assert attestation.windows_acceptance.cancellation_passed
+    assert attestation.windows_acceptance.regeneration_completed
+    assert attestation.windows_acceptance.restart_readable
+    assert attestation.windows_acceptance.answer_versions_preserved
+    assert attestation.sample_count >= 3
+    assert len(attestation.cases) >= 3
+    assert all(case.original_comparison_passed for case in attestation.cases)
+    payload = attestation.as_dict()
+    payload["answer_completeness"] = 1.0
+    try:
+        parse_real_corpus_benchmark(payload)
+    except ValueError as error:
+        assert "digest" in str(error)
+    else:
+        raise AssertionError("A modified real-corpus attestation must fail validation.")
+
+
+def test_portable_attestation_digest_binds_payload_without_self_reference(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "OpenKB"
+    executable = package / "OpenKB.exe"
+    attestation = (
+        package
+        / "runtime"
+        / "engine"
+        / "_internal"
+        / "openkb"
+        / "benchmarks"
+        / "real-corpus-attestation.json"
+    )
+    attestation.parent.mkdir(parents=True)
+    executable.write_bytes(b"candidate")
+    attestation.write_bytes(b"first attestation")
+    files = []
+    for path in (executable, attestation):
+        files.append(
+            {
+                "path": path.relative_to(package).as_posix(),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "bytes": path.stat().st_size,
+            }
+        )
+    (package / "release-manifest.json").write_text(json.dumps({"files": files}), encoding="utf-8")
+
+    artifact_digest = portable_artifact_digest(package)
+    manifest_digest = portable_manifest_digest(package)
+
+    assert artifact_digest == manifest_digest
+    attestation.write_bytes(b"final attestation with the payload digest")
+    assert portable_artifact_digest(package) == artifact_digest
+    executable.write_bytes(b"different candidate")
+    assert portable_artifact_digest(package) != artifact_digest
+    assert portable_artifact_digest(package) != portable_manifest_digest(package)
+
+
+def test_multi_document_coverage_measures_only_safely_bound_identities() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(
+        """
+        CREATE TABLE source_documents (
+            document_id TEXT PRIMARY KEY,
+            availability TEXT NOT NULL
+        );
+        CREATE TABLE knowledge_document_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            normalized_title TEXT NOT NULL,
+            admission_state TEXT NOT NULL
+        );
+        CREATE TABLE knowledge_identity_candidates (
+            identity_id TEXT NOT NULL,
+            candidate_id TEXT NOT NULL
+        );
+        CREATE TABLE knowledge_generation_items (
+            generation_id INTEGER NOT NULL,
+            item_key TEXT NOT NULL,
+            identity_id TEXT,
+            kind TEXT NOT NULL,
+            normalized_title TEXT NOT NULL
+        );
+        CREATE TABLE knowledge_generation_item_sources (
+            generation_id INTEGER NOT NULL,
+            item_key TEXT NOT NULL,
+            evidence_id TEXT NOT NULL
+        );
+        CREATE TABLE evidence_occurrences (
+            evidence_id TEXT NOT NULL,
+            document_id TEXT NOT NULL
+        );
+
+        INSERT INTO source_documents VALUES ('doc-1', 'available'), ('doc-2', 'available');
+
+        -- These candidates deliberately remain outside a published identity while
+        -- model-proposed aliases await review. They are not eligible synthesis work.
+        INSERT INTO knowledge_document_candidates VALUES
+            ('pending-1', 'doc-1', 'entity', 'ambiguous product', 'admitted'),
+            ('pending-2', 'doc-2', 'entity', 'ambiguous product', 'admitted');
+
+        INSERT INTO knowledge_document_candidates VALUES
+            ('bound-1', 'doc-1', 'procedure', 'cluster install', 'admitted'),
+            ('bound-2', 'doc-2', 'procedure', 'cluster install', 'admitted');
+        INSERT INTO knowledge_identity_candidates VALUES
+            ('identity-install', 'bound-1'),
+            ('identity-install', 'bound-2');
+        INSERT INTO knowledge_generation_items VALUES
+            (7, 'procedure:cluster-install', 'identity-install', 'procedure', 'cluster install');
+        INSERT INTO knowledge_generation_item_sources VALUES
+            (7, 'procedure:cluster-install', 'evidence-1'),
+            (7, 'procedure:cluster-install', 'evidence-2');
+        INSERT INTO evidence_occurrences VALUES
+            ('evidence-1', 'doc-1'),
+            ('evidence-2', 'doc-2');
+        """
+    )
+
+    assert _multi_document_topic_coverage(connection, 7) == 1.0
+
+    connection.execute(
+        "DELETE FROM knowledge_generation_item_sources WHERE evidence_id = 'evidence-2'"
+    )
+
+    assert _multi_document_topic_coverage(connection, 7) == 0.0
 
 
 def _identity_candidate(
@@ -93,6 +240,27 @@ def test_one_generic_alias_cannot_merge_distinct_corpus_identities() -> None:
     clusters = _candidate_clusters((storage, network))
 
     assert clusters == ((storage,), (network,))
+
+
+def test_same_identity_keeps_claims_from_distinct_applicability_scopes() -> None:
+    alpha = _identity_candidate(
+        "alpha",
+        title="Cluster networking",
+        aliases=(),
+        tags=("network",),
+        platform="Alpha",
+    )
+    beta = _identity_candidate(
+        "beta",
+        title="Cluster networking",
+        aliases=(),
+        tags=("network",),
+        platform="Beta",
+    )
+
+    clusters = _candidate_clusters((alpha, beta))
+
+    assert clusters == ((alpha, beta),)
 
 
 def test_missing_applicability_is_retained_as_explicit_unspecified_scope() -> None:
@@ -153,6 +321,96 @@ def test_opposed_claims_in_overlapping_scope_enter_conflict_review() -> None:
     )
 
     assert _claim_conflicts((positive, negative))
+
+
+def test_different_default_ports_in_the_same_scope_enter_conflict_review() -> None:
+    first = _identity_candidate(
+        "port-8080",
+        title="管理服务端口",
+        aliases=(),
+        tags=("port",),
+        platform="OCloudView",
+    )
+    second = _Candidate(
+        **{
+            **first.__dict__,
+            "candidate_id": "port-9090",
+            "document_id": "document-port-9090",
+        }
+    )
+    first = _Candidate(
+        **{
+            **first.__dict__,
+            "claims": (
+                _Claim(
+                    role="configuration",
+                    text="管理服务默认端口为 8080。",
+                    applicability=(("platform", "OCloudView"),),
+                    evidence_ids=("evidence-8080",),
+                ),
+            ),
+        }
+    )
+    second = _Candidate(
+        **{
+            **second.__dict__,
+            "claims": (
+                _Claim(
+                    role="configuration",
+                    text="管理服务默认端口为 9090。",
+                    applicability=(("platform", "OCloudView"),),
+                    evidence_ids=("evidence-9090",),
+                ),
+            ),
+        }
+    )
+
+    assert _claim_conflicts((first, second))
+
+
+def test_numbered_steps_are_not_misclassified_as_value_conflicts() -> None:
+    first = _identity_candidate(
+        "step-one",
+        title="安装步骤",
+        aliases=(),
+        tags=(),
+        platform="OCloudView",
+    )
+    second = _Candidate(
+        **{
+            **first.__dict__,
+            "candidate_id": "step-two",
+            "document_id": "document-step-two",
+        }
+    )
+    first = _Candidate(
+        **{
+            **first.__dict__,
+            "claims": (
+                _Claim(
+                    role="step",
+                    text="步骤 1：安装系统。",
+                    applicability=(("platform", "OCloudView"),),
+                    evidence_ids=("evidence-step-1",),
+                ),
+            ),
+        }
+    )
+    second = _Candidate(
+        **{
+            **second.__dict__,
+            "claims": (
+                _Claim(
+                    role="step",
+                    text="步骤 2：配置网络。",
+                    applicability=(("platform", "OCloudView"),),
+                    evidence_ids=("evidence-step-2",),
+                ),
+            ),
+        }
+    )
+
+    assert not _claim_conflicts((first, second))
 
 
 def test_corpus_uses_one_dominant_or_explicitly_overridden_page_language() -> None:
@@ -549,6 +807,36 @@ def test_navigation_reserves_one_relevant_document_summary() -> None:
     assert selected[3].authority_id == "deployment-manual"
 
 
+def test_navigation_requested_routes_cannot_reread_excluded_route() -> None:
+    visited = _descriptor(score=140, kind="concept", authority_id="visited")
+    unread = _descriptor(score=120, kind="concept", authority_id="unread")
+
+    selected = _select_read_descriptors(
+        (visited, unread),
+        max_reads=1,
+        excluded_routes=frozenset((visited.route,)),
+        requested_routes=(visited.route,),
+        requested_only=True,
+    )
+
+    assert selected == ()
+
+
+def test_navigation_reads_only_the_routes_requested_by_an_adaptive_round() -> None:
+    requested = _descriptor(score=80, kind="summary", authority_id="requested")
+    higher_ranked = _descriptor(score=140, kind="concept", authority_id="higher-ranked")
+
+    selected = _select_read_descriptors(
+        (higher_ranked, requested),
+        max_reads=12,
+        excluded_routes=frozenset(),
+        requested_routes=(requested.route,),
+        requested_only=True,
+    )
+
+    assert selected == (requested,)
+
+
 def test_navigation_ranks_procedural_sources_before_revision_history() -> None:
     connection = sqlite3.connect(":memory:")
     connection.executescript(
@@ -687,7 +975,8 @@ def test_extended_import_admits_procedure_and_rejects_raw_literal(tmp_path: Path
         generation = connection.execute(
             """
             SELECT generations.generation_id, generations.qualification_state,
-                items.kind, items.title, items.content_markdown
+                items.kind, items.title, items.content_markdown,
+                generations.qualification_report_json
             FROM knowledge_generation_state AS state
             JOIN knowledge_generations AS generations
                 ON generations.generation_id = state.current_generation_id
@@ -699,6 +988,27 @@ def test_extended_import_admits_procedure_and_rejects_raw_literal(tmp_path: Path
         assert generation[1:4] == ("qualified", "procedure", "双节点超融合部署")
         assert "## 操作步骤" in str(generation[4])
         assert "## 验证" in str(generation[4])
+        qualification = json.loads(str(generation[5]))
+        assert qualification["schema_version"] == "openkb.corpus-benchmark.v2"
+        assert qualification["passed"] is True
+        assert qualification["structural_gate_passed"] is True
+        assert qualification["noise_leakage_rate"] <= 0.02
+        assert qualification["duplicate_identity_rate"] <= 0.05
+        assert qualification["multi_document_topic_coverage"] >= 0.85
+        assert qualification["procedure_stage_coverage"] >= 0.85
+        real_corpus = qualification["real_corpus_benchmark"]
+        assert real_corpus["suite_id"] == "ocloudware-dual-node-hyperconverged-v1"
+        assert real_corpus["sample_count"] >= 3
+        assert real_corpus["answer_completeness"] >= 0.85
+        assert real_corpus["answer_correctness"] >= 0.95
+        assert real_corpus["citation_precision"] >= 0.95
+        assert real_corpus["unsupported_claim_count"] == 0
+        assert real_corpus["retrieval_replay_passed"] is True
+        assert real_corpus["automated_regression_passed"] is True
+        assert real_corpus["passed"] is True
+        assert len(real_corpus["corpus_digest"]) == 64
+        assert len(real_corpus["contract_digest"]) == 64
+        assert len(real_corpus["report_digest"]) == 64
         assert connection.execute(
             """
             SELECT COUNT(*) FROM knowledge_generation_state AS state
@@ -720,7 +1030,7 @@ def test_extended_import_admits_procedure_and_rejects_raw_literal(tmp_path: Path
     assert "canonical_evidence_id" in projected
 
 
-def test_cross_document_aliases_merge_into_one_stable_identity(tmp_path: Path) -> None:
+def test_cross_document_model_aliases_require_identity_review(tmp_path: Path) -> None:
     kb_dir = tmp_path / "knowledge"
     first = tmp_path / "part-one.md"
     second = tmp_path / "part-two.md"
@@ -742,19 +1052,6 @@ def test_cross_document_aliases_merge_into_one_stable_identity(tmp_path: Path) -
 
     _import(server, first, "qualified-corpus-first")
     database = kb_dir / ".openkb" / "state.sqlite3"
-    with sqlite3.connect(database) as connection:
-        first_identity = str(
-            connection.execute(
-                """
-                SELECT items.identity_id
-                FROM knowledge_generation_state AS state
-                JOIN knowledge_generation_items AS items
-                    ON items.generation_id = state.current_generation_id
-                WHERE items.kind = 'procedure'
-                """
-            ).fetchone()[0]
-        )
-
     _import(server, second, "qualified-corpus-second")
 
     with sqlite3.connect(database) as connection:
@@ -767,11 +1064,9 @@ def test_cross_document_aliases_merge_into_one_stable_identity(tmp_path: Path) -
             WHERE items.kind = 'procedure'
             """
         ).fetchall()
+        # The prior safe page remains current while the plausible second identity is
+        # withheld for review; no duplicate provisional page may be published.
         assert len(rows) == 1
-        assert str(rows[0][0]) == first_identity
-        content = str(rows[0][1])
-        assert "先在第一个节点完成管理服务初始化" in content
-        assert "在第二个节点完成集群加入操作" in content
         assert connection.execute(
             """
             SELECT COUNT(DISTINCT sources.evidence_id)
@@ -783,10 +1078,13 @@ def test_cross_document_aliases_merge_into_one_stable_identity(tmp_path: Path) -
                 AND items.item_key = sources.item_key
             WHERE items.kind = 'procedure'
             """
-        ).fetchone() == (2,)
-        assert connection.execute(
-            "SELECT COUNT(*) FROM knowledge_identity_review_items WHERE status = 'pending'"
-        ).fetchone() == (0,)
+        ).fetchone() == (1,)
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM knowledge_identity_review_items WHERE status = 'pending'"
+            ).fetchone()[0]
+            >= 1
+        )
 
 
 def test_virtual_navigation_reads_qualified_procedure_and_supplements_source(
@@ -863,7 +1161,7 @@ def test_virtual_navigation_reads_qualified_procedure_and_supplements_source(
     evidence_ids = {reference.evidence_id for reference in pack.evidence}
     assert set(pack.guidance[0].source_evidence_ids) <= evidence_ids
     assert pack.retrieval_trace.navigation_read_count <= 4
-    assert pack.retrieval_trace.source_window_count == 1
+    assert 1 <= pack.retrieval_trace.source_window_count <= 4
     assert pack.retrieval_trace.link_hop_count <= 1
     assert pack.retrieval_trace.coverage_gate_state == "uncovered"
     assert pack.retrieval_trace.navigation_stop_reason == "model_degraded"
@@ -888,5 +1186,12 @@ def test_virtual_navigation_excludes_legacy_unqualified_generation(
     pack = DesktopEvidenceRetriever(kb_dir).retrieve("Legacy Topic")
 
     assert pack.evidence
-    assert pack.guidance == ()
-    assert pack.retrieval_trace.navigation_read_count == 0
+    assert pack.guidance
+    assert all(not item.route.startswith("generated/") for item in pack.guidance)
+    assert all(
+        item.authority in {"document_summary", "source_document", "source_section"}
+        for item in pack.guidance
+    )
+    assert all(
+        not route.startswith("generated/") for route in pack.retrieval_trace.navigation_routes
+    )

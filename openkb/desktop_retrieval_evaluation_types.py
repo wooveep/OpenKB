@@ -4,14 +4,62 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Literal, cast
+from typing import TYPE_CHECKING, Iterable, Literal, cast
 
+from openkb.desktop_navigator_evaluation_types import DesktopNavigatorEvaluationGate
+from openkb.desktop_original_agent_observation import (
+    DesktopEvaluationEvidenceSelector,
+    DesktopOriginalAgentObservation,
+    evidence_selector,
+    original_agent_observation,
+)
 from openkb.desktop_retrieval_channels import (
     DESKTOP_EVALUATION_VARIANTS,
     DesktopEvaluationVariant,
     normalize_retrieval_channel,
+)
+from openkb.desktop_retrieval_evaluation_validation import (
+    optional_nonnegative_int as _optional_nonnegative_int,
+)
+
+if TYPE_CHECKING:
+    from openkb.desktop_retrieval_evaluation_stability import (
+        DesktopRetrievalEvaluationVariantStability,
+    )
+from openkb.desktop_retrieval_evaluation_validation import (
+    optional_positive_float as _optional_positive_float,
+)
+from openkb.desktop_retrieval_evaluation_validation import (
+    optional_report_bool as _optional_report_bool,
+)
+from openkb.desktop_retrieval_evaluation_validation import (
+    optional_report_float as _optional_report_float,
+)
+from openkb.desktop_retrieval_evaluation_validation import (
+    optional_sha256 as _optional_sha256,
+)
+from openkb.desktop_retrieval_evaluation_validation import (
+    optional_string as _optional_string,
+)
+from openkb.desktop_retrieval_evaluation_validation import (
+    report_bool as _report_bool,
+)
+from openkb.desktop_retrieval_evaluation_validation import (
+    report_float as _report_float,
+)
+from openkb.desktop_retrieval_evaluation_validation import (
+    report_int as _report_int,
+)
+from openkb.desktop_retrieval_evaluation_validation import (
+    required_sha256 as _required_sha256,
+)
+from openkb.desktop_retrieval_evaluation_validation import (
+    required_string as _required_string,
+)
+from openkb.desktop_retrieval_evaluation_validation import (
+    required_strings as _required_strings,
 )
 from openkb.locks import atomic_write_text
 
@@ -54,14 +102,7 @@ class DesktopEvaluationAnswer:
     text: str
     model_cost: DesktopEvaluationModelCost = DesktopEvaluationModelCost()
     status: str = "completed"
-
-
-@dataclass(frozen=True)
-class DesktopEvaluationEvidenceSelector:
-    """A durable corpus-snapshot anchor, resolved to a run-local EvidenceRef."""
-
-    document_name: str
-    text_contains: str
+    cited_evidence_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +116,7 @@ class DesktopRetrievalEvaluationCase:
     expected_answer_terms: tuple[str, ...]
     expect_absent_answer: bool = False
     long_document: bool = False
+    original_observation: DesktopOriginalAgentObservation | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +131,9 @@ class DesktopRetrievalEvaluationSuite:
     max_additional_retrieval_p95_ms: float = PAGE_TREE_MAX_ADDITIONAL_RETRIEVAL_P95_MS
     max_additional_model_calls_per_case: int = 1
     max_navigator_model_calls_per_case: int = 8
+    schema_version: int = 1
+    navigator_model_profile_digest: str | None = None
+    minimum_navigator_repetitions: int = 1
 
     @classmethod
     def from_json(cls, path: Path) -> DesktopRetrievalEvaluationSuite:
@@ -98,12 +143,20 @@ class DesktopRetrievalEvaluationSuite:
             raise ValueError("Desktop retrieval evaluation suite is unreadable.") from error
         if not isinstance(payload, dict):
             raise ValueError("Desktop retrieval evaluation suite must be a JSON object.")
-        if payload.get("schema_version") != 1:
-            raise ValueError("Desktop retrieval evaluation suite schema_version must be 1.")
+        schema_version = payload.get("schema_version")
+        if schema_version not in {1, 2, 3}:
+            raise ValueError("Desktop retrieval evaluation suite schema_version must be 1, 2 or 3.")
         raw_cases = payload.get("cases")
         if not isinstance(raw_cases, list) or not raw_cases:
             raise ValueError("Desktop retrieval evaluation suite must contain cases.")
-        cases = tuple(_evaluation_case(value) for value in raw_cases)
+        cases = tuple(
+            _evaluation_case(
+                value,
+                require_original=schema_version >= 2,
+                require_reference_identity=schema_version >= 3,
+            )
+            for value in raw_cases
+        )
         if len({case.case_id for case in cases}) != len(cases):
             raise ValueError("Desktop retrieval evaluation case IDs must be unique.")
         categories = {case.category for case in cases}
@@ -125,6 +178,15 @@ class DesktopRetrievalEvaluationSuite:
             max_additional_retrieval_p95_ms=_page_tree_latency_budget(payload),
             max_additional_model_calls_per_case=_model_call_budget(payload),
             max_navigator_model_calls_per_case=_navigator_model_call_budget(payload),
+            schema_version=schema_version,
+            navigator_model_profile_digest=(
+                _required_sha256(payload, "navigator_model_profile_digest")
+                if schema_version >= 3
+                else _optional_sha256(payload, "navigator_model_profile_digest")
+            ),
+            minimum_navigator_repetitions=_minimum_navigator_repetitions(
+                payload, required=schema_version >= 3
+            ),
         )
 
 
@@ -150,7 +212,18 @@ def evaluation_corpus_identity(suite_path: Path) -> tuple[str, tuple[str, ...]]:
     suite = DesktopRetrievalEvaluationSuite.from_json(suite_path)
     file_names = tuple(
         sorted(
-            {selector.document_name for case in suite.cases for selector in case.expected_evidence}
+            {
+                selector.document_name
+                for case in suite.cases
+                for selector in (
+                    *case.expected_evidence,
+                    *(
+                        case.original_observation.critical_evidence
+                        if case.original_observation is not None
+                        else ()
+                    ),
+                )
+            }
         )
     )
     records: list[tuple[str, str]] = []
@@ -230,6 +303,12 @@ class DesktopRetrievalEvaluationCaseResult:
     degradation_reasons: tuple[str, ...] = ()
     catalog_generation_ids: tuple[str, ...] = ()
     page_tree_generation_ids: tuple[str, ...] = ()
+    cited_evidence_ids: tuple[str, ...] = ()
+    original_evidence_ids: tuple[str, ...] = ()
+    original_evidence_recall_at_k: float = 0.0
+    original_citation_precision: float = 0.0
+    original_answer_point_coverage: float = 0.0
+    unsupported_claim_count: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -252,6 +331,12 @@ class DesktopRetrievalEvaluationCaseResult:
             "degradation_reasons": list(self.degradation_reasons),
             "catalog_generation_ids": list(self.catalog_generation_ids),
             "page_tree_generation_ids": list(self.page_tree_generation_ids),
+            "cited_evidence_ids": list(self.cited_evidence_ids),
+            "original_evidence_ids": list(self.original_evidence_ids),
+            "original_evidence_recall_at_k": self.original_evidence_recall_at_k,
+            "original_citation_precision": self.original_citation_precision,
+            "original_answer_point_coverage": self.original_answer_point_coverage,
+            "unsupported_claim_count": self.unsupported_claim_count,
         }
 
 
@@ -268,6 +353,8 @@ class DesktopRetrievalEvaluationMetrics:
     retrieval_p95_ms: float
     model_cost: DesktopEvaluationModelCost
     degradation_runs: int = 0
+    original_answer_point_coverage: float = 0.0
+    unsupported_claim_count: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -282,6 +369,8 @@ class DesktopRetrievalEvaluationMetrics:
             "retrieval_p95_ms": self.retrieval_p95_ms,
             "model_cost": self.model_cost.as_dict(),
             "degradation_runs": self.degradation_runs,
+            "original_answer_point_coverage": self.original_answer_point_coverage,
+            "unsupported_claim_count": self.unsupported_claim_count,
         }
 
 
@@ -321,25 +410,6 @@ class DesktopLocalGraphEvaluationGate:
 
 
 @dataclass(frozen=True)
-class DesktopNavigatorEvaluationGate:
-    passed: bool
-    frozen_reference_complete: bool
-    evidence_recall_non_regression: bool
-    no_critical_evidence_loss: bool
-    citation_precision_non_regression: bool
-    absent_answer_non_regression: bool
-    faithfulness_non_regression: bool
-    retrieval_p95_within_budget: bool
-    model_cost_within_budget: bool
-    degradation_free: bool
-    knowledge_snapshot_stable: bool
-    fixed_suite_complete: bool
-
-    def as_dict(self) -> dict[str, bool]:
-        return {field: bool(getattr(self, field)) for field in self.__dataclass_fields__}
-
-
-@dataclass(frozen=True)
 class DesktopRetrievalEvaluationReport:
     suite_snapshot_id: str
     suite_digest: str
@@ -354,11 +424,16 @@ class DesktopRetrievalEvaluationReport:
     gate: DesktopPageTreeEvaluationGate
     local_graph_gate: DesktopLocalGraphEvaluationGate
     navigator_gate: DesktopNavigatorEvaluationGate
+    source_integrity_healthy: bool
+    model_profile_digest: str | None = None
     corpus_digest: str | None = None
     pageindex_worker_sha256: str | None = None
     final_knowledge_snapshot_digest: str | None = None
     final_knowledge_snapshot_revision: int | None = None
     final_derived_snapshot_digest: str | None = None
+    stability: dict[DesktopEvaluationVariant, DesktopRetrievalEvaluationVariantStability] = field(
+        default_factory=dict
+    )
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -377,11 +452,14 @@ class DesktopRetrievalEvaluationReport:
             "gate": self.gate.as_dict(),
             "local_graph_gate": self.local_graph_gate.as_dict(),
             "navigator_gate": self.navigator_gate.as_dict(),
+            "source_integrity_healthy": self.source_integrity_healthy,
+            "model_profile_digest": self.model_profile_digest,
             "corpus_digest": self.corpus_digest,
             "pageindex_worker_sha256": self.pageindex_worker_sha256,
             "final_knowledge_snapshot_digest": self.final_knowledge_snapshot_digest,
             "final_knowledge_snapshot_revision": self.final_knowledge_snapshot_revision,
             "final_derived_snapshot_digest": self.final_derived_snapshot_digest,
+            "stability": {variant: record.as_dict() for variant, record in self.stability.items()},
         }
 
     def write(self, path: Path) -> None:
@@ -398,7 +476,12 @@ class DesktopRetrievalEvaluationReport:
         return _evaluation_report(payload)
 
 
-def _evaluation_case(value: object) -> DesktopRetrievalEvaluationCase:
+def _evaluation_case(
+    value: object,
+    *,
+    require_original: bool = False,
+    require_reference_identity: bool = False,
+) -> DesktopRetrievalEvaluationCase:
     if not isinstance(value, dict):
         raise ValueError("Desktop retrieval evaluation cases must be objects.")
     category_value = _required_string(value, "category")
@@ -407,7 +490,7 @@ def _evaluation_case(value: object) -> DesktopRetrievalEvaluationCase:
     raw_expected_evidence = value.get("expected_evidence")
     if not isinstance(raw_expected_evidence, list):
         raise ValueError("Desktop retrieval evaluation expected_evidence must be an array.")
-    expected_evidence = tuple(_evidence_selector(item) for item in raw_expected_evidence)
+    expected_evidence = tuple(evidence_selector(item) for item in raw_expected_evidence)
     expected_answer_terms = _required_strings(value, "expected_answer_terms")
     expect_absent_answer = value.get("expect_absent_answer", False)
     long_document = value.get("long_document", False)
@@ -428,19 +511,18 @@ def _evaluation_case(value: object) -> DesktopRetrievalEvaluationCase:
         expected_answer_terms=expected_answer_terms,
         expect_absent_answer=expect_absent_answer,
         long_document=long_document,
-    )
-
-
-def _evidence_selector(value: object) -> DesktopEvaluationEvidenceSelector:
-    if not isinstance(value, dict):
-        raise ValueError("Desktop retrieval evaluation evidence selectors must be objects.")
-    return DesktopEvaluationEvidenceSelector(
-        document_name=_required_string(value, "document_name"),
-        text_contains=_required_string(value, "text_contains"),
+        original_observation=original_agent_observation(
+            value.get("original_observation"),
+            required=require_original,
+            expect_absent_answer=expect_absent_answer,
+            require_reference_identity=require_reference_identity,
+        ),
     )
 
 
 def _evaluation_report(value: dict[object, object]) -> DesktopRetrievalEvaluationReport:
+    from openkb.desktop_retrieval_evaluation_stability import report_stability
+
     raw_results = value.get("results")
     raw_metrics = value.get("metrics")
     raw_gate = value.get("gate")
@@ -488,6 +570,8 @@ def _evaluation_report(value: dict[object, object]) -> DesktopRetrievalEvaluatio
             if isinstance(raw_navigator_gate, dict)
             else _failed_navigator_gate()
         ),
+        source_integrity_healthy=_optional_report_bool(value, "source_integrity_healthy"),
+        model_profile_digest=_optional_sha256(value, "model_profile_digest"),
         corpus_digest=_optional_sha256(value, "corpus_digest"),
         pageindex_worker_sha256=_optional_sha256(value, "pageindex_worker_sha256"),
         final_knowledge_snapshot_digest=_optional_sha256(value, "final_knowledge_snapshot_digest"),
@@ -497,6 +581,7 @@ def _evaluation_report(value: dict[object, object]) -> DesktopRetrievalEvaluatio
             else None
         ),
         final_derived_snapshot_digest=_optional_sha256(value, "final_derived_snapshot_digest"),
+        stability=report_stability(value.get("stability")),
     )
 
 
@@ -531,6 +616,22 @@ def _report_result(value: object) -> DesktopRetrievalEvaluationCaseResult:
         degradation_reasons=_required_strings(value, "degradation_reasons"),
         catalog_generation_ids=_required_strings(value, "catalog_generation_ids"),
         page_tree_generation_ids=_required_strings(value, "page_tree_generation_ids"),
+        cited_evidence_ids=_required_strings(value, "cited_evidence_ids"),
+        original_evidence_ids=_required_strings(value, "original_evidence_ids"),
+        original_evidence_recall_at_k=_optional_report_float(
+            value, "original_evidence_recall_at_k", 0.0
+        ),
+        original_citation_precision=_optional_report_float(
+            value, "original_citation_precision", 0.0
+        ),
+        original_answer_point_coverage=_optional_report_float(
+            value, "original_answer_point_coverage", 0.0
+        ),
+        unsupported_claim_count=(
+            _report_int(value, "unsupported_claim_count")
+            if "unsupported_claim_count" in value
+            else 0
+        ),
     )
 
 
@@ -556,6 +657,14 @@ def _report_metrics(value: dict[object, object]) -> DesktopRetrievalEvaluationMe
         degradation_runs=(
             _report_int(value, "degradation_runs") if "degradation_runs" in value else 0
         ),
+        original_answer_point_coverage=_optional_report_float(
+            value, "original_answer_point_coverage", 0.0
+        ),
+        unsupported_claim_count=(
+            _report_int(value, "unsupported_claim_count")
+            if "unsupported_claim_count" in value
+            else 0
+        ),
     )
 
 
@@ -573,7 +682,9 @@ def _report_local_graph_gate(value: dict[object, object]) -> DesktopLocalGraphEv
 
 def _report_navigator_gate(value: dict[object, object]) -> DesktopNavigatorEvaluationGate:
     fields = DesktopNavigatorEvaluationGate.__dataclass_fields__
-    return DesktopNavigatorEvaluationGate(**{field: _report_bool(value, field) for field in fields})
+    return DesktopNavigatorEvaluationGate(
+        **{field: _report_bool(value, field) if field in value else False for field in fields}
+    )
 
 
 def _failed_local_graph_gate() -> DesktopLocalGraphEvaluationGate:
@@ -581,7 +692,9 @@ def _failed_local_graph_gate() -> DesktopLocalGraphEvaluationGate:
 
 
 def _failed_navigator_gate() -> DesktopNavigatorEvaluationGate:
-    return DesktopNavigatorEvaluationGate(*([False] * 12))
+    return DesktopNavigatorEvaluationGate(
+        **{field: False for field in DesktopNavigatorEvaluationGate.__dataclass_fields__}
+    )
 
 
 def _report_providers(value: object) -> tuple[DesktopPageTreeProviderIdentity, ...]:
@@ -629,42 +742,14 @@ def _report_model_cost(value: dict[object, object]) -> DesktopEvaluationModelCos
     )
 
 
-def _required_string(value: dict[object, object], key: str) -> str:
-    candidate = value.get(key)
-    if not isinstance(candidate, str) or not candidate.strip():
-        raise ValueError(f"Desktop retrieval evaluation field {key} must be a string.")
-    return candidate.strip()
-
-
-def _required_strings(value: dict[object, object], key: str) -> tuple[str, ...]:
-    candidates = value.get(key, [])
-    if not isinstance(candidates, list):
-        raise ValueError(f"Desktop retrieval evaluation field {key} must be an array.")
-    values = tuple(item.strip() for item in candidates if isinstance(item, str) and item.strip())
-    if len(values) != len(candidates):
-        raise ValueError(f"Desktop retrieval evaluation field {key} contains invalid values.")
-    return values
-
-
-def _optional_string(value: dict[object, object], key: str) -> str | None:
-    candidate = value.get(key)
-    if candidate is None:
-        return None
-    if not isinstance(candidate, str) or not candidate.strip():
-        raise ValueError(f"Desktop retrieval evaluation field {key} must be a string or null.")
-    return candidate.strip()
-
-
-def _optional_sha256(value: dict[object, object], key: str) -> str | None:
-    candidate = value.get(key)
-    if candidate is None:
-        return None
-    if (
-        not isinstance(candidate, str)
-        or len(candidate) != 64
-        or any(character not in "0123456789abcdef" for character in candidate)
-    ):
-        raise ValueError(f"Desktop retrieval evaluation field {key} must be a SHA-256.")
+def _minimum_navigator_repetitions(value: dict[object, object], *, required: bool) -> int:
+    candidate = value.get("minimum_navigator_repetitions")
+    if candidate is None and not required:
+        return 1
+    if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate < 2:
+        raise ValueError(
+            "Desktop retrieval evaluation field minimum_navigator_repetitions must be at least two."
+        )
     return candidate
 
 
@@ -673,24 +758,6 @@ def _page_tree_latency_budget(value: dict[object, object]) -> float:
     if configured is not None and configured > PAGE_TREE_MAX_ADDITIONAL_RETRIEVAL_P95_MS:
         raise ValueError("Desktop PageTree added retrieval p95 cannot exceed 10 seconds.")
     return configured or PAGE_TREE_MAX_ADDITIONAL_RETRIEVAL_P95_MS
-
-
-def _optional_positive_float(value: dict[object, object], key: str) -> float | None:
-    candidate = value.get(key)
-    if candidate is None:
-        return None
-    if isinstance(candidate, bool) or not isinstance(candidate, (int, float)) or candidate <= 0:
-        raise ValueError(f"Desktop retrieval evaluation field {key} must be positive.")
-    return float(candidate)
-
-
-def _optional_nonnegative_int(value: dict[object, object], key: str) -> int | None:
-    candidate = value.get(key)
-    if candidate is None:
-        return None
-    if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate < 0:
-        raise ValueError(f"Desktop retrieval evaluation field {key} must be nonnegative.")
-    return candidate
 
 
 def _model_call_budget(value: dict[object, object]) -> int:
@@ -713,32 +780,3 @@ def _navigator_model_call_budget(value: dict[object, object]) -> int:
     if budget is None:
         raise ValueError(f"Desktop retrieval evaluation field {key} must be nonnegative.")
     return budget
-
-
-def _report_int(value: dict[object, object], key: str, *, minimum: int = 0) -> int:
-    candidate = value.get(key)
-    if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate < minimum:
-        raise ValueError(f"Desktop retrieval evaluation report field {key} is invalid.")
-    return candidate
-
-
-def _report_float(value: dict[object, object], key: str) -> float:
-    candidate = value.get(key)
-    if isinstance(candidate, bool) or not isinstance(candidate, (int, float)) or candidate < 0:
-        raise ValueError(f"Desktop retrieval evaluation report field {key} is invalid.")
-    return float(candidate)
-
-
-def _optional_report_float(value: dict[object, object], key: str, default: float) -> float:
-    return _report_float(value, key) if key in value else default
-
-
-def _report_bool(value: dict[object, object], key: str) -> bool:
-    candidate = value.get(key)
-    if not isinstance(candidate, bool):
-        raise ValueError(f"Desktop retrieval evaluation report field {key} is invalid.")
-    return candidate
-
-
-def _optional_report_bool(value: dict[object, object], key: str) -> bool:
-    return _report_bool(value, key) if key in value else False

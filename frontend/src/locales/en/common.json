@@ -706,6 +706,7 @@
         "exporting": "Exporting…",
         "portableWiki": "Portable Wiki",
         "portableWikiDescription": "Readable summaries, semantic knowledge pages, source Markdown, images, aliases, and snapshot checksums.",
+        "portableWikiPreview": "{{count}} available documents · about {{size}}",
         "projection": "Knowledge projection",
         "projectionDescription": "OKF Markdown and source manifest, without original files.",
         "selfContained": "Self-contained bundle",

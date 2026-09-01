@@ -2,10 +2,10 @@
 
 use super::{
     BridgeError, BridgeResult, EngineSupervisor, KnowledgeAdoptionDecision,
-    KnowledgeAdoptionResult, KnowledgeExportMode, KnowledgeExportResult, KnowledgePage,
-    KnowledgePageDeletionResult, KnowledgePageKind, KnowledgePagesResult, KnowledgeSourcesResult,
-    KnowledgeWorkspaceHistory, KnowledgeWorkspaceItemDetail, KnowledgeWorkspaceItemRequest,
-    KnowledgeWorkspaceResult, LONG_REQUEST_TIMEOUT,
+    KnowledgeAdoptionResult, KnowledgeExportMode, KnowledgeExportPreview, KnowledgeExportResult,
+    KnowledgePage, KnowledgePageDeletionResult, KnowledgePageKind, KnowledgePagesResult,
+    KnowledgeSourcesResult, KnowledgeWorkspaceHistory, KnowledgeWorkspaceItemDetail,
+    KnowledgeWorkspaceItemRequest, KnowledgeWorkspaceResult, LONG_REQUEST_TIMEOUT,
 };
 use serde_json::json;
 
@@ -296,11 +296,16 @@ impl EngineSupervisor {
         destination: String,
         mode: KnowledgeExportMode,
         request_id: String,
+        expected_snapshot_id: Option<String>,
     ) -> BridgeResult<KnowledgeExportResult> {
         self.ensure_started()?;
         let value = self.request_started_with_wait(
             "workbench.export_knowledge_bundle",
-            json!({ "destination": destination, "mode": mode }),
+            json!({
+                "destination": destination,
+                "mode": mode,
+                "expected_snapshot_id": expected_snapshot_id,
+            }),
             Some(request_id),
             Some(LONG_REQUEST_TIMEOUT),
         )?;
@@ -308,6 +313,24 @@ impl EngineSupervisor {
             BridgeError::new(
                 "invalid_engine_response",
                 format!("Engine Knowledge export response has an invalid shape: {error}"),
+            )
+        })
+    }
+
+    pub fn preview_knowledge_bundle(
+        &self,
+        mode: KnowledgeExportMode,
+    ) -> BridgeResult<KnowledgeExportPreview> {
+        self.ensure_started()?;
+        let value = self.request_started(
+            "workbench.preview_knowledge_bundle",
+            json!({ "mode": mode }),
+            None,
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            BridgeError::new(
+                "invalid_engine_response",
+                format!("Engine Knowledge export preview has an invalid shape: {error}"),
             )
         })
     }

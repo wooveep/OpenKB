@@ -8,8 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from openkb.desktop_answer_types import DesktopEvidenceRef, DesktopKnowledgeGuidance
 from openkb.desktop_grounded_answer import (
     DesktopGroundedAnswerService,
+    _answer_output_token_budget,
+    _answer_prompt,
 )
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_model_gateway import (
@@ -18,7 +21,124 @@ from openkb.desktop_model_gateway import (
     DesktopModelProviderResponse,
 )
 from openkb.desktop_retrieval import _source_image_matches_evidence
+from openkb.desktop_retrieval_trace import DesktopRetrievalTrace
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+
+
+def test_answer_prompt_exposes_guidance_structure_without_guidance_facts() -> None:
+    prompt = _answer_prompt(
+        "How do I deploy Alpha?",
+        (
+            DesktopEvidenceRef(
+                "evidence-1",
+                "document-1",
+                "manual.md",
+                "Install",
+                {},
+                "Run the evidence-backed installer.",
+                ("fts",),
+            ),
+        ),
+        (
+            DesktopKnowledgeGuidance(
+                route="generated/procedure/alpha",
+                kind="procedure",
+                authority="published_generation",
+                title="Alpha deployment",
+                content_markdown=(
+                    "## Prerequisites\n\nUNSUPPORTED_GUIDANCE_FACT\n\n## Steps\n\n"
+                    "1. Another unsupported fact."
+                ),
+                source_evidence_ids=("evidence-1",),
+            ),
+        ),
+    )
+
+    assert "Route: generated/procedure/alpha" in prompt
+    assert "Outline: Prerequisites > Steps" in prompt
+    assert "UNSUPPORTED_GUIDANCE_FACT" not in prompt
+    assert "Another unsupported fact" not in prompt
+    assert "Run the evidence-backed installer" in prompt
+
+
+def test_how_to_answer_prompt_groups_original_evidence_into_major_phases() -> None:
+    evidence = (
+        DesktopEvidenceRef(
+            "evidence-keepalived",
+            "deployment-manual",
+            "Deployment Manual",
+            "Cluster deployment / 1. Management HA / 1.1 Keepalived",
+            {},
+            "Install Keepalived on both nodes.",
+            ("knowledge_navigation_source_window",),
+        ),
+        DesktopEvidenceRef(
+            "evidence-mysql",
+            "deployment-manual",
+            "Deployment Manual",
+            "Cluster deployment / 1. Management HA / 1.4 MySQL",
+            {},
+            "Configure MySQL replication.",
+            ("knowledge_navigation_source_window",),
+        ),
+        DesktopEvidenceRef(
+            "evidence-storage",
+            "deployment-manual",
+            "Deployment Manual",
+            "Cluster deployment / 2. Storage / 2.1 Bcache",
+            {},
+            "Install Bcache.",
+            ("knowledge_navigation_source_window",),
+        ),
+    )
+
+    prompt = _answer_prompt(
+        "How do I install the cluster?",
+        evidence,
+        retrieval_trace=DesktopRetrievalTrace(
+            navigation_answer_kind="how_to",
+            navigation_stop_reason="budget_exhausted",
+        ),
+    )
+
+    assert "Evidence Phase Index" in prompt
+    phase_index = prompt.split("Evidence Phase Index", 1)[1].split("\n\nOriginal Evidence is", 1)[0]
+    assert phase_index.count("Deployment Manual — Cluster deployment / 1. Management HA") == 1
+    assert "[1], [2]" in phase_index
+    assert "1.1 Keepalived" in phase_index
+    assert "1.4 MySQL" in phase_index
+    assert "Deployment Manual — Cluster deployment / 2. Storage" in phase_index
+    assert "Stop reason" not in prompt
+
+
+def test_citation_guard_removes_uncited_validation_items_only() -> None:
+    from openkb.desktop_grounded_answer import _citation_guarded_answer
+
+    answer = """# Install cluster
+
+- Prepare both nodes.
+
+## Validation
+
+- Stop nginx and verify VIP failover. [2]
+- Confirm storage is healthy.
+
+## Deployment notes
+
+- Optional scope note without a citation.
+"""
+
+    guarded = _citation_guarded_answer(answer, evidence_count=2)
+
+    assert "Stop nginx and verify VIP failover. [2]" in guarded
+    assert "Confirm storage is healthy." not in guarded
+    assert "Optional scope note without a citation." in guarded
+
+
+def test_answer_output_budget_expands_only_for_large_context_models() -> None:
+    assert _answer_output_token_budget(4_096) == 2_048
+    assert _answer_output_token_budget(16_384) == 2_048
+    assert _answer_output_token_budget(32_768) == 4_096
 
 
 def test_grounded_answer_persists_available_evidence_citations(tmp_path):
