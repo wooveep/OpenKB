@@ -33,6 +33,7 @@ from openkb.desktop_answer_types import (
     DesktopEvidencePack,
     DesktopEvidenceRef,
     DesktopKnowledgeGuidance,
+    DesktopKnowledgeRouteOption,
     DesktopRetrievalModelCost,
     DesktopRetrievalPlan,
 )
@@ -55,6 +56,8 @@ class NavigationRoundRetriever(Protocol):
         _navigation_max_source_windows: int,
         _navigation_excluded_routes: frozenset[str],
         _navigation_prior_evidence: tuple[DesktopEvidenceRef, ...],
+        _navigation_requested_routes: tuple[str, ...],
+        _navigation_source_anchors: tuple[str, ...],
     ) -> DesktopEvidencePack: ...
 
 
@@ -77,7 +80,7 @@ def run_navigation_session(
     coverage = deterministic_seed_coverage(objective, initial_pack)
     pack = initial_pack
     rounds = 0
-    model_calls = 0
+    model_calls = initial_pack.retrieval_model_cost.model_calls
     logical_reads = _logical_reads(pack.retrieval_trace)
     source_tokens = estimated_source_tokens(pack)
     search_actions = 0
@@ -127,7 +130,6 @@ def run_navigation_session(
         )
         if budget_stop is not None:
             stop_reason = budget_stop
-            degradations.append("knowledge_navigation_budget_exhausted")
             break
         if is_cancelled is not None and is_cancelled():
             stop_reason = "cancelled"
@@ -173,7 +175,7 @@ def run_navigation_session(
             stop_reason = "covered"
             break
         if step.decision.decision == "stop":
-            stop_reason = "absent" if not pack.evidence else "partial"
+            stop_reason = "absent" if coverage_gate_state(coverage) == "uncovered" else "partial"
             break
 
         actions = step.decision.actions
@@ -184,9 +186,15 @@ def run_navigation_session(
             if term.casefold()
             not in {existing.casefold() for existing in pack.retrieval_plan.terms}
         )
-        if not new_terms:
-            stop_reason = "partial"
-            degradations.append("knowledge_navigation_no_progress")
+        requested_routes = _unique(route for action in actions for route in action.routes)
+        source_anchors = _unique(
+            evidence_id for action in actions for evidence_id in action.evidence_ids
+        )
+        if not new_terms and not requested_routes and not source_anchors:
+            stop_reason = "no_progress"
+            break
+        if rounds >= NAVIGATION_MAX_ROUNDS:
+            stop_reason = "budget_exhausted"
             break
         for action in actions:
             visited_action_ids.add(action.identity)
@@ -218,7 +226,10 @@ def run_navigation_session(
             _navigation_max_source_windows=source_read_limit,
             _navigation_excluded_routes=frozenset(pack.retrieval_trace.navigation_routes),
             _navigation_prior_evidence=pack.evidence,
+            _navigation_requested_routes=requested_routes,
+            _navigation_source_anchors=source_anchors,
         )
+        model_calls += supplement.retrieval_model_cost.model_calls
         if current_navigation_snapshot_id(database_path) != pinned_snapshot_id:
             stop_reason = "snapshot_degraded"
             degradations.append("knowledge_navigation_snapshot_changed")
@@ -228,8 +239,7 @@ def run_navigation_session(
         logical_reads += _logical_reads(supplement.retrieval_trace)
         source_tokens = estimated_source_tokens(pack)
         if not frozenset(item.evidence_id for item in pack.evidence) - prior_ids:
-            stop_reason = "partial"
-            degradations.append("knowledge_navigation_no_progress")
+            stop_reason = "no_progress"
             break
 
     return _finalize(
@@ -321,6 +331,7 @@ def _merge_packs(
             current.retrieval_model_cost, supplement.retrieval_model_cost
         ),
         guidance=guidance,
+        route_options=_merge_route_options(current, supplement),
     )
 
 
@@ -399,6 +410,14 @@ def _merge_images(
         if image.evidence_id in evidence_ids:
             images.setdefault(image.source_image_id, image)
     return tuple(images.values())
+
+
+def _merge_route_options(
+    first: DesktopEvidencePack,
+    second: DesktopEvidencePack,
+) -> tuple[DesktopKnowledgeRouteOption, ...]:
+    by_route = {item.route: item for item in (*first.route_options, *second.route_options)}
+    return tuple(by_route[route] for route in sorted(by_route))
 
 
 def _merge_trace(

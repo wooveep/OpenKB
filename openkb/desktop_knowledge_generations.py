@@ -204,6 +204,7 @@ def publish_corpus_generation_in(
     current_generation_id: int | None,
     changes: tuple[KnowledgeGenerationChange, ...],
     document_ids: tuple[str, ...],
+    carry_forward_identity_ids: tuple[str, ...],
     synthesis_schema_version: str,
     now: str,
 ) -> int | None:
@@ -223,6 +224,13 @@ def publish_corpus_generation_in(
     if cursor.lastrowid is None:
         raise RuntimeError("Corpus knowledge generation insert returned no identifier.")
     generation_id = int(cursor.lastrowid)
+    if current_generation_id is not None and carry_forward_identity_ids:
+        _carry_forward_generation_identities_in(
+            connection,
+            current_generation_id=current_generation_id,
+            generation_id=generation_id,
+            identity_ids=carry_forward_identity_ids,
+        )
     for change in changes:
         _upsert_generation_change_in(connection, generation_id, change, now)
     connection.executemany(
@@ -232,6 +240,13 @@ def publish_corpus_generation_in(
         """,
         ((generation_id, document_id) for document_id in dict.fromkeys(document_ids)),
     )
+    if corpus_generation_qualification_issues_in(connection, generation_id):
+        connection.execute(
+            "UPDATE knowledge_generations SET qualification_state = 'failed' "
+            "WHERE generation_id = ?",
+            (generation_id,),
+        )
+        return current_generation_id
     connection.execute(
         """
         UPDATE knowledge_generations SET qualification_state = 'qualified'
@@ -248,6 +263,120 @@ def publish_corpus_generation_in(
         (generation_id,),
     )
     return generation_id
+
+
+def corpus_generation_qualification_issues_in(
+    connection: sqlite3.Connection,
+    generation_id: int,
+) -> tuple[str, ...]:
+    """Validate the source and identity invariants required before activation."""
+    issues: list[str] = []
+    item_rows = connection.execute(
+        """
+        SELECT item_key, content_markdown, content_sha256, identity_id, provenance_state
+        FROM knowledge_generation_items WHERE generation_id = ?
+        """,
+        (generation_id,),
+    ).fetchall()
+    if not item_rows:
+        issues.append("empty_generation")
+    if any(
+        not str(row[1]).strip()
+        or str(row[2]) != knowledge_content_sha256(str(row[1]))
+        or row[3] is None
+        or str(row[4]) != "source_backed"
+        for row in item_rows
+    ):
+        issues.append("invalid_item")
+    missing_sources = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM knowledge_generation_items AS items
+        WHERE items.generation_id = ? AND NOT EXISTS (
+            SELECT 1 FROM knowledge_generation_item_sources AS sources
+            WHERE sources.generation_id = items.generation_id
+              AND sources.item_key = items.item_key
+        )
+        """,
+        (generation_id,),
+    ).fetchone()
+    if missing_sources is not None and int(missing_sources[0]) > 0:
+        issues.append("missing_item_source")
+    invalid_sources = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM knowledge_generation_item_sources AS sources
+        WHERE sources.generation_id = ? AND (
+            trim(sources.claim_text) = '' OR NOT EXISTS (
+                SELECT 1 FROM evidence_occurrences AS occurrences
+                JOIN source_documents AS documents
+                  ON documents.document_id = occurrences.document_id
+                WHERE occurrences.evidence_id = sources.evidence_id
+                  AND documents.availability = 'available'
+            )
+        )
+        """,
+        (generation_id,),
+    ).fetchone()
+    if invalid_sources is not None and int(invalid_sources[0]) > 0:
+        issues.append("invalid_item_source")
+    duplicates = connection.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT identity_id
+            FROM knowledge_generation_items
+            WHERE generation_id = ?
+            GROUP BY identity_id HAVING COUNT(*) > 1
+        )
+        """,
+        (generation_id,),
+    ).fetchone()
+    if duplicates is not None and int(duplicates[0]) > 0:
+        issues.append("duplicate_identity")
+    return tuple(issues)
+
+
+def _carry_forward_generation_identities_in(
+    connection: sqlite3.Connection,
+    *,
+    current_generation_id: int,
+    generation_id: int,
+    identity_ids: tuple[str, ...],
+) -> None:
+    placeholders = ", ".join("?" for _ in identity_ids)
+    parameters = (generation_id, current_generation_id, *identity_ids)
+    connection.execute(
+        f"""
+        INSERT INTO knowledge_generation_items (
+            generation_id, item_key, kind, title, normalized_title,
+            content_markdown, content_sha256, source_document_id, created_at,
+            provenance_state, entity_subtype, aliases_json, tags_json,
+            analysis_provenance_json, identity_id
+        )
+        SELECT ?, item_key, kind, title, normalized_title,
+            content_markdown, content_sha256, source_document_id, created_at,
+            provenance_state, entity_subtype, aliases_json, tags_json,
+            analysis_provenance_json, identity_id
+        FROM knowledge_generation_items
+        WHERE generation_id = ? AND identity_id IN ({placeholders})
+        """,
+        parameters,
+    )
+    connection.execute(
+        f"""
+        INSERT INTO knowledge_generation_item_sources (
+            generation_id, item_key, source_id, evidence_id, claim_text
+        )
+        SELECT ?, sources.item_key, sources.source_id,
+            sources.evidence_id, sources.claim_text
+        FROM knowledge_generation_item_sources AS sources
+        JOIN knowledge_generation_items AS items
+          ON items.generation_id = sources.generation_id
+         AND items.item_key = sources.item_key
+        WHERE sources.generation_id = ? AND items.identity_id IN ({placeholders})
+        """,
+        parameters,
+    )
 
 
 def materialize_generation_in(

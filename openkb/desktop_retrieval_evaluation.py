@@ -26,7 +26,11 @@ from openkb.desktop_grounded_answer import (
     generate_grounded_answer,
     prepare_grounded_evidence_pack,
 )
+from openkb.desktop_local_graph_evaluation_gate import (
+    local_graph_evaluation_gate as _local_graph_gate,
+)
 from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_navigator_evaluation_gate import navigator_evaluation_gate
 from openkb.desktop_page_tree import PageTreeGeneration
 from openkb.desktop_readonly import connect_desktop_read_only
 from openkb.desktop_retrieval import (
@@ -43,7 +47,6 @@ from openkb.desktop_retrieval_evaluation_types import (
     PAGE_TREE_MAX_ADDITIONAL_RETRIEVAL_P95_MS,
     DesktopEvaluationAnswer,
     DesktopEvaluationModelCost,
-    DesktopLocalGraphEvaluationGate,
     DesktopPageTreeEvaluationGate,
     DesktopPageTreeGenerationIdentity,
     DesktopPageTreeProviderIdentity,
@@ -235,6 +238,12 @@ class DesktopRetrievalEvaluator:
                 metrics,
                 knowledge_snapshot_stable=knowledge_snapshot_stable,
             ),
+            navigator_gate=navigator_evaluation_gate(
+                suite,
+                results,
+                metrics,
+                knowledge_snapshot_stable=knowledge_snapshot_stable,
+            ),
             corpus_digest=corpus_digest,
             pageindex_worker_sha256=pageindex_worker_sha256,
             final_knowledge_snapshot_digest=final_snapshot.knowledge_snapshot_digest,
@@ -264,6 +273,25 @@ class DesktopRetrievalEvaluator:
         suite: DesktopRetrievalEvaluationSuite,
     ) -> None:
         """Reject a stale or non-passing report before a later provider promotion."""
+        self._require_promotion_eligible(report, suite, report.gate.passed, "a PageTree provider")
+
+    def require_navigator_promotion_eligible(
+        self,
+        report: DesktopRetrievalEvaluationReport,
+        suite: DesktopRetrievalEvaluationSuite,
+    ) -> None:
+        """Reject a stale or non-passing report before Navigator release promotion."""
+        self._require_promotion_eligible(
+            report, suite, report.navigator_gate.passed, "the Navigator"
+        )
+
+    def _require_promotion_eligible(
+        self,
+        report: DesktopRetrievalEvaluationReport,
+        suite: DesktopRetrievalEvaluationSuite,
+        passed: bool,
+        candidate: str,
+    ) -> None:
         current_derived = self._derived_snapshot()
         unchanged = (
             report.suite_snapshot_id == suite.snapshot_id
@@ -274,10 +302,8 @@ class DesktopRetrievalEvaluator:
             and report.page_tree_providers == current_derived.page_tree_providers
             and report.page_tree_generations == current_derived.page_tree_generations
         )
-        if not report.gate.passed:
-            raise ValueError(
-                "A non-passing retrieval evaluation cannot promote a PageTree provider."
-            )
+        if not passed:
+            raise ValueError(f"A non-passing retrieval evaluation cannot promote {candidate}.")
         if not unchanged:
             raise ValueError(
                 "The Desktop Knowledge Base or fixed suite changed after this retrieval "
@@ -720,64 +746,6 @@ def _page_tree_gate(
         derived_generations_stable=derived_generations_stable,
         derived_identity_bound=derived_identity_bound,
         fixed_suite_complete=fixed_suite_complete,
-    )
-
-
-def _local_graph_gate(
-    suite: DesktopRetrievalEvaluationSuite,
-    results: list[DesktopRetrievalEvaluationCaseResult],
-    metrics: dict[DesktopEvaluationVariant, DesktopRetrievalEvaluationMetrics],
-    *,
-    knowledge_snapshot_stable: bool,
-) -> DesktopLocalGraphEvaluationGate:
-    baseline = metrics["baseline"]
-    local_graph = metrics["local_graph"]
-    baseline_by_case = {
-        (result.case_id, result.repetition): result
-        for result in results
-        if result.variant == "baseline"
-    }
-    graph_by_case = {
-        (result.case_id, result.repetition): result
-        for result in results
-        if result.variant == "local_graph"
-    }
-    no_critical_loss = bool(baseline_by_case) and all(
-        key in graph_by_case
-        and graph_by_case[key].evidence_recall_at_k >= result.evidence_recall_at_k
-        for key, result in baseline_by_case.items()
-    )
-    evidence_recall_improved = local_graph.evidence_recall_at_k > baseline.evidence_recall_at_k
-    citation_precision_non_regression = (
-        local_graph.citation_precision >= baseline.citation_precision
-    )
-    faithfulness_non_regression = local_graph.answer_faithfulness >= baseline.answer_faithfulness
-    latency_within_budget = (
-        suite.max_graph_latency_ms is None
-        or local_graph.mean_latency_ms <= suite.max_graph_latency_ms
-    )
-    model_cost_within_budget = (
-        suite.max_graph_model_calls is None
-        or local_graph.model_cost.model_calls <= suite.max_graph_model_calls
-    )
-    passed = (
-        evidence_recall_improved
-        and no_critical_loss
-        and citation_precision_non_regression
-        and faithfulness_non_regression
-        and latency_within_budget
-        and model_cost_within_budget
-        and knowledge_snapshot_stable
-    )
-    return DesktopLocalGraphEvaluationGate(
-        passed=passed,
-        evidence_recall_improved=evidence_recall_improved,
-        no_critical_evidence_loss=no_critical_loss,
-        citation_precision_non_regression=citation_precision_non_regression,
-        faithfulness_non_regression=faithfulness_non_regression,
-        latency_within_budget=latency_within_budget,
-        model_cost_within_budget=model_cost_within_budget,
-        knowledge_snapshot_stable=knowledge_snapshot_stable,
     )
 
 

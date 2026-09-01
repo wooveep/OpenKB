@@ -354,7 +354,9 @@ class DesktopDiagnosticBundleService:
                         ),
                     },
                     "integrity.json": {
-                        "source_integrity": audit_source_integrity_in(connection).as_dict(),
+                        "source_integrity": audit_source_integrity_in(
+                            connection, kb_dir=self._kb_dir
+                        ).as_dict(),
                         "source_document_counts": _rows(
                             connection,
                             """

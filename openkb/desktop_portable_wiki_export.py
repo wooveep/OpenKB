@@ -16,6 +16,10 @@ from pathlib import Path
 
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels
 from openkb.desktop_knowledge_routes import knowledge_route, source_route, summary_route
+from openkb.desktop_portable_wiki_validation import (
+    portable_wiki_snapshot_id,
+    validate_portable_wiki,
+)
 from openkb.locks import atomic_write_text
 
 _ANCHOR_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -146,10 +150,12 @@ def render_portable_wiki_in(
 
     atomic_write_text(staging / "index.md", _index_markdown(routes))
     checksums = _checksums_in(staging)
+    snapshot = _snapshot_in(connection)
     manifest = {
         "format": "openkb-portable-wiki-v1",
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "snapshot": _snapshot_in(connection),
+        "snapshot": snapshot,
+        "snapshot_id": portable_wiki_snapshot_id(snapshot),
         "routes": [asdict(entry) for entry in routes],
         "aliases": _aliases(pages),
         "source_images": [
@@ -170,6 +176,7 @@ def render_portable_wiki_in(
         staging / "wiki-manifest.json",
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
     )
+    validate_portable_wiki(staging)
     return PortableWikiExport(source_image_count=len(set(image_resources.values())))
 
 
@@ -526,6 +533,8 @@ def _write_source_page(
 
 
 def _render_block(kind: str, value: str, heading_path_json: str) -> str:
+    if kind != "code":
+        value = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"Image: \1", value)
     if kind == "heading":
         level = min(6, max(2, len(_heading_parts(heading_path_json)) + 1))
         return f"{'#' * level} {value}"
@@ -533,7 +542,7 @@ def _render_block(kind: str, value: str, heading_path_json: str) -> str:
         fence = "````" if "```" in value else "```"
         return f"{fence}\n{value}\n{fence}"
     if kind == "figure":
-        return f"> Image: {value}"
+        return f"> {value or 'Image: source figure'}"
     return value
 
 

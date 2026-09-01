@@ -535,10 +535,7 @@ function EvidenceDrawer({ version, tab, focusIndex, onTabChange, onClose, onOpen
 
 function NavigationTraceDetails({ trace }: { trace: DesktopAnswerVersion["retrievalTrace"] }) {
   const { t } = useTranslation("common")
-  const visible = trace.navigationSnapshotIds.length > 0
-    || trace.navigationReadCount > 0
-    || trace.navigationRoundCount > 0
-    || trace.groundingInputBudgetTokens > 0
+  const visible = trace.navigationStopReason !== null || trace.coverageAspects.length > 0
   if (!visible) return null
   return (
     <details className="mt-4 rounded-lg border border-border/70 bg-muted/20 p-3 text-xs">
@@ -546,17 +543,8 @@ function NavigationTraceDetails({ trace }: { trace: DesktopAnswerVersion["retrie
       <dl className="mt-3 grid grid-cols-[1fr_auto] gap-x-3 gap-y-2 text-muted-foreground">
         <dt>{t("desktop.conversations.navigationTrace.coverage")}</dt>
         <dd>{t(`desktop.conversations.navigationTrace.coverageStates.${trace.coverageGateState || "not_applicable"}`)}</dd>
-        <dt>{t("desktop.conversations.navigationTrace.rounds")}</dt><dd>{trace.navigationRoundCount}</dd>
         <dt>{t("desktop.conversations.navigationTrace.stopReason")}</dt>
         <dd>{t(`desktop.conversations.navigationTrace.stopReasons.${trace.navigationStopReason || "legacy"}`)}</dd>
-        <dt>{t("desktop.conversations.navigationTrace.modelCalls")}</dt><dd>{trace.navigationModelCalls}</dd>
-        <dt>{t("desktop.conversations.navigationTrace.reads")}</dt><dd>{trace.navigationReadCount}</dd>
-        <dt>{t("desktop.conversations.navigationTrace.logicalReads")}</dt><dd>{trace.navigationLogicalReadCount}</dd>
-        <dt>{t("desktop.conversations.navigationTrace.sourceWindows")}</dt><dd>{trace.sourceWindowCount}</dd>
-        <dt>{t("desktop.conversations.navigationTrace.sourceTokens")}</dt><dd>{trace.navigationSourceTokens}</dd>
-        <dt>{t("desktop.conversations.navigationTrace.linkHops")}</dt><dd>{trace.linkHopCount}</dd>
-        <dt>{t("desktop.conversations.navigationTrace.pageTreeSupplements")}</dt><dd>{trace.pageTreeSupplementCount}</dd>
-        <dt>{t("desktop.conversations.navigationTrace.budget")}</dt><dd>{trace.evidenceInputTokens} + {trace.guidanceInputTokens} / {trace.groundingInputBudgetTokens}</dd>
       </dl>
       {trace.coverageAspects.length ? (
         <div className="mt-3 border-t border-border/60 pt-3">
@@ -570,7 +558,6 @@ function NavigationTraceDetails({ trace }: { trace: DesktopAnswerVersion["retrie
           </ul>
         </div>
       ) : null}
-      {trace.navigationRoutes.length ? <div className="mt-3 border-t border-border/60 pt-3"><p className="font-medium">{t("desktop.conversations.navigationTrace.routes")}</p><ul className="mt-1 space-y-1 text-muted-foreground">{trace.navigationRoutes.map((route) => <li key={route} className="break-all">{route}</li>)}</ul></div> : null}
     </details>
   )
 }

@@ -10,16 +10,18 @@ and request a query-scoped route search for a missing aspect.
 
 The model receives no file, SQL, path, or arbitrary tool capability. The structured contract
 echoes the pinned Navigation Snapshot, keeps code-owned generic answer aspects, cites only
-Evidence IDs already present in the session, and can request only bounded semantic search terms.
-Code rejects stale snapshots, invented Evidence, unknown or repeated actions, unsafe path/SQL
-strings, and batches beyond the remaining budget. One permitted structured-output repair uses
+Evidence IDs already present in the session, and can request bounded semantic search terms,
+advertised virtual routes, or logical sections anchored by already-known Evidence IDs. Code
+rejects stale snapshots, invented Evidence, unadvertised routes, unknown or repeated actions,
+unsafe path/SQL strings, and batches beyond the remaining budget. One structured-output repair uses
 the existing operation suspension and explicit retry authority. Optional failure preserves all
 verified deterministic Evidence and records `model_degraded`, `snapshot_degraded`, `cancelled`,
 or `budget_exhausted` rather than claiming complete coverage.
 
-Budgets are a session envelope, not fixed work quotas: at most three adaptive decisions, six
-physical navigation model attempts, twenty-four logical reads, twenty-four thousand estimated
-source tokens, six route searches, and 120 seconds checked between operations. Independent
+Budgets are a session envelope, not fixed work quotas: at most three adaptive decisions, eight
+physical model attempts across retrieval planning, PageTree selection, navigation and repair,
+twenty-four logical reads, twenty-four thousand estimated source tokens, six navigation actions,
+and 120 seconds checked between operations. Independent
 knowledge and source reads remain batched. Later rounds exclude visited virtual routes, put new
 gap-specific terms ahead of generic seed terms, and stop on no progress. Source expansion reads
 small documents in full and otherwise preserves logical heading sections and whole blocks rather

@@ -331,10 +331,14 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     assert report.gate.page_tree_selection_exercised
     assert report.gate.derived_identity_bound
     assert report.local_graph_gate.passed
+    assert not report.navigator_gate.passed
+    assert not report.navigator_gate.frozen_reference_complete
     assert report.catalog_generation_ids
     assert report.page_tree_providers
     suite = DesktopRetrievalEvaluationSuite.from_json(suite_path)
     evaluator.require_page_tree_promotion_eligible(report, suite)
+    with pytest.raises(ValueError, match="cannot promote the Navigator"):
+        evaluator.require_navigator_promotion_eligible(report, suite)
     with monkeypatch.context() as scoped:
         scoped.setattr(
             "openkb.desktop_retrieval.select_page_tree_evidence",
@@ -362,11 +366,14 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     changed_suite_path = tmp_path / "changed-suite.json"
     changed_suite_payload = json.loads(suite_path.read_text(encoding="utf-8"))
     changed_suite_payload["max_additional_model_calls_per_case"] = 0
+    changed_suite_payload["max_navigator_model_calls_per_case"] = 0
     changed_suite_path.write_text(json.dumps(changed_suite_payload), encoding="utf-8")
     changed_suite = DesktopRetrievalEvaluationSuite.from_json(changed_suite_path)
+    assert changed_suite.max_navigator_model_calls_per_case == 0
     cost_blocked_report = evaluator.evaluate(changed_suite)
     assert not cost_blocked_report.gate.model_cost_within_budget
     assert not cost_blocked_report.gate.passed
+    assert not cost_blocked_report.navigator_gate.model_cost_within_budget
     with pytest.raises(ValueError, match="changed after this retrieval evaluation"):
         evaluator.require_page_tree_promotion_eligible(report, changed_suite)
     generation_content = "This generated page is unrelated to the fixture questions."
@@ -404,6 +411,14 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
         for reference in DesktopEvidenceRetriever(kb_dir).retrieve("policyconflict zeta").evidence
         for channel in reference.channels
     }
+    report = evaluator.evaluate(suite)
+    assert report.navigator_gate.passed, [
+        (result.case_id, result.evidence_recall_at_k, result.answer_faithfulness)
+        for result in report.results
+        if result.variant == "navigator"
+    ]
+    assert report.navigator_gate.frozen_reference_complete
+    evaluator.require_navigator_promotion_eligible(report, suite)
     report_path = tmp_path / "report.json"
     report.write(report_path)
     payload = json.loads(report_path.read_text(encoding="utf-8"))
@@ -415,6 +430,7 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     assert payload["metrics"]["local_graph"]["evidence_recall_k"] == 6
     assert payload["gate"]["passed"] is True
     assert payload["local_graph_gate"]["passed"] is True
+    assert payload["navigator_gate"]["passed"] is True
     assert payload["catalog_generation_ids"] == list(report.catalog_generation_ids)
     assert payload["page_tree_providers"]
     assert payload["page_tree_generations"] == [

@@ -683,7 +683,7 @@ def test_duplicate_claim_merges_independent_available_sources(tmp_path: Path) ->
     )
 
 
-def test_analysis_application_failure_rolls_back_publication_for_resume(
+def test_analysis_application_failure_keeps_the_document_available(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     kb_dir = tmp_path / "knowledge"
@@ -698,36 +698,21 @@ def test_analysis_application_failure_rolls_back_publication_for_resume(
         return _analysis_response(_evidence_ids_from_request(request.content))
 
     importer = DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(analyze))
-    original = importer._knowledge_reconciliation.record_analysis_changes_in
     monkeypatch.setattr(
         importer._knowledge_reconciliation,
         "record_analysis_changes_in",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(SystemExit("simulated crash")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("simulated failure")),
     )
-    with pytest.raises(SystemExit):
-        importer.import_text(source)
+    imported = importer.import_text(source)
+
+    assert imported.document.availability == "available"
     assert calls == 1
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)
-    DesktopKnowledgeBaseRuntime().open(kb_dir)
-    (job_id,) = importer.recoverable_job_ids()
-
-    DesktopTextImportService(kb_dir).import_text(source)
-
-    monkeypatch.setattr(importer._knowledge_reconciliation, "record_analysis_changes_in", original)
-    recovered = importer.resume_text(job_id)
-    assert recovered.document.availability == "available"
-    assert calls == 1
-    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM knowledge_generations").fetchone() == (3,)
-        assert connection.execute(
-            """
-            SELECT provenance_state FROM knowledge_generation_state AS state
-            JOIN knowledge_generation_items AS items
-                ON items.generation_id = state.current_generation_id
-            WHERE items.normalized_title = 'evidence routing'
-            """
-        ).fetchone() == ("source_backed",)
+        assert connection.execute("SELECT availability FROM source_documents").fetchone() == (
+            "available",
+        )
+        assert connection.execute("SELECT status FROM import_jobs").fetchone() == ("completed",)
+        assert connection.execute("SELECT COUNT(*) FROM knowledge_generations").fetchone() == (0,)
 
 
 def test_valid_empty_analysis_still_publishes_the_document(tmp_path: Path) -> None:

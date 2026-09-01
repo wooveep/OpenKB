@@ -27,6 +27,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--promote-local-graph", action="store_true")
     parser.add_argument("--validate-page-tree-promotion", action="store_true")
+    parser.add_argument("--validate-navigator-promotion", action="store_true")
     parser.add_argument("--experimental-pageindex-python", type=Path)
     parser.add_argument("--experimental-pageindex-worker", type=Path)
     parser.add_argument("--pageindex-timeout-seconds", type=float, default=60.0)
@@ -66,7 +67,12 @@ def run(argv: Sequence[str] | None = None) -> int:
         evaluator.promote_local_graph(report)
     if args.validate_page_tree_promotion and report.gate.passed:
         evaluator.require_page_tree_promotion_eligible(report, suite)
-    return 0 if report.gate.passed else 2
+    if args.validate_navigator_promotion and report.navigator_gate.passed:
+        evaluator.require_navigator_promotion_eligible(report, suite)
+    gate_passed = (
+        report.navigator_gate.passed if args.validate_navigator_promotion else report.gate.passed
+    )
+    return 0 if gate_passed else 2
 
 
 def _page_tree_provider(args: argparse.Namespace) -> object | None:

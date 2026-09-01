@@ -609,7 +609,7 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
     assert {"diagnostics", "feature_flags", "results", "current_results"} <= (
         graph_diagnostics.keys()
     )
-    assert integrity["source_integrity"]["schema_version"] == "openkb.source-integrity.v1"
+    assert integrity["source_integrity"]["schema_version"] == "openkb.source-integrity.v2"
     assert integrity["source_integrity"]["status"] == "healthy"
     assert integrity["source_integrity"]["counts"]["available_documents"] == 1
     assert integrity["source_integrity"]["counts"]["document_ir_blocks"] >= 1

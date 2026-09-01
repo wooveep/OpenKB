@@ -9,9 +9,23 @@ from pathlib import Path
 
 from openkb import desktop_catalog_store as catalog_store
 from openkb.desktop_catalog_store import rebuild_pending_catalog
+from openkb.desktop_corpus_knowledge import (
+    _applicability_pairs,
+    _Candidate,
+    _candidate_clusters,
+    _Claim,
+    _claim_conflicts,
+    _corpus_language,
+    synthesize_qualified_corpus_in,
+)
 from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.desktop_knowledge_generations import (
+    KnowledgeGenerationChange,
+    KnowledgeGenerationSource,
+    publish_corpus_generation_in,
+)
 from openkb.desktop_knowledge_navigation import (
     _GuidanceUnit,
     _NavigationRead,
@@ -29,6 +43,392 @@ _APPLICABILITY = {
     "deployment_scenario": "双节点超融合",
     "time_boundary": "",
 }
+
+
+def _identity_candidate(
+    candidate_id: str,
+    *,
+    title: str,
+    aliases: tuple[str, ...],
+    tags: tuple[str, ...],
+    platform: str,
+) -> _Candidate:
+    return _Candidate(
+        candidate_id=candidate_id,
+        document_id=f"document-{candidate_id}",
+        kind="concept",
+        title=title,
+        normalized_title=title.casefold(),
+        entity_subtype=None,
+        aliases=aliases,
+        tags=tags,
+        provenance_json="{}",
+        claims=(
+            _Claim(
+                role="definition",
+                text=f"{title} definition",
+                applicability=(("platform", platform),),
+                evidence_ids=(f"evidence-{candidate_id}",),
+            ),
+        ),
+    )
+
+
+def test_one_generic_alias_cannot_merge_distinct_corpus_identities() -> None:
+    storage = _identity_candidate(
+        "storage",
+        title="Alpha storage",
+        aliases=("cluster",),
+        tags=("storage",),
+        platform="Alpha",
+    )
+    network = _identity_candidate(
+        "network",
+        title="Beta network",
+        aliases=("cluster",),
+        tags=("network",),
+        platform="Beta",
+    )
+
+    clusters = _candidate_clusters((storage, network))
+
+    assert clusters == ((storage,), (network,))
+
+
+def test_missing_applicability_is_retained_as_explicit_unspecified_scope() -> None:
+    applicability = _applicability_pairs(
+        json.dumps(
+            {
+                "product_version": "V10",
+                "platform": "",
+                "deployment_scenario": "双节点超融合",
+                "time_boundary": "",
+            }
+        )
+    )
+
+    assert applicability == (
+        ("product_version", "V10"),
+        ("platform", "Unspecified"),
+        ("deployment_scenario", "双节点超融合"),
+        ("time_boundary", "Unspecified"),
+    )
+
+
+def test_opposed_claims_in_overlapping_scope_enter_conflict_review() -> None:
+    positive = _identity_candidate(
+        "positive",
+        title="VIP 配置",
+        aliases=(),
+        tags=("VIP",),
+        platform="OCloudView",
+    )
+    negative = _Candidate(
+        **{
+            **positive.__dict__,
+            "candidate_id": "negative",
+            "document_id": "document-negative",
+            "claims": (
+                _Claim(
+                    role="definition",
+                    text="不需要配置 VIP。",
+                    applicability=(("platform", "OCloudView"),),
+                    evidence_ids=("evidence-negative",),
+                ),
+            ),
+        }
+    )
+    positive = _Candidate(
+        **{
+            **positive.__dict__,
+            "claims": (
+                _Claim(
+                    role="definition",
+                    text="需要配置 VIP。",
+                    applicability=(("platform", "OCloudView"),),
+                    evidence_ids=("evidence-positive",),
+                ),
+            ),
+        }
+    )
+
+    assert _claim_conflicts((positive, negative))
+
+
+def test_corpus_uses_one_dominant_or_explicitly_overridden_page_language() -> None:
+    chinese = _identity_candidate(
+        "zh",
+        title="中文概念",
+        aliases=(),
+        tags=(),
+        platform="平台",
+    )
+    english = _identity_candidate(
+        "en",
+        title="English concept",
+        aliases=(),
+        tags=(),
+        platform="Platform",
+    )
+
+    assert _corpus_language((chinese, english), preferred_language=None) == "en"
+    assert _corpus_language((chinese, english), preferred_language="zh") == "zh"
+
+
+def test_one_generic_alias_cannot_reuse_an_existing_persistent_identity(
+    tmp_path: Path,
+) -> None:
+    kb_dir = tmp_path / "knowledge"
+    first = tmp_path / "storage.md"
+    second = tmp_path / "network.md"
+    first.write_text("# Alpha storage\n\nStorage definition.", encoding="utf-8")
+    second.write_text("# Beta network\n\nNetwork definition.", encoding="utf-8")
+
+    def response(content: str) -> str:
+        request = json.loads(content)
+        evidence_id = str(request["evidence"][0]["evidence_id"])
+        storage = str(request["document_name"]).startswith("storage")
+        title = "Alpha storage" if storage else "Beta network"
+        platform = "Alpha" if storage else "Beta"
+        tag = "storage" if storage else "network"
+        return json.dumps(
+            {
+                "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+                "analysis_scope": "document",
+                "document_description": f"{title} documentation.",
+                "document_summary": [
+                    {
+                        "role": "purpose",
+                        "text": f"Describe {title}.",
+                        "source_evidence_ids": [evidence_id],
+                    }
+                ],
+                "concepts": [
+                    {
+                        "title": title,
+                        "aliases": ["cluster"],
+                        "tags": [tag],
+                        "claims": [
+                            {
+                                "role": "definition",
+                                "text": f"{title} is a distinct subject.",
+                                "applicability": {
+                                    **_APPLICABILITY,
+                                    "platform": platform,
+                                },
+                                "source_evidence_ids": [evidence_id],
+                            }
+                        ],
+                    }
+                ],
+                "entities": [],
+                "procedures": [],
+            }
+        )
+
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(
+            lambda request, _timeout: response(request.content)
+        ),
+    )
+    server._handshake_complete = True
+    _import(server, first, "generic-alias-first")
+    _import(server, second, "generic-alias-second")
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        rows = connection.execute(
+            """
+            SELECT title, identity_id
+            FROM knowledge_generation_state AS state
+            JOIN knowledge_generation_items AS items
+              ON items.generation_id = state.current_generation_id
+            WHERE items.kind = 'concept'
+            ORDER BY title
+            """
+        ).fetchall()
+
+    assert [str(row[0]) for row in rows] == ["Alpha storage", "Beta network"]
+    assert len({str(row[1]) for row in rows}) == 2
+
+
+def test_ambiguous_identity_cluster_carries_forward_its_prior_generated_item(
+    tmp_path: Path,
+) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "part-one.md"
+    safe_source = tmp_path / "safe.md"
+    source.write_text("# 第一部分\n\n初始化第一个节点。", encoding="utf-8")
+    safe_source.write_text("# 独立概念\n\n这是独立概念的定义。", encoding="utf-8")
+
+    def response(content: str) -> str:
+        request = json.loads(content)
+        if str(request["document_name"]).startswith("part-one"):
+            return _analysis_response(content)
+        evidence_id = str(request["evidence"][0]["evidence_id"])
+        return json.dumps(
+            {
+                "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+                "analysis_scope": "document",
+                "document_description": "独立概念资料。",
+                "document_summary": [
+                    {
+                        "role": "purpose",
+                        "text": "说明独立概念。",
+                        "source_evidence_ids": [evidence_id],
+                    }
+                ],
+                "concepts": [
+                    {
+                        "title": "独立概念",
+                        "aliases": [],
+                        "tags": ["独立"],
+                        "claims": [_claim("definition", "独立概念有自己的定义。", evidence_id)],
+                    }
+                ],
+                "entities": [],
+                "procedures": [],
+            },
+            ensure_ascii=False,
+        )
+
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(
+            lambda request, _timeout: response(request.content)
+        ),
+    )
+    server._handshake_complete = True
+    _import(server, source, "carry-forward-first")
+    _import(server, safe_source, "carry-forward-safe")
+
+    database = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database) as connection:
+        original = connection.execute(
+            """
+            SELECT items.identity_id, items.content_markdown
+            FROM knowledge_generation_state AS state
+            JOIN knowledge_generation_items AS items
+              ON items.generation_id = state.current_generation_id
+            WHERE items.kind = 'procedure'
+            """
+        ).fetchone()
+        assert original is not None
+        competing_identity = "competing-identity"
+        connection.execute(
+            """
+            INSERT INTO knowledge_identities (
+                identity_id, kind, canonical_title, normalized_title,
+                status, created_at, updated_at
+            ) VALUES (?, 'procedure', '竞争部署流程', '竞争部署流程', 'active', ?, ?)
+            """,
+            (competing_identity, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"),
+        )
+        connection.executemany(
+            """
+            INSERT INTO knowledge_identity_aliases (
+                identity_id, alias, normalized_alias, created_at
+            ) VALUES (?, ?, ?, '2026-09-01T00:00:00Z')
+            """,
+            (
+                (competing_identity, "双节点超融合部署", "双节点超融合部署"),
+                (competing_identity, "双节点超融合安装", "双节点超融合安装"),
+            ),
+        )
+        synthesize_qualified_corpus_in(connection, now="2026-09-01T00:00:01Z")
+        connection.commit()
+        current = connection.execute(
+            """
+            SELECT items.identity_id, items.content_markdown
+            FROM knowledge_generation_state AS state
+            JOIN knowledge_generation_items AS items
+              ON items.generation_id = state.current_generation_id
+            WHERE items.kind = 'procedure'
+            """
+        ).fetchall()
+
+    assert (str(original[0]), str(original[1])) in {
+        (str(identity_id), str(content)) for identity_id, content in current
+    }
+
+
+def test_invalid_candidate_generation_fails_gate_and_keeps_prior_current(
+    tmp_path: Path,
+) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "part-one.md"
+    source.write_text("# 第一部分\n\n初始化第一个节点。", encoding="utf-8")
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    server = DesktopEngineServer(
+        io.BytesIO(),
+        io.BytesIO(),
+        workspace=workspace,
+        model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(
+            lambda request, _timeout: _analysis_response(request.content)
+        ),
+    )
+    server._handshake_complete = True
+    imported = _import(server, source, "generation-gate")
+    document_id = str(imported["document"]["document_id"])
+
+    database = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database) as connection:
+        current_generation_id = int(
+            connection.execute(
+                "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1"
+            ).fetchone()[0]
+        )
+        evidence_id = str(
+            connection.execute(
+                "SELECT evidence_id FROM evidence_occurrences WHERE document_id = ? LIMIT 1",
+                (document_id,),
+            ).fetchone()[0]
+        )
+        result = publish_corpus_generation_in(
+            connection,
+            current_generation_id=current_generation_id,
+            changes=(
+                KnowledgeGenerationChange(
+                    document_id=document_id,
+                    kind="concept",
+                    title="Invalid empty concept",
+                    normalized_title="invalid empty concept",
+                    content_markdown="",
+                    content_sha256="invalid",
+                    sources=(
+                        KnowledgeGenerationSource("source", evidence_id, "unsupported claim"),
+                    ),
+                    identity_id="invalid-empty-concept",
+                ),
+            ),
+            document_ids=(document_id,),
+            carry_forward_identity_ids=(),
+            synthesis_schema_version="test.invalid",
+            now="2026-09-01T00:00:00Z",
+        )
+        connection.commit()
+        states = connection.execute(
+            "SELECT generation_id, qualification_state "
+            "FROM knowledge_generations ORDER BY generation_id"
+        ).fetchall()
+        still_current = int(
+            connection.execute(
+                "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1"
+            ).fetchone()[0]
+        )
+
+    assert result == current_generation_id
+    assert states[-1][1] == "failed"
+    assert still_current == current_generation_id
 
 
 def _claim(role: str, text: str, evidence_id: str) -> dict[str, object]:

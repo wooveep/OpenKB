@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from collections import Counter, defaultdict
@@ -25,6 +26,7 @@ from openkb.desktop_knowledge_generations import (
 )
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels, encode_knowledge_labels
 from openkb.desktop_knowledge_rendering import (
+    UNSPECIFIED_APPLICABILITY,
     RenderedKnowledgeClaim,
     render_generated_knowledge,
 )
@@ -33,6 +35,12 @@ from openkb.desktop_knowledge_titles import normalize_knowledge_title
 
 CORPUS_SYNTHESIS_SCHEMA_VERSION = "openkb.corpus-knowledge.v1"
 _IDENTITY_NAMESPACE = uuid.UUID("fd4bc9f7-4c24-5e43-9a93-a4e235318586")
+_APPLICABILITY_DIMENSIONS = (
+    "product_version",
+    "platform",
+    "deployment_scenario",
+    "time_boundary",
+)
 
 
 @dataclass(frozen=True)
@@ -93,7 +101,12 @@ def replace_document_corpus_analysis_in(
         )
 
 
-def synthesize_qualified_corpus_in(connection: sqlite3.Connection, *, now: str) -> int | None:
+def synthesize_qualified_corpus_in(
+    connection: sqlite3.Connection,
+    *,
+    now: str,
+    preferred_language: str | None = None,
+) -> int | None:
     """Consolidate every admitted Available-document candidate into one snapshot."""
     candidates = _load_admitted_candidates_in(connection)
     if not candidates:
@@ -101,13 +114,20 @@ def synthesize_qualified_corpus_in(connection: sqlite3.Connection, *, now: str) 
     clusters = _candidate_clusters(candidates)
     connection.execute("DELETE FROM knowledge_identity_candidates")
     changes: list[KnowledgeGenerationChange] = []
-    included_documents: set[str] = set()
+    included_documents = {candidate.document_id for candidate in candidates}
+    carry_forward_identity_ids: set[str] = set()
+    language = _corpus_language(candidates, preferred_language=preferred_language)
     for cluster in clusters:
-        change = _synthesize_cluster_in(connection, cluster, now=now)
+        change = _synthesize_cluster_in(
+            connection,
+            cluster,
+            now=now,
+            language=language,
+            carry_forward_identity_ids=carry_forward_identity_ids,
+        )
         if change is None:
             continue
         changes.append(change)
-        included_documents.update(candidate.document_id for candidate in cluster)
     if not changes:
         return current_generation_id_in(connection)
     return publish_corpus_generation_in(
@@ -115,6 +135,7 @@ def synthesize_qualified_corpus_in(connection: sqlite3.Connection, *, now: str) 
         current_generation_id=current_generation_id_in(connection),
         changes=tuple(changes),
         document_ids=tuple(sorted(included_documents)),
+        carry_forward_identity_ids=tuple(sorted(carry_forward_identity_ids)),
         synthesis_schema_version=CORPUS_SYNTHESIS_SCHEMA_VERSION,
         now=now,
     )
@@ -323,53 +344,90 @@ def _candidate_from_row(connection: sqlite3.Connection, row: tuple[object, ...])
 
 
 def _candidate_clusters(candidates: tuple[_Candidate, ...]) -> tuple[tuple[_Candidate, ...], ...]:
-    parents = list(range(len(candidates)))
+    clusters: list[list[_Candidate]] = []
+    for candidate in candidates:
+        compatible = [
+            index
+            for index, cluster in enumerate(clusters)
+            if all(_same_identity(candidate, existing) for existing in cluster)
+        ]
+        if len(compatible) == 1:
+            clusters[compatible[0]].append(candidate)
+        else:
+            # Multiple possible homes are review work. Do not bridge otherwise separate
+            # identities through one broad alias or tag.
+            clusters.append([candidate])
+    return tuple(tuple(cluster) for cluster in clusters)
 
-    def root(index: int) -> int:
-        while parents[index] != index:
-            parents[index] = parents[parents[index]]
-            index = parents[index]
-        return index
 
-    def union(left: int, right: int) -> None:
-        left_root, right_root = root(left), root(right)
-        if left_root != right_root:
-            parents[right_root] = left_root
+def _same_identity(left: _Candidate, right: _Candidate) -> bool:
+    if left.kind != right.kind or _identity_contradiction(left, right):
+        return False
+    if left.normalized_title == right.normalized_title:
+        return True
+    shared_names = _identity_tokens(left) & _identity_tokens(right)
+    if len(shared_names) >= 2:
+        return True
+    shared_tags = {tag.casefold() for tag in left.tags if tag.strip()} & {
+        tag.casefold() for tag in right.tags if tag.strip()
+    }
+    return bool(shared_names and shared_tags and _shared_applicability(left, right))
 
-    owners: dict[tuple[str, str], int] = {}
-    for index, candidate in enumerate(candidates):
-        for token in _identity_tokens(candidate):
-            key = candidate.kind, token
-            previous = owners.setdefault(key, index)
-            union(index, previous)
-    grouped: dict[int, list[_Candidate]] = defaultdict(list)
-    for index, candidate in enumerate(candidates):
-        grouped[root(index)].append(candidate)
-    return tuple(tuple(values) for _key, values in sorted(grouped.items()))
+
+def _identity_contradiction(left: _Candidate, right: _Candidate) -> bool:
+    if (
+        left.entity_subtype
+        and right.entity_subtype
+        and left.entity_subtype.casefold() != right.entity_subtype.casefold()
+    ):
+        return True
+    left_scope = _applicability_values(left)
+    right_scope = _applicability_values(right)
+    return any(
+        left_scope[dimension].isdisjoint(right_scope[dimension])
+        for dimension in left_scope.keys() & right_scope.keys()
+    )
+
+
+def _shared_applicability(left: _Candidate, right: _Candidate) -> bool:
+    left_scope = _applicability_values(left)
+    right_scope = _applicability_values(right)
+    return any(
+        not left_scope[dimension].isdisjoint(right_scope[dimension])
+        for dimension in left_scope.keys() & right_scope.keys()
+    )
+
+
+def _applicability_values(candidate: _Candidate) -> dict[str, set[str]]:
+    values: defaultdict[str, set[str]] = defaultdict(set)
+    for claim in candidate.claims:
+        for dimension, scope in claim.applicability:
+            if scope.strip() and scope != UNSPECIFIED_APPLICABILITY:
+                values[dimension.casefold()].add(scope.casefold())
+    return dict(values)
 
 
 def _synthesize_cluster_in(
-    connection: sqlite3.Connection, cluster: tuple[_Candidate, ...], *, now: str
+    connection: sqlite3.Connection,
+    cluster: tuple[_Candidate, ...],
+    *,
+    now: str,
+    language: str,
+    carry_forward_identity_ids: set[str] | None = None,
 ) -> KnowledgeGenerationChange | None:
     kind = cluster[0].kind
-    tokens = frozenset(token for candidate in cluster for token in _identity_tokens(candidate))
-    identity_rows = connection.execute(
-        """
-        SELECT DISTINCT identities.identity_id, identities.canonical_title,
-            identities.normalized_title
-        FROM knowledge_identities AS identities
-        LEFT JOIN knowledge_identity_aliases AS aliases
-            ON aliases.identity_id = identities.identity_id
-        WHERE identities.kind = ? AND (
-            identities.normalized_title IN ({placeholders})
-            OR aliases.normalized_alias IN ({placeholders})
-        )
-        ORDER BY identities.identity_id
-        """.format(placeholders=", ".join("?" for _ in tokens)),
-        (kind, *tokens, *tokens),
-    ).fetchall()
+    identity_rows = _matching_identity_rows_in(connection, kind, cluster)
     if len(identity_rows) > 1:
-        _record_identity_review_in(connection, kind, cluster, now=now)
+        _record_identity_review_in(
+            connection, kind, cluster, reason="multiple_identity_matches", now=now
+        )
+        if carry_forward_identity_ids is not None:
+            carry_forward_identity_ids.update(str(row[0]) for row in identity_rows)
+        return None
+    if _claim_conflicts(cluster):
+        _record_identity_review_in(connection, kind, cluster, reason="claim_conflict", now=now)
+        if carry_forward_identity_ids is not None:
+            carry_forward_identity_ids.update(str(row[0]) for row in identity_rows)
         return None
     if identity_rows:
         identity_id = str(identity_rows[0][0])
@@ -401,12 +459,12 @@ def _synthesize_cluster_in(
         """
         INSERT INTO knowledge_identity_candidates (
             identity_id, candidate_id, match_basis, created_at
-        ) VALUES (?, ?, 'verified_title_or_alias', ?)
+        ) VALUES (?, ?, 'exact_title_or_multi_signal', ?)
         """,
         ((identity_id, candidate.candidate_id, now) for candidate in cluster),
     )
     rendered_claims, sources = _merge_cluster_claims(cluster)
-    content = render_generated_knowledge(kind, rendered_claims)
+    content = render_generated_knowledge(kind, rendered_claims, language=language)
     if not content or not sources:
         return None
     subtype_counts = Counter(
@@ -428,6 +486,44 @@ def _synthesize_cluster_in(
         analysis_provenance_json=cluster[0].provenance_json,
         identity_id=identity_id,
     )
+
+
+def _matching_identity_rows_in(
+    connection: sqlite3.Connection,
+    kind: str,
+    cluster: tuple[_Candidate, ...],
+) -> list[tuple[object, ...]]:
+    tokens = frozenset(token for candidate in cluster for token in _identity_tokens(candidate))
+    titles = frozenset(candidate.normalized_title for candidate in cluster)
+    token_placeholders = ", ".join("?" for _ in tokens)
+    title_placeholders = ", ".join("?" for _ in titles)
+    return connection.execute(
+        """
+        WITH identity_names AS (
+            SELECT identity_id, normalized_title AS token FROM knowledge_identities
+            UNION
+            SELECT identity_id, normalized_alias AS token FROM knowledge_identity_aliases
+        ), matched AS (
+            SELECT identity_id, COUNT(DISTINCT token) AS overlap_count
+            FROM identity_names
+            WHERE token IN ({token_placeholders})
+            GROUP BY identity_id
+        )
+        SELECT identities.identity_id, identities.canonical_title,
+            identities.normalized_title
+        FROM knowledge_identities AS identities
+        JOIN matched ON matched.identity_id = identities.identity_id
+        WHERE identities.kind = ? AND (
+            identities.normalized_title IN ({title_placeholders})
+            OR matched.overlap_count >= 2
+        )
+        ORDER BY identities.identity_id
+        """.format(
+            token_placeholders=token_placeholders,
+            title_placeholders=title_placeholders,
+        ),
+        (*tokens, kind, *titles),
+    ).fetchall()
 
 
 def _merge_cluster_claims(
@@ -468,6 +564,81 @@ def _merge_cluster_claims(
     return tuple(rendered), sources
 
 
+def _claim_conflicts(cluster: tuple[_Candidate, ...]) -> bool:
+    claims = tuple(claim for candidate in cluster for claim in candidate.claims)
+    for index, left in enumerate(claims):
+        for right in claims[index + 1 :]:
+            if (
+                left.role == right.role
+                and _normalized_text(left.text) != _normalized_text(right.text)
+                and _claim_scopes_overlap(left, right)
+                and _opposed_claims(left.text, right.text)
+            ):
+                return True
+    return False
+
+
+def _corpus_language(
+    candidates: tuple[_Candidate, ...],
+    *,
+    preferred_language: str | None,
+) -> str:
+    if preferred_language in {"zh", "en"}:
+        return preferred_language
+    texts = tuple(
+        claim.text for candidate in candidates for claim in candidate.claims if claim.text.strip()
+    )
+    chinese = sum(bool(re.search(r"[\u3400-\u9fff]", text)) for text in texts)
+    return "zh" if chinese * 2 > max(1, len(texts)) else "en"
+
+
+def _claim_scopes_overlap(left: _Claim, right: _Claim) -> bool:
+    left_scope = dict(left.applicability)
+    right_scope = dict(right.applicability)
+    for dimension in left_scope.keys() & right_scope.keys():
+        left_value = left_scope[dimension]
+        right_value = right_scope[dimension]
+        if (
+            left_value != UNSPECIFIED_APPLICABILITY
+            and right_value != UNSPECIFIED_APPLICABILITY
+            and left_value.casefold() != right_value.casefold()
+        ):
+            return False
+    return True
+
+
+def _opposed_claims(left: str, right: str) -> bool:
+    left_key, left_negative = _claim_polarity(left)
+    right_key, right_negative = _claim_polarity(right)
+    return bool(left_key and left_key == right_key and left_negative != right_negative)
+
+
+def _claim_polarity(value: str) -> tuple[str, bool]:
+    normalized = value.casefold()
+    negative = False
+    replacements = (
+        ("不需要", "需要"),
+        ("无需", "需要"),
+        ("不要", ""),
+        ("禁止", ""),
+        ("不得", ""),
+        ("不可", "可"),
+        ("不能", "能"),
+        ("must not", ""),
+        ("do not", ""),
+        ("does not", ""),
+        ("should not", ""),
+        ("cannot", "can"),
+        ("disable", "enable"),
+    )
+    for marker, replacement in replacements:
+        if marker in normalized:
+            negative = True
+            normalized = normalized.replace(marker, replacement)
+    key = re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", normalized)
+    return key, negative
+
+
 def _identity_tokens(candidate: _Candidate) -> frozenset[str]:
     values = (candidate.title, *candidate.aliases)
     tokens = frozenset(
@@ -502,18 +673,21 @@ def _record_identity_review_in(
     kind: str,
     cluster: tuple[_Candidate, ...],
     *,
+    reason: str,
     now: str,
 ) -> None:
     candidate_ids = tuple(sorted(candidate.candidate_id for candidate in cluster))
-    review_id = hashlib.sha256(f"{kind}\x1f{'|'.join(candidate_ids)}".encode("utf-8")).hexdigest()
+    review_id = hashlib.sha256(
+        f"{kind}\x1f{reason}\x1f{'|'.join(candidate_ids)}".encode("utf-8")
+    ).hexdigest()
     connection.execute(
         """
         INSERT INTO knowledge_identity_review_items (
             review_id, kind, reason, candidate_ids_json, status, created_at, resolved_at
-        ) VALUES (?, ?, 'multiple_identity_matches', ?, 'pending', ?, NULL)
+        ) VALUES (?, ?, ?, ?, 'pending', ?, NULL)
         ON CONFLICT(review_id) DO NOTHING
         """,
-        (review_id, kind, _json(candidate_ids), now),
+        (review_id, kind, reason, _json(candidate_ids), now),
     )
 
 
@@ -525,9 +699,11 @@ def _applicability_pairs(value: str) -> tuple[tuple[str, str], ...]:
     if not isinstance(payload, dict):
         return ()
     return tuple(
-        (dimension, str(scope))
-        for dimension, scope in payload.items()
-        if isinstance(dimension, str) and isinstance(scope, str) and scope
+        (
+            dimension,
+            str(payload.get(dimension) or UNSPECIFIED_APPLICABILITY),
+        )
+        for dimension in _APPLICABILITY_DIMENSIONS
     )
 
 

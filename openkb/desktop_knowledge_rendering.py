@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 _CJK = re.compile(r"[\u3400-\u9fff]")
+UNSPECIFIED_APPLICABILITY = "Unspecified"
 
 
 @dataclass(frozen=True)
@@ -88,9 +89,17 @@ _EN_SECTIONS = {
 }
 
 
-def render_generated_knowledge(kind: str, claims: tuple[RenderedKnowledgeClaim, ...]) -> str:
+def render_generated_knowledge(
+    kind: str,
+    claims: tuple[RenderedKnowledgeClaim, ...],
+    *,
+    language: str | None = None,
+) -> str:
     """Render each factual unit once while preserving its compact source markers."""
-    chinese = sum(bool(_CJK.search(claim.text)) for claim in claims) * 2 >= max(1, len(claims))
+    chinese = language == "zh" or (
+        language is None
+        and sum(bool(_CJK.search(claim.text)) for claim in claims) * 2 >= max(1, len(claims))
+    )
     sections = (_ZH_SECTIONS if chinese else _EN_SECTIONS)[kind]
     by_role: dict[str, list[RenderedKnowledgeClaim]] = defaultdict(list)
     for claim in claims:
@@ -116,12 +125,23 @@ def render_generated_knowledge(kind: str, claims: tuple[RenderedKnowledgeClaim, 
 
 
 def _claim_text(claim: RenderedKnowledgeClaim, *, chinese: bool) -> str:
-    scope = tuple(value for _dimension, value in claim.applicability if value)
+    scope = tuple(
+        value
+        for _dimension, value in claim.applicability
+        if value and value != UNSPECIFIED_APPLICABILITY
+    )
+    unspecified = tuple(
+        dimension for dimension, value in claim.applicability if value == UNSPECIFIED_APPLICABILITY
+    )
     applicability = ""
-    if scope:
+    if scope or unspecified:
         label = "适用：" if chinese else "Applies to: "
+        details = list(scope)
+        if unspecified:
+            dimensions = "、".join(unspecified) if chinese else ", ".join(unspecified)
+            details.append(f"未指定：{dimensions}" if chinese else f"unspecified: {dimensions}")
         applicability = (
-            f"（{label}{'；'.join(scope)}）" if chinese else f" ({label}{'; '.join(scope)})"
+            f"（{label}{'；'.join(details)}）" if chinese else f" ({label}{'; '.join(details)})"
         )
     markers = "".join(claim.source_markers)
     return f"{claim.text}{applicability}{markers}"

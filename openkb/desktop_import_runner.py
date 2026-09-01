@@ -44,7 +44,7 @@ from openkb.desktop_import_checkpoints import next_import_stage, require_import_
 from openkb.desktop_import_control import DesktopImportControl
 from openkb.desktop_import_deduplication import DuplicateImportSignal, normalized_body_sha256
 from openkb.desktop_import_failures import DIRECT_IMPORT_QUARANTINE_CODES
-from openkb.desktop_import_knowledge import apply_import_knowledge_analysis_in
+from openkb.desktop_import_knowledge import apply_import_knowledge_analysis
 from openkb.desktop_import_model_call import quarantine_import_model_call
 from openkb.desktop_import_model_dispatch import DesktopImportAnalysisDispatcher
 from openkb.desktop_import_model_ledger import DesktopImportModelLedger
@@ -90,7 +90,6 @@ from openkb.desktop_model_recovery import DesktopModelRecoveryService
 from openkb.desktop_okf_projection import (
     activate_okf_projection,
     discard_okf_projection_staging,
-    stage_okf_projection_in,
 )
 from openkb.desktop_parser_runtime import begin_parser_warmup, require_parser_mode
 from openkb.locks import kb_import_activity_lock
@@ -481,40 +480,40 @@ class DesktopTextImportService:
                 published: DesktopImportedDocument,
                 _deduplicated: bool,
             ) -> None:
-                nonlocal staged_projection
                 page_tree_store.publish_or_queue_page_tree_in(
                     connection, published.document_id, page_tree
                 )
-                if knowledge_analysis is not None and analysis_provenance_json is not None:
-                    self._apply_knowledge_analysis_in(
-                        connection,
-                        published.document_id,
-                        knowledge_analysis,
-                        analysis_provenance_json,
-                        evidence,
-                    )
-                    staged_projection = stage_okf_projection_in(connection, self._store.kb_dir)
 
-            try:
-                document, deduplicated = self._store.publish_document(
-                    state=state,
-                    source=state.source,
-                    document_id=page_tree.document_version_id,
-                    asset_sha256=asset_sha256,
-                    raw_path=raw_path,
-                    raw_size=len(raw_bytes),
-                    source_format=source_format,
-                    raw_media_type=source_media_type(source_format),
-                    blocks=blocks,
-                    evidence=evidence,
-                    source_images=source_images,
-                    normalized_body_sha256=normalized_body_hash,
-                    before_commit=apply_import_derivatives,
-                )
-            except BaseException:
-                if staged_projection is not None:
-                    discard_okf_projection_staging(staged_projection)
-                raise
+            document, deduplicated = self._store.publish_document(
+                state=state,
+                source=state.source,
+                document_id=page_tree.document_version_id,
+                asset_sha256=asset_sha256,
+                raw_path=raw_path,
+                raw_size=len(raw_bytes),
+                source_format=source_format,
+                raw_media_type=source_media_type(source_format),
+                blocks=blocks,
+                evidence=evidence,
+                source_images=source_images,
+                normalized_body_sha256=normalized_body_hash,
+                before_commit=apply_import_derivatives,
+            )
+            if knowledge_analysis is not None and analysis_provenance_json is not None:
+                try:
+                    staged_projection = apply_import_knowledge_analysis(
+                        self._store.kb_dir,
+                        document_id=document.document_id,
+                        analysis=knowledge_analysis,
+                        analysis_provenance_json=analysis_provenance_json,
+                        evidence=evidence,
+                        reconciliation=self._knowledge_reconciliation,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not publish derived Knowledge for Available document %s.",
+                        document.document_id,
+                    )
             if staged_projection is not None:
                 try:
                     activate_okf_projection(self._store.kb_dir, staged_projection)
@@ -740,24 +739,6 @@ class DesktopTextImportService:
             self._knowledge_reconciliation.record_document_changes(document_id, blocks)
         except (DesktopImportError, OSError, sqlite3.Error, ValueError) as error:
             logger.warning("Could not reconcile imported knowledge for %s: %s", document_id, error)
-
-    def _apply_knowledge_analysis_in(
-        self,
-        connection: sqlite3.Connection,
-        document_id: str,
-        analysis: DesktopKnowledgeAnalysis,
-        analysis_provenance_json: str,
-        evidence: tuple[tuple[str, DocumentIRBlock], ...],
-    ) -> None:
-        """Atomically bind canonical Evidence and apply validated structured knowledge."""
-        apply_import_knowledge_analysis_in(
-            connection,
-            document_id=document_id,
-            analysis=analysis,
-            analysis_provenance_json=analysis_provenance_json,
-            evidence=evidence,
-            reconciliation=self._knowledge_reconciliation,
-        )
 
     def _record_existing_knowledge_reconciliation(self, document_id: str) -> None:
         """Replay canonical structured analysis, falling back only for legacy imports."""

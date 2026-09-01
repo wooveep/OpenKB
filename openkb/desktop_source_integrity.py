@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
-SOURCE_INTEGRITY_SCHEMA_VERSION = "openkb.source-integrity.v1"
+SOURCE_INTEGRITY_SCHEMA_VERSION = "openkb.source-integrity.v2"
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,8 @@ class DesktopSourceIntegrityReport:
 
 def audit_source_integrity_in(
     connection: sqlite3.Connection,
+    *,
+    kb_dir: Path | None = None,
 ) -> DesktopSourceIntegrityReport:
     """Audit structural preservation and canonical evidence bindings in one snapshot."""
     counts = {
@@ -137,6 +141,7 @@ def audit_source_integrity_in(
             expected=list,
             string_items=True,
         ),
+        **_missing_expected_structure_counts(connection, kb_dir),
     }
     block_kind_counts = {
         str(kind): int(count)
@@ -156,6 +161,74 @@ def audit_source_integrity_in(
         issues=issues,
         block_kind_counts=block_kind_counts,
     )
+
+
+def _missing_expected_structure_counts(
+    connection: sqlite3.Connection,
+    kb_dir: Path | None,
+) -> dict[str, int]:
+    issue_names = {
+        "heading": "documents_missing_expected_headings",
+        "code": "documents_missing_expected_code",
+        "table": "documents_missing_expected_tables",
+    }
+    missing = {name: 0 for name in issue_names.values()}
+    if kb_dir is None:
+        return missing
+    rows = connection.execute(
+        """
+        SELECT documents.document_id, documents.source_format, raw.raw_path
+        FROM source_documents AS documents
+        JOIN raw_assets AS raw ON raw.asset_sha256 = documents.asset_sha256
+        WHERE documents.availability = 'available'
+        ORDER BY documents.document_id
+        """
+    ).fetchall()
+    actual = {
+        str(document_id): {str(kind) for (kind,) in kind_rows}
+        for document_id in (str(row[0]) for row in rows)
+        if (
+            kind_rows := connection.execute(
+                "SELECT DISTINCT kind FROM document_ir_blocks WHERE document_id = ?",
+                (document_id,),
+            ).fetchall()
+        )
+    }
+    for document_id, source_format, raw_path in rows:
+        expected = _expected_structure_kinds(
+            kb_dir,
+            source_format=str(source_format),
+            raw_path=str(raw_path),
+        )
+        present = actual.get(str(document_id), set())
+        for kind in expected - present:
+            missing[issue_names[kind]] += 1
+    return missing
+
+
+def _expected_structure_kinds(
+    kb_dir: Path,
+    *,
+    source_format: str,
+    raw_path: str,
+) -> set[str]:
+    if source_format not in {"markdown", "md"}:
+        return set()
+    relative = Path(raw_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        return set()
+    try:
+        content = (kb_dir / relative).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return set()
+    expected: set[str] = set()
+    if re.search(r"(?m)^\s{0,3}#{1,6}\s+\S", content):
+        expected.add("heading")
+    if re.search(r"(?m)^\s{0,3}(?:```|~~~)", content):
+        expected.add("code")
+    if re.search(r"(?m)^\s*\|?.+\|.+\n\s*\|?\s*:?-{3,}", content):
+        expected.add("table")
+    return expected
 
 
 def _count(connection: sqlite3.Connection, statement: str) -> int:

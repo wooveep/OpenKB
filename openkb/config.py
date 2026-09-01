@@ -56,6 +56,15 @@ def resolve_credential_bundle(kb_dir: Path) -> LlmCredentialBundle:
     )
 
 
+def preferred_knowledge_language(kb_dir: Path) -> str | None:
+    """Return the optional KB-wide synthesized-page language override."""
+    config = load_config_mapping(kb_dir.expanduser().resolve() / ".openkb" / "config.yaml")
+    knowledge = config.get("knowledge")
+    values = knowledge if isinstance(knowledge, dict) else {}
+    language = _configured_text(values.get("language"))
+    return language if language in {"zh", "en"} else None
+
+
 def _configured_text(value: object) -> str | None:
     if not isinstance(value, str):
         return None

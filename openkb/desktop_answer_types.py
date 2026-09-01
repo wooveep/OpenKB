@@ -107,6 +107,15 @@ class DesktopKnowledgeGuidance:
 
 
 @dataclass(frozen=True)
+class DesktopKnowledgeRouteOption:
+    """One code-advertised virtual route that a bounded model action may read."""
+
+    route: str
+    kind: str
+    title: str
+
+
+@dataclass(frozen=True)
 class DesktopEvidencePack:
     """Original Evidence plus separately labelled navigation guidance."""
 
@@ -117,6 +126,7 @@ class DesktopEvidencePack:
     retrieval_trace: DesktopRetrievalTrace = DesktopRetrievalTrace()
     retrieval_model_cost: DesktopRetrievalModelCost = DesktopRetrievalModelCost()
     guidance: tuple[DesktopKnowledgeGuidance, ...] = ()
+    route_options: tuple[DesktopKnowledgeRouteOption, ...] = ()
 
 
 @dataclass(frozen=True)

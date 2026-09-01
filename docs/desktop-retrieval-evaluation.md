@@ -22,6 +22,7 @@ the complete report. Its JSON suite is versioned and corpus-snapshot-bound:
   "snapshot_id": "support-corpus-2026-08-15",
   "max_graph_latency_ms": 250,
   "max_graph_model_calls": 20,
+  "max_navigator_model_calls_per_case": 8,
   "cases": [
     {
       "case_id": "release-path",
@@ -43,7 +44,7 @@ Include at least one case in each category: `local_fact`, `multi_hop`,
 document names and original evidence text so the suite remains valid when an
 import assigns new random Evidence IDs.
 
-Each report records FTS, PageTree, Wiki, fused baseline, and local-graph
+Each report records FTS, PageTree, Wiki, fused baseline, local-graph, and Navigator
 Recall@K (including the active K), citation precision, grounded-answer
 faithfulness, mean latency, and model invocation counts/input-output character
 costs. When a model is configured, the command invokes the same
@@ -67,6 +68,22 @@ revision maintained by SQLite on every retrieval-affecting write. Ordinary
 answers compare only that revision, so after an import or published
 knowledge-page change local graph retrieval remains off until the suite is run
 again without adding a full-corpus scan to question latency.
+
+After the required discovery channels have passed their own gates and are enabled,
+run the same frozen suite as the Navigator release gate:
+
+```bash
+uv run python -m openkb.desktop_retrieval_evaluation <kb-dir> <suite.json> \
+  --repetitions 3 --output <navigator-report.json> \
+  --validate-navigator-promotion
+```
+
+This mode exits with code `2` unless Navigator recalls every reviewed critical
+Evidence expectation, preserves baseline recall/citation/faithfulness and
+absent-answer behavior, stays within the configured model/latency envelope,
+finishes without degradation, and keeps the pinned knowledge snapshot stable.
+Python callers may enforce the same stale-report check with
+`DesktopRetrievalEvaluator.require_navigator_promotion_eligible(report, suite)`.
 
 ## Experimental official PageIndex provider
 

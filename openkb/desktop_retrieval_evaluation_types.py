@@ -88,6 +88,7 @@ class DesktopRetrievalEvaluationSuite:
     max_graph_model_calls: int | None = None
     max_additional_retrieval_p95_ms: float = PAGE_TREE_MAX_ADDITIONAL_RETRIEVAL_P95_MS
     max_additional_model_calls_per_case: int = 1
+    max_navigator_model_calls_per_case: int = 8
 
     @classmethod
     def from_json(cls, path: Path) -> DesktopRetrievalEvaluationSuite:
@@ -123,6 +124,7 @@ class DesktopRetrievalEvaluationSuite:
             max_graph_model_calls=_optional_nonnegative_int(payload, "max_graph_model_calls"),
             max_additional_retrieval_p95_ms=_page_tree_latency_budget(payload),
             max_additional_model_calls_per_case=_model_call_budget(payload),
+            max_navigator_model_calls_per_case=_navigator_model_call_budget(payload),
         )
 
 
@@ -319,6 +321,25 @@ class DesktopLocalGraphEvaluationGate:
 
 
 @dataclass(frozen=True)
+class DesktopNavigatorEvaluationGate:
+    passed: bool
+    frozen_reference_complete: bool
+    evidence_recall_non_regression: bool
+    no_critical_evidence_loss: bool
+    citation_precision_non_regression: bool
+    absent_answer_non_regression: bool
+    faithfulness_non_regression: bool
+    retrieval_p95_within_budget: bool
+    model_cost_within_budget: bool
+    degradation_free: bool
+    knowledge_snapshot_stable: bool
+    fixed_suite_complete: bool
+
+    def as_dict(self) -> dict[str, bool]:
+        return {field: bool(getattr(self, field)) for field in self.__dataclass_fields__}
+
+
+@dataclass(frozen=True)
 class DesktopRetrievalEvaluationReport:
     suite_snapshot_id: str
     suite_digest: str
@@ -332,6 +353,7 @@ class DesktopRetrievalEvaluationReport:
     metrics: dict[DesktopEvaluationVariant, DesktopRetrievalEvaluationMetrics]
     gate: DesktopPageTreeEvaluationGate
     local_graph_gate: DesktopLocalGraphEvaluationGate
+    navigator_gate: DesktopNavigatorEvaluationGate
     corpus_digest: str | None = None
     pageindex_worker_sha256: str | None = None
     final_knowledge_snapshot_digest: str | None = None
@@ -354,6 +376,7 @@ class DesktopRetrievalEvaluationReport:
             "metrics": {variant: metrics.as_dict() for variant, metrics in self.metrics.items()},
             "gate": self.gate.as_dict(),
             "local_graph_gate": self.local_graph_gate.as_dict(),
+            "navigator_gate": self.navigator_gate.as_dict(),
             "corpus_digest": self.corpus_digest,
             "pageindex_worker_sha256": self.pageindex_worker_sha256,
             "final_knowledge_snapshot_digest": self.final_knowledge_snapshot_digest,
@@ -422,6 +445,7 @@ def _evaluation_report(value: dict[object, object]) -> DesktopRetrievalEvaluatio
     raw_metrics = value.get("metrics")
     raw_gate = value.get("gate")
     raw_graph_gate = value.get("local_graph_gate")
+    raw_navigator_gate = value.get("navigator_gate")
     if not isinstance(raw_results, list) or not isinstance(raw_metrics, dict):
         raise ValueError("Desktop retrieval evaluation report collections are invalid.")
     if not isinstance(raw_gate, dict):
@@ -458,6 +482,11 @@ def _evaluation_report(value: dict[object, object]) -> DesktopRetrievalEvaluatio
             _report_local_graph_gate(raw_graph_gate)
             if isinstance(raw_graph_gate, dict)
             else _failed_local_graph_gate()
+        ),
+        navigator_gate=(
+            _report_navigator_gate(raw_navigator_gate)
+            if isinstance(raw_navigator_gate, dict)
+            else _failed_navigator_gate()
         ),
         corpus_digest=_optional_sha256(value, "corpus_digest"),
         pageindex_worker_sha256=_optional_sha256(value, "pageindex_worker_sha256"),
@@ -542,8 +571,17 @@ def _report_local_graph_gate(value: dict[object, object]) -> DesktopLocalGraphEv
     )
 
 
+def _report_navigator_gate(value: dict[object, object]) -> DesktopNavigatorEvaluationGate:
+    fields = DesktopNavigatorEvaluationGate.__dataclass_fields__
+    return DesktopNavigatorEvaluationGate(**{field: _report_bool(value, field) for field in fields})
+
+
 def _failed_local_graph_gate() -> DesktopLocalGraphEvaluationGate:
     return DesktopLocalGraphEvaluationGate(False, False, False, False, False, False, False, False)
+
+
+def _failed_navigator_gate() -> DesktopNavigatorEvaluationGate:
+    return DesktopNavigatorEvaluationGate(*([False] * 12))
 
 
 def _report_providers(value: object) -> tuple[DesktopPageTreeProviderIdentity, ...]:
@@ -664,6 +702,16 @@ def _model_call_budget(value: dict[object, object]) -> int:
             "Desktop retrieval evaluation field max_additional_model_calls_per_case "
             "must be nonnegative."
         )
+    return budget
+
+
+def _navigator_model_call_budget(value: dict[object, object]) -> int:
+    key = "max_navigator_model_calls_per_case"
+    if key not in value:
+        return 8
+    budget = _optional_nonnegative_int(value, key)
+    if budget is None:
+        raise ValueError(f"Desktop retrieval evaluation field {key} must be nonnegative.")
     return budget
 
 

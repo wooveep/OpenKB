@@ -40,7 +40,7 @@ from openkb.desktop_structured_output import (
 
 NAVIGATION_STEP_SCHEMA_VERSION = "openkb.knowledge-navigation-step.v1"
 NAVIGATION_MAX_ROUNDS = 3
-NAVIGATION_MAX_MODEL_CALLS = 6
+NAVIGATION_MAX_MODEL_CALLS = 8
 NAVIGATION_MAX_LOGICAL_READS = 24
 NAVIGATION_MAX_SOURCE_TOKENS = 24_000
 NAVIGATION_MAX_SEARCH_ACTIONS = 6
@@ -77,6 +77,38 @@ _CONSTRAINTS = re.compile(
     r"双节点|单节点|两节点|版本|集群|离线|在线",
     re.IGNORECASE,
 )
+_QUESTION_FORM = re.compile(
+    r"\b(?:what|who|when|where|which|why|how)\b|什么|谁|何时|哪里|哪个|为什么|如何|怎么|怎样",
+    re.IGNORECASE,
+)
+_LOOKUP_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]*|[\u4e00-\u9fff]{2,}")
+_LOOKUP_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "are",
+        "did",
+        "do",
+        "does",
+        "for",
+        "from",
+        "in",
+        "is",
+        "of",
+        "the",
+        "to",
+        "was",
+        "were",
+    }
+)
+_SQL_TERM = re.compile(
+    r"^\s*(?:pragma\b|select\s+(?:\*|\d+|['\"])|select\b.+\b(?:from|where|join)\b)",
+    re.IGNORECASE,
+)
+
+
+class _NavigationModelBudgetExhausted(Exception):
+    """The structured decision requested a physical call beyond its envelope."""
 
 
 @dataclass(frozen=True)
@@ -110,11 +142,14 @@ class NavigationAction:
     """One validated query-scoped expansion request."""
 
     kind: str
-    terms: tuple[str, ...]
+    terms: tuple[str, ...] = ()
+    routes: tuple[str, ...] = ()
+    evidence_ids: tuple[str, ...] = ()
 
     @property
     def identity(self) -> str:
-        normalized = tuple(sorted(term.casefold() for term in self.terms))
+        values = (*self.terms, *self.routes, *self.evidence_ids)
+        normalized = tuple(sorted(value.casefold() for value in values))
         return f"{self.kind}:{'|'.join(normalized)}"
 
 
@@ -178,20 +213,22 @@ def initial_navigation_objective(question: str, plan: DesktopRetrievalPlan) -> N
 
 def navigation_requires_model(objective: NavigationObjective, pack: DesktopEvidencePack) -> bool:
     """Let a supported simple fact finish from the deterministic seed."""
-    return objective.answer_kind != "factual_lookup" or not pack.evidence
+    return not _simple_lookup_supported(objective, pack)
 
 
 def deterministic_seed_coverage(
     objective: NavigationObjective, pack: DesktopEvidencePack
 ) -> tuple[DesktopAnswerCoverageTrace, ...]:
     """Record only the one coverage conclusion deterministic retrieval can prove."""
-    if objective.answer_kind == "factual_lookup" and pack.evidence:
-        return (
+    if _simple_lookup_supported(objective, pack):
+        evidence_ids = tuple(item.evidence_id for item in pack.evidence)
+        return tuple(
             DesktopAnswerCoverageTrace(
-                aspect="requested_fact",
-                status="covered",
-                evidence_ids=tuple(item.evidence_id for item in pack.evidence),
-            ),
+                aspect=aspect,
+                status="covered" if aspect == "requested_fact" else "not_applicable",
+                evidence_ids=evidence_ids if aspect == "requested_fact" else (),
+            )
+            for aspect in objective.required_aspects
         )
     return tuple(
         DesktopAnswerCoverageTrace(aspect=aspect, status="missing")
@@ -290,6 +327,8 @@ def run_navigation_step(
 
         def invoke(request: DesktopModelRequest):
             nonlocal attempts, response_characters
+            if attempts >= budget.model_calls:
+                raise _NavigationModelBudgetExhausted
             require_model_operation_dispatch(
                 kb_dir,
                 model_gateway,
@@ -310,13 +349,12 @@ def run_navigation_step(
                 if on_model_event is not None:
                     on_model_event(event)
 
-            call = (
-                model_gateway.analyze_once
-                if request.operation == "knowledge_navigation_step"
-                else model_gateway.analyze
-            )
             try:
-                result = call(request, on_event=observe, is_cancelled=is_cancelled)
+                result = model_gateway.analyze_once(
+                    request,
+                    on_event=observe,
+                    is_cancelled=is_cancelled,
+                )
             except BaseException:
                 attempts += call_attempts
                 raise
@@ -335,6 +373,7 @@ def run_navigation_step(
                 seed_objective=objective,
                 known_evidence_ids=frozenset(item.evidence_id for item in pack.evidence),
                 visited_action_ids=visited_action_ids,
+                available_routes=frozenset(item.route for item in pack.route_options),
                 budget=budget,
             ),
         )
@@ -347,6 +386,11 @@ def run_navigation_step(
         return NavigationStepResult(
             decision=output.value,
             model_cost=_model_cost(prompt, attempts, response_characters),
+        )
+    except _NavigationModelBudgetExhausted:
+        return NavigationStepResult(
+            model_cost=_model_cost(prompt, attempts, response_characters),
+            stop_reason="budget_exhausted",
         )
     except DesktopModelCancelledError:
         return NavigationStepResult(
@@ -453,6 +497,10 @@ def _navigation_prompt(
             }
             for item in pack.guidance[:16]
         ],
+        "available_routes": [
+            {"route": item.route, "kind": item.kind, "title": item.title}
+            for item in pack.route_options[:24]
+        ],
         "visited_action_ids": sorted(visited_action_ids),
         "remaining_budget": budget.as_dict(),
     }
@@ -466,6 +514,7 @@ def _navigation_decision(
     seed_objective: NavigationObjective,
     known_evidence_ids: frozenset[str],
     visited_action_ids: frozenset[str],
+    available_routes: frozenset[str],
     budget: NavigationBudget,
 ) -> NavigationDecision:
     payload = json.loads(content)
@@ -479,7 +528,13 @@ def _navigation_decision(
         raise ValueError("Navigation Snapshot is stale.")
     objective = _objective(payload["objective"], seed_objective)
     coverage = _coverage(payload["coverage"], objective, known_evidence_ids)
-    actions = _actions(payload["actions"], visited_action_ids, budget)
+    actions = _actions(
+        payload["actions"],
+        visited_action_ids,
+        available_routes,
+        known_evidence_ids,
+        budget,
+    )
     decision = payload["decision"]
     if decision not in {"continue", "stop"}:
         raise ValueError("Navigation decision is invalid.")
@@ -556,6 +611,8 @@ def _coverage(
 def _actions(
     value: object,
     visited_action_ids: frozenset[str],
+    available_routes: frozenset[str],
+    known_evidence_ids: frozenset[str],
     budget: NavigationBudget,
 ) -> tuple[NavigationAction, ...]:
     if not isinstance(value, list) or len(value) > min(3, budget.search_actions):
@@ -563,16 +620,34 @@ def _actions(
     actions: list[NavigationAction] = []
     seen: set[str] = set()
     for item in value:
-        _require_keys(item, {"kind", "terms"})
-        assert isinstance(item, dict)
-        if item["kind"] != "search_routes":
+        if not isinstance(item, dict):
+            raise ValueError("Navigation action is invalid.")
+        kind = item.get("kind")
+        if kind == "search_routes":
+            _require_keys(item, {"kind", "terms"})
+            terms = _string_array(item["terms"], maximum=8, item_limit=120)
+            if not terms:
+                raise ValueError("Route search requires terms.")
+            if any(_unsafe_term(term) for term in terms):
+                raise ValueError("Route search term is unsafe.")
+            action = NavigationAction("search_routes", terms=terms)
+        elif kind == "read_routes":
+            _require_keys(item, {"kind", "routes"})
+            routes = _string_array(item["routes"], maximum=4, item_limit=320)
+            if not routes or not set(routes) <= available_routes:
+                raise ValueError("Navigation route is unavailable or unpublished.")
+            action = NavigationAction("read_routes", routes=routes)
+        elif kind == "read_source_sections":
+            _require_keys(item, {"kind", "evidence_ids"})
+            evidence_ids = _string_array(item["evidence_ids"], maximum=4, item_limit=160)
+            if not evidence_ids or not set(evidence_ids) <= known_evidence_ids:
+                raise ValueError("Source section anchor is not known Available Evidence.")
+            action = NavigationAction(
+                "read_source_sections",
+                evidence_ids=evidence_ids,
+            )
+        else:
             raise ValueError("Navigation action kind is not allowed.")
-        terms = _string_array(item["terms"], maximum=8, item_limit=120)
-        if not terms:
-            raise ValueError("Route search requires terms.")
-        if any(_unsafe_term(term) for term in terms):
-            raise ValueError("Route search term is unsafe.")
-        action = NavigationAction("search_routes", terms)
         if action.identity in seen or action.identity in visited_action_ids:
             raise ValueError("Navigation action was already visited.")
         seen.add(action.identity)
@@ -610,11 +685,28 @@ def _unsafe_term(term: str) -> bool:
         or term.startswith(("/", "\\"))
         or ":\\" in term
         or "file://" in normalized
-        or "select " in normalized
-        or "pragma " in normalized
+        or _SQL_TERM.search(normalized) is not None
         or "../" in term
         or "..\\" in term
     )
+
+
+def _simple_lookup_supported(objective: NavigationObjective, pack: DesktopEvidencePack) -> bool:
+    if objective.answer_kind != "factual_lookup" or not pack.evidence:
+        return False
+    subject = objective.subject.strip()
+    if len(subject) > 160 or objective.constraints:
+        return False
+    evidence_text = " ".join(
+        f"{item.document_name} {item.section} {item.excerpt}" for item in pack.evidence
+    ).casefold()
+    question_terms = tuple(
+        token.casefold()
+        for token in _LOOKUP_TOKEN.findall(subject)
+        if token.casefold() not in _LOOKUP_STOP_WORDS and _QUESTION_FORM.fullmatch(token) is None
+    )
+    supported = sum(term in evidence_text for term in dict.fromkeys(question_terms))
+    return bool(question_terms) and supported >= min(2, len(set(question_terms)))
 
 
 def _answer_kind(question: str) -> str:

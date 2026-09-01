@@ -95,8 +95,6 @@ class _VariantEvidence:
 
 
 class DesktopEvidenceRetriever:
-    """Build an Evidence Pack from Available Knowledge with safe fallbacks."""
-
     def __init__(
         self,
         kb_dir: Path,
@@ -138,7 +136,7 @@ class DesktopEvidenceRetriever:
             is_cancelled=is_cancelled,
             on_model_event=on_model_event,
             operation_retry_scopes=operation_retry_scopes,
-            _enable_page_tree_selection=True,
+            _enable_page_tree_selection=False,
             _enable_navigation=True,
         )
         return run_navigation_session(
@@ -157,7 +155,6 @@ class DesktopEvidenceRetriever:
     def build_plan(
         self, question: str, *, is_cancelled: Callable[[], bool] | None = None
     ) -> tuple[DesktopRetrievalPlan, tuple[str, ...]]:
-        """Build one bounded plan that an evaluation can reuse across variants."""
         result = self.build_plan_with_cost(question, is_cancelled=is_cancelled)
         return result.plan, result.degradations
 
@@ -168,7 +165,6 @@ class DesktopEvidenceRetriever:
         is_cancelled: Callable[[], bool] | None = None,
         on_model_event: Callable[[object], None] | None = None,
     ) -> DesktopRetrievalPlanningResult:
-        """Build one plan and retain the physical Model Attempt cost."""
         return build_retrieval_plan(
             validate_question(question),
             self._model_gateway,
@@ -193,8 +189,9 @@ class DesktopEvidenceRetriever:
         _navigation_max_source_windows: int | None = None,
         _navigation_excluded_routes: frozenset[str] = frozenset(),
         _navigation_prior_evidence: tuple[DesktopEvidenceRef, ...] = (),
+        _navigation_requested_routes: tuple[str, ...] = (),
+        _navigation_source_anchors: tuple[str, ...] = (),
     ) -> DesktopEvidencePack:
-        """Retrieve one named vectorless channel for a fixed evaluation plan."""
         if variant not in DESKTOP_EVALUATION_VARIANTS or variant == "navigator":
             raise ValueError(f"Unsupported Desktop retrieval variant: {variant}")
         normalized_question = validate_question(question)
@@ -224,7 +221,7 @@ class DesktopEvidenceRetriever:
         navigation = DesktopKnowledgeNavigationResult()
         with _best_effort_catalog_lease(
             self._kb_dir,
-            enabled=variant in CATALOG_RETRIEVAL_VARIANTS,
+            enabled=_enable_navigation or variant in CATALOG_RETRIEVAL_VARIANTS,
             lease_factory=lease_current_catalog,
         ) as (
             catalog,
@@ -292,6 +289,8 @@ class DesktopEvidenceRetriever:
                                 else NAVIGATION_MAX_SOURCE_WINDOWS
                             ),
                             excluded_routes=_navigation_excluded_routes,
+                            requested_routes=_navigation_requested_routes,
+                            requested_evidence_ids=_navigation_source_anchors,
                         )
                     except (KeyError, TypeError, ValueError, sqlite3.Error):
                         logger.warning(
@@ -406,6 +405,7 @@ class DesktopEvidenceRetriever:
                 ),
             ),
             guidance=guidance,
+            route_options=navigation.route_options,
         )
 
 

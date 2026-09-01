@@ -368,11 +368,12 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
         "required aspects; refine the subject and scope, and add a source-revealed aspect only "
         "when materially required. Mark covered or partial only with supplied Original Evidence "
         "IDs; Knowledge Guidance alone never establishes coverage. If important coverage is "
-        "missing, request at most three query-scoped search_routes actions using short semantic "
-        "terms that target the missing aspects. Never return paths, SQL, files, source ranges, "
-        "raw tool calls, or invented routes. Stop when all aspects are covered/not_applicable or "
-        "when the supplied observations expose no useful bounded expansion.",
-        version=1,
+        "missing, request at most three actions: search_routes with short semantic terms, "
+        "read_routes using only supplied available_routes, or read_source_sections using only "
+        "supplied Evidence IDs. Never return paths, SQL, files, source ranges, raw tool calls, "
+        "or invented routes. Stop when all aspects are covered/not_applicable or when the "
+        "supplied observations expose no useful bounded expansion.",
+        version=2,
         output_schema={
             "type": "object",
             "properties": {
@@ -445,14 +446,30 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "kind": {"const": "search_routes"},
+                            "kind": {
+                                "enum": [
+                                    "search_routes",
+                                    "read_routes",
+                                    "read_source_sections",
+                                ]
+                            },
                             "terms": {
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "maxItems": 8,
                             },
+                            "routes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "maxItems": 4,
+                            },
+                            "evidence_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "maxItems": 4,
+                            },
                         },
-                        "required": ["kind", "terms"],
+                        "required": ["kind"],
                         "additionalProperties": False,
                     },
                 },
@@ -473,7 +490,8 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
             "same_snapshot_only",
             "known_evidence_ids_only",
             "all_required_aspects_exactly_once",
-            "code_owned_search_actions_only",
+            "code_owned_navigation_actions_only",
+            "known_routes_and_evidence_only",
             "no_repeated_actions",
         ),
         token_budget_policy={"reserve_output_tokens": 4_096, "document_input_share": 0.7},

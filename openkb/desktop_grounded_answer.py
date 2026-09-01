@@ -360,6 +360,7 @@ def prepare_grounded_evidence_pack(
         retrieval_trace=trace,
         retrieval_model_cost=pack.retrieval_model_cost,
         guidance=sent_guidance,
+        route_options=pack.route_options,
     )
 
 

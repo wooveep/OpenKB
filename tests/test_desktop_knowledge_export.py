@@ -154,6 +154,10 @@ def test_portable_wiki_export_uses_semantic_routes_and_snapshot_checksums(
     manifest_path = root / "wiki-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["format"] == "openkb-portable-wiki-v1"
+    expected_snapshot_id = hashlib.sha256(
+        json.dumps(manifest["snapshot"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert manifest["snapshot_id"] == expected_snapshot_id
     assert manifest["snapshot"]["knowledge_qualification_state"] == "qualified"
     routes = {entry["route"]: entry for entry in manifest["routes"]}
     assert routes["summaries/referenced"]["identity"] == imported.document.document_id
@@ -170,6 +174,27 @@ def test_portable_wiki_export_uses_semantic_routes_and_snapshot_checksums(
     assert "wiki-manifest.json" not in manifest["checksums"]
     for relative, digest in manifest["checksums"].items():
         assert hashlib.sha256((root / relative).read_bytes()).hexdigest() == digest
+
+
+def test_portable_wiki_rejects_a_broken_internal_link_before_publication(
+    tmp_path: Path,
+) -> None:
+    kb_dir, _imported, _page_id = _knowledge_base_with_referenced_image(tmp_path)
+    pages = DesktopKnowledgePageService(kb_dir)
+    page = pages.save_draft(
+        page_id=None,
+        kind="concept",
+        title="Broken route",
+        content_markdown="See [missing page](missing-page.md).",
+    )
+    pages.publish(page.page_id)
+    destination = tmp_path / "exports"
+    destination.mkdir()
+
+    with pytest.raises(DesktopKnowledgeExportError):
+        DesktopKnowledgeExportService(kb_dir).export(destination, mode="portable_wiki")
+
+    assert not tuple(destination.iterdir())
 
 
 def test_portable_wiki_excludes_legacy_unqualified_generated_items(tmp_path: Path) -> None:

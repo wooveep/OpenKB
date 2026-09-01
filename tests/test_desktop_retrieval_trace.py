@@ -9,13 +9,14 @@ from contextlib import nullcontext
 
 from openkb import desktop_model_transport
 from openkb import desktop_retrieval as desktop_retrieval_module
-from openkb.desktop_answer_types import DesktopEvidenceRef
+from openkb.desktop_answer_types import (
+    DesktopEvidencePack,
+    DesktopEvidenceRef,
+    DesktopKnowledgeRouteOption,
+)
 from openkb.desktop_conversations import DesktopConversationService
 from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_knowledge_navigation import (
-    DesktopKnowledgeNavigationResult,
-    _bounded_source_text,
-)
+from openkb.desktop_knowledge_navigation import DesktopKnowledgeNavigationResult
 from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
 from openkb.desktop_model_gateway import DesktopModelCancelledError, DesktopModelGateway
 from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
@@ -31,6 +32,7 @@ from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_retrieval_fusion import RetrievalCandidate, fuse_candidates
 from openkb.desktop_retrieval_plan import deterministic_plan, model_plan, with_baseline_terms
+from openkb.desktop_source_sections import bounded_source_text, source_section_evidence_in
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseRuntime,
     desktop_state_database_path,
@@ -90,6 +92,81 @@ def test_model_retrieval_plan_preserves_atomic_cjk_semantic_terms() -> None:
     )
 
     assert plan.terms == ("双节点", "超融合", "安装部署")
+
+
+def test_navigation_prompt_advertises_unread_bounded_route_options(tmp_path) -> None:
+    kb_dir = _knowledge_base(tmp_path)
+    offered = DesktopKnowledgeRouteOption(
+        route="generated/procedure/omega",
+        kind="procedure",
+        title="Omega acceptance",
+    )
+    observed_available_routes: list[str] = []
+
+    def transport(request, _timeout_seconds):
+        if request.operation == "retrieval_plan":
+            return '{"terms":["Alpha","installation"]}'
+        if request.operation == "page_tree_selection":
+            return _selection_response(request)
+        if request.operation == "knowledge_navigation_step":
+            prompt = json.loads(request.content)
+            observed_available_routes.extend(item["route"] for item in prompt["available_routes"])
+            evidence_ids = [item["evidence_id"] for item in prompt["evidence"]]
+            return json.dumps(
+                {
+                    "schema_version": "openkb.knowledge-navigation-step.v1",
+                    "snapshot_id": prompt["snapshot_id"],
+                    "objective": prompt["objective"],
+                    "coverage": [
+                        {
+                            "aspect": aspect,
+                            "status": "partial",
+                            "evidence_ids": evidence_ids[:1],
+                        }
+                        for aspect in prompt["objective"]["required_aspects"]
+                    ],
+                    "actions": [{"kind": "read_routes", "routes": [offered.route]}],
+                    "decision": "continue",
+                }
+            )
+        if request.operation == "structured_output_repair":
+            raise AssertionError("An advertised route must validate without repair.")
+        raise AssertionError(request.operation)
+
+    gateway = DesktopModelGateway(transport)
+    retriever = DesktopEvidenceRetriever(kb_dir, model_gateway=gateway)
+    initial = retriever.retrieve_variant(
+        "Alpha 如何安装",
+        variant="baseline",
+        _enable_page_tree_selection=True,
+        _enable_navigation=True,
+    )
+    seeded = DesktopEvidencePack(
+        retrieval_plan=initial.retrieval_plan,
+        evidence=initial.evidence,
+        degradations=initial.degradations,
+        source_images=initial.source_images,
+        retrieval_trace=initial.retrieval_trace,
+        retrieval_model_cost=initial.retrieval_model_cost,
+        guidance=initial.guidance,
+        route_options=(*initial.route_options, offered),
+    )
+
+    # Exercise the public session seam with a route that is visible but has not been read.
+    from openkb.desktop_adaptive_navigation import current_navigation_snapshot_id
+    from openkb.desktop_navigation_session import run_navigation_session
+
+    run_navigation_session(
+        kb_dir=kb_dir,
+        database_path=desktop_state_database_path(kb_dir),
+        question="Alpha 如何安装",
+        pinned_snapshot_id=current_navigation_snapshot_id(desktop_state_database_path(kb_dir)),
+        initial_pack=seeded,
+        model_gateway=gateway,
+        retrieve_round=lambda **_kwargs: seeded,
+    )
+
+    assert offered.route in observed_available_routes
 
 
 def test_combined_retrieval_plan_prioritizes_model_semantics_and_keeps_baseline() -> None:
@@ -843,7 +920,7 @@ def test_source_window_preserves_a_logical_section_without_slicing_blocks() -> N
         (16, "paragraph", after, section),
     ]
 
-    excerpt = _bounded_source_text(rows, 13)
+    excerpt = bounded_source_text(rows, 13)
 
     assert "Node setup" in excerpt
     assert "install-alpha --two-node" in excerpt
@@ -851,6 +928,49 @@ def test_source_window_preserves_a_logical_section_without_slicing_blocks() -> N
     assert "Verify the VIP and replicated volume." in excerpt
     assert "unrelated appendix" not in excerpt
     assert (before in excerpt) != (after in excerpt)
+
+
+def test_source_section_keeps_each_neighbor_bound_to_its_own_evidence(tmp_path) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "deployment.md"
+    source.write_text(
+        "# Node deployment\n\nPrepare both hosts.\n\n"
+        "```bash\ninstall-alpha --two-node\n```\n\n"
+        "> Warning: do not select the cluster communication NIC.\n\n"
+        "Verify the VIP after installation.\n",
+        encoding="utf-8",
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        anchor_id = str(
+            connection.execute(
+                "SELECT evidence_id FROM evidence_refs WHERE text LIKE '%install-alpha%'"
+            ).fetchone()[0]
+        )
+        references = source_section_evidence_in(
+            connection,
+            anchor_id,
+            terms=("deployment", "install"),
+        )
+        canonical_text = {
+            str(evidence_id): str(text).strip()
+            for evidence_id, text in connection.execute(
+                """
+                SELECT occurrences.evidence_id, blocks.text
+                FROM evidence_occurrences AS occurrences
+                JOIN document_ir_blocks AS blocks ON blocks.block_id = occurrences.block_id
+                """
+            )
+        }
+
+    assert len(references) >= 4
+    assert all(
+        reference.excerpt == canonical_text[reference.evidence_id] for reference in references
+    )
+    assert any("install-alpha --two-node" in reference.excerpt for reference in references)
+    assert any("do not select" in reference.excerpt for reference in references)
 
 
 def test_navigation_rejects_unsafe_actions_and_preserves_seed_evidence(tmp_path) -> None:
@@ -968,6 +1088,8 @@ def test_navigation_supplements_after_page_tree_evidence_is_known(tmp_path, monk
         max_reads,
         max_source_windows,
         excluded_routes,
+        requested_routes,
+        requested_evidence_ids,
     ) -> DesktopKnowledgeNavigationResult:
         del (
             catalog_generation_id,
@@ -975,6 +1097,8 @@ def test_navigation_supplements_after_page_tree_evidence_is_known(tmp_path, monk
             max_reads,
             max_source_windows,
             excluded_routes,
+            requested_routes,
+            requested_evidence_ids,
         )
         observed_baselines.append(baseline_evidence)
         return DesktopKnowledgeNavigationResult()
@@ -1020,6 +1144,118 @@ def test_simple_question_skips_page_tree_selection(tmp_path) -> None:
     assert pack.retrieval_trace.navigation_round_count == 0
     assert pack.retrieval_trace.navigation_stop_reason == "covered"
     assert pack.retrieval_trace.coverage_gate_state == "covered"
+
+
+def test_supported_factual_question_finishes_from_lexically_matching_seed(tmp_path) -> None:
+    kb_dir = _knowledge_base(tmp_path)
+    operations: list[str] = []
+
+    def transport(request, _timeout_seconds):
+        operations.append(request.operation)
+        if request.operation == "retrieval_plan":
+            return '{"terms":["Alpha","original evidence"]}'
+        raise AssertionError(request.operation)
+
+    pack = DesktopEvidenceRetriever(kb_dir, model_gateway=DesktopModelGateway(transport)).retrieve(
+        "What remains in Alpha original evidence?"
+    )
+
+    assert operations == ["retrieval_plan"]
+    assert pack.evidence
+    assert pack.retrieval_trace.navigation_round_count == 0
+    assert pack.retrieval_trace.navigation_stop_reason == "covered"
+
+
+def test_factual_question_does_not_treat_an_unrelated_seed_hit_as_covered(tmp_path) -> None:
+    kb_dir = _knowledge_base(tmp_path)
+    operations: list[str] = []
+
+    def transport(request, _timeout_seconds):
+        operations.append(request.operation)
+        if request.operation == "retrieval_plan":
+            return '{"terms":["Alpha"]}'
+        if request.operation == "page_tree_selection":
+            return _selection_response(request)
+        if request.operation == "knowledge_navigation_step":
+            prompt = json.loads(request.content)
+            return json.dumps(
+                {
+                    "schema_version": "openkb.knowledge-navigation-step.v1",
+                    "snapshot_id": prompt["snapshot_id"],
+                    "objective": prompt["objective"],
+                    "coverage": [
+                        {"aspect": aspect, "status": "missing", "evidence_ids": []}
+                        for aspect in prompt["objective"]["required_aspects"]
+                    ],
+                    "actions": [],
+                    "decision": "stop",
+                }
+            )
+        raise AssertionError(request.operation)
+
+    pack = DesktopEvidenceRetriever(kb_dir, model_gateway=DesktopModelGateway(transport)).retrieve(
+        "Who owns the missing release?"
+    )
+
+    assert pack.evidence
+    assert operations == [
+        "retrieval_plan",
+        "page_tree_selection",
+        "knowledge_navigation_step",
+    ]
+    assert pack.retrieval_trace.navigation_round_count == 1
+    assert pack.retrieval_trace.navigation_stop_reason == "absent"
+    assert pack.retrieval_trace.coverage_gate_state == "uncovered"
+
+
+def test_normal_navigation_no_progress_is_not_reported_as_capability_failure(
+    tmp_path,
+) -> None:
+    kb_dir = _knowledge_base(tmp_path)
+    operations: list[str] = []
+
+    def transport(request, _timeout_seconds):
+        operations.append(request.operation)
+        if request.operation == "retrieval_plan":
+            return '{"terms":["Alpha","installation"]}'
+        if request.operation == "page_tree_selection":
+            return _selection_response(request)
+        if request.operation == "knowledge_navigation_step":
+            prompt = json.loads(request.content)
+            evidence_ids = [item["evidence_id"] for item in prompt["evidence"]]
+            return json.dumps(
+                {
+                    "schema_version": "openkb.knowledge-navigation-step.v1",
+                    "snapshot_id": prompt["snapshot_id"],
+                    "objective": prompt["objective"],
+                    "coverage": [
+                        {
+                            "aspect": aspect,
+                            "status": "partial",
+                            "evidence_ids": evidence_ids[:1],
+                        }
+                        for aspect in prompt["objective"]["required_aspects"]
+                    ],
+                    "actions": [
+                        {
+                            "kind": "search_routes",
+                            "terms": ["select cluster communication NIC"],
+                        }
+                    ],
+                    "decision": "continue",
+                }
+            )
+        if request.operation == "structured_output_repair":
+            raise AssertionError("Natural-language select must not be parsed as raw SQL.")
+        raise AssertionError(request.operation)
+
+    pack = DesktopEvidenceRetriever(kb_dir, model_gateway=DesktopModelGateway(transport)).retrieve(
+        "Alpha 如何安装"
+    )
+
+    assert pack.retrieval_trace.navigation_stop_reason == "no_progress"
+    assert pack.retrieval_trace.navigation_action_kinds == ("search_routes",)
+    assert not any(code.startswith("knowledge_navigation_step_") for code in pack.degradations)
 
 
 def test_page_tree_selection_failure_keeps_deterministic_baseline(tmp_path) -> None:

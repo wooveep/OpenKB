@@ -8,14 +8,34 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 
-from openkb.desktop_answer_types import DesktopEvidenceRef, DesktopKnowledgeGuidance
+from openkb.desktop_answer_types import (
+    DesktopEvidenceRef,
+    DesktopKnowledgeGuidance,
+    DesktopKnowledgeRouteOption,
+)
 from openkb.desktop_knowledge_routes import knowledge_route, summary_route
+from openkb.desktop_source_sections import (
+    is_administrative_section as _is_administrative_section,
+)
+from openkb.desktop_source_sections import (
+    section_from_heading_path as _section,
+)
+from openkb.desktop_source_sections import (
+    source_occurrence_sort_key as _source_occurrence_sort_key,
+)
+from openkb.desktop_source_sections import (
+    source_occurrences_in as _source_occurrences_in,
+)
+from openkb.desktop_source_sections import (
+    source_section_evidence_in,
+)
+from openkb.desktop_source_sections import (
+    term_match_count as _term_match_count,
+)
 
 NAVIGATION_MAX_READS = 8
 NAVIGATION_MAX_SOURCE_WINDOWS = 4
 NAVIGATION_MAX_LINK_HOPS = 1
-SOURCE_WINDOW_MAX_CHARACTERS = 12_000
-FULL_SOURCE_MAX_CHARACTERS = 6_000
 
 _KNOWLEDGE_KINDS = ("concept", "entity", "procedure")
 
@@ -59,6 +79,8 @@ class DesktopKnowledgeNavigationResult:
     snapshot_id: str | None = None
     reads: tuple[_NavigationRead, ...] = ()
     source_windows: tuple[DesktopEvidenceRef, ...] = ()
+    source_read_count: int = 0
+    route_options: tuple[DesktopKnowledgeRouteOption, ...] = ()
     degradation_reasons: tuple[str, ...] = ()
 
     @property
@@ -67,7 +89,7 @@ class DesktopKnowledgeNavigationResult:
 
     @property
     def source_window_count(self) -> int:
-        return len(self.source_windows)
+        return self.source_read_count or len(self.source_windows)
 
     @property
     def link_hop_count(self) -> int:
@@ -131,6 +153,8 @@ def build_knowledge_navigation_in(
     max_reads: int = NAVIGATION_MAX_READS,
     max_source_windows: int = NAVIGATION_MAX_SOURCE_WINDOWS,
     excluded_routes: frozenset[str] = frozenset(),
+    requested_routes: tuple[str, ...] = (),
+    requested_evidence_ids: tuple[str, ...] = (),
 ) -> DesktopKnowledgeNavigationResult:
     """Spend the supplied slice of the session-wide logical-read budget."""
     if catalog_generation_id is None:
@@ -144,10 +168,15 @@ def build_knowledge_navigation_in(
         *_catalog_descriptors_in(connection, catalog_generation_id, normalized_terms),
         *_summary_descriptors_in(connection, normalized_terms, baseline_evidence),
     )
+    route_options = tuple(
+        DesktopKnowledgeRouteOption(item.route, item.kind, item.title)
+        for item in sorted(descriptors, key=_descriptor_sort_key)
+    )
     selected = _select_read_descriptors(
         descriptors,
         max_reads=max(0, max_reads),
         excluded_routes=excluded_routes,
+        requested_routes=requested_routes,
     )
     reads = tuple(
         read
@@ -155,23 +184,32 @@ def build_knowledge_navigation_in(
         if (read := _resolve_read_in(connection, descriptor)) is not None and read.units
     )
     baseline_ids = {reference.evidence_id for reference in baseline_evidence}
-    missing_ids = _rank_source_evidence_ids_in(
-        connection,
-        reads,
-        terms=normalized_terms,
-        baseline_ids=frozenset(baseline_ids),
+    missing_ids = tuple(
+        dict.fromkeys(
+            (
+                *requested_evidence_ids,
+                *_rank_source_evidence_ids_in(
+                    connection,
+                    reads,
+                    terms=normalized_terms,
+                    baseline_ids=frozenset(baseline_ids),
+                ),
+            )
+        )
     )
     windows: list[DesktopEvidenceRef] = []
+    source_read_count = 0
     for evidence_id in missing_ids:
-        if len(windows) == max(0, max_source_windows):
+        if source_read_count == max(0, max_source_windows):
             break
-        window = _source_window_for_evidence_in(
+        section_evidence = source_section_evidence_in(
             connection,
             evidence_id,
             terms=normalized_terms,
         )
-        if window is not None:
-            windows.append(window)
+        if section_evidence:
+            source_read_count += 1
+            windows.extend(section_evidence)
     snapshot_material = "\n".join(
         (catalog_generation_id, *(f"{read.route}:{read.snapshot_token}" for read in reads))
     )
@@ -180,6 +218,8 @@ def build_knowledge_navigation_in(
         snapshot_id=snapshot_id,
         reads=reads,
         source_windows=tuple(windows),
+        source_read_count=source_read_count,
+        route_options=route_options,
     )
 
 
@@ -192,15 +232,25 @@ def _select_read_descriptors(
     *,
     max_reads: int,
     excluded_routes: frozenset[str],
+    requested_routes: tuple[str, ...] = (),
 ) -> tuple[_ReadDescriptor, ...]:
     """Keep one relevant source-backed summary when catalog pages fill the budget."""
     if max_reads <= 0:
         return ()
+    by_route = {item.route: item for item in descriptors}
+    requested = [by_route[route] for route in dict.fromkeys(requested_routes) if route in by_route][
+        :max_reads
+    ]
+    requested_ids = {item.route for item in requested}
     ranked = sorted(
-        (item for item in descriptors if item.route not in excluded_routes),
+        (
+            item
+            for item in descriptors
+            if item.route not in excluded_routes and item.route not in requested_ids
+        ),
         key=_descriptor_sort_key,
     )
-    selected = ranked[:max_reads]
+    selected = [*requested, *ranked[: max_reads - len(requested)]]
     if any(item.descriptor_kind == "summary" for item in selected):
         return tuple(selected)
     best_summary = next(
@@ -208,6 +258,8 @@ def _select_read_descriptors(
         None,
     )
     if best_summary is None:
+        return tuple(selected)
+    if len(requested) == max_reads:
         return tuple(selected)
     if len(selected) == max_reads:
         selected[-1] = best_summary
@@ -588,41 +640,6 @@ def _source_relevance_in(
     )
 
 
-def _source_occurrences_in(
-    connection: sqlite3.Connection, evidence_id: str
-) -> list[tuple[object, ...]]:
-    return connection.execute(
-        """
-        SELECT occurrences.document_id, documents.display_name, blocks.ordinal,
-            blocks.heading_path, blocks.locator_json, documents.created_at
-        FROM evidence_occurrences AS occurrences
-        JOIN source_documents AS documents ON documents.document_id = occurrences.document_id
-        JOIN document_ir_blocks AS blocks ON blocks.block_id = occurrences.block_id
-        WHERE occurrences.evidence_id = ? AND documents.availability = 'available'
-        ORDER BY documents.created_at, documents.document_id, occurrences.ordinal
-        """,
-        (evidence_id,),
-    ).fetchall()
-
-
-def _source_occurrence_sort_key(
-    row: tuple[object, ...], terms: tuple[str, ...]
-) -> tuple[bool, int, str, str, int]:
-    section = _section(str(row[3]))
-    return (
-        _is_administrative_section(section),
-        -_term_match_count(section, terms),
-        str(row[5]),
-        str(row[0]),
-        int(str(row[2])),
-    )
-
-
-def _term_match_count(text: str, terms: tuple[str, ...]) -> int:
-    normalized = text.casefold()
-    return sum(1 for term in terms if term in normalized)
-
-
 def _guidance_role_bonus(role: str | None) -> int:
     return {"key_topic": 3, "purpose": 1}.get(role or "", 0)
 
@@ -647,140 +664,6 @@ def _unrequested_scope_penalty(section: str, terms: tuple[str, ...]) -> int:
         marker in normalized and not any(marker in term for term in terms) for marker in markers
     )
     return min(12, unmatched * 6)
-
-
-def _is_administrative_section(section: str) -> bool:
-    normalized = section.casefold()
-    return any(
-        marker in normalized
-        for marker in ("修订记录", "revision history", "目录", "table of contents")
-    )
-
-
-def _source_window_for_evidence_in(
-    connection: sqlite3.Connection,
-    evidence_id: str,
-    *,
-    terms: tuple[str, ...] = (),
-) -> DesktopEvidenceRef | None:
-    rows = _source_occurrences_in(connection, evidence_id)
-    if not rows:
-        return None
-    row = min(rows, key=lambda item: _source_occurrence_sort_key(item, terms))
-    document_id, document_name, anchor_ordinal = (
-        str(row[0]),
-        str(row[1]),
-        int(str(row[2])),
-    )
-    blocks = connection.execute(
-        """
-        SELECT ordinal, kind, text, heading_path FROM document_ir_blocks
-        WHERE document_id = ? ORDER BY ordinal
-        """,
-        (document_id,),
-    ).fetchall()
-    excerpt = _bounded_source_text(blocks, anchor_ordinal)
-    if not excerpt:
-        return None
-    return DesktopEvidenceRef(
-        evidence_id=evidence_id,
-        document_id=document_id,
-        document_name=document_name,
-        section=_section(str(row[3])),
-        locator=_json_object(str(row[4])),
-        excerpt=excerpt,
-        channels=("knowledge_navigation_source_window",),
-    )
-
-
-def _bounded_source_text(rows: list[tuple[object, ...]], anchor_ordinal: int) -> str:
-    blocks = tuple(
-        (
-            int(str(row[0])),
-            str(row[1]),
-            str(row[2]).strip(),
-            _heading_path(str(row[3])),
-        )
-        for row in rows
-        if str(row[2]).strip()
-    )
-    full = "\n\n".join(text for _ordinal, _kind, text, _path in blocks)
-    if len(full) <= FULL_SOURCE_MAX_CHARACTERS:
-        return full
-    anchor = next((item for item in blocks if item[0] == anchor_ordinal), None)
-    if anchor is None:
-        return ""
-    anchor_path = anchor[3]
-    logical = tuple(
-        item
-        for item in blocks
-        if item[3] == anchor_path or (anchor_path and item[3][: len(anchor_path)] == anchor_path)
-    )
-    if not logical:
-        logical = (anchor,)
-    logical_text = "\n\n".join(text for _ordinal, _kind, text, _path in logical)
-    if len(logical_text) <= SOURCE_WINDOW_MAX_CHARACTERS:
-        return logical_text
-    anchor_index = next(
-        (index for index, item in enumerate(logical) if item[0] == anchor_ordinal),
-        0,
-    )
-    selected: dict[int, str] = {}
-    used = 0
-    order = _nearby_block_indexes(len(logical), anchor_index)
-    heading_index = next(
-        (index for index, item in enumerate(logical) if item[1] == "heading"),
-        None,
-    )
-    if heading_index is not None:
-        order = (heading_index, *(index for index in order if index != heading_index))
-    required_indexes = {anchor_index}
-    if heading_index is not None:
-        required_indexes.add(heading_index)
-    for index in order:
-        ordinal, _kind, text, _path = logical[index]
-        separator = 2 if selected else 0
-        if (
-            index not in required_indexes
-            and selected
-            and used + separator + len(text) > SOURCE_WINDOW_MAX_CHARACTERS
-        ):
-            continue
-        selected[ordinal] = text
-        used += separator + len(text)
-    return "\n\n".join(selected[ordinal] for ordinal in sorted(selected))
-
-
-def _nearby_block_indexes(length: int, anchor_index: int) -> tuple[int, ...]:
-    values = [anchor_index]
-    for distance in range(1, length):
-        right = anchor_index + distance
-        left = anchor_index - distance
-        if right < length:
-            values.append(right)
-        if left >= 0:
-            values.append(left)
-    return tuple(values)
-
-
-def _heading_path(value: str) -> tuple[str, ...]:
-    try:
-        decoded = json.loads(value)
-    except json.JSONDecodeError:
-        return ()
-    if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
-        return ()
-    return tuple(decoded)
-
-
-def _section(value: str) -> str:
-    try:
-        decoded = json.loads(value)
-    except json.JSONDecodeError:
-        return "Document"
-    if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
-        return "Document"
-    return " / ".join(decoded) if decoded else "Document"
 
 
 def _json_object(value: str) -> dict[str, object]:
