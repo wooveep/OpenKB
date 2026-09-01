@@ -3,43 +3,106 @@
 from __future__ import annotations
 
 _MAX_BOUND_EVIDENCE_PER_ENDPOINT = 3
+_MAX_RELATIONSHIP_ITEMS_PER_GENERATION = 1_024
+_MAX_RELATIONSHIP_SOURCE_CLAIMS_PER_ITEM = 16
+_MAX_RELATIONSHIPS_PER_SOURCE_ITEM = 12
+_MAX_RELATIONSHIPS_PER_GENERATION = 4_096
 
 
-def _relationship_insert(predicate: str) -> str:
+def _relationship_insert(item_predicate: str) -> str:
     return f"""
+    WITH bounded_items AS (
+        SELECT items.generation_id, items.item_key, items.title
+        FROM knowledge_generation_items AS items
+        WHERE {item_predicate}
+        ORDER BY items.generation_id, items.item_key
+        LIMIT {_MAX_RELATIONSHIP_ITEMS_PER_GENERATION}
+    ), ranked_sources AS (
+        SELECT sources.generation_id, sources.item_key, sources.claim_text,
+            ROW_NUMBER() OVER (
+                PARTITION BY sources.generation_id, sources.item_key
+                ORDER BY sources.source_id, sources.evidence_id, sources.claim_text
+            ) AS source_rank
+        FROM knowledge_generation_item_sources AS sources
+        JOIN bounded_items AS items
+          ON items.generation_id = sources.generation_id
+         AND items.item_key = sources.item_key
+    ), bounded_sources AS (
+        SELECT generation_id, item_key, claim_text
+        FROM ranked_sources
+        WHERE source_rank <= {_MAX_RELATIONSHIP_SOURCE_CLAIMS_PER_ITEM}
+    ), candidates AS (
+        SELECT DISTINCT source_items.generation_id,
+            source_items.item_key AS source_item_key,
+            target_items.item_key AS target_item_key
+        FROM bounded_items AS source_items
+        JOIN bounded_sources AS source_sources
+          ON source_sources.generation_id = source_items.generation_id
+         AND source_sources.item_key = source_items.item_key
+        JOIN bounded_items AS target_items
+          ON target_items.generation_id = source_items.generation_id
+         AND target_items.item_key <> source_items.item_key
+        WHERE length(trim(target_items.title)) >= 2
+          AND instr(lower(source_sources.claim_text), lower(trim(target_items.title))) > 0
+    ), source_ranked AS (
+        SELECT candidates.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY generation_id, source_item_key
+                ORDER BY target_item_key
+            ) AS relationship_rank
+        FROM candidates
+    ), generation_ranked AS (
+        SELECT source_ranked.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY generation_id
+                ORDER BY source_item_key, target_item_key
+            ) AS generation_rank
+        FROM source_ranked
+        WHERE relationship_rank <= {_MAX_RELATIONSHIPS_PER_SOURCE_ITEM}
+    )
     INSERT OR IGNORE INTO knowledge_generation_relationships (
         generation_id, source_item_key, target_item_key, relation_kind, provenance
     )
-    SELECT DISTINCT source_items.generation_id, source_items.item_key,
-        target_items.item_key, 'references', 'corpus_claim_title_mention'
-    FROM knowledge_generation_items AS source_items
-    JOIN knowledge_generation_item_sources AS source_sources
-      ON source_sources.generation_id = source_items.generation_id
-     AND source_sources.item_key = source_items.item_key
-    JOIN knowledge_generation_items AS target_items
-      ON target_items.generation_id = source_items.generation_id
-     AND target_items.item_key <> source_items.item_key
-    WHERE {predicate}
-      AND length(trim(target_items.title)) >= 2
-      AND instr(lower(source_sources.claim_text), lower(trim(target_items.title))) > 0
+    SELECT generation_id, source_item_key, target_item_key,
+        'references', 'corpus_claim_title_mention'
+    FROM generation_ranked
+    WHERE generation_rank <= {_MAX_RELATIONSHIPS_PER_GENERATION}
     """
 
 
 def _source_binding_insert(predicate: str) -> str:
     return f"""
-    WITH candidates AS (
+    WITH relevant_relationships AS (
+        SELECT * FROM knowledge_generation_relationships AS relationships
+        WHERE {predicate}
+    ), relevant_items AS (
+        SELECT DISTINCT generation_id, source_item_key AS item_key
+        FROM relevant_relationships
+    ), ranked_sources AS (
+        SELECT sources.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY sources.generation_id, sources.item_key
+                ORDER BY sources.source_id, sources.evidence_id, sources.claim_text
+            ) AS source_rank
+        FROM knowledge_generation_item_sources AS sources
+        JOIN relevant_items AS items
+          ON items.generation_id = sources.generation_id
+         AND items.item_key = sources.item_key
+    ), bounded_sources AS (
+        SELECT * FROM ranked_sources
+        WHERE source_rank <= {_MAX_RELATIONSHIP_SOURCE_CLAIMS_PER_ITEM}
+    ), candidates AS (
         SELECT DISTINCT relationships.generation_id,
             relationships.source_item_key, relationships.target_item_key,
             relationships.relation_kind, sources.evidence_id
-        FROM knowledge_generation_relationships AS relationships
+        FROM relevant_relationships AS relationships
         JOIN knowledge_generation_items AS targets
           ON targets.generation_id = relationships.generation_id
          AND targets.item_key = relationships.target_item_key
-        JOIN knowledge_generation_item_sources AS sources
+        JOIN bounded_sources AS sources
           ON sources.generation_id = relationships.generation_id
          AND sources.item_key = relationships.source_item_key
-        WHERE {predicate}
-          AND instr(lower(sources.claim_text), lower(trim(targets.title))) > 0
+        WHERE instr(lower(sources.claim_text), lower(trim(targets.title))) > 0
     ), ranked AS (
         SELECT candidates.*,
             ROW_NUMBER() OVER (
@@ -61,15 +124,33 @@ def _source_binding_insert(predicate: str) -> str:
 
 def _target_binding_insert(predicate: str) -> str:
     return f"""
-    WITH candidates AS (
+    WITH relevant_relationships AS (
+        SELECT * FROM knowledge_generation_relationships AS relationships
+        WHERE {predicate}
+    ), relevant_items AS (
+        SELECT DISTINCT generation_id, target_item_key AS item_key
+        FROM relevant_relationships
+    ), ranked_sources AS (
+        SELECT sources.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY sources.generation_id, sources.item_key
+                ORDER BY sources.source_id, sources.evidence_id, sources.claim_text
+            ) AS source_rank
+        FROM knowledge_generation_item_sources AS sources
+        JOIN relevant_items AS items
+          ON items.generation_id = sources.generation_id
+         AND items.item_key = sources.item_key
+    ), bounded_sources AS (
+        SELECT * FROM ranked_sources
+        WHERE source_rank <= {_MAX_RELATIONSHIP_SOURCE_CLAIMS_PER_ITEM}
+    ), candidates AS (
         SELECT DISTINCT relationships.generation_id,
             relationships.source_item_key, relationships.target_item_key,
             relationships.relation_kind, sources.evidence_id
-        FROM knowledge_generation_relationships AS relationships
-        JOIN knowledge_generation_item_sources AS sources
+        FROM relevant_relationships AS relationships
+        JOIN bounded_sources AS sources
           ON sources.generation_id = relationships.generation_id
          AND sources.item_key = relationships.target_item_key
-        WHERE {predicate}
     ), ranked AS (
         SELECT candidates.*,
             ROW_NUMBER() OVER (
@@ -135,7 +216,7 @@ KNOWLEDGE_RELATIONSHIP_MIGRATION_STATEMENTS: tuple[str, ...] = (
     "DELETE FROM knowledge_generation_relationship_sources",
     "DELETE FROM knowledge_generation_relationships",
     _relationship_insert(
-        "source_items.generation_id = ("
+        "items.generation_id = ("
         "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1)"
     ),
     _source_binding_insert(
@@ -182,7 +263,7 @@ KNOWLEDGE_RELATIONSHIP_MIGRATION_STATEMENTS: tuple[str, ...] = (
 
 def relationship_rebuild_statements() -> tuple[str, str, str]:
     """Return parameterized inserts for one immutable generation."""
-    predicate = "source_items.generation_id = ?"
+    predicate = "items.generation_id = ?"
     return (
         _relationship_insert(predicate),
         _source_binding_insert("relationships.generation_id = ?"),

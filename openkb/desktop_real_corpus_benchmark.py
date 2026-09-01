@@ -305,6 +305,8 @@ def parse_real_corpus_benchmark(payload: object) -> RealCorpusBenchmarkAttestati
         raise ValueError("Real-corpus benchmark contract is stale.")
     original_baseline = _original_baseline(payload.get("original_baseline"))
     windows_acceptance = _windows_acceptance(payload.get("windows_acceptance"))
+    if windows_acceptance.artifact_digest != windows_acceptance.package_manifest_digest:
+        raise ValueError("Real-corpus package manifest does not describe the accepted payload.")
     raw_cases = payload.get("cases")
     if not isinstance(raw_cases, list) or len(raw_cases) < 3:
         raise ValueError("Real-corpus benchmark requires three fixed cases.")

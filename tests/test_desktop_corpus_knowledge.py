@@ -83,6 +83,28 @@ def test_shipped_real_corpus_attestation_is_fixed_complete_and_tamper_evident() 
         raise AssertionError("A modified real-corpus attestation must fail validation.")
 
 
+def test_real_corpus_attestation_rejects_a_manifest_digest_for_another_payload() -> None:
+    path = Path(__file__).parents[1] / "openkb" / "benchmarks" / "real-corpus-attestation.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["windows_acceptance"]["package_manifest_digest"] = "0" * 64
+    unsigned = {key: value for key, value in payload.items() if key != "report_digest"}
+    payload["report_digest"] = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+    try:
+        parse_real_corpus_benchmark(payload)
+    except ValueError as error:
+        assert "payload" in str(error).casefold()
+    else:
+        raise AssertionError("A manifest for another payload must fail validation.")
+
+
 def test_portable_attestation_digest_binds_payload_without_self_reference(
     tmp_path: Path,
 ) -> None:

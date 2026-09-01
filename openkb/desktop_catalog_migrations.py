@@ -257,3 +257,38 @@ CATALOG_MIGRATION_STATEMENTS: tuple[str, ...] = (
         "knowledge_metadata_change",
     ),
 )
+
+
+CATALOG_ELIGIBILITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """
+    UPDATE knowledge_catalog_state
+    SET source_revision = source_revision + 1,
+        is_stale = 1,
+        stale_since = COALESCE(
+            stale_since,
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        )
+    WHERE singleton = 1
+    """,
+    """
+    INSERT INTO knowledge_catalog_rebuild_tasks (
+        singleton, status, reason, requested_source_revision, execution_token,
+        attempt_count, error_code, error_reason, created_at, updated_at, completed_at
+    )
+    SELECT 1, 'pending', 'knowledge_eligibility_upgrade', source_revision, NULL,
+        0, NULL, NULL,
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), NULL
+    FROM knowledge_catalog_state WHERE singleton = 1
+    ON CONFLICT(singleton) DO UPDATE SET
+        status = 'pending',
+        reason = excluded.reason,
+        requested_source_revision = excluded.requested_source_revision,
+        execution_token = NULL,
+        attempt_count = 0,
+        error_code = NULL,
+        error_reason = NULL,
+        updated_at = excluded.updated_at,
+        completed_at = NULL
+    """,
+)

@@ -8,7 +8,7 @@ import posixpath
 import re
 import sqlite3
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urlsplit
 
@@ -93,24 +93,47 @@ def build_catalog_snapshot_in(
     connection: sqlite3.Connection, source_revision: int
 ) -> CatalogSnapshot:
     """Read the five authority inputs without retaining source Evidence text."""
+    inventory = eligible_knowledge_routes_in(connection)
+    routes = {(item.authority, item.kind, item.identity): item.route for item in inventory}
     occurrence_by_evidence = _preferred_occurrences_in(connection)
     page_values, page_sources = _published_pages_in(connection, occurrence_by_evidence)
     generated_values, generated_sources = _generated_items_in(connection, occurrence_by_evidence)
     document_values, document_sources = _source_documents_in(connection)
-    values = tuple((*page_values, *generated_values))
+    values = _eligible_knowledge_values((*page_values, *generated_values), frozenset(routes))
+    eligible_node_ids = frozenset(value.node.node_id for value in values)
     leaves = tuple(value.node for value in values) + document_values
     nodes = _ordered_nodes(leaves)
     sources = tuple(
         sorted(
-            (*page_sources, *generated_sources, *document_sources),
+            (
+                *(
+                    source
+                    for source in (*page_sources, *generated_sources)
+                    if source.node_id in eligible_node_ids
+                ),
+                *document_sources,
+            ),
             key=lambda item: (item.node_id, item.order, item.evidence_id),
         )
     )
-    inventory = eligible_knowledge_routes_in(connection)
-    routes = {(item.authority, item.kind, item.identity): item.route for item in inventory}
     links = _knowledge_links(connection, values, nodes, sources, routes)
     digest = _snapshot_digest(nodes, sources, links)
     return CatalogSnapshot(source_revision, digest, nodes, sources, links)
+
+
+def _eligible_knowledge_values(
+    values: tuple[_KnowledgeValue, ...],
+    eligible_routes: frozenset[tuple[str, str, str]],
+) -> tuple[_KnowledgeValue, ...]:
+    return tuple(
+        _KnowledgeValue(
+            node=replace(value.node, availability="available"),
+            relative_path=value.relative_path,
+            content_markdown=value.content_markdown,
+        )
+        for value in values
+        if (value.node.authority, value.node.kind, value.node.authority_id) in eligible_routes
+    )
 
 
 def _published_pages_in(

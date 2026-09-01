@@ -30,7 +30,14 @@ from openkb.desktop_knowledge_generations import (
     knowledge_content_sha256,
     publish_generation_changes_in,
 )
+from openkb.desktop_knowledge_inventory import eligible_knowledge_routes_in
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
+from openkb.desktop_knowledge_relationship_migrations import (
+    _MAX_RELATIONSHIP_ITEMS_PER_GENERATION,
+    _MAX_RELATIONSHIPS_PER_GENERATION,
+    _MAX_RELATIONSHIPS_PER_SOURCE_ITEM,
+    relationship_rebuild_statements,
+)
 from openkb.desktop_knowledge_sources import stable_source_id
 from openkb.desktop_okf_projection import materialize_okf_projection
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
@@ -208,6 +215,131 @@ def test_catalog_persists_typed_links_with_routes_and_source_bindings(
     assert supported_by[1:] == ("supported_by", "knowledge_source_binding", 1)
 
 
+def test_catalog_cannot_route_through_knowledge_with_one_unavailable_binding(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kb_dir = _controlled_kb(tmp_path, monkeypatch)
+    unavailable_source = tmp_path / "unavailable.md"
+    available_source = tmp_path / "available.md"
+    unavailable_source.write_text("# Retired\n\nRetired installation evidence.", encoding="utf-8")
+    available_source.write_text(
+        "# Current\n\nCurrent deployment evidence must not leak through an ineligible page.",
+        encoding="utf-8",
+    )
+    unavailable_document = DesktopTextImportService(kb_dir).import_text(unavailable_source).document
+    DesktopTextImportService(kb_dir).import_text(available_source)
+    assert rebuild_pending_catalog(kb_dir)
+    pages = DesktopKnowledgePageService(kb_dir)
+    unavailable_evidence = pages.search_sources("Retired installation evidence")[0]
+    available_evidence = pages.search_sources("Current deployment evidence")[0]
+    page = pages.save_draft(
+        page_id=None,
+        kind="procedure",
+        title="Mixed Eligibility Router",
+        content_markdown="Retired prerequisite.\n\nCurrent step.",
+    )
+    pages.bind_source(page.page_id, "Retired prerequisite.", unavailable_evidence.evidence_id)
+    pages.bind_source(page.page_id, "Current step.", available_evidence.evidence_id)
+    pages.publish(page.page_id)
+    assert rebuild_pending_catalog(kb_dir)
+
+    database = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE source_documents SET availability = 'failed' WHERE document_id = ?",
+            (unavailable_document.document_id,),
+        )
+        connection.commit()
+    assert rebuild_pending_catalog(kb_dir)
+
+    with sqlite3.connect(database) as connection:
+        assert not any(
+            route.authority == "user_revision" and route.identity == page.page_id
+            for route in eligible_knowledge_routes_in(connection)
+        )
+        generation_id = str(
+            connection.execute(
+                "SELECT current_generation_id FROM knowledge_catalog_state"
+            ).fetchone()[0]
+        )
+        assert (
+            connection.execute(
+                "SELECT 1 FROM knowledge_catalog_nodes WHERE generation_id = ? AND node_id = ?",
+                (generation_id, f"page:{page.page_id}"),
+            ).fetchone()
+            is None
+        )
+        routed = catalog_route_rows_in(
+            connection, generation_id, ("mixed", "eligibility", "router"), limit=12
+        )
+    assert available_evidence.evidence_id not in {str(row[0]) for row in routed}
+
+
+def test_relationship_inference_has_item_fanout_and_generation_bounds() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(
+        """
+        CREATE TABLE knowledge_generation_items (
+            generation_id INTEGER NOT NULL,
+            item_key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            PRIMARY KEY(generation_id, item_key)
+        );
+        CREATE TABLE knowledge_generation_item_sources (
+            generation_id INTEGER NOT NULL,
+            item_key TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            evidence_id TEXT NOT NULL,
+            claim_text TEXT NOT NULL
+        );
+        CREATE TABLE knowledge_generation_relationships (
+            generation_id INTEGER NOT NULL,
+            source_item_key TEXT NOT NULL,
+            target_item_key TEXT NOT NULL,
+            relation_kind TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            PRIMARY KEY(generation_id, source_item_key, target_item_key, relation_kind)
+        );
+        """
+    )
+    item_count = _MAX_RELATIONSHIP_ITEMS_PER_GENERATION + 1
+    items = [(1, f"item-{index:04d}", "Shared target") for index in range(item_count)]
+    connection.executemany("INSERT INTO knowledge_generation_items VALUES (?, ?, ?)", items)
+    connection.executemany(
+        "INSERT INTO knowledge_generation_item_sources VALUES (?, ?, ?, ?, ?)",
+        (
+            (generation_id, item_key, f"source-{item_key}", f"evidence-{item_key}", "Shared target")
+            for generation_id, item_key, _title in items
+        ),
+    )
+
+    connection.execute(relationship_rebuild_statements()[0], (1,))
+
+    relationship_count = int(
+        connection.execute("SELECT COUNT(*) FROM knowledge_generation_relationships").fetchone()[0]
+    )
+    maximum_fanout = int(
+        connection.execute(
+            """
+            SELECT COALESCE(MAX(fanout), 0) FROM (
+                SELECT COUNT(*) AS fanout FROM knowledge_generation_relationships
+                GROUP BY generation_id, source_item_key
+            )
+            """
+        ).fetchone()[0]
+    )
+    endpoints = {
+        str(value)
+        for row in connection.execute(
+            "SELECT source_item_key, target_item_key FROM knowledge_generation_relationships"
+        )
+        for value in row
+    }
+    assert relationship_count == _MAX_RELATIONSHIPS_PER_GENERATION
+    assert maximum_fanout <= _MAX_RELATIONSHIPS_PER_SOURCE_ITEM
+    assert f"item-{_MAX_RELATIONSHIP_ITEMS_PER_GENERATION:04d}" not in endpoints
+
+
 def test_generated_relations_are_structured_authority_and_markdown_projection(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -326,7 +458,7 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
 
         connection.execute("DROP TABLE knowledge_generation_relationship_sources")
         connection.execute("DROP TABLE knowledge_generation_relationships")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 56")
+        connection.execute("DELETE FROM schema_migrations WHERE version >= 56")
         connection.commit()
 
     DesktopKnowledgeBaseRuntime().open(kb_dir)

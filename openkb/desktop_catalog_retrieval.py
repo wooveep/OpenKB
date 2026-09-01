@@ -43,7 +43,7 @@ def catalog_route_rows_in(
             WHERE nodes.generation_id = ?
                 AND nodes.kind IN ('concept', 'entity', 'procedure', 'source_document')
                 AND COALESCE(nodes.lifecycle_state, 'stable') != 'deprecated'
-                AND COALESCE(nodes.availability, 'available') = 'available'
+                AND nodes.availability = 'available'
         ), direct_nodes AS (
             SELECT node_id, node_score,
                 {CATALOG_DIRECT_WEIGHT} * lifecycle_weight AS route_weight,
@@ -73,7 +73,7 @@ def catalog_route_rows_in(
                 ON targets.generation_id = links.generation_id
                 AND targets.node_id = links.target_node_id
                 AND COALESCE(targets.lifecycle_state, 'stable') != 'deprecated'
-                AND COALESCE(targets.availability, 'available') = 'available'
+                AND targets.availability = 'available'
         ), routed_nodes AS (
             SELECT node_id, node_score, route_weight, hop FROM (
                 SELECT routed_candidates.*,
