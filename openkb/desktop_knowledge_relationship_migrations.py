@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+_MAX_BOUND_EVIDENCE_PER_ENDPOINT = 3
+
 
 def _relationship_insert(predicate: str) -> str:
     return f"""
@@ -25,39 +27,65 @@ def _relationship_insert(predicate: str) -> str:
 
 def _source_binding_insert(predicate: str) -> str:
     return f"""
+    WITH candidates AS (
+        SELECT DISTINCT relationships.generation_id,
+            relationships.source_item_key, relationships.target_item_key,
+            relationships.relation_kind, sources.evidence_id
+        FROM knowledge_generation_relationships AS relationships
+        JOIN knowledge_generation_items AS targets
+          ON targets.generation_id = relationships.generation_id
+         AND targets.item_key = relationships.target_item_key
+        JOIN knowledge_generation_item_sources AS sources
+          ON sources.generation_id = relationships.generation_id
+         AND sources.item_key = relationships.source_item_key
+        WHERE {predicate}
+          AND instr(lower(sources.claim_text), lower(trim(targets.title))) > 0
+    ), ranked AS (
+        SELECT candidates.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY generation_id, source_item_key, target_item_key,
+                    relation_kind
+                ORDER BY evidence_id
+            ) AS binding_rank
+        FROM candidates
+    )
     INSERT OR IGNORE INTO knowledge_generation_relationship_sources (
         generation_id, source_item_key, target_item_key, relation_kind,
         binding_role, evidence_id
     )
-    SELECT DISTINCT relationships.generation_id, relationships.source_item_key,
-        relationships.target_item_key, relationships.relation_kind,
-        'source', sources.evidence_id
-    FROM knowledge_generation_relationships AS relationships
-    JOIN knowledge_generation_items AS targets
-      ON targets.generation_id = relationships.generation_id
-     AND targets.item_key = relationships.target_item_key
-    JOIN knowledge_generation_item_sources AS sources
-      ON sources.generation_id = relationships.generation_id
-     AND sources.item_key = relationships.source_item_key
-    WHERE {predicate}
-      AND instr(lower(sources.claim_text), lower(trim(targets.title))) > 0
+    SELECT generation_id, source_item_key, target_item_key, relation_kind,
+        'source', evidence_id
+    FROM ranked WHERE binding_rank <= {_MAX_BOUND_EVIDENCE_PER_ENDPOINT}
     """
 
 
 def _target_binding_insert(predicate: str) -> str:
     return f"""
+    WITH candidates AS (
+        SELECT DISTINCT relationships.generation_id,
+            relationships.source_item_key, relationships.target_item_key,
+            relationships.relation_kind, sources.evidence_id
+        FROM knowledge_generation_relationships AS relationships
+        JOIN knowledge_generation_item_sources AS sources
+          ON sources.generation_id = relationships.generation_id
+         AND sources.item_key = relationships.target_item_key
+        WHERE {predicate}
+    ), ranked AS (
+        SELECT candidates.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY generation_id, source_item_key, target_item_key,
+                    relation_kind
+                ORDER BY evidence_id
+            ) AS binding_rank
+        FROM candidates
+    )
     INSERT OR IGNORE INTO knowledge_generation_relationship_sources (
         generation_id, source_item_key, target_item_key, relation_kind,
         binding_role, evidence_id
     )
-    SELECT DISTINCT relationships.generation_id, relationships.source_item_key,
-        relationships.target_item_key, relationships.relation_kind,
-        'target', sources.evidence_id
-    FROM knowledge_generation_relationships AS relationships
-    JOIN knowledge_generation_item_sources AS sources
-      ON sources.generation_id = relationships.generation_id
-     AND sources.item_key = relationships.target_item_key
-    WHERE {predicate}
+    SELECT generation_id, source_item_key, target_item_key, relation_kind,
+        'target', evidence_id
+    FROM ranked WHERE binding_rank <= {_MAX_BOUND_EVIDENCE_PER_ENDPOINT}
     """
 
 
@@ -106,9 +134,18 @@ KNOWLEDGE_RELATIONSHIP_MIGRATION_STATEMENTS: tuple[str, ...] = (
     """,
     "DELETE FROM knowledge_generation_relationship_sources",
     "DELETE FROM knowledge_generation_relationships",
-    _relationship_insert("1 = 1"),
-    _source_binding_insert("1 = 1"),
-    _target_binding_insert("1 = 1"),
+    _relationship_insert(
+        "source_items.generation_id = ("
+        "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1)"
+    ),
+    _source_binding_insert(
+        "relationships.generation_id = ("
+        "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1)"
+    ),
+    _target_binding_insert(
+        "relationships.generation_id = ("
+        "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1)"
+    ),
     """
     UPDATE knowledge_catalog_state
     SET source_revision = source_revision + 1,

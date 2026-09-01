@@ -215,17 +215,47 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
     source = tmp_path / "deployment.md"
     source.write_text(
         "# Deployment\n\nInstall Glusterfs before creating the replicated volume.\n\n"
-        "# Storage\n\nGlusterfs provides replicated storage for both nodes.\n",
+        "Configure Glusterfs peers before volume creation.\n\n"
+        "Validate Glusterfs health before continuing.\n\n"
+        "Record Glusterfs status for deployment audit.\n\n"
+        "# Storage\n\nGlusterfs provides replicated storage for both nodes.\n\n"
+        "Glusterfs replicates storage across the nodes.\n\n"
+        "Glusterfs storage remains available after one node fails.\n\n"
+        "Glusterfs storage health is checked after deployment.\n",
         encoding="utf-8",
     )
     imported = DesktopTextImportService(kb_dir).import_text(source)
-    pages = DesktopKnowledgePageService(kb_dir)
-    procedure_evidence = pages.search_sources("Install Glusterfs")[0].evidence_id
-    entity_evidence = pages.search_sources("replicated storage")[0].evidence_id
     procedure_content = "## Steps\n\n1. Install Glusterfs before creating the replicated volume."
     entity_content = "Glusterfs provides replicated storage for both nodes."
     database = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database) as connection:
+        evidence = connection.execute(
+            """
+            SELECT occurrences.evidence_id, blocks.text
+            FROM evidence_occurrences AS occurrences
+            JOIN document_ir_blocks AS blocks ON blocks.block_id = occurrences.block_id
+            WHERE occurrences.document_id = ? AND blocks.text LIKE '%Glusterfs%'
+            ORDER BY occurrences.ordinal
+            """,
+            (imported.document.document_id,),
+        ).fetchall()
+        procedure_sources = tuple(
+            KnowledgeGenerationSource(
+                stable_source_id(str(evidence_id)),
+                str(evidence_id),
+                str(claim_text),
+            )
+            for evidence_id, claim_text in evidence[:4]
+        )
+        entity_sources = tuple(
+            KnowledgeGenerationSource(
+                stable_source_id(str(evidence_id)),
+                str(evidence_id),
+                str(claim_text),
+            )
+            for evidence_id, claim_text in evidence[4:]
+        )
+        assert len(procedure_sources) == len(entity_sources) == 4
         generation_id = publish_generation_changes_in(
             connection,
             current_generation_id=current_generation_id_in(connection),
@@ -237,13 +267,7 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
                     normalized_title="dual-node deployment",
                     content_markdown=procedure_content,
                     content_sha256=knowledge_content_sha256(procedure_content),
-                    sources=(
-                        KnowledgeGenerationSource(
-                            stable_source_id(procedure_evidence),
-                            procedure_evidence,
-                            "Install Glusterfs before creating the replicated volume.",
-                        ),
-                    ),
+                    sources=procedure_sources,
                     identity_id="procedure-identity",
                 ),
                 KnowledgeGenerationChange(
@@ -253,13 +277,7 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
                     normalized_title="glusterfs",
                     content_markdown=entity_content,
                     content_sha256=knowledge_content_sha256(entity_content),
-                    sources=(
-                        KnowledgeGenerationSource(
-                            stable_source_id(entity_evidence),
-                            entity_evidence,
-                            entity_content,
-                        ),
-                    ),
+                    sources=entity_sources,
                     identity_id="entity-identity",
                 ),
             ),
@@ -287,7 +305,7 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
             "references",
             "corpus_claim_title_mention",
         )
-        assert connection.execute(
+        relationship_sources = connection.execute(
             """
             SELECT binding_role, evidence_id
             FROM knowledge_generation_relationship_sources
@@ -296,10 +314,36 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
             ORDER BY binding_role, evidence_id
             """,
             (generation_id,),
-        ).fetchall() == [
-            ("source", procedure_evidence),
-            ("target", entity_evidence),
-        ]
+        ).fetchall()
+        assert [role for role, _evidence_id in relationship_sources].count("source") == 3
+        assert [role for role, _evidence_id in relationship_sources].count("target") == 3
+        assert {evidence_id for role, evidence_id in relationship_sources if role == "source"} < {
+            source.evidence_id for source in procedure_sources
+        }
+        assert {evidence_id for role, evidence_id in relationship_sources if role == "target"} < {
+            source.evidence_id for source in entity_sources
+        }
+
+        connection.execute("DROP TABLE knowledge_generation_relationship_sources")
+        connection.execute("DROP TABLE knowledge_generation_relationships")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 56")
+        connection.commit()
+
+    DesktopKnowledgeBaseRuntime().open(kb_dir)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT DISTINCT generation_id FROM knowledge_generation_relationships"
+        ).fetchall() == [(generation_id,)]
+        assert connection.execute(
+            """
+            SELECT MAX(binding_count) FROM (
+                SELECT COUNT(*) AS binding_count
+                FROM knowledge_generation_relationship_sources
+                GROUP BY generation_id, source_item_key, target_item_key,
+                    relation_kind, binding_role
+            )
+            """
+        ).fetchone() == (3,)
 
     assert "[" not in procedure_content
     assert rebuild_pending_catalog(kb_dir)
