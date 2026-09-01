@@ -12,8 +12,8 @@ from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urlsplit
 
-from openkb.desktop_knowledge_metadata import decode_knowledge_labels
 from openkb.desktop_knowledge_inventory import eligible_knowledge_routes_in
+from openkb.desktop_knowledge_metadata import decode_knowledge_labels
 
 _MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 
@@ -106,9 +106,7 @@ def build_catalog_snapshot_in(
         )
     )
     inventory = eligible_knowledge_routes_in(connection)
-    routes = {
-        (item.authority, item.kind, item.identity): item.route for item in inventory
-    }
+    routes = {(item.authority, item.kind, item.identity): item.route for item in inventory}
     links = _knowledge_links(values, nodes, sources, routes)
     digest = _snapshot_digest(nodes, sources, links)
     return CatalogSnapshot(source_revision, digest, nodes, sources, links)
@@ -513,14 +511,8 @@ def _knowledge_links(
             relationship_sources = tuple(
                 sorted(
                     (
-                        *(
-                            _relationship_source("source", source)
-                            for source in source_bindings
-                        ),
-                        *(
-                            _relationship_source("target", source)
-                            for source in target_bindings
-                        ),
+                        *(_relationship_source("source", source) for source in source_bindings),
+                        *(_relationship_source("target", source) for source in target_bindings),
                     ),
                     key=lambda item: (
                         item.binding_role,
@@ -554,9 +546,7 @@ def _catalog_route(
     return routes.get((node.authority, kind, node.authority_id))
 
 
-def _relationship_source(
-    binding_role: str, source: CatalogSource
-) -> CatalogRelationshipSource:
+def _relationship_source(binding_role: str, source: CatalogSource) -> CatalogRelationshipSource:
     return CatalogRelationshipSource(
         binding_role=binding_role,
         source_id=source.source_id,
