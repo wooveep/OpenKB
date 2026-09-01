@@ -238,10 +238,12 @@
       "knowledgePages": {
         "newConcept": "New concept",
         "newEntity": "New entity",
+        "newProcedure": "New procedure",
         "concept": "Concept",
         "entity": "Entity",
+        "procedure": "Procedure",
         "loading": "Loading pages…",
-        "empty": "No knowledge pages yet. Create a Concept or Entity page to begin.",
+        "empty": "No knowledge pages yet. Create a Concept, Entity, or Procedure page to begin.",
         "newPage": "New knowledge page",
         "untitled": "Untitled page",
         "revision": "Revision {{revision}}",
@@ -484,11 +486,12 @@
       },
       "reconciliation": {
         "title": "Knowledge conflicts",
-        "description": "Review incoming Concept and Entity changes. When a Working Draft exists, every result remains a draft until you explicitly publish it.",
+        "description": "Review incoming Concept, Entity, and Procedure changes. When a Working Draft exists, every result remains a draft until you explicitly publish it.",
         "loading": "Checking knowledge changes…",
         "empty": "No knowledge conflicts need review.",
         "concept": "Concept",
         "entity": "Entity",
+        "procedure": "Procedure",
         "fromDocument": "Incoming change from {{document}}",
         "incoming": "Incoming change",
         "userRevision": "Current user revision",
@@ -573,6 +576,41 @@
           "title": "Page-tree selection is suspended",
           "impact": "This answer kept deterministic evidence selection after the current page-tree contract failed validation.",
           "recovery": "Regenerate this answer to explicitly retry the same contract after correcting the model configuration."
+        },
+        "knowledgeNavigation": {
+          "title": "Knowledge navigation is unverified",
+          "impact": "OpenKB kept the deterministic seed evidence but could not run adaptive, gap-directed evidence collection.",
+          "recovery": "Use Save and Verify for the Analysis role in Model Settings, then retry the question."
+        },
+        "knowledgeNavigationUnavailable": {
+          "title": "Knowledge navigation is not configured",
+          "impact": "No Analysis model was available, so the answer used deterministic seed evidence without adaptive follow-up.",
+          "recovery": "Configure the Analysis role and use Save and Verify in Model Settings."
+        },
+        "knowledgeNavigationCancelled": {
+          "title": "Knowledge navigation was cancelled",
+          "impact": "Adaptive evidence collection stopped; evidence gathered before cancellation was retained.",
+          "recovery": "Retry this answer when you are ready to continue evidence collection."
+        },
+        "knowledgeNavigationSuspended": {
+          "title": "Knowledge navigation is suspended",
+          "impact": "The navigation-step contract returned an unusable result, so OpenKB safely retained deterministic evidence.",
+          "recovery": "Correct the Analysis model configuration, then retry this answer to run the same contract again."
+        },
+        "knowledgeNavigationBudget": {
+          "title": "Knowledge navigation reached its safety budget",
+          "impact": "OpenKB stopped bounded evidence collection and answered from the evidence already gathered.",
+          "recovery": "Review the Navigation Trace to see which answer aspects remain partial or missing."
+        },
+        "knowledgeNavigationSnapshot": {
+          "title": "Knowledge changed during navigation",
+          "impact": "OpenKB stopped mixing evidence from different knowledge snapshots and retained only the consistent result.",
+          "recovery": "Wait for import or knowledge analysis to finish, then retry this answer."
+        },
+        "knowledgeNavigationNoProgress": {
+          "title": "Knowledge navigation found no additional evidence",
+          "impact": "Further bounded searches repeated known evidence, so OpenKB stopped instead of looping.",
+          "recovery": "The Navigation Trace identifies aspects that the current knowledge base could not support."
         },
         "answerModel": {
           "title": "Answer model is unverified",
@@ -666,6 +704,8 @@
       "export": {
         "action": "Export",
         "exporting": "Exporting…",
+        "portableWiki": "Portable Wiki",
+        "portableWikiDescription": "Readable summaries, semantic knowledge pages, source Markdown, images, aliases, and snapshot checksums.",
         "projection": "Knowledge projection",
         "projectionDescription": "OKF Markdown and source manifest, without original files.",
         "selfContained": "Self-contained bundle",
@@ -922,6 +962,46 @@
       "evidenceDescription": "Only sources that were sent to the answer model for this version.",
       "sources": "Sources {{count}}",
       "images": "Images {{count}}",
+      "navigationTrace": {
+        "title": "Knowledge navigation trace",
+        "coverage": "Evidence coverage",
+        "rounds": "Adaptive rounds",
+        "stopReason": "Stop reason",
+        "modelCalls": "Navigation model calls",
+        "reads": "Knowledge reads",
+        "logicalReads": "Total logical reads",
+        "sourceWindows": "Source windows",
+        "sourceTokens": "Source tokens",
+        "linkHops": "Link hops",
+        "pageTreeSupplements": "PageTree supplements",
+        "budget": "Evidence + guidance / budget (tokens)",
+        "routes": "Virtual routes",
+        "aspects": "Required answer aspects",
+        "evidenceCount": "{{count}} evidence",
+        "coverageStates": {
+          "not_applicable": "Not used",
+          "covered": "Covered",
+          "supplemented": "Covered after supplementation",
+          "partial": "Partially covered",
+          "uncovered": "Uncovered"
+        },
+        "aspectStates": {
+          "covered": "Covered",
+          "partial": "Partial",
+          "missing": "Missing",
+          "not_applicable": "Not applicable"
+        },
+        "stopReasons": {
+          "legacy": "Legacy trace",
+          "covered": "Covered",
+          "partial": "Partial coverage",
+          "absent": "No supported answer",
+          "budget_exhausted": "Budget exhausted",
+          "cancelled": "Cancelled",
+          "model_degraded": "Navigation model degraded",
+          "snapshot_degraded": "Snapshot changed"
+        }
+      },
       "sourceUnavailable": "This historical source is currently unavailable.",
       "groups": {
         "today": "Today",

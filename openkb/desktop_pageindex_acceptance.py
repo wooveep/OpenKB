@@ -43,6 +43,9 @@ from openkb.locks import atomic_write_text
 _ACCEPTANCE_SCHEMA = 1
 _CACHE_TAMPER_TITLE = "OpenKB cache corruption acceptance sentinel"
 _PAGEINDEX_ENTRY_POINT = "runtime/pageindex/OpenKBPageIndex.exe"
+_PAGEINDEX_EVALUATION_VARIANTS = tuple(
+    variant for variant in DESKTOP_EVALUATION_VARIANT_ORDER if variant != "navigator"
+)
 
 
 def run_pageindex_package_acceptance(
@@ -186,7 +189,9 @@ def validate_pageindex_evaluation(
         raise ValueError("Portable package fixed evaluation suite path is invalid.")
     suite = DesktopRetrievalEvaluationSuite.from_json(suite_path)
     corpus_digest, corpus_files = pageindex_evaluation_corpus_identity(suite_path)
-    expected_variants = tuple(DESKTOP_EVALUATION_VARIANT_ORDER)
+    # The frozen PageIndex package report validates that provider, while Navigator is
+    # model-backed and measured by the live retrieval evaluation rather than this gate.
+    expected_variants = _PAGEINDEX_EVALUATION_VARIANTS
     if (
         evaluation.get("suiteSnapshotId") != suite.snapshot_id
         or evaluation.get("suiteDigest") != suite.digest

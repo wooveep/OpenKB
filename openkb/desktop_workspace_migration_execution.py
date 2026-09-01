@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 
+from openkb.desktop_corpus_knowledge_migrations import (
+    pending_corpus_knowledge_migration_statements,
+)
 from openkb.desktop_knowledge_adoption_migrations import (
     KNOWLEDGE_ADOPTION_REQUEST_INPUT_COLUMNS,
 )
@@ -13,6 +16,7 @@ from openkb.desktop_knowledge_analysis_migrations import (
 from openkb.desktop_model_observability_migrations import MODEL_LIFECYCLE_COLUMNS
 from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
 from openkb.desktop_workspace_feature_migrations import (
+    CORPUS_KNOWLEDGE_MIGRATION_VERSION,
     KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_VERSION,
     KNOWLEDGE_ANALYSIS_MIGRATION_VERSION,
     MODEL_LIFECYCLE_MIGRATION_VERSION,
@@ -20,9 +24,7 @@ from openkb.desktop_workspace_feature_migrations import (
 )
 
 _REPAIRABLE_COLUMN_MIGRATIONS = {
-    KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_VERSION: (
-        KNOWLEDGE_ADOPTION_REQUEST_INPUT_COLUMNS
-    ),
+    KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_VERSION: (KNOWLEDGE_ADOPTION_REQUEST_INPUT_COLUMNS),
     MODEL_LIFECYCLE_MIGRATION_VERSION: MODEL_LIFECYCLE_COLUMNS,
     MODEL_RESULT_OBSERVATION_MIGRATION_VERSION: MODEL_RESULT_OBSERVATION_COLUMNS,
 }
@@ -46,6 +48,8 @@ def pending_migration_statements(
             )
             if (table_name, column_name) not in existing
         )
+    if version == CORPUS_KNOWLEDGE_MIGRATION_VERSION:
+        return pending_corpus_knowledge_migration_statements(connection)
     if version != KNOWLEDGE_ANALYSIS_MIGRATION_VERSION:
         return statements
     if not _table_has_column(connection, "knowledge_reconciliation_candidates", "entity_subtype"):

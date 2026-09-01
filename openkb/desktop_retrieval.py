@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
+from typing import TypeAlias
 
+from openkb.desktop_adaptive_navigation import current_navigation_snapshot_id
 from openkb.desktop_answer_types import (
     DesktopAnswerError,
     DesktopEvidencePack,
@@ -27,9 +29,16 @@ from openkb.desktop_knowledge_graph import (
     local_graph_evidence_ids,
     record_query_diagnostic,
 )
+from openkb.desktop_knowledge_navigation import (
+    NAVIGATION_MAX_READS,
+    NAVIGATION_MAX_SOURCE_WINDOWS,
+    DesktopKnowledgeNavigationResult,
+    build_knowledge_navigation_in,
+)
 from openkb.desktop_knowledge_source_retrieval import knowledge_source_rows_in
 from openkb.desktop_knowledge_sources import AVAILABLE_EVIDENCE_OCCURRENCES_CTE
 from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_navigation_session import run_navigation_session
 from openkb.desktop_page_tree_selection import (
     PageTreeLeaseFactory,
     PageTreeSelectionResult,
@@ -46,6 +55,12 @@ from openkb.desktop_retrieval_channels import (
     RETRIEVAL_CHANNELS_BY_VARIANT,
     DesktopEvaluationVariant,
 )
+from openkb.desktop_retrieval_fusion import (
+    BASELINE_EVIDENCE_PACK_LIMIT,
+    GRAPH_CANDIDATE_LIMIT,
+    RetrievalCandidate,
+    fuse_candidates,
+)
 from openkb.desktop_retrieval_images import source_images_for_evidence
 from openkb.desktop_retrieval_plan import validate_question
 from openkb.desktop_retrieval_planning import (
@@ -61,23 +76,13 @@ from openkb.desktop_source_image_locator import source_image_matches_evidence
 from openkb.desktop_workspace import desktop_state_database_path
 
 _source_image_matches_evidence = source_image_matches_evidence
+_Candidate: TypeAlias = RetrievalCandidate
+_fuse_candidates = fuse_candidates
 
 _CHANNEL_LIMIT = 12
-_EVIDENCE_PACK_LIMIT = 6
-DESKTOP_EVIDENCE_RECALL_K = _EVIDENCE_PACK_LIMIT
-_BASELINE_MINIMUM_QUOTA = 4
-_GRAPH_CANDIDATE_LIMIT = 2
-_RRF_OFFSET = 60
+DESKTOP_EVIDENCE_RECALL_K = BASELINE_EVIDENCE_PACK_LIMIT
 _SCORE_COLUMNS = frozenset(("display_name", "heading_path", "text"))
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class _Candidate:
-    reference: DesktopEvidenceRef
-    channel: str
-    rank: int
-    weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -112,17 +117,41 @@ class DesktopEvidenceRetriever:
         on_model_event: Callable[[object], None] | None = None,
         operation_retry_scopes: Mapping[str, str] | None = None,
     ) -> DesktopEvidencePack:
-        """Plan and retrieve without ever allowing optional model work to block a reply."""
+        """Run one bounded adaptive session with deterministic evidence as its fallback."""
         variant: DesktopEvaluationVariant = (
             "local_graph" if local_graph_default_enabled(self._kb_dir) else "baseline"
         )
-        return self.retrieve_variant(
+        pinned_snapshot_id = current_navigation_snapshot_id(self._database_path)
+        initial_pack = self.retrieve_variant(
             question,
             variant=variant,
             is_cancelled=is_cancelled,
             on_model_event=on_model_event,
             operation_retry_scopes=operation_retry_scopes,
             _enable_page_tree_selection=True,
+            _enable_navigation=True,
+        )
+        retrieve_round = partial(
+            self.retrieve_variant,
+            question,
+            variant=variant,
+            is_cancelled=is_cancelled,
+            on_model_event=on_model_event,
+            operation_retry_scopes=operation_retry_scopes,
+            _enable_page_tree_selection=True,
+            _enable_navigation=True,
+        )
+        return run_navigation_session(
+            kb_dir=self._kb_dir,
+            database_path=self._database_path,
+            question=question,
+            pinned_snapshot_id=pinned_snapshot_id,
+            initial_pack=initial_pack,
+            model_gateway=self._model_gateway,
+            retrieve_round=retrieve_round,
+            is_cancelled=is_cancelled,
+            on_model_event=on_model_event,
+            retry_scope=(operation_retry_scopes or {}).get("knowledge_navigation_step"),
         )
 
     def build_plan(
@@ -159,9 +188,14 @@ class DesktopEvidenceRetriever:
         on_model_event: Callable[[object], None] | None = None,
         operation_retry_scopes: Mapping[str, str] | None = None,
         _enable_page_tree_selection: bool = False,
+        _enable_navigation: bool = False,
+        _navigation_max_reads: int | None = None,
+        _navigation_max_source_windows: int | None = None,
+        _navigation_excluded_routes: frozenset[str] = frozenset(),
+        _navigation_prior_evidence: tuple[DesktopEvidenceRef, ...] = (),
     ) -> DesktopEvidencePack:
         """Retrieve one named vectorless channel for a fixed evaluation plan."""
-        if variant not in DESKTOP_EVALUATION_VARIANTS:
+        if variant not in DESKTOP_EVALUATION_VARIANTS or variant == "navigator":
             raise ValueError(f"Unsupported Desktop retrieval variant: {variant}")
         normalized_question = validate_question(question)
         if retrieval_plan is None:
@@ -187,6 +221,7 @@ class DesktopEvidenceRetriever:
             all_degradations = degradations
         graph_error_code: str | None = None
         selection = PageTreeSelectionResult()
+        navigation = DesktopKnowledgeNavigationResult()
         with _best_effort_catalog_lease(
             self._kb_dir,
             enabled=variant in CATALOG_RETRIEVAL_VARIANTS,
@@ -197,6 +232,7 @@ class DesktopEvidenceRetriever:
         ):
             connection = _connect(self._database_path)
             try:
+                connection.execute("BEGIN")
                 catalog_candidates, catalog_degradation = _catalog_channel_candidates(
                     connection,
                     plan.terms,
@@ -212,6 +248,7 @@ class DesktopEvidenceRetriever:
                 )
                 graph_error_code = variant_evidence.graph_error_code
             finally:
+                connection.rollback()
                 connection.close()
             page_tree_enabled = variant in PAGE_TREE_EVALUATION_VARIANTS or (
                 _enable_page_tree_selection and variant in {"baseline", "local_graph"}
@@ -231,10 +268,61 @@ class DesktopEvidenceRetriever:
             connection = _connect(self._database_path)
             try:
                 page_tree_candidates = _page_tree_candidates(connection, selection.evidence_ids)
-                candidates = (*variant_evidence.candidates, *page_tree_candidates)
+                if _enable_navigation:
+                    try:
+                        navigation = build_knowledge_navigation_in(
+                            connection,
+                            catalog_generation_id=(
+                                catalog.generation_id if catalog is not None else None
+                            ),
+                            terms=plan.terms,
+                            baseline_evidence=(
+                                *_navigation_prior_evidence,
+                                *variant_evidence.evidence,
+                                *(candidate.reference for candidate in page_tree_candidates),
+                            ),
+                            max_reads=(
+                                _navigation_max_reads
+                                if _navigation_max_reads is not None
+                                else NAVIGATION_MAX_READS
+                            ),
+                            max_source_windows=(
+                                _navigation_max_source_windows
+                                if _navigation_max_source_windows is not None
+                                else NAVIGATION_MAX_SOURCE_WINDOWS
+                            ),
+                            excluded_routes=_navigation_excluded_routes,
+                        )
+                    except (KeyError, TypeError, ValueError, sqlite3.Error):
+                        logger.warning(
+                            "Knowledge Navigation degraded to baseline retrieval.",
+                            exc_info=True,
+                        )
+                        navigation = DesktopKnowledgeNavigationResult(
+                            degradation_reasons=("knowledge_navigation_failed",)
+                        )
+                navigation_candidates = tuple(
+                    _Candidate(
+                        reference=reference,
+                        channel="knowledge_navigation_source_window",
+                        rank=rank,
+                        weight=1.0,
+                    )
+                    for rank, reference in enumerate(navigation.source_windows, start=1)
+                )
+                candidates = (
+                    *variant_evidence.candidates,
+                    *navigation_candidates,
+                    *page_tree_candidates,
+                )
                 evidence = _fuse_candidates(
                     candidates,
                     protected=variant_evidence.protected_candidates,
+                    routed=(*navigation_candidates, *page_tree_candidates),
+                )
+                guidance, coverage_gate_state = navigation.grounded_guidance(
+                    tuple(reference.evidence_id for reference in evidence),
+                    page_tree_supplemented=bool(selection.evidence_ids),
                 )
                 source_images = source_images_for_evidence(connection, evidence, self._kb_dir)
             finally:
@@ -254,6 +342,7 @@ class DesktopEvidenceRetriever:
             dict.fromkeys(
                 (
                     *retrieval_degradations,
+                    *navigation.degradation_reasons,
                     *((graph_error_code,) if graph_error_code else ()),
                 )
             )
@@ -263,6 +352,8 @@ class DesktopEvidenceRetriever:
             channel_counts.setdefault(channel, 0)
         if page_tree_enabled:
             channel_counts["document_page_tree"] = len(page_tree_candidates)
+        if _enable_navigation:
+            channel_counts["knowledge_navigation_source_window"] = len(navigation_candidates)
         channel_degradations = {
             "catalog": catalog_degradation,
             "knowledge_graph": ((graph_error_code,) if graph_error_code else ()),
@@ -289,6 +380,15 @@ class DesktopEvidenceRetriever:
             selected_node_ids=selection.selected_node_ids,
             canonical_evidence_ids=tuple(reference.evidence_id for reference in evidence),
             fusion_policy_version=FUSION_POLICY_VERSION,
+            navigation_snapshot_ids=(
+                (navigation.snapshot_id,) if navigation.snapshot_id is not None else ()
+            ),
+            navigation_routes=navigation.routes,
+            navigation_read_count=navigation.read_count,
+            source_window_count=navigation.source_window_count,
+            link_hop_count=navigation.link_hop_count,
+            page_tree_supplement_count=1 if selection.evidence_ids else 0,
+            coverage_gate_state=coverage_gate_state,
         )
         return DesktopEvidencePack(
             retrieval_plan=plan,
@@ -305,6 +405,7 @@ class DesktopEvidenceRetriever:
                     planning_cost.output_characters + selection.model_cost.output_characters
                 ),
             ),
+            guidance=guidance,
         )
 
 
@@ -550,7 +651,7 @@ def _variant_evidence(
             graph_error_code=error.code,
             extra_channel_counts=(("knowledge_graph", 0),),
         )
-    bounded_graph = graph_candidates[:_GRAPH_CANDIDATE_LIMIT]
+    bounded_graph = graph_candidates[:GRAPH_CANDIDATE_LIMIT]
     return _variant_result(
         (*candidates, *bounded_graph),
         protected=protected,
@@ -687,109 +788,6 @@ def _json_object(value: str) -> dict[str, object]:
     except json.JSONDecodeError:
         return {}
     return dict(decoded) if isinstance(decoded, dict) else {}
-
-
-def _fuse_candidates(
-    candidates: tuple[_Candidate, ...], *, protected: tuple[_Candidate, ...] = ()
-) -> tuple[DesktopEvidenceRef, ...]:
-    scores: defaultdict[str, float] = defaultdict(float)
-    channels: defaultdict[str, set[str]] = defaultdict(set)
-    references: dict[str, DesktopEvidenceRef] = {}
-    channel_first: dict[str, str] = {}
-    for candidate in candidates:
-        evidence_id = candidate.reference.evidence_id
-        scores[evidence_id] += candidate.weight / (_RRF_OFFSET + candidate.rank)
-        channels[evidence_id].add(candidate.channel)
-        references.setdefault(evidence_id, candidate.reference)
-        channel_first.setdefault(candidate.channel, evidence_id)
-
-    selected: list[str] = list(_rank_candidate_ids(protected)[:_BASELINE_MINIMUM_QUOTA])
-    for channel in ("fts", "structure_lexical", "wiki"):
-        if len(selected) == _EVIDENCE_PACK_LIMIT:
-            break
-        first_evidence_id = channel_first.get(channel)
-        if first_evidence_id is not None and first_evidence_id not in selected:
-            selected.append(first_evidence_id)
-    ranked = sorted(scores, key=lambda evidence_id: (-scores[evidence_id], evidence_id))
-    for evidence_id in ranked:
-        if len(selected) == _EVIDENCE_PACK_LIMIT:
-            break
-        if evidence_id not in selected:
-            selected.append(evidence_id)
-    return tuple(
-        DesktopEvidenceRef(
-            **{
-                **references[key].__dict__,
-                "channels": tuple(sorted(channels[key])),
-            }
-        )
-        for key in selected
-    )
-
-
-def _rank_candidate_ids(candidates: tuple[_Candidate, ...]) -> tuple[str, ...]:
-    scores: defaultdict[str, float] = defaultdict(float)
-    channel_first: dict[str, str] = {}
-    for candidate in candidates:
-        evidence_id = candidate.reference.evidence_id
-        scores[evidence_id] += candidate.weight / (_RRF_OFFSET + candidate.rank)
-        channel_first.setdefault(candidate.channel, evidence_id)
-    selected: list[str] = []
-    for channel in ("fts", "structure_lexical", "wiki"):
-        first_evidence_id = channel_first.get(channel)
-        if first_evidence_id is not None and first_evidence_id not in selected:
-            selected.append(first_evidence_id)
-    for evidence_id in sorted(scores, key=lambda key: (-scores[key], key)):
-        if evidence_id not in selected:
-            selected.append(evidence_id)
-    return tuple(selected)
-
-
-def _with_graph_budget(
-    baseline: tuple[DesktopEvidenceRef, ...], graph: tuple[_Candidate, ...]
-) -> tuple[DesktopEvidenceRef, ...]:
-    """Reserve baseline evidence before an optional graph can add context."""
-    graph_references = {candidate.reference.evidence_id: candidate.reference for candidate in graph}
-
-    def with_graph_channel(reference: DesktopEvidenceRef) -> DesktopEvidenceRef:
-        graph_reference = graph_references.get(reference.evidence_id)
-        if graph_reference is None:
-            return reference
-        return DesktopEvidenceRef(
-            **{
-                **reference.__dict__,
-                "channels": tuple(sorted(set(reference.channels) | set(graph_reference.channels))),
-            }
-        )
-
-    baseline_references = tuple(with_graph_channel(reference) for reference in baseline)
-    baseline_by_evidence_id = {
-        reference.evidence_id: reference for reference in baseline_references
-    }
-    selected: list[DesktopEvidenceRef] = []
-    selected_ids: set[str] = set()
-
-    def append(reference: DesktopEvidenceRef) -> None:
-        if reference.evidence_id not in selected_ids and len(selected) < _EVIDENCE_PACK_LIMIT:
-            selected.append(reference)
-            selected_ids.add(reference.evidence_id)
-
-    for reference in baseline_references[:_BASELINE_MINIMUM_QUOTA]:
-        append(reference)
-    graph_added = 0
-    for candidate in graph:
-        if graph_added == _GRAPH_CANDIDATE_LIMIT:
-            break
-        reference = baseline_by_evidence_id.get(
-            candidate.reference.evidence_id, candidate.reference
-        )
-        if reference.evidence_id in selected_ids:
-            continue
-        append(reference)
-        graph_added += 1
-    for reference in baseline_references:
-        append(reference)
-    return tuple(selected)
 
 
 def _placeholders(values: tuple[str, ...]) -> str:

@@ -238,10 +238,12 @@
       "knowledgePages": {
         "newConcept": "新建概念",
         "newEntity": "新建实体",
+        "newProcedure": "新建流程",
         "concept": "概念",
         "entity": "实体",
+        "procedure": "流程",
         "loading": "正在加载知识页…",
-        "empty": "还没有知识页。新建一个概念或实体页即可开始。",
+        "empty": "还没有知识页。新建一个概念、实体或流程页即可开始。",
         "newPage": "新建知识页",
         "untitled": "未命名知识页",
         "revision": "修订 {{revision}}",
@@ -484,11 +486,12 @@
       },
       "reconciliation": {
         "title": "知识冲突",
-        "description": "审核导入的概念和实体变更。存在工作草稿时，所有协调结果仍是草稿，必须由你显式发布。",
+        "description": "审核导入的概念、实体和流程变更。存在工作草稿时，所有协调结果仍是草稿，必须由你显式发布。",
         "loading": "正在检查知识变更…",
         "empty": "没有待审核的知识冲突。",
         "concept": "概念",
         "entity": "实体",
+        "procedure": "流程",
         "fromDocument": "来自 {{document}} 的新增变更",
         "incoming": "导入内容",
         "userRevision": "当前用户修订",
@@ -573,6 +576,41 @@
           "title": "页面树选择已暂停",
           "impact": "当前页面树契约验证失败后，本次问答保留了确定性证据选择。",
           "recovery": "修正模型配置后，请重新生成此回答，以显式重试同一契约。"
+        },
+        "knowledgeNavigation": {
+          "title": "知识导航未验证",
+          "impact": "OpenKB 已保留确定性种子证据，但无法执行针对缺口的自适应补证。",
+          "recovery": "请在模型设置中对分析角色执行“保存并验证”，然后重试问答。"
+        },
+        "knowledgeNavigationUnavailable": {
+          "title": "知识导航未配置",
+          "impact": "当前没有可用的分析模型，因此本次回答只使用确定性种子证据，未执行自适应补证。",
+          "recovery": "请配置分析角色，并在模型设置中执行“保存并验证”。"
+        },
+        "knowledgeNavigationCancelled": {
+          "title": "知识导航已取消",
+          "impact": "自适应补证已停止；取消前已取得的证据仍被保留。",
+          "recovery": "准备好继续补证后，重试此回答。"
+        },
+        "knowledgeNavigationSuspended": {
+          "title": "知识导航已暂停",
+          "impact": "导航步骤契约返回了不可用结果，因此 OpenKB 安全地保留了确定性证据。",
+          "recovery": "修正分析模型配置后，重试此回答以再次运行同一契约。"
+        },
+        "knowledgeNavigationBudget": {
+          "title": "知识导航已达到安全预算",
+          "impact": "OpenKB 已停止有界补证，并基于当前已收集证据回答。",
+          "recovery": "请查看“导航轨迹”，确认哪些回答要点仍为部分覆盖或缺失。"
+        },
+        "knowledgeNavigationSnapshot": {
+          "title": "导航期间知识库发生变化",
+          "impact": "OpenKB 已停止混用不同知识快照的证据，并仅保留一致结果。",
+          "recovery": "等待文档导入或知识分析完成后，再重试此回答。"
+        },
+        "knowledgeNavigationNoProgress": {
+          "title": "知识导航未找到新增证据",
+          "impact": "后续有界搜索只重复了已知证据，因此 OpenKB 主动停止，避免无效循环。",
+          "recovery": "“导航轨迹”会标明当前知识库无法充分支持的回答要点。"
         },
         "answerModel": {
           "title": "问答模型未验证",
@@ -666,6 +704,8 @@
       "export": {
         "action": "导出",
         "exporting": "正在导出…",
+        "portableWiki": "可移植 Wiki",
+        "portableWikiDescription": "导出可读摘要、语义知识页、来源 Markdown、图片、别名与快照校验和。",
         "projection": "知识投影包",
         "projectionDescription": "包含 OKF Markdown 与来源清单，不包含原始文件。",
         "selfContained": "自包含知识包",
@@ -922,6 +962,46 @@
       "evidenceDescription": "这里只展示该版本实际发送给回答模型的来源。",
       "sources": "来源 {{count}}",
       "images": "图片 {{count}}",
+      "navigationTrace": {
+        "title": "知识导航记录",
+        "coverage": "补证覆盖",
+        "rounds": "自适应轮数",
+        "stopReason": "停止原因",
+        "modelCalls": "导航模型调用",
+        "reads": "知识读取",
+        "logicalReads": "逻辑读取总数",
+        "sourceWindows": "原文窗口",
+        "sourceTokens": "原文 token",
+        "linkHops": "链接跳数",
+        "pageTreeSupplements": "PageTree 补证",
+        "budget": "证据 + 指引 / 总预算（token）",
+        "routes": "虚拟路径",
+        "aspects": "回答必需方面",
+        "evidenceCount": "{{count}} 条证据",
+        "coverageStates": {
+          "not_applicable": "未使用",
+          "covered": "已覆盖",
+          "supplemented": "补证后覆盖",
+          "partial": "部分覆盖",
+          "uncovered": "未覆盖"
+        },
+        "aspectStates": {
+          "covered": "已覆盖",
+          "partial": "部分覆盖",
+          "missing": "缺失",
+          "not_applicable": "不适用"
+        },
+        "stopReasons": {
+          "legacy": "历史记录",
+          "covered": "覆盖完成",
+          "partial": "部分覆盖",
+          "absent": "无来源支持",
+          "budget_exhausted": "预算耗尽",
+          "cancelled": "已取消",
+          "model_degraded": "导航模型降级",
+          "snapshot_degraded": "知识快照已变化"
+        }
+      },
       "sourceUnavailable": "此历史来源当前不可用。",
       "groups": {
         "today": "今天",

@@ -314,6 +314,56 @@ def test_retry_waits_for_the_original_bulk_run_to_finish(tmp_path: Path) -> None
     assert error.value.code == "knowledge_reanalysis_run_active"
 
 
+def test_reanalysis_batches_preserve_duplicate_evidence_occurrences(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+    )
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "repeated-sections.md"
+    repeated_paragraph = "Shared operational prerequisite. " * 400
+    source.write_text(
+        "\n\n".join(
+            f"# Section {ordinal}\n\n{repeated_paragraph}\n\n{repeated_paragraph}"
+            for ordinal in range(7)
+        ),
+        encoding="utf-8",
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        occurrence_count, unique_evidence_count = connection.execute(
+            """
+            SELECT COUNT(*), COUNT(DISTINCT evidence_id)
+            FROM evidence_occurrences WHERE document_id = ?
+            """,
+            (document.document_id,),
+        ).fetchone()
+    assert occurrence_count > unique_evidence_count
+
+    service = DesktopKnowledgeReanalysisService(kb_dir)
+    run = service.create_run((document.document_id,), provider="provider", model="model")
+
+    def transport(request, _timeout_seconds):
+        if request.operation == "knowledge_analysis_batch":
+            return _empty_analysis("batch")
+        if request.operation == "knowledge_analysis_merge":
+            return _empty_analysis("document")
+        raise AssertionError(request.operation)
+
+    service.run_job(
+        run.jobs[0].job_id,
+        DesktopModelGateway(transport, provider_name="provider", model_name="model"),
+    )
+
+    job = service.overview()["runs"][0]["jobs"][0]
+    assert job["status"] == "completed", job["reason"]
+    assert job["batch_total"] > 1
+
+
 def test_reanalysis_retry_reuses_completed_long_document_batch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

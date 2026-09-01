@@ -195,6 +195,35 @@ function retrievalTrace(payload: unknown): DesktopConversation["messages"][numbe
     selectedNodeIds: strings(value.selected_node_ids),
     canonicalEvidenceIds: strings(value.canonical_evidence_ids),
     fusionPolicyVersion: stringValue(value, "fusion_policy_version"),
+    navigationSnapshotIds: strings(value.navigation_snapshot_ids),
+    navigationRoutes: strings(value.navigation_routes),
+    navigationReadCount: numberValue(value.navigation_read_count),
+    sourceWindowCount: numberValue(value.source_window_count),
+    linkHopCount: numberValue(value.link_hop_count),
+    pageTreeSupplementCount: numberValue(value.page_tree_supplement_count),
+    coverageGateState: stringValue(value, "coverage_gate_state"),
+    navigationAnswerKind: stringValue(value, "navigation_answer_kind"),
+    navigationSubject: stringValue(value, "navigation_subject"),
+    navigationRoundCount: numberValue(value.navigation_round_count),
+    navigationActionKinds: strings(value.navigation_action_kinds),
+    navigationStopReason: stringValue(value, "navigation_stop_reason"),
+    coverageAspects: (Array.isArray(value.coverage_aspects) ? value.coverage_aspects : []).map((item) => {
+      const aspect = record(item)
+      const status = stringValue(aspect, "status")
+      return {
+        aspect: stringValue(aspect, "aspect"),
+        status: (["covered", "partial", "missing", "not_applicable"].includes(status)
+          ? status
+          : "missing") as "covered" | "partial" | "missing" | "not_applicable",
+        evidenceIds: strings(aspect.evidence_ids),
+      }
+    }),
+    navigationModelCalls: numberValue(value.navigation_model_calls),
+    navigationLogicalReadCount: numberValue(value.navigation_logical_read_count),
+    navigationSourceTokens: numberValue(value.navigation_source_tokens),
+    groundingInputBudgetTokens: numberValue(value.grounding_input_budget_tokens),
+    evidenceInputTokens: numberValue(value.evidence_input_tokens),
+    guidanceInputTokens: numberValue(value.guidance_input_tokens),
   }
 }
 

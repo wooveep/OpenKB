@@ -47,6 +47,15 @@ pub struct RetrievalChannelTrace {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AnswerCoverageTrace {
+    pub aspect: String,
+    pub status: String,
+    #[serde(default, alias = "evidence_ids")]
+    pub evidence_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RetrievalTrace {
     #[serde(default, alias = "catalog_generation_ids")]
     pub catalog_generation_ids: Vec<String>,
@@ -64,6 +73,44 @@ pub struct RetrievalTrace {
     pub canonical_evidence_ids: Vec<String>,
     #[serde(default, alias = "fusion_policy_version")]
     pub fusion_policy_version: String,
+    #[serde(default, alias = "navigation_snapshot_ids")]
+    pub navigation_snapshot_ids: Vec<String>,
+    #[serde(default, alias = "navigation_routes")]
+    pub navigation_routes: Vec<String>,
+    #[serde(default, alias = "navigation_read_count")]
+    pub navigation_read_count: u64,
+    #[serde(default, alias = "source_window_count")]
+    pub source_window_count: u64,
+    #[serde(default, alias = "link_hop_count")]
+    pub link_hop_count: u64,
+    #[serde(default, alias = "page_tree_supplement_count")]
+    pub page_tree_supplement_count: u64,
+    #[serde(default, alias = "coverage_gate_state")]
+    pub coverage_gate_state: String,
+    #[serde(default, alias = "navigation_answer_kind")]
+    pub navigation_answer_kind: String,
+    #[serde(default, alias = "navigation_subject")]
+    pub navigation_subject: String,
+    #[serde(default, alias = "navigation_round_count")]
+    pub navigation_round_count: u64,
+    #[serde(default, alias = "navigation_action_kinds")]
+    pub navigation_action_kinds: Vec<String>,
+    #[serde(default, alias = "navigation_stop_reason")]
+    pub navigation_stop_reason: String,
+    #[serde(default, alias = "coverage_aspects")]
+    pub coverage_aspects: Vec<AnswerCoverageTrace>,
+    #[serde(default, alias = "navigation_model_calls")]
+    pub navigation_model_calls: u64,
+    #[serde(default, alias = "navigation_logical_read_count")]
+    pub navigation_logical_read_count: u64,
+    #[serde(default, alias = "navigation_source_tokens")]
+    pub navigation_source_tokens: u64,
+    #[serde(default, alias = "grounding_input_budget_tokens")]
+    pub grounding_input_budget_tokens: u64,
+    #[serde(default, alias = "evidence_input_tokens")]
+    pub evidence_input_tokens: u64,
+    #[serde(default, alias = "guidance_input_tokens")]
+    pub guidance_input_tokens: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -1,0 +1,3 @@
+# Separate knowledge candidates from corpus synthesis
+
+Knowledge Analysis retains document-scoped, evidence-bound candidates as recoverable intermediate data, while bounded Corpus Knowledge Synthesis turns high-confidence generated identities into readable corpus-level Generated Knowledge Items. Ambiguous generated identity matches enter review and User Knowledge Pages are never rewritten automatically; the Knowledge Graph remains an optional retrieval aid rather than identity authority. This adds bounded model work in exchange for original-style synthesis without losing claim provenance, and existing generations change only through explicit Knowledge Reanalysis followed by atomic activation rather than unapproved background calls.

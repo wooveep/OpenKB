@@ -1,4 +1,4 @@
-"""SQLite-authoritative drafts and published Concept/Entity pages for Desktop."""
+"""SQLite-authoritative drafts and published knowledge pages for Desktop."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ DesktopKnowledgePagePublicationState = Literal["draft", "unpublished_changes", "
 DesktopKnowledgeProvenanceState = Literal[
     "source_backed", "structural", "legacy_unmapped", "unsourced", "invalid"
 ]
-_PAGE_KINDS = frozenset({"concept", "entity"})
+_PAGE_KINDS = frozenset({"concept", "entity", "procedure"})
 logger = logging.getLogger(__name__)
 
 _PAGE_STATE_CTE = """
@@ -736,7 +736,8 @@ def _materialized_path(kind: str, page_id: str) -> str:
 def _require_kind(kind: str) -> str:
     if kind not in _PAGE_KINDS:
         raise DesktopKnowledgePageError(
-            "knowledge_page_kind_invalid", "Knowledge page kind must be concept or entity."
+            "knowledge_page_kind_invalid",
+            "Knowledge page kind must be concept, entity, or procedure.",
         )
     return kind
 

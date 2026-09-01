@@ -58,7 +58,7 @@ class DesktopMissingSourceCandidate:
     candidate_id: str
     document_id: str
     document_name: str
-    kind: Literal["concept", "entity"]
+    kind: Literal["concept", "entity", "procedure"]
     title: str
     claim_text: str
     reason: MissingSourceReason
@@ -455,9 +455,7 @@ def _checkpoint_payload(payload: object) -> dict[str, object]:
 
 
 def _checkpoint_json(checkpoint: dict[str, object]) -> str:
-    return json.dumps(
-        checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
+    return json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _redacted_analysis_checkpoint(
@@ -500,6 +498,7 @@ def _redacted_analysis_checkpoint(
         analysis,
         concepts=retained_candidates(analysis.concepts),
         entities=retained_candidates(analysis.entities),
+        procedures=retained_candidates(analysis.procedures),
     )
     updated = dict(checkpoint)
     updated["normalized_result"] = redacted.as_dict()

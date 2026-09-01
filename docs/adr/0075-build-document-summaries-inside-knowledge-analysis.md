@@ -1,0 +1,3 @@
+# Build document summaries inside knowledge analysis
+
+New imports and explicit Knowledge Reanalysis extend the existing batched Knowledge Analysis result with evidence-bound Document Summary purpose, applicability, and key-content units while deriving the section map deterministically from DocumentIR and its PageTree. OpenKB does not add a separate summary Model Call and does not promote the legacy unbound `document_description` field into trusted summary prose. After the one existing structured-output repair opportunity, invalid or absent semantic summary units degrade to the deterministic section map without discarding valid Document Knowledge Candidates or blocking Available Knowledge.

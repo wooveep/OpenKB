@@ -1708,9 +1708,9 @@ def test_engine_adoption_collision_requires_reconciliation_without_overwrite(tmp
     assert conflicts[0]["target_page_id"] == existing.page_id
     assert conflicts[0]["content_markdown"].startswith("# Generated Knowledge")
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
-        assert connection.execute(
-            "SELECT page_id FROM knowledge_origin_references"
-        ).fetchone() == (existing.page_id,)
+        assert connection.execute("SELECT page_id FROM knowledge_origin_references").fetchone() == (
+            existing.page_id,
+        )
 
     DesktopKnowledgePageService(kb_dir).permanent_delete(
         existing.page_id,
@@ -1727,8 +1727,7 @@ def test_engine_adoption_collision_requires_reconciliation_without_overwrite(tmp
             (generation_id, item_key),
         ).fetchone() == (0,)
         assert connection.execute(
-            "SELECT COUNT(*) FROM knowledge_reconciliation_candidates "
-            "WHERE target_page_id = ?",
+            "SELECT COUNT(*) FROM knowledge_reconciliation_candidates WHERE target_page_id = ?",
             (existing.page_id,),
         ).fetchone() == (0,)
     readopted = server._dispatch(
@@ -1751,9 +1750,7 @@ def test_engine_adoption_collision_survives_an_unavailable_source_binding(tmp_pa
     kb_dir = tmp_path / "desktop-kb"
     workspace = DesktopKnowledgeBaseRuntime()
     workspace.create(kb_dir)
-    generation_id, item_key, _evidence_id = _seed_generated_workspace_item(
-        kb_dir, tmp_path
-    )
+    generation_id, item_key, _evidence_id = _seed_generated_workspace_item(kb_dir, tmp_path)
     existing = DesktopKnowledgePageService(kb_dir).save_draft(
         page_id=None,
         kind="concept",
@@ -1837,9 +1834,7 @@ def test_engine_high_confidence_adoption_queues_reconciliation_without_choice(tm
     kb_dir = tmp_path / "desktop-kb"
     workspace = DesktopKnowledgeBaseRuntime()
     workspace.create(kb_dir)
-    generation_id, item_key, _evidence_id = _seed_generated_workspace_item(
-        kb_dir, tmp_path
-    )
+    generation_id, item_key, _evidence_id = _seed_generated_workspace_item(kb_dir, tmp_path)
     existing = DesktopKnowledgePageService(kb_dir).save_draft(
         page_id=None,
         kind="concept",
@@ -1990,9 +1985,9 @@ def test_engine_ambiguous_adoption_can_queue_reconciliation_with_selected_page(t
     assert len(conflicts) == 1
     assert conflicts[0]["target_page_id"] == existing.page_id
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
-        assert connection.execute(
-            "SELECT page_id FROM knowledge_origin_references"
-        ).fetchone() == (existing.page_id,)
+        assert connection.execute("SELECT page_id FROM knowledge_origin_references").fetchone() == (
+            existing.page_id,
+        )
         assert connection.execute(
             "SELECT decision, candidate_page_id FROM knowledge_adoption_requests "
             "WHERE request_id = 'adoption-selected-existing'"
@@ -2091,6 +2086,30 @@ def test_engine_exports_a_typed_knowledge_bundle_to_a_selected_directory(tmp_pat
     assert exported["source_image_count"] == 0
     assert "source-manifest.json" in exported["files"]
     assert Path(exported["path"]).parent == destination
+
+
+def test_engine_exports_an_explicit_portable_wiki_snapshot(tmp_path):
+    kb_dir = tmp_path / "desktop-kb"
+    destination = tmp_path / "exports"
+    destination.mkdir()
+    workspace = DesktopKnowledgeBaseRuntime()
+    workspace.create(kb_dir)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
+    server._handshake_complete = True
+
+    exported = server._dispatch(
+        DesktopRequest(
+            request_id="export-portable-wiki",
+            method="workbench.export_knowledge_bundle",
+            params={"destination": str(destination), "mode": "portable_wiki"},
+        ),
+        cancel_event=None,
+    )
+
+    assert exported["mode"] == "portable_wiki"
+    assert exported["raw_asset_count"] == 0
+    assert "index.md" in exported["files"]
+    assert "wiki-manifest.json" in exported["files"]
 
 
 def test_engine_exposes_knowledge_lifecycle_and_confirmed_permanent_delete(tmp_path):

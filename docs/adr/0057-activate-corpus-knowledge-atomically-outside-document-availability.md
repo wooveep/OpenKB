@@ -1,0 +1,3 @@
+# Activate corpus knowledge atomically outside document availability
+
+A Document Version becomes Available Knowledge once its DocumentIR, Evidence, and Document Knowledge Candidates validate; corpus-level synthesis does not block that availability. An explicit Corpus Reanalysis Run reanalyzes its selected documents, combines those results with unchanged corpus candidates, and atomically activates one complete Generated Knowledge Generation only after the run validates end to end. Until then the prior generated generation remains current, so this design favors a consistent corpus snapshot and recoverable failures over per-document freshness or destructive rebuilds.

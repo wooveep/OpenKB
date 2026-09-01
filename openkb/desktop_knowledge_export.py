@@ -20,6 +20,7 @@ from openkb.desktop_okf_projection import (
     discard_okf_projection_staging,
     stage_okf_projection_in,
 )
+from openkb.desktop_portable_wiki_export import render_portable_wiki_in
 from openkb.desktop_source_image_locator import source_image_matches_evidence
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
@@ -28,7 +29,7 @@ from openkb.desktop_workspace import (
 )
 from openkb.locks import atomic_write_text, kb_ingest_lock
 
-DesktopKnowledgeExportMode = Literal["knowledge_projection", "self_contained"]
+DesktopKnowledgeExportMode = Literal["knowledge_projection", "self_contained", "portable_wiki"]
 
 
 class DesktopKnowledgeExportError(DesktopKnowledgeBaseError):
@@ -99,7 +100,7 @@ class DesktopKnowledgeExportService:
         self, destination_directory: Path, *, mode: DesktopKnowledgeExportMode
     ) -> DesktopKnowledgeExport:
         parent = destination_directory.expanduser().resolve()
-        if mode not in {"knowledge_projection", "self_contained"}:
+        if mode not in {"knowledge_projection", "self_contained", "portable_wiki"}:
             raise DesktopKnowledgeExportError("Choose a supported Knowledge Bundle type.")
         if not parent.is_dir():
             raise DesktopKnowledgeExportError("The selected export folder is unavailable.")
@@ -115,6 +116,8 @@ class DesktopKnowledgeExportService:
         staging: Path | None = None
         final = parent / _export_directory_name(mode)
         projection_staging: Path | None = None
+        raw_asset_count = 0
+        source_image_count = 0
         try:
             with kb_ingest_lock(self._state_dir):
                 _discard_abandoned_export_staging(parent, self._kb_dir)
@@ -124,29 +127,38 @@ class DesktopKnowledgeExportService:
                 connection = sqlite3.connect(self._database_path)
                 try:
                     connection.execute("BEGIN")
-                    projection_snapshot = stage_okf_projection_in(connection, self._kb_dir)
-                    projection_staging = projection_snapshot
-                    sources = _source_assets_in(connection)
-                    mappings = tuple(mapping for source in sources for mapping in source.mappings)
-                    images = _source_images_in(connection, mappings)
-                    shutil.copytree(projection_snapshot, staging, dirs_exist_ok=True)
-                    raw_resources: dict[str, str] = {}
-                    image_resources: dict[str, str] = {}
-                    if mode == "self_contained":
-                        raw_resources = self._copy_raw_assets(staging, sources)
-                        image_resources = self._copy_source_images(staging, images)
-                        _rewrite_projection_resources(staging, raw_resources)
-                    manifest = _manifest(
-                        mode=mode,
-                        sources=sources,
-                        images=images,
-                        raw_resources=raw_resources,
-                        image_resources=image_resources,
-                    )
-                    atomic_write_text(
-                        staging / "source-manifest.json",
-                        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                    )
+                    if mode == "portable_wiki":
+                        portable = render_portable_wiki_in(connection, self._kb_dir, staging)
+                        source_image_count = portable.source_image_count
+                    else:
+                        projection_snapshot = stage_okf_projection_in(connection, self._kb_dir)
+                        projection_staging = projection_snapshot
+                        sources = _source_assets_in(connection)
+                        mappings = tuple(
+                            mapping for source in sources for mapping in source.mappings
+                        )
+                        images = _source_images_in(connection, mappings)
+                        shutil.copytree(projection_snapshot, staging, dirs_exist_ok=True)
+                        raw_resources: dict[str, str] = {}
+                        image_resources: dict[str, str] = {}
+                        if mode == "self_contained":
+                            raw_resources = self._copy_raw_assets(staging, sources)
+                            image_resources = self._copy_source_images(staging, images)
+                            _rewrite_projection_resources(staging, raw_resources)
+                        manifest = _manifest(
+                            mode=mode,
+                            sources=sources,
+                            images=images,
+                            raw_resources=raw_resources,
+                            image_resources=image_resources,
+                        )
+                        atomic_write_text(
+                            staging / "source-manifest.json",
+                            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True)
+                            + "\n",
+                        )
+                        raw_asset_count = len(raw_resources)
+                        source_image_count = len(image_resources)
                 finally:
                     connection.rollback()
                     connection.close()
@@ -162,8 +174,8 @@ class DesktopKnowledgeExportService:
                 path=str(final),
                 mode=mode,
                 files=files,
-                raw_asset_count=len(raw_resources),
-                source_image_count=len(image_resources),
+                raw_asset_count=raw_asset_count,
+                source_image_count=source_image_count,
             )
         except DesktopKnowledgeExportError:
             raise
@@ -439,6 +451,10 @@ def _discard_abandoned_export_staging(parent: Path, kb_dir: Path) -> None:
 
 
 def _export_directory_name(mode: DesktopKnowledgeExportMode) -> str:
-    label = "Knowledge-Projection" if mode == "knowledge_projection" else "Knowledge-Bundle"
+    label = {
+        "knowledge_projection": "Knowledge-Projection",
+        "self_contained": "Knowledge-Bundle",
+        "portable_wiki": "Portable-Wiki",
+    }[mode]
     timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     return f"OpenKB-{label}-{timestamp}-{uuid.uuid4().hex[:8]}"

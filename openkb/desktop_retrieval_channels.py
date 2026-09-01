@@ -20,6 +20,7 @@ DesktopEvaluationVariant = Literal[
     "local_graph",
     "document_page_tree",
     "catalog + document_page_tree",
+    "navigator",
 ]
 
 DESKTOP_RETRIEVAL_VARIANT_ORDER: tuple[DesktopRetrievalVariant, ...] = (
@@ -36,6 +37,7 @@ DESKTOP_EVALUATION_VARIANT_ORDER: tuple[DesktopEvaluationVariant, ...] = (
     *DESKTOP_RETRIEVAL_VARIANT_ORDER,
     "document_page_tree",
     "catalog + document_page_tree",
+    "navigator",
 )
 DESKTOP_EVALUATION_VARIANTS: frozenset[DesktopEvaluationVariant] = frozenset(
     DESKTOP_EVALUATION_VARIANT_ORDER
@@ -64,6 +66,16 @@ RETRIEVAL_CHANNELS_BY_VARIANT: dict[DesktopEvaluationVariant, tuple[str, ...]] =
         "structure_lexical",
         "catalog",
         "document_page_tree",
+    ),
+    "navigator": (
+        "fts",
+        "structure_lexical",
+        "wiki",
+        "knowledge_source",
+        "catalog",
+        "knowledge_graph",
+        "document_page_tree",
+        "knowledge_navigation_source_window",
     ),
 }
 

@@ -1,0 +1,3 @@
+# Integrate navigation into the existing answer experience
+
+Knowledge Navigation runs automatically inside the existing Grounded Answer and Conversation paths; OpenKB does not add a user-facing baseline/Wiki toggle or a separate Wiki Chat. The existing Evidence Drawer gains a collapsed Knowledge Navigation section backed by Retrieval Trace metadata, showing routes, pinned generations, supplementation, status, and degradation without exposing model reasoning. Published user knowledge contributes only factual units whose source bindings resolve to Available Evidence; invalid sibling units remain browsable with Source Health and Review Queue warnings instead of admitting an entire partially stale page or excluding all of its valid content.

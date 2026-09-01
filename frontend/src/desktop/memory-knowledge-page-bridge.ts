@@ -166,10 +166,13 @@ export abstract class MemoryKnowledgePageBridge {
     requestId: string,
   ): Promise<DesktopKnowledgeExport> {
     void requestId
+    const portable = mode === "portable_wiki"
     return {
       path: `${destination}/OpenKB-Knowledge-Export`,
       mode,
-      files: ["index.md", "log.md", "source-manifest.json"],
+      files: portable
+        ? ["index.md", "wiki-manifest.json"]
+        : ["index.md", "log.md", "source-manifest.json"],
       rawAssetCount: mode === "self_contained" ? 1 : 0,
       sourceImageCount: mode === "self_contained" ? 1 : 0,
     }

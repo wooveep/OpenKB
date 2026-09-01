@@ -1,0 +1,3 @@
+# Model operational procedures as first-class knowledge
+
+OpenKB models reusable, goal-oriented operational knowledge as a first-class Procedure alongside Concept and Entity. A Procedure owns its applicability, prerequisites, ordered actions, completion checks, and supporting claims; commands, paths, scripts, accounts, and individual steps do not become standalone knowledge identities merely because analysis extracts them. This adds a durable content type and kind-specific behavior, but prevents operational manuals from being fragmented into literal-shaped entity pages or flattened into explanatory concepts.

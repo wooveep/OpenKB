@@ -1,7 +1,8 @@
-"""Acceptance coverage for both user-visible OKF Knowledge Bundle exports."""
+"""Acceptance coverage for user-visible Knowledge and Portable Wiki exports."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -99,9 +100,7 @@ def test_self_contained_export_copies_only_referenced_raw_and_images_and_rewrite
     destination = tmp_path / "exports"
     destination.mkdir()
 
-    exported = DesktopKnowledgeExportService(kb_dir).export(
-        destination, mode="self_contained"
-    )
+    exported = DesktopKnowledgeExportService(kb_dir).export(destination, mode="self_contained")
 
     root = Path(exported.path)
     referenced_raw = root / "raw" / f"{referenced.document.raw_asset_sha256}.md"
@@ -113,9 +112,7 @@ def test_self_contained_export_copies_only_referenced_raw_and_images_and_rewrite
     assert images[0].read_bytes() == b"\x89PNG\r\n\x1a\nreferenced"
     manifest = json.loads((root / "source-manifest.json").read_text(encoding="utf-8"))
     assert manifest["mode"] == "self_contained"
-    assert manifest["sources"][0]["resource"] == (
-        f"raw/{referenced.document.raw_asset_sha256}.md"
-    )
+    assert manifest["sources"][0]["resource"] == (f"raw/{referenced.document.raw_asset_sha256}.md")
     assert len(manifest["source_images"]) == 1
     assert manifest["source_images"][0]["resource"].startswith("images/")
     page_path = root / "concept" / f"{page_id}.md"
@@ -124,6 +121,97 @@ def test_self_contained_export_copies_only_referenced_raw_and_images_and_rewrite
     assert not resource.startswith("urn:")
     assert (page_path.parent / resource).resolve() == referenced_raw.resolve()
     assert unrelated.document.document_id not in json.dumps(manifest)
+
+
+def test_portable_wiki_export_uses_semantic_routes_and_snapshot_checksums(
+    tmp_path: Path,
+) -> None:
+    kb_dir, imported, page_id = _knowledge_base_with_referenced_image(tmp_path)
+    evidence_id = _qualify_portable_wiki_fixture(kb_dir, document_id=imported.document.document_id)
+    destination = tmp_path / "exports"
+    destination.mkdir()
+
+    exported = DesktopKnowledgeExportService(kb_dir).export(destination, mode="portable_wiki")
+
+    root = Path(exported.path)
+    assert exported.mode == "portable_wiki"
+    assert exported.raw_asset_count == 0
+    assert exported.source_image_count == 2
+    assert not (root / "raw").exists()
+    assert (root / "index.md").is_file()
+    assert (root / "summaries" / "referenced.md").is_file()
+    assert (root / "concepts" / "routing.md").is_file()
+    procedure = root / "generated" / "procedure" / "双节点超融合部署.md"
+    assert procedure.is_file()
+    assert (root / "sources" / "referenced.md").is_file()
+    assert len(tuple((root / "images").iterdir())) == 2
+    source_markdown = (root / "sources" / "referenced.md").read_text(encoding="utf-8")
+    assert f'<a id="evidence-{evidence_id}"></a>' in source_markdown
+    assert "../images/" in source_markdown
+    assert "sources/referenced.md" in (root / "index.md").read_text(encoding="utf-8")
+    assert "../../sources/referenced.md#evidence-" in procedure.read_text(encoding="utf-8")
+
+    manifest_path = root / "wiki-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["format"] == "openkb-portable-wiki-v1"
+    assert manifest["snapshot"]["knowledge_qualification_state"] == "qualified"
+    routes = {entry["route"]: entry for entry in manifest["routes"]}
+    assert routes["summaries/referenced"]["identity"] == imported.document.document_id
+    assert routes["concepts/routing"]["identity"] == page_id
+    assert routes["generated/procedure/双节点超融合部署"]["identity"] == ("portable-procedure")
+    assert routes["sources/referenced"]["identity"] == imported.document.document_id
+    assert manifest["aliases"] == [
+        {
+            "alias": "双节点超融合安装",
+            "identity": "portable-procedure",
+            "route": "generated/procedure/双节点超融合部署",
+        }
+    ]
+    assert "wiki-manifest.json" not in manifest["checksums"]
+    for relative, digest in manifest["checksums"].items():
+        assert hashlib.sha256((root / relative).read_bytes()).hexdigest() == digest
+
+
+def test_portable_wiki_excludes_legacy_unqualified_generated_items(tmp_path: Path) -> None:
+    kb_dir, imported, _page_id = _knowledge_base_with_referenced_image(tmp_path)
+    _insert_legacy_generated_item(kb_dir, document_id=imported.document.document_id)
+    destination = tmp_path / "exports"
+    destination.mkdir()
+
+    exported = DesktopKnowledgeExportService(kb_dir).export(destination, mode="portable_wiki")
+
+    generated = Path(exported.path) / "generated"
+    assert not generated.exists() or not tuple(generated.rglob("*.md"))
+    manifest = json.loads((Path(exported.path) / "wiki-manifest.json").read_text(encoding="utf-8"))
+    assert not any(entry["identity"] == "legacy-generated" for entry in manifest["routes"])
+
+
+def test_portable_wiki_disambiguates_same_named_document_versions(tmp_path: Path) -> None:
+    kb_dir = tmp_path / "knowledge"
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first = first_dir / "manual.md"
+    second = second_dir / "manual.md"
+    first.write_text("# First\n\nFirst document version.", encoding="utf-8")
+    second.write_text("# Second\n\nSecond document version.", encoding="utf-8")
+    DesktopTextImportService(kb_dir).import_text(first)
+    DesktopTextImportService(kb_dir).import_text(second)
+    destination = tmp_path / "exports"
+    destination.mkdir()
+
+    exported = DesktopKnowledgeExportService(kb_dir).export(destination, mode="portable_wiki")
+
+    root = Path(exported.path)
+    manifest = json.loads((root / "wiki-manifest.json").read_text(encoding="utf-8"))
+    source_routes = [
+        entry for entry in manifest["routes"] if entry["authority"] == "source_document"
+    ]
+    assert len(source_routes) == 2
+    assert len({entry["route"] for entry in source_routes}) == 2
+    assert all((root / entry["path"]).is_file() for entry in source_routes)
 
 
 def test_export_failure_leaves_no_partial_bundle(
@@ -222,6 +310,114 @@ def _knowledge_base_with_referenced_image(tmp_path: Path) -> tuple[Path, object,
     pages.bind_source(page.page_id, claim, evidence.evidence_id)
     pages.publish(page.page_id)
     return kb_dir, imported, page.page_id
+
+
+def _qualify_portable_wiki_fixture(kb_dir: Path, *, document_id: str) -> str:
+    database = desktop_state_database_path(kb_dir)
+    with sqlite3.connect(database) as connection:
+        evidence_id = str(
+            connection.execute(
+                "SELECT evidence_id FROM evidence_occurrences "
+                "WHERE document_id = ? ORDER BY ordinal LIMIT 1",
+                (document_id,),
+            ).fetchone()[0]
+        )
+        generation_id = int(
+            connection.execute(
+                "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1"
+            ).fetchone()[0]
+        )
+        connection.execute(
+            "UPDATE knowledge_generations "
+            "SET qualification_state = 'qualified', synthesis_schema_version = ? "
+            "WHERE generation_id = ?",
+            ("openkb.corpus-knowledge.v1", generation_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO document_summaries (
+                document_id, provenance_state, section_map_json,
+                analysis_provenance_json, created_at, updated_at
+            ) VALUES (?, 'source_backed', '[]', '{}', ?, ?)
+            """,
+            (document_id, "2026-08-31T00:00:00Z", "2026-08-31T00:00:00Z"),
+        )
+        connection.execute(
+            """
+            INSERT INTO document_summary_units (
+                document_id, unit_ordinal, role, unit_text
+            ) VALUES (?, 0, 'purpose', ?)
+            """,
+            (document_id, "本文说明路由与双节点部署资料。"),
+        )
+        connection.execute(
+            """
+            INSERT INTO document_summary_unit_sources (
+                document_id, unit_ordinal, evidence_id
+            ) VALUES (?, 0, ?)
+            """,
+            (document_id, evidence_id),
+        )
+        content = "## 操作步骤\n\n1. 初始化双节点超融合环境。"
+        connection.execute(
+            """
+            INSERT INTO knowledge_generation_items (
+                generation_id, item_key, kind, title, normalized_title,
+                content_markdown, content_sha256, source_document_id, created_at,
+                provenance_state, entity_subtype, analysis_provenance_json,
+                aliases_json, tags_json, identity_id
+            ) VALUES (?, 'portable-procedure', 'procedure', ?, ?, ?, ?, ?, ?,
+                'source_backed', NULL, '{}', ?, '[]', 'portable-identity')
+            """,
+            (
+                generation_id,
+                "双节点超融合部署",
+                "双节点超融合部署",
+                content,
+                hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                document_id,
+                "2026-08-31T00:00:00Z",
+                json.dumps(["双节点超融合安装"], ensure_ascii=False),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_generation_item_sources (
+                generation_id, item_key, source_id, evidence_id, claim_text
+            ) VALUES (?, 'portable-procedure', 'portable-source', ?, ?)
+            """,
+            (generation_id, evidence_id, "初始化双节点超融合环境。"),
+        )
+        return evidence_id
+
+
+def _insert_legacy_generated_item(kb_dir: Path, *, document_id: str) -> None:
+    content = "Legacy content must stay outside portable navigation."
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        generation_id = int(
+            connection.execute(
+                "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1"
+            ).fetchone()[0]
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_generation_items (
+                generation_id, item_key, kind, title, normalized_title,
+                content_markdown, content_sha256, source_document_id, created_at,
+                provenance_state, entity_subtype, analysis_provenance_json,
+                aliases_json, tags_json, identity_id
+            ) VALUES (?, 'legacy-generated', 'concept', 'Legacy Generated',
+                'legacy generated', ?, ?, ?, ?, 'source_backed', NULL, '{}',
+                '[]', '[]', 'legacy-identity')
+            """,
+            (
+                generation_id,
+                content,
+                hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                document_id,
+                "2026-08-31T00:00:00Z",
+            ),
+        )
 
 
 def _authority_snapshot(kb_dir: Path) -> tuple[list[tuple[object, ...]], ...]:

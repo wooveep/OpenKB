@@ -1,0 +1,3 @@
+# Preserve claim applicability during corpus synthesis
+
+Corpus Knowledge Synthesis qualifies claims by product version, platform, deployment scenario, and time boundary before deciding whether they agree. Claims from different applicability scopes may coexist in one generated item, while materially incompatible claims in the same scope enter review instead of being resolved by document recency or by treating every textual difference as a conflict. This requires explicit scope extraction and comparison, but preserves legitimate operational variants without allowing a newer unrelated manual to erase applicable knowledge.

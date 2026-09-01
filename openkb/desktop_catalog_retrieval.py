@@ -41,7 +41,7 @@ def catalog_route_rows_in(
                 END AS lifecycle_weight
             FROM knowledge_catalog_nodes AS nodes
             WHERE nodes.generation_id = ?
-                AND nodes.kind IN ('concept', 'entity', 'source_document')
+                AND nodes.kind IN ('concept', 'entity', 'procedure', 'source_document')
                 AND COALESCE(nodes.lifecycle_state, 'stable') != 'deprecated'
                 AND COALESCE(nodes.availability, 'available') = 'available'
         ), direct_nodes AS (

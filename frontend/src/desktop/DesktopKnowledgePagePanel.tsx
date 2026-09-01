@@ -498,6 +498,10 @@ export function DesktopKnowledgePagePanel({
               <FilePlus2 className="size-3.5" />
               {t("desktop.knowledgeBases.knowledgePages.newEntity")}
             </Button>
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => void beginNew("procedure")}>
+              <FilePlus2 className="size-3.5" />
+              {t("desktop.knowledgeBases.knowledgePages.newProcedure")}
+            </Button>
           </div>
           {loading ? (
             <div className="flex items-center gap-2 px-2 py-6 text-sm text-muted-foreground">
@@ -505,7 +509,11 @@ export function DesktopKnowledgePagePanel({
               {t("desktop.knowledgeBases.knowledgePages.loading")}
             </div>
           ) : pages.length ? (
-            <div className="mt-3">{renderPageList("concept")}{renderPageList("entity")}</div>
+            <div className="mt-3">
+              {renderPageList("concept")}
+              {renderPageList("entity")}
+              {renderPageList("procedure")}
+            </div>
           ) : (
             <p className="px-2 py-6 text-sm leading-6 text-muted-foreground">
               {t("desktop.knowledgeBases.knowledgePages.empty")}
@@ -601,6 +609,7 @@ export function DesktopKnowledgePagePanel({
                 >
                   <option value="concept">{t("desktop.knowledgeBases.knowledgePages.concept")}</option>
                   <option value="entity">{t("desktop.knowledgeBases.knowledgePages.entity")}</option>
+                  <option value="procedure">{t("desktop.knowledgeBases.knowledgePages.procedure")}</option>
                 </select>
               </label>
               <label className="block text-sm font-medium">

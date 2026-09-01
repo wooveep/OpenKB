@@ -1,0 +1,3 @@
+# Preview and preserve reanalysis generations
+
+Before an explicit Corpus Reanalysis Run, OpenKB shows the selected documents, estimated affected identities, Model Calls, token budget, and recoverable snapshot. Starting the run authorizes atomic activation after all non-deferred work passes validation and the Corpus Knowledge Quality Gate, without requiring the user to wait for a second confirmation. A post-run change report summarizes filtering, consolidation, additions, changes, carry-forwards, deferrals, and review work, while the prior generation remains available for rollback. This favors an observable, reversible operation over silent replacement or double-confirmation babysitting.

@@ -49,7 +49,8 @@ from openkb.desktop_model_settings import save_desktop_model_settings
 from openkb.desktop_model_terminal import DesktopTerminalModelEvent
 from openkb.desktop_model_usage import DesktopModelUsageStore
 from openkb.desktop_prompt_contracts import prompt_contract_for
-from openkb.desktop_retrieval import DesktopEvidenceRetriever, _Candidate, _with_graph_budget
+from openkb.desktop_retrieval import DesktopEvidenceRetriever
+from openkb.desktop_retrieval_fusion import RetrievalCandidate, with_graph_budget
 from openkb.desktop_structured_output import structured_output_repair_contract_digest
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_dir
 from openkb.locks import kb_ingest_lock
@@ -661,10 +662,12 @@ def test_graph_budget_preserves_baseline_minimum_candidates():
     """A graph addition cannot displace the four protected baseline results."""
     baseline = tuple(_reference(f"base-{ordinal}") for ordinal in range(6))
     graph = (
-        _Candidate(_reference("graph-only", channels=("knowledge_graph",)), "knowledge_graph", 1),
+        RetrievalCandidate(
+            _reference("graph-only", channels=("knowledge_graph",)), "knowledge_graph", 1
+        ),
     )
 
-    selected = _with_graph_budget(baseline, graph)
+    selected = with_graph_budget(baseline, graph)
 
     assert [reference.evidence_id for reference in selected[:4]] == [
         reference.evidence_id for reference in baseline[:4]
@@ -1330,9 +1333,7 @@ def test_graph_retry_revokes_partial_authorization_if_group_setup_fails(tmp_path
     def fail_second_authorization(connection, *, operation, **kwargs):
         if operation == "structured_output_repair":
             raise RuntimeError("repair authorization failed")
-        return authorize_model_operation_retry_in(
-            connection, operation=operation, **kwargs
-        )
+        return authorize_model_operation_retry_in(connection, operation=operation, **kwargs)
 
     monkeypatch.setattr(
         "openkb.desktop_model_result_failure._authorize_model_operation_retry_in",

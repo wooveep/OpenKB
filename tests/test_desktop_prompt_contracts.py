@@ -49,19 +49,108 @@ def test_every_runtime_model_operation_has_a_canonical_versioned_contract() -> N
         assert "AGENTS.md" not in json.dumps(snapshot)
 
 
-def test_knowledge_analysis_contract_bounds_structured_output_size() -> None:
-    instructions = prompt_contract_for("knowledge_analysis_batch").instructions
+def test_retrieval_plan_contract_requests_atomic_semantic_terms() -> None:
+    contract = prompt_contract_for("retrieval_plan")
 
-    assert "at most 16 concepts and 16 entities" in instructions
+    assert "separate semantic concepts or actions" in contract.instructions
+    assert "双节点" in contract.instructions
+    assert "超融合" in contract.instructions
+    assert "安装部署" in contract.instructions
+    assert contract.output_schema is not None
+    terms_schema = contract.output_schema["properties"]["terms"]
+    assert isinstance(terms_schema, dict)
+    assert terms_schema["maxItems"] == 8
+
+
+def test_grounded_answer_contract_preserves_evidence_backed_how_to_detail() -> None:
+    instructions = prompt_contract_for("grounded_answer").instructions
+
+    assert "For how-to questions" in instructions
+    assert "prerequisites" in instructions
+    assert "ordered steps" in instructions
+    assert "commands or configuration values" in instructions
+    assert "validation and safety warnings" in instructions
+    assert "Do not omit an evidence-backed phase merely to be concise" in instructions
+
+
+def test_knowledge_analysis_contract_bounds_structured_output_size() -> None:
+    contract = prompt_contract_for("knowledge_analysis_batch")
+    instructions = contract.instructions
+    normalized_instructions = " ".join(instructions.split())
+
+    assert "at most 16 candidates per kind" in instructions
     assert "at most 8 concise claims" in instructions
+    assert "at most 16 supplied Evidence IDs per claim" in normalized_instructions
+    assert (
+        "source_evidence_ids only inside claims or document_summary units"
+        in normalized_instructions
+    )
+    assert "Paths, commands, scripts, addresses" in instructions
+    assert "one user-completable operational goal" in instructions
     assert "within 2,000 characters" in instructions
+    assert contract.output_schema is not None
+    properties = contract.output_schema["properties"]
+    assert isinstance(properties, dict)
+    concepts = properties["concepts"]
+    assert isinstance(concepts, dict)
+    candidate = concepts["items"]
+    assert isinstance(candidate, dict)
+    candidate_properties = candidate["properties"]
+    assert isinstance(candidate_properties, dict)
+    claims = candidate_properties["claims"]
+    assert isinstance(claims, dict)
+    claim = claims["items"]
+    assert isinstance(claim, dict)
+    claim_properties = claim["properties"]
+    assert isinstance(claim_properties, dict)
+    source_ids = claim_properties["source_evidence_ids"]
+    assert isinstance(source_ids, dict)
+    assert source_ids["maxItems"] == 16
+    assert {"document_summary", "procedures"} <= set(properties)
+    assert contract.output_example is not None
+    assert contract.output_example["procedures"] == []
+
+
+def test_knowledge_analysis_schema_requires_the_complete_locally_validated_shape() -> None:
+    contract = prompt_contract_for("knowledge_analysis_batch")
+    schema = contract.output_schema
+    assert schema is not None
+    assert set(schema["required"]) == {
+        "schema_version",
+        "analysis_scope",
+        "document_description",
+        "document_summary",
+        "concepts",
+        "entities",
+        "procedures",
+    }
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    for kind in ("concepts", "entities", "procedures"):
+        collection = properties[kind]
+        assert isinstance(collection, dict)
+        candidate = collection["items"]
+        assert isinstance(candidate, dict)
+        candidate_properties = candidate["properties"]
+        assert isinstance(candidate_properties, dict)
+        assert ("subtype" in candidate_properties) is (kind == "entities")
+        claims = candidate_properties["claims"]
+        assert isinstance(claims, dict)
+        claim = claims["items"]
+        assert isinstance(claim, dict)
+        assert set(claim["required"]) == {
+            "text",
+            "source_evidence_ids",
+            "role",
+            "applicability",
+        }
 
 
 def test_changed_knowledge_analysis_prompt_versions_are_pinned() -> None:
     expected_versions = {
-        "knowledge_analysis": 3,
-        "knowledge_analysis_batch": 3,
-        "knowledge_analysis_merge": 4,
+        "knowledge_analysis": 6,
+        "knowledge_analysis_batch": 6,
+        "knowledge_analysis_merge": 5,
     }
     for operation, version in expected_versions.items():
         assert prompt_contract_for(operation).version == f"openkb.prompt.{operation}.v{version}"

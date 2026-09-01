@@ -19,11 +19,14 @@ if TYPE_CHECKING:
 
 MAX_ANALYSIS_DOCUMENT_INPUT_TOKENS = 12_000
 MINIMUM_USEFUL_ANALYSIS_BATCH_TOKENS = 512
+MINIMUM_ANALYSIS_FINAL_OUTPUT_TOKENS = 4_096
 _ANALYSIS_PLAN_OPERATIONS = (
     "knowledge_analysis",
     "knowledge_analysis_batch",
     "knowledge_analysis_merge",
     "page_tree_enrichment",
+    "page_tree_selection",
+    "knowledge_navigation_step",
     "knowledge_graph_extraction",
     "retrieval_plan",
     "structured_output_repair",
@@ -31,7 +34,7 @@ _ANALYSIS_PLAN_OPERATIONS = (
 _REASONING_ALLOWANCE_NUMERATORS = {"off": 0, "low": 1, "medium": 2, "high": 4}
 ANALYSIS_CAPABILITY_VERSION = "openkb.analysis-structured-streaming.v2"
 ANALYSIS_CAPABILITY_INSTRUCTIONS = (
-    "Return this exact JSON object and no other text: " '{"status":"ok"}'
+    'Return this exact JSON object and no other text: {"status":"ok"}'
 )
 ANALYSIS_CAPABILITY_FINAL_OUTPUT_TOKENS = 64
 ANSWER_CAPABILITY_SYSTEM_PROMPT = "Stream the requested short answer capability value."
@@ -329,7 +332,14 @@ def build_analysis_execution_profile(
     contracts = bundle["contracts"]
     assert isinstance(contracts, dict)
     snapshots = tuple(contracts.values())
-    final_reserve = max(_reserve_output_tokens(snapshot) for snapshot in snapshots)
+    requested_final_reserve = max(_reserve_output_tokens(snapshot) for snapshot in snapshots)
+    final_reserve = min(
+        requested_final_reserve,
+        max(
+            MINIMUM_ANALYSIS_FINAL_OUTPUT_TOKENS,
+            capability.context_capacity // 2,
+        ),
+    )
     numerator = _REASONING_ALLOWANCE_NUMERATORS[reasoning_effort]
     reasoning_allowance = final_reserve * numerator // 2
     output_ceiling = final_reserve + reasoning_allowance

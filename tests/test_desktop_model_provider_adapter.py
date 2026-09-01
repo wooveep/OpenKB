@@ -193,6 +193,55 @@ def test_deepseek_initial_graph_request_renders_its_complete_output_contract(
     assert captured[0]["response_format"] == {"type": "json_object"}
 
 
+def test_deepseek_page_tree_selection_renders_its_complete_output_contract(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    def completion(**kwargs):
+        captured.append(kwargs)
+        return {"choices": [{"message": {"content": '{"selections":[]}'}}]}
+
+    monkeypatch.setattr("litellm.completion", completion)
+    transport = desktop_model_transport.DesktopLiteLLMTransport(
+        model="deepseek/deepseek-v4-pro",
+        bundle=LlmCredentialBundle(
+            api_key="test-key",
+            base_url="https://api.deepseek.com",
+        ),
+    )
+    contract = prompt_contract_for("page_tree_selection")
+
+    transport(
+        DesktopModelRequest(
+            "page_tree_selection",
+            "Current Knowledge Base",
+            '{"question":"Compare Alpha and Beta","trees":[]}',
+            reasoning_effort="off",
+            provider_adapter="deepseek",
+            provider_adapter_version="deepseek.v1",
+            structured_output_mode="json_object",
+            response_schema=contract.output_schema,
+            response_example=contract.output_example,
+            prompt_contract_version=contract.version,
+            prompt_contract_snapshot=contract.snapshot(),
+        ),
+        30,
+    )
+
+    messages = captured[0]["messages"]
+    assert isinstance(messages, list)
+    system_message = messages[0]["content"]
+    assert "STRUCTURED OUTPUT CONTRACT" in system_message
+    assert '"selections"' in system_message
+    assert '"node_ids"' in system_message
+    assert '"maxItems":3' in system_message
+    assert '"maxItems":12' in system_message
+    assert '"maximum_twelve_nodes_per_document"' in system_message
+    assert '"known_document_and_node_ids_only"' in system_message
+    assert captured[0]["response_format"] == {"type": "json_object"}
+
+
 def test_deepseek_graph_repair_request_keeps_the_parent_contract_visible(
     monkeypatch,
 ) -> None:
@@ -244,6 +293,52 @@ def test_deepseek_graph_repair_request_keeps_the_parent_contract_visible(
     assert '"RELATED_TO"' in system_message
     assert '"support_quote"' in system_message
     assert '"output_example"' in system_message
+    assert captured[0]["response_format"] == {"type": "json_object"}
+
+
+def test_deepseek_knowledge_analysis_renders_its_complete_output_contract(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    def completion(**kwargs):
+        captured.append(kwargs)
+        return {"choices": [{"message": {"content": "{}"}}]}
+
+    monkeypatch.setattr("litellm.completion", completion)
+    transport = desktop_model_transport.DesktopLiteLLMTransport(
+        model="deepseek/deepseek-v4-pro",
+        bundle=LlmCredentialBundle(
+            api_key="test-key",
+            base_url="https://api.deepseek.com",
+        ),
+    )
+    contract = prompt_contract_for("knowledge_analysis_batch")
+
+    transport(
+        DesktopModelRequest(
+            "knowledge_analysis_batch",
+            "guide.md",
+            "content-free evidence batch",
+            reasoning_effort="off",
+            provider_adapter="deepseek",
+            provider_adapter_version="deepseek.v1",
+            structured_output_mode="json_object",
+            response_schema=contract.output_schema,
+            response_example=contract.output_example,
+            prompt_contract_version=contract.version,
+            prompt_contract_snapshot=contract.snapshot(),
+        ),
+        30,
+    )
+
+    messages = captured[0]["messages"]
+    assert isinstance(messages, list)
+    system_message = messages[0]["content"]
+    assert "STRUCTURED OUTPUT CONTRACT" in system_message
+    assert '"document_summary"' in system_message
+    assert '"applicability"' in system_message
+    assert '"troubleshooting"' in system_message
     assert captured[0]["response_format"] == {"type": "json_object"}
 
 

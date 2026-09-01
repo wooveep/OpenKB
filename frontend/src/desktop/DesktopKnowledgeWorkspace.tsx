@@ -1,4 +1,4 @@
-import { Download, Loader2, PackageOpen } from "lucide-react"
+import { BookOpen, Download, Loader2, PackageOpen } from "lucide-react"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -83,6 +83,20 @@ export function DesktopKnowledgeWorkspace({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-72">
+              <DropdownMenuItem
+                className="items-start py-2"
+                onSelect={() => void exportKnowledge("portable_wiki")}
+              >
+                <BookOpen className="mt-0.5 size-4" />
+                <span>
+                  <span className="block font-medium">
+                    {t("desktop.knowledge.export.portableWiki")}
+                  </span>
+                  <span className="block text-xs text-muted-foreground">
+                    {t("desktop.knowledge.export.portableWikiDescription")}
+                  </span>
+                </span>
+              </DropdownMenuItem>
               <DropdownMenuItem
                 className="items-start py-2"
                 onSelect={() => void exportKnowledge("knowledge_projection")}

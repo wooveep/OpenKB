@@ -118,7 +118,7 @@ def test_v51_graph_migrates_additively_without_model_work_or_pointer_movement(
 
     migrated = DesktopKnowledgeBaseRuntime().open(kb_dir)
 
-    assert migrated.knowledge_base.schema_version == 52
+    assert migrated.knowledge_base.schema_version == workspace_module._MIGRATIONS[-1][0]
     assert model_calls == []
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(

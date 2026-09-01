@@ -516,6 +516,7 @@ pub struct KnowledgePageDeletionResult {
 pub enum KnowledgeExportMode {
     KnowledgeProjection,
     SelfContained,
+    PortableWiki,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -565,9 +566,9 @@ mod tests {
     #[test]
     fn knowledge_export_accepts_python_snake_case_counts() {
         let export: KnowledgeExportResult = serde_json::from_value(json!({
-            "path": "C:/Exports/OpenKB-Knowledge-Bundle",
-            "mode": "self_contained",
-            "files": ["index.md", "source-manifest.json"],
+            "path": "C:/Exports/OpenKB-Portable-Wiki",
+            "mode": "portable_wiki",
+            "files": ["index.md", "wiki-manifest.json"],
             "raw_asset_count": 1,
             "source_image_count": 2
         }))
@@ -575,6 +576,10 @@ mod tests {
 
         assert_eq!(export.raw_asset_count, 1);
         assert_eq!(export.source_image_count, 2);
+        assert!(matches!(
+            export.mode,
+            super::KnowledgeExportMode::PortableWiki
+        ));
     }
 
     #[test]

@@ -7,14 +7,23 @@ import json
 from openkb.desktop_model_gateway import DesktopModelRequest
 from openkb.desktop_prompt_contracts import prompt_contract_for
 
-_RENDERED_STRUCTURED_OPERATIONS = frozenset({"knowledge_graph_extraction"})
+_RENDERED_STRUCTURED_OPERATIONS = frozenset(
+    {
+        "knowledge_analysis",
+        "knowledge_analysis_batch",
+        "knowledge_analysis_merge",
+        "knowledge_navigation_step",
+        "knowledge_graph_extraction",
+        "page_tree_selection",
+    }
+)
 
 
 def render_provider_visible_contract(
     request: DesktopModelRequest,
     instructions: str,
 ) -> str:
-    """Render the graph contract for adapters whose native mode is not authoritative."""
+    """Render adopted contracts for adapters whose native mode is not authoritative."""
     parent_operation = request.parent_operation
     if (
         request.operation not in _RENDERED_STRUCTURED_OPERATIONS

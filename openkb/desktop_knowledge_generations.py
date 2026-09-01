@@ -29,7 +29,7 @@ class KnowledgeGenerationSource:
 
 @dataclass(frozen=True)
 class KnowledgeGenerationChange:
-    """One selected derived Concept or Entity value for a generation."""
+    """One selected derived Concept, Entity, or Procedure value for a generation."""
 
     document_id: str
     kind: str
@@ -42,6 +42,7 @@ class KnowledgeGenerationChange:
     tags: tuple[str, ...] = ()
     sources: tuple[KnowledgeGenerationSource, ...] = ()
     analysis_provenance_json: str | None = None
+    identity_id: str | None = None
 
 
 def normalized_knowledge_content(value: str) -> str:
@@ -91,12 +92,12 @@ def publish_generation_changes_in(
                 generation_id, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
                 provenance_state, entity_subtype, aliases_json, tags_json,
-                analysis_provenance_json
+                analysis_provenance_json, identity_id
             )
             SELECT ?, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
                 provenance_state, entity_subtype, aliases_json, tags_json,
-                analysis_provenance_json
+                analysis_provenance_json, identity_id
             FROM knowledge_generation_items WHERE generation_id = ?
             """,
             (generation_id, current_generation_id),
@@ -137,7 +138,8 @@ def publish_additional_generation_sources_in(
     row = connection.execute(
         """
         SELECT item_key, title, content_markdown, content_sha256, source_document_id,
-            entity_subtype, aliases_json, tags_json, analysis_provenance_json
+            entity_subtype, aliases_json, tags_json, analysis_provenance_json,
+            identity_id
         FROM knowledge_generation_items
         WHERE generation_id = ? AND kind = ? AND normalized_title = ?
         """,
@@ -184,6 +186,7 @@ def publish_additional_generation_sources_in(
                 tags=decode_knowledge_labels(row[7]),
                 sources=tuple(merged.values()),
                 analysis_provenance_json=str(row[8]) if row[8] is not None else None,
+                identity_id=str(row[9]) if row[9] is not None else None,
             ),
         ),
         now=now,
@@ -193,6 +196,58 @@ def publish_additional_generation_sources_in(
 def materialize_current_generation(kb_dir: Path) -> None:
     """Restore the complete disposable OKF projection."""
     materialize_okf_projection(kb_dir)
+
+
+def publish_corpus_generation_in(
+    connection: sqlite3.Connection,
+    *,
+    current_generation_id: int | None,
+    changes: tuple[KnowledgeGenerationChange, ...],
+    document_ids: tuple[str, ...],
+    synthesis_schema_version: str,
+    now: str,
+) -> int | None:
+    """Atomically replace generated knowledge with one structurally qualified corpus snapshot."""
+    if not changes:
+        return current_generation_id
+    if any(not change.sources or change.identity_id is None for change in changes):
+        raise ValueError("Qualified corpus knowledge requires identities and source bindings.")
+    cursor = connection.execute(
+        """
+        INSERT INTO knowledge_generations (
+            parent_generation_id, created_at, qualification_state, synthesis_schema_version
+        ) VALUES (?, ?, 'candidate', ?)
+        """,
+        (current_generation_id, now, synthesis_schema_version),
+    )
+    if cursor.lastrowid is None:
+        raise RuntimeError("Corpus knowledge generation insert returned no identifier.")
+    generation_id = int(cursor.lastrowid)
+    for change in changes:
+        _upsert_generation_change_in(connection, generation_id, change, now)
+    connection.executemany(
+        """
+        INSERT INTO knowledge_generation_documents (generation_id, document_id)
+        VALUES (?, ?)
+        """,
+        ((generation_id, document_id) for document_id in dict.fromkeys(document_ids)),
+    )
+    connection.execute(
+        """
+        UPDATE knowledge_generations SET qualification_state = 'qualified'
+        WHERE generation_id = ?
+        """,
+        (generation_id,),
+    )
+    connection.execute(
+        """
+        INSERT INTO knowledge_generation_state (singleton, current_generation_id)
+        VALUES (1, ?)
+        ON CONFLICT(singleton) DO UPDATE SET current_generation_id = excluded.current_generation_id
+        """,
+        (generation_id,),
+    )
+    return generation_id
 
 
 def materialize_generation_in(
@@ -237,15 +292,15 @@ def _upsert_generation_change_in(
         (generation_id, change.kind, change.normalized_title),
     ).fetchone()
     if existing is None:
-        item_key = uuid.uuid4().hex
+        item_key = change.identity_id or uuid.uuid4().hex
         connection.execute(
             """
             INSERT INTO knowledge_generation_items (
                 generation_id, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
                 provenance_state, entity_subtype, aliases_json, tags_json,
-                analysis_provenance_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                analysis_provenance_json, identity_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 generation_id,
@@ -262,6 +317,7 @@ def _upsert_generation_change_in(
                 encode_knowledge_labels(change.aliases),
                 encode_knowledge_labels(change.tags),
                 change.analysis_provenance_json,
+                change.identity_id,
             ),
         )
     else:
@@ -272,7 +328,7 @@ def _upsert_generation_change_in(
             SET title = ?, content_markdown = ?, content_sha256 = ?,
                 source_document_id = ?, created_at = ?, provenance_state = ?,
                 entity_subtype = ?, aliases_json = ?, tags_json = ?,
-                analysis_provenance_json = ?
+                analysis_provenance_json = ?, identity_id = ?
             WHERE generation_id = ? AND item_key = ?
             """,
             (
@@ -286,6 +342,7 @@ def _upsert_generation_change_in(
                 encode_knowledge_labels(change.aliases),
                 encode_knowledge_labels(change.tags),
                 change.analysis_provenance_json,
+                change.identity_id,
                 generation_id,
                 item_key,
             ),

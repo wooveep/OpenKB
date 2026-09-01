@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -336,6 +337,62 @@ def test_grounded_answer_streams_model_deltas_without_losing_baseline_terms(tmp_
         (True, 1),
         (False, 1),
     ]
+
+
+def test_grounded_answer_receives_source_backed_navigation_blueprint(tmp_path) -> None:
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "install-alpha.md"
+    source.write_text(
+        "# Alpha 安装\n\n先检查主机容量，再安装 Alpha，最后运行健康检查。\n",
+        encoding="utf-8",
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+
+    class BlueprintTransport:
+        answer_prompt = ""
+
+        def __call__(self, request, _timeout_seconds):
+            if request.operation == "retrieval_plan":
+                return '{"terms":["Alpha","安装","健康检查"]}'
+            if request.operation == "knowledge_navigation_step":
+                prompt = json.loads(request.content)
+                evidence_ids = [item["evidence_id"] for item in prompt["evidence"]]
+                return json.dumps(
+                    {
+                        "schema_version": "openkb.knowledge-navigation-step.v1",
+                        "snapshot_id": prompt["snapshot_id"],
+                        "objective": prompt["objective"],
+                        "coverage": [
+                            {
+                                "aspect": aspect,
+                                "status": "covered",
+                                "evidence_ids": evidence_ids[:1],
+                            }
+                            for aspect in prompt["objective"]["required_aspects"]
+                        ],
+                        "actions": [],
+                        "decision": "stop",
+                    }
+                )
+            raise AssertionError(request.operation)
+
+        def stream_until_terminal(self, request, _connect_timeout_seconds, on_delta):
+            assert request.operation == "grounded_answer"
+            self.answer_prompt = request.content
+            on_delta("按证据执行并验证。[1]")
+            return "按证据执行并验证。[1]"
+
+    transport = BlueprintTransport()
+    answer = DesktopGroundedAnswerService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(transport),
+    ).answer("Alpha 如何安装")
+
+    assert answer.retrieval_trace.navigation_stop_reason == "covered"
+    assert "Answer Blueprint (navigation only" in transport.answer_prompt
+    assert "prerequisites — covered — [1]" in transport.answer_prompt
+    assert "Original Evidence is the only factual authority" in transport.answer_prompt
 
 
 def test_grounded_answer_uses_knowledge_name_channel(tmp_path):

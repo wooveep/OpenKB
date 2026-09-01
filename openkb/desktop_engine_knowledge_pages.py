@@ -46,9 +46,7 @@ def dispatch_knowledge_page_request(
         if request.method == "workbench.knowledge_workspace_history":
             try:
                 return workspace_service.history(
-                    generation_id=_optional_positive_integer_param(
-                        request, "generation_id"
-                    )
+                    generation_id=_optional_positive_integer_param(request, "generation_id")
                 )
             except ValueError as error:
                 raise DesktopRequestError(str(error), "Knowledge generation was not found.")
@@ -61,9 +59,7 @@ def dispatch_knowledge_page_request(
                         _required_string_param(request, "item_key"),
                     )
                 if authority == "user":
-                    return workspace_service.user_item(
-                        _required_string_param(request, "page_id")
-                    )
+                    return workspace_service.user_item(_required_string_param(request, "page_id"))
             except ValueError as error:
                 raise DesktopRequestError(str(error), "Knowledge Workspace item was not found.")
             raise DesktopRequestError(
@@ -87,20 +83,28 @@ def dispatch_knowledge_page_request(
         server._begin_workspace_mutation(request, cancel_event)
         if request.method == "workbench.adopt_knowledge_item":
             try:
-                return DesktopKnowledgeAdoptionService(Path(active.kb_dir)).adopt(
-                    generation_id=_required_integer_param(request, "generation_id"),
-                    item_key=_required_string_param(request, "item_key"),
-                    request_id=_required_string_param(request, "adoption_request_id"),
-                    decision=_optional_adoption_decision(request),
-                    candidate_page_id=_optional_string_param(request, "candidate_page_id"),
-                ).as_dict()
+                return (
+                    DesktopKnowledgeAdoptionService(Path(active.kb_dir))
+                    .adopt(
+                        generation_id=_required_integer_param(request, "generation_id"),
+                        item_key=_required_string_param(request, "item_key"),
+                        request_id=_required_string_param(request, "adoption_request_id"),
+                        decision=_optional_adoption_decision(request),
+                        candidate_page_id=_optional_string_param(request, "candidate_page_id"),
+                    )
+                    .as_dict()
+                )
             except ValueError as error:
                 raise DesktopRequestError(str(error), "Knowledge Adoption could not continue.")
         if request.method == "workbench.export_knowledge_bundle":
-            return DesktopKnowledgeExportService(Path(active.kb_dir)).export(
-                Path(_required_string_param(request, "destination")),
-                mode=_required_export_mode(request),
-            ).as_dict()
+            return (
+                DesktopKnowledgeExportService(Path(active.kb_dir))
+                .export(
+                    Path(_required_string_param(request, "destination")),
+                    mode=_required_export_mode(request),
+                )
+                .as_dict()
+            )
         if request.method == "workbench.publish_knowledge_page":
             return service.publish(_required_string_param(request, "page_id")).as_dict()
         if request.method == "workbench.verify_knowledge_page":
@@ -231,7 +235,7 @@ def _required_export_mode(request: DesktopRequest) -> DesktopKnowledgeExportMode
     from openkb.desktop_engine import DesktopRequestError
 
     value = request.params.get("mode")
-    if value not in {"knowledge_projection", "self_contained"}:
+    if value not in {"knowledge_projection", "self_contained", "portable_wiki"}:
         raise DesktopRequestError(
             "invalid_params", f"{request.method} requires a supported Knowledge Bundle mode."
         )

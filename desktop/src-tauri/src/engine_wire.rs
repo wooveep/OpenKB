@@ -202,6 +202,7 @@ pub enum ModelCallStatus {
 pub enum KnowledgePageKind {
     Concept,
     Entity,
+    Procedure,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

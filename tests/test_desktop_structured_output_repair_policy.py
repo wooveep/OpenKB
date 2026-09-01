@@ -6,7 +6,11 @@ import json
 
 import pytest
 
-from openkb.desktop_model_gateway import DesktopModelRequest, DesktopModelResult
+from openkb.desktop_model_gateway import (
+    DesktopModelOutputObservations,
+    DesktopModelRequest,
+    DesktopModelResult,
+)
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
     run_structured_output,
@@ -20,6 +24,41 @@ class _RepairableError(ValueError):
 
 class _LocalDispositionError(ValueError):
     pass
+
+
+def test_explicit_output_limit_is_not_treated_as_repairable_json() -> None:
+    requests: list[DesktopModelRequest] = []
+
+    def invoke(request: DesktopModelRequest) -> DesktopModelResult:
+        requests.append(request)
+        return DesktopModelResult(
+            "truncated-call",
+            '{"terms":["incomplete',
+            1,
+            observations=DesktopModelOutputObservations(
+                finish_reason="length",
+                final_content_observed=True,
+                final_chunk_count=1,
+                final_character_count=21,
+                output_limit_reached=True,
+            ),
+        )
+
+    with pytest.raises(DesktopStructuredOutputInvalidError) as captured:
+        run_structured_output(
+            operation="retrieval_plan",
+            document_name="question",
+            source_material="evidence",
+            invoke=invoke,
+            validate=lambda _content: (_ for _ in ()).throw(
+                AssertionError("Truncated JSON must not reach semantic validation.")
+            ),
+        )
+
+    assert [request.operation for request in requests] == ["retrieval_plan"]
+    assert captured.value.attempt_count == 1
+    assert captured.value.final_result is captured.value.initial_result
+    assert not captured.value.repair_attempted
 
 
 def test_operation_can_end_an_unrepairable_structured_failure_without_a_second_call() -> None:

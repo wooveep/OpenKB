@@ -1,0 +1,3 @@
+# Exclude unqualified legacy knowledge from guidance
+
+Compatibility migration preserves the existing generated snapshot as a Legacy Unqualified Knowledge Generation without running models or rewriting its content. It remains browsable, available through current OKF compatibility behavior, and retained for rollback, while direct Evidence retrieval continues unchanged; it is not eligible for Knowledge Guidance because it has not passed the current admission, consolidation, synthesis, and real-corpus quality contracts. An explicitly previewed Corpus Reanalysis must validate and atomically activate a qualified generation before generated guidance becomes available.

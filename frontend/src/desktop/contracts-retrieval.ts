@@ -35,6 +35,12 @@ export interface DesktopRetrievalChannelTrace {
   degradationReasons: string[]
 }
 
+export interface DesktopAnswerCoverageTrace {
+  aspect: string
+  status: "covered" | "partial" | "missing" | "not_applicable"
+  evidenceIds: string[]
+}
+
 export interface DesktopRetrievalTrace {
   catalogGenerationIds: string[]
   pageTreeGenerationIds: string[]
@@ -44,6 +50,25 @@ export interface DesktopRetrievalTrace {
   selectedNodeIds: string[]
   canonicalEvidenceIds: string[]
   fusionPolicyVersion: string
+  navigationSnapshotIds: string[]
+  navigationRoutes: string[]
+  navigationReadCount: number
+  sourceWindowCount: number
+  linkHopCount: number
+  pageTreeSupplementCount: number
+  coverageGateState: string
+  navigationAnswerKind: string
+  navigationSubject: string
+  navigationRoundCount: number
+  navigationActionKinds: string[]
+  navigationStopReason: string
+  coverageAspects: DesktopAnswerCoverageTrace[]
+  navigationModelCalls: number
+  navigationLogicalReadCount: number
+  navigationSourceTokens: number
+  groundingInputBudgetTokens: number
+  evidenceInputTokens: number
+  guidanceInputTokens: number
 }
 
 export interface DesktopGroundedAnswer {

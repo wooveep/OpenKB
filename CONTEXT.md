@@ -270,6 +270,16 @@ An immutable imported representation of a source document, distinguished from
 other versions by its content.
 _Avoid_: document update
 
+**Document Summary**:
+A Document Version-bound navigation artifact whose deterministic section map is
+derived from DocumentIR and whose optional semantic purpose, applicability, and
+key-content units each bind to Evidence. New analysis produces those semantic
+units inside the existing Knowledge Analysis batch-and-merge operation rather
+than through another Model Call. Invalid semantic units degrade to the section
+map without blocking otherwise valid Document Knowledge Candidates or Available
+Knowledge. It is neither a corpus Knowledge Identity nor a User Knowledge Page.
+_Avoid_: Generated Knowledge Item, Concept, query-time summary
+
 **Document Version Candidate**:
 A possible new Document Version identified by semantic similarity and awaiting
 user confirmation of which source document, if any, it belongs to.
@@ -551,9 +561,62 @@ _Avoid_: model response timeout
 
 **Knowledge Analysis**:
 The mandatory, versioned Model Analysis result that describes one imported
-document as source-backed Concepts, Entities, aliases, tags, and claims before
-that Document Version may be published.
+document as source-backed Document Knowledge Candidates before that Document
+Version may be published.
 _Avoid_: provider connection test, graph extraction, PageTree Enrichment
+
+**Concept**:
+A reusable explanatory idea, principle, mechanism, or category whose identity
+comes from its meaning rather than from a named concrete object or an ordered
+operational goal.
+_Avoid_: Entity, Procedure, document heading
+
+**Entity**:
+A durable, named, independently queryable object that is reusable across claims,
+such as a product, component, service, organization, or formally recurring tool.
+A script, path, address, account, log, package filename, or configuration value
+remains part of a claim unless it is itself such an object.
+_Avoid_: every noun phrase, raw literal, Procedure
+
+**Procedure**:
+A reusable, goal-oriented unit of operational knowledge with an applicability
+scope, prerequisites, ordered actions, and an observable completion condition.
+Commands, paths, individual steps, and troubleshooting observations are claims
+within a Procedure rather than separate knowledge identities.
+_Avoid_: Concept, task heading, command page
+
+**Document Knowledge Candidate**:
+A document-scoped, evidence-bound Concept, Entity, or Procedure hypothesis
+produced by Knowledge Analysis before corpus-level identity resolution and
+synthesis.
+_Avoid_: Generated Knowledge Item, Knowledge Graph Candidate
+
+**Knowledge Candidate Admission**:
+The gate that admits a Document Knowledge Candidate to corpus consolidation only
+when it is independently queryable, reusable beyond one local passage, and
+supported by evidence containing a definition, goal, or substantive claim.
+Document titles, table-of-contents entries, revision records, isolated literals,
+and one-off parameter values remain metadata or claims rather than identities.
+_Avoid_: extract every heading, delayed noise cleanup, Entity Resolution
+
+**Knowledge Identity**:
+The corpus-stable identity for one reusable Concept or Entity subject, or for one
+user-completable Procedure goal. Supporting subtopics become sections; an
+operation with an independently useful goal or lifecycle receives its own
+Procedure identity and may be referenced by a broader Procedure.
+_Avoid_: source section, topic keyword, whole-product omnibus page
+
+**Canonical Knowledge Title**:
+The stable display title for a Knowledge Identity, chosen from an evidence-backed
+official full name or, when none exists, the dominant corpus form. Deterministic
+case, spacing, punctuation, full-name, and supported abbreviation variants are
+Knowledge Aliases; an action phrase is not an alias for an Entity.
+_Avoid_: first occurrence, model-invented label, source heading
+
+**Knowledge Alias**:
+An evidence-backed or deterministically derived naming variant that resolves to
+one Knowledge Identity without changing its kind or semantic boundary.
+_Avoid_: related topic, action on an Entity, unverified model synonym
 
 **Knowledge Analysis Batch**:
 A recoverable, token-budgeted analysis checkpoint for one group of natural
@@ -581,10 +644,109 @@ _Avoid_: plan mutation, document reimport, mixed-plan recovery
 
 **Knowledge Analysis Merge**:
 The checkpointed document-level reduction of completed Knowledge Analysis
-Batches. It deterministically combines identical entities, aliases, tags,
-claims, and evidence links, then uses token-bounded hierarchical Model Calls
-only for document summaries and unresolved conflicts.
+Batches. It deterministically combines identical candidate identities, aliases,
+tags, claims, and evidence links, then uses token-bounded hierarchical Model
+Calls only for document summaries and unresolved conflicts.
 _Avoid_: one giant merge prompt, concatenation
+
+**Knowledge Candidate Consolidation**:
+The evidence-preserving resolution of Document Knowledge Candidates into
+high-confidence generated identities; ambiguous identity matches remain review
+work rather than being merged automatically.
+_Avoid_: Knowledge Analysis Merge, Knowledge Reconciliation
+
+**Automatic Knowledge Identity Match**:
+A same-kind consolidation decision supported by an identical normalized title
+or verified Knowledge Alias, or by at least two independent non-model identity
+signals plus a confirming structured Model Result and no contrary evidence.
+Cross-kind, model-only, and contradicted matches enter the Review Queue.
+_Avoid_: title substring match, model confidence alone, cross-kind merge
+
+**Corpus Knowledge Synthesis**:
+The bounded integration of consolidated, source-backed generated claims across
+documents into readable corpus-level Generated Knowledge Items. It never
+rewrites User Knowledge Pages automatically.
+_Avoid_: Knowledge Analysis, Knowledge Graph extraction, claim concatenation
+
+**Incremental Corpus Synthesis**:
+The debounced automatic synthesis of only the Knowledge Identities affected by
+newly available document candidates. The document becomes Available Knowledge
+before synthesis finishes, and the prior Generated Knowledge Generation remains
+current until the complete candidate generation validates and activates.
+Knowledge Reanalysis remains explicit.
+_Avoid_: blocking document publication, per-document activation, automatic reanalysis
+
+**Corpus Synthesis Budget**:
+The configured Model Call and token ceilings for one Corpus Knowledge Synthesis
+run after deterministic admission and clustering. Estimated and actual usage are
+visible; reaching a ceiling pauses the resumable candidate generation without
+truncating content or displacing the current generation.
+_Avoid_: silent topic dropping, unlimited calls, partial activation
+
+**Corpus Synthesis Batch**:
+A token-bounded Structured Output request that synthesizes several compatible
+small Knowledge Identities while preserving an independent result and source map
+for each. An oversized Procedure receives its own batch; validation isolates
+cross-item leakage or failure so only the affected item is retried.
+_Avoid_: one Model Call per page, whole-corpus prompt, shared page prose
+
+**Claim Applicability Scope**:
+The product version, platform, deployment scenario, and time boundary within
+which a source-backed knowledge claim applies, derived only from explicit
+evidence or reliable document metadata. Claims from distinct scopes may coexist;
+materially incompatible claims in the same scope require review rather than a
+newest-wins choice.
+_Avoid_: source document identity, global latest value, Conflict
+
+**Unspecified Applicability**:
+The explicit state of a Claim Applicability Scope dimension that its evidence
+does not establish. It is neither a wildcard nor a value inherited from document
+recency or neighboring claims; a conflict with an explicitly scoped claim enters
+review.
+_Avoid_: universal applicability, inferred latest version, missing data error
+
+**Generated Knowledge Generation**:
+An immutable corpus-wide snapshot of Generated Knowledge Items produced by one
+successful Corpus Knowledge Synthesis. It becomes current only through atomic
+activation; an incomplete or failed synthesis leaves the prior generation
+current and does not affect document availability.
+_Avoid_: Knowledge Graph Generation, per-document activation, Working Draft
+
+**Deferred Knowledge Cluster**:
+An affected identity cluster withheld from new synthesis because its identity or
+claims require review. A new generation carries forward its prior Generated
+Knowledge Item when one exists, or omits a new item while retaining its source
+Evidence for direct retrieval; it does not block safe clusters from activating.
+_Avoid_: duplicate provisional pages, failed generation, discarded evidence
+
+**Corpus Reanalysis Run**:
+An explicit user-initiated run that reanalyzes selected existing Document
+Versions and combines their new candidates with unchanged corpus candidates to
+build one candidate Generated Knowledge Generation. The run activates that
+generation only after every selected analysis and every non-deferred
+consolidation, synthesis, and validation step succeeds. Starting the run after
+its preview authorizes that atomic activation.
+_Avoid_: automatic migration, per-document activation, destructive rebuild
+
+**Corpus Reanalysis Preview**:
+The pre-run disclosure of selected Document Versions, estimated affected
+Knowledge Identities, Model Calls, token budget, and recoverable snapshot that
+lets the user authorize one Corpus Reanalysis Run.
+_Avoid_: post-run approval, silent model work, destructive migration
+
+**Corpus Reanalysis Change Report**:
+The post-run comparison that counts filtered candidates, consolidated identities,
+new and changed items, carried-forward items, Deferred Knowledge Clusters, and
+review work while retaining the prior Generated Knowledge Generation for
+rollback.
+_Avoid_: model transcript, second activation prompt, irreversible replacement
+
+**Corpus Knowledge Quality Gate**:
+The fixed real-corpus benchmark and regression contract a candidate Generated
+Knowledge Generation must pass before activation. It measures evidence binding,
+candidate noise, duplicate identities, multi-document synthesis, Procedure
+coverage, representative Grounded Answers, and existing retrieval behavior.
+_Avoid_: page-count comparison, average length, subjective spot check
 
 **Outdated Knowledge Analysis**:
 A still-usable Knowledge Analysis produced by an older analysis schema, prompt,
@@ -661,16 +823,43 @@ direct presentation as Answer Evidence.
 _Avoid_: generated image
 
 **Available Knowledge**:
-Completed, non-quarantined document results currently eligible for Grounded
-Answers, even while other Import Jobs remain active.
+Non-quarantined Document Versions whose DocumentIR, Evidence, and Document
+Knowledge Candidates have validated and are currently eligible for Grounded
+Answers, even while other Import Jobs or Corpus Knowledge Synthesis runs remain
+active.
 _Avoid_: complete batch
 
 **Retrieval Plan**:
-A validated, bounded structure derived from a question that records intent,
-lexical expansions, named entities, concepts, time constraints, and requested
-answer scope for the retrieval channels. Failure to create one does not disable
-deterministic baseline retrieval.
+A validated, bounded set of lexical and semantic search terms derived from a
+question for the retrieval channels. It is a discovery signal, not the
+representation of answer intent or scope. Failure to create a model-assisted
+plan does not disable deterministic baseline retrieval.
 _Avoid_: generated search query
+
+**Navigation Objective**:
+The answer kind, subject, requested scope, named entities, Concepts, requested
+actions, constraints, and required answer aspects pinned and refined inside one
+Navigation Session. It remains navigation metadata and never supports a fact.
+_Avoid_: Retrieval Plan, answer outline, model rationale
+
+**Navigation Session**:
+The private, bounded observe-plan-read loop behind one
+`DesktopEvidenceRetriever.retrieve` call. It owns the pinned Navigation
+Snapshot, Navigation Objective, visited actions and routes, Answer Coverage,
+budget use, Evidence allocation, degradation, and explicit stop outcome.
+_Avoid_: Wiki Agent, Conversation, second retrieval path
+
+**Knowledge Navigation View**:
+A query-time, virtual read model over one Navigation Snapshot of the Catalog,
+Document Summaries, current knowledge pages, and bounded source sections. It is
+not the Knowledge Workspace, an authority store, or a live Wiki directory.
+_Avoid_: Knowledge Workspace, OKF projection, filesystem mirror
+
+**Navigation Snapshot**:
+The immutable Knowledge Snapshot Revision, Generated Knowledge Generation,
+available-document set, and derived Catalog and PageTree generation identities
+pinned for one Grounded Answer's navigation.
+_Avoid_: latest state per read, Generated Knowledge Generation alone
 
 **Vectorless Semantic Retrieval**:
 Semantic candidate discovery without Embedding models or vector indexes. It
@@ -679,16 +868,60 @@ Pages, entity aliases, and evidence-backed graph traversal.
 _Avoid_: vector search
 
 **Evidence Pack**:
-The bounded, generation-consistent set of ranked EvidenceRefs, source
-coordinates, Source Images, channel reasons, and degradation state given to an
-answer model. It contains no unpublished graph candidates or Quarantined
-Document results.
-_Avoid_: prompt context
+The source-only, generation-consistent set of ranked EvidenceRefs, source
+coordinates, Source Images, channel reasons, and degradation state within one
+Grounding Context. It contains no generated knowledge prose, unpublished graph
+candidates, or Quarantined Document results.
+_Avoid_: Grounding Context, Knowledge Guidance, prompt context
+
+**Knowledge Guidance**:
+The source-bound units read from current generated or published user knowledge
+that organize an answer but never constitute Answer Evidence or an independently
+citable fact source. Eligibility is evaluated per factual unit: a unit whose
+Knowledge Source Bindings do not all resolve to Available Evidence is omitted,
+while valid sibling units and complementary generated knowledge remain usable.
+_Avoid_: Evidence Pack, Answer Evidence, unbound generated prose
+
+**Grounding Context**:
+The Navigation Snapshot, Knowledge Guidance, and source-only Evidence Pack
+provided together for one answer generation.
+_Avoid_: Evidence Pack, answer prompt, Conversation Context
+
+**Grounding Budget**:
+The model-capacity-aware input and output envelope enforced for one Grounded
+Answer. It reserves the Prompt Contract's output allowance, bounds Conversation
+Context, applies the configured document-input share, gives source Evidence at
+least three quarters of that document budget, and limits Knowledge Guidance to
+the remainder. An unknown model capacity selects a conservative code-owned
+fallback rather than an unbounded prompt.
+_Avoid_: Evidence Pack character limit, provider default, user-tuned prompt
+
+**Navigation Read Budget**:
+The code-owned session envelope over navigation rounds, physical Model Calls,
+total logical reads, source input tokens, wall time, and search expansion. Its
+values are maxima rather than fixed per-kind allocations; independent reads may
+be batched, and the Answer Coverage Gate stops work as soon as scope is covered.
+_Avoid_: model turn limit, target read count, open-ended agent loop
+
+**Answer Coverage Gate**:
+The evidence-bound comparison of a Navigation Objective's required aspects with
+collected Available Evidence. Every aspect is covered, partial, missing, or not
+applicable and binds canonical Evidence IDs when supported. Knowledge Guidance
+alone never satisfies coverage; meaningful gaps may authorize another bounded
+navigation round and remaining gaps are disclosed by aspect.
+_Avoid_: Corpus Knowledge Quality Gate, guidance-unit count, open-ended research
+
+**Answer Blueprint**:
+The ordered, navigation-only projection of Answer Coverage and its canonical
+Evidence IDs passed to the answer model. It organizes synthesis but cannot add a
+fact or replace Original Evidence citations.
+_Avoid_: generated answer, Knowledge Guidance, chain of thought
 
 **Retrieval Trace**:
-The compact record of Catalog and Document PageTree generations, selected
-channels, candidate reasons, and degradation state that explains how an Answer
-Version obtained its immutable Answer Evidence.
+The compact source-content-free record of the Navigation Objective summary,
+Navigation Snapshot, selected channels, rounds, validated action kinds, route
+IDs, Answer Coverage, budget use, model cost, stop outcome, and degradation that
+explains how an Answer Version obtained its immutable Answer Evidence.
 _Avoid_: model chain of thought, regenerated search
 
 **Entity Resolution Candidate**:
@@ -778,23 +1011,74 @@ _Avoid_: exception text, source excerpt, single-document failure
 The unified browsing surface for Generated Knowledge Items and User Knowledge
 Pages; its default scope contains the current generated generation and all user
 pages, while prior generated generations remain explicit history.
-_Avoid_: User Knowledge Page, generated-only list
+_Avoid_: Knowledge Navigation View, User Knowledge Page, generated-only list
+
+**Portable Wiki Export**:
+An explicit export mode that uses the existing transactional export pipeline to
+materialize one Navigation Snapshot as semantic-route Markdown for portable
+browsing or external tools. It contains a root index, Document Summaries,
+published User Knowledge Pages, the current Generated Knowledge Generation,
+full Available Document source views, referenced images, and a Portable Wiki
+Manifest, but no Raw Assets. It neither participates in runtime retrieval nor
+changes or continuously mirrors the Knowledge Base.
+_Avoid_: Knowledge Navigation View, live Wiki directory, authority backup
+
+**Portable Wiki Manifest**:
+The versioned inventory of a Portable Wiki Export's Navigation Snapshot, routes,
+route aliases, resources, and checksums. All routes, links, and checksums must
+validate before the staged export is atomically published to a new immutable
+directory.
+_Avoid_: source manifest, database backup, mutable export state
+
+**Portable Source View**:
+The complete Markdown projection of one Available Document Version in a
+Portable Wiki Export, stored as one semantic-slug file with stable heading,
+page, and source-locator anchors and relative Source Image links. It is derived
+from DocumentIR and is not split into per-page files or treated as a Raw Asset.
+_Avoid_: Evidence-only excerpt, original binary, runtime Source Read Window
 
 **Knowledge Base Compatibility Migration**:
 An additive, transactional schema transition preceded by a restorable backup.
-It exposes current generated knowledge in place and never triggers model calls,
-Knowledge Reanalysis, or authoritative-content rewriting.
+It exposes existing generated knowledge as a Legacy Unqualified Knowledge
+Generation, derives safe structural routes and summaries in place, and never
+triggers Model Calls, Knowledge Reanalysis, or authoritative-content rewriting.
 _Avoid_: document reimport, destructive upgrade
 
+**Legacy Unqualified Knowledge Generation**:
+A compatibility-preserved generation created from knowledge produced before the
+current candidate admission, corpus synthesis, and quality contracts. It remains
+browsable, exportable through existing OKF compatibility surfaces, and available
+for rollback, but cannot supply Knowledge Guidance until explicit Corpus
+Reanalysis produces a generation that passes the current quality gate.
+_Avoid_: failed generation, automatically trusted legacy knowledge, deleted history
+
 **Generated Knowledge Item**:
-An immutable, generation-bound Concept or Entity produced by Knowledge Analysis
-and browsable as generated knowledge. It remains read-only unless a user adopts
-it into a separate User Knowledge Page.
+An immutable, generation-bound corpus-level Concept, Entity, or Procedure
+produced by Corpus Knowledge Synthesis and browsable as generated knowledge. It
+remains read-only unless a user adopts it into a separate User Knowledge Page.
 _Avoid_: User Knowledge Page, Working Draft
 
+**Knowledge Page Content Contract**:
+The kind-specific readable structure for a Generated Knowledge Item or User
+Knowledge Page. Entity pages explain identity, role, capabilities, applicability,
+related operations, and limitations; Concept pages explain definition,
+mechanism, scope, tradeoffs, and relations; Procedure pages explain goal, scope,
+prerequisites, ordered steps, validation, rollback, and troubleshooting. Empty
+sections are omitted, equivalent claims become one unit with all supporting
+sources, complementary claims form coherent prose, scoped differences remain
+visible, and every factual paragraph or list item retains claim-level sources.
+_Avoid_: universal prose template, raw claim dump, page-level citation only
+
+**Knowledge Page Language**:
+The Knowledge Base preference used consistently for synthesized explanatory
+prose, defaulted from the corpus's dominant language and explicitly overridable.
+Official names, commands, paths, and other exact technical literals retain their
+source form, and a query's language does not rewrite stored pages.
+_Avoid_: per-source mixed prose, query-time page rewrite, forced translation of literals
+
 **User Knowledge Page**:
-A user-owned Concept or Entity with stable identity, revisions, and an explicit
-publication lifecycle.
+A user-owned Concept, Entity, or Procedure with stable identity, revisions, and
+an explicit publication lifecycle.
 _Avoid_: Generated Knowledge Item, source document
 
 **Knowledge Adoption**:
@@ -894,7 +1178,9 @@ _Avoid_: source array index, random footnote ID
 **Knowledge Source Binding**:
 The user-visible association of one claim-level Markdown unit with one or more
 document sections from Available Knowledge, represented portably as OKF source
-markers.
+markers. Its compact marker opens the supporting document, section, page or
+coordinate, and original excerpt; repeated sources share stable page-local IDs
+and appear once in the page's source summary.
 _Avoid_: manual Evidence ID entry, page-level source
 
 **Missing Source Candidate**:
@@ -914,10 +1200,12 @@ automatically with an existing revision.
 _Avoid_: import failure
 
 **Knowledge Reconciliation**:
-Classification of incoming concept and entity changes as compatible additions
-or Conflicts against approved knowledge. Adoption never overwrites a possible
-matching User Knowledge Page: a confident match enters reconciliation, while an
-ambiguous match requires the user to choose the existing page or a new page.
+Classification of incoming Concept, Entity, and Procedure changes as compatible
+additions or Conflicts against approved knowledge, with Claim Applicability
+Scope distinguishing legitimate variants from same-scope contradictions.
+Adoption never overwrites a possible matching User Knowledge Page: a confident
+match enters reconciliation, while an ambiguous match requires the user to
+choose the existing page or a new page.
 _Avoid_: document deduplication
 
 **Three-way Knowledge Reconciliation**:
@@ -931,13 +1219,18 @@ from default routing while retaining its identity, content, and history.
 _Avoid_: permanent deletion
 
 **Review Queue**:
-A persisted collection of Conflicts and other unresolved knowledge candidates
-awaiting a user's individual or batch resolution.
+A persisted, evidence-comparative collection of typed identity and claim
+problems. Identity actions include merge, keep separate, set alias, change kind,
+and exclude noise; claim actions include set applicability, preserve scoped
+variants, adopt a correction, and exclude an invalid claim. Batch resolution is
+available only for items sharing the same deterministic reason.
 _Avoid_: exception module
 
 **Resolution Record**:
-The minimal retained record of a submitted Conflict decision after unselected
-candidate content has been deleted.
+The minimal reusable decision signature, selected action, and provenance of a
+submitted Review Queue decision after unselected candidate content has been
+deleted. A later matching issue may replay the decision without retaining the
+rejected source text.
 _Avoid_: rejected revision
 
 **Reconciliation**:

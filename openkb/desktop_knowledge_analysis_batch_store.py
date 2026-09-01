@@ -416,9 +416,9 @@ def _hydrate_batches(
     rows: list[tuple[object, ...]],
     evidence: tuple[tuple[str, DocumentIRBlock], ...],
 ) -> tuple[KnowledgeAnalysisBatch, ...]:
-    by_id = {item[0]: item for item in evidence}
+    available_ids = {item[0] for item in evidence}
     hydrated: list[KnowledgeAnalysisBatch] = []
-    flattened: list[str] = []
+    evidence_offset = 0
     for expected_ordinal, row in enumerate(rows):
         try:
             section_values = json.loads(str(row[2]))
@@ -435,10 +435,13 @@ def _hydrate_batches(
             )
             or not isinstance(evidence_ids, list)
             or not evidence_ids
-            or not all(isinstance(value, str) and value in by_id for value in evidence_ids)
+            or not all(isinstance(value, str) and value in available_ids for value in evidence_ids)
         ):
             raise _state_error("Knowledge Analysis batch plan is invalid.")
-        flattened.extend(evidence_ids)
+        batch_evidence = evidence[evidence_offset : evidence_offset + len(evidence_ids)]
+        if [item[0] for item in batch_evidence] != evidence_ids:
+            raise _state_error("Knowledge Analysis batch plan no longer matches Evidence.")
+        evidence_offset += len(evidence_ids)
         checkpoint = _checkpoint(row[5]) if row[5] is not None else None
         if str(row[4]) == "completed" and checkpoint is None:
             raise _state_error("Completed Knowledge Analysis batch has no checkpoint.")
@@ -447,12 +450,12 @@ def _hydrate_batches(
                 batch_id=str(row[0]),
                 ordinal=expected_ordinal,
                 section_paths=tuple(tuple(path) for path in section_values),
-                evidence=tuple(by_id[value] for value in evidence_ids),
+                evidence=batch_evidence,
                 status=str(row[4]),
                 checkpoint=checkpoint,
             )
         )
-    if flattened != [item[0] for item in evidence] or len(flattened) != len(set(flattened)):
+    if evidence_offset != len(evidence):
         raise _state_error("Knowledge Analysis batch plan no longer matches Evidence.")
     return tuple(hydrated)
 

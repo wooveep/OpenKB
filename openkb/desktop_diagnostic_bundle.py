@@ -14,6 +14,7 @@ from pathlib import Path
 from openkb import __version__
 from openkb.desktop_diagnostic_logs import diagnostic_log_payloads
 from openkb.desktop_model_settings import read_desktop_model_settings
+from openkb.desktop_source_integrity import audit_source_integrity_in
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseError,
     desktop_state_database_path,
@@ -201,7 +202,11 @@ class DesktopDiagnosticBundleService:
                             SELECT operation, capability_identity, prompt_contract_digest,
                                 status, failure_code, failure_stage, failure_signature,
                                 CASE
-                                    WHEN operation IN ('retrieval_plan', 'page_tree_selection')
+                                    WHEN operation IN (
+                                        'retrieval_plan',
+                                        'page_tree_selection',
+                                        'knowledge_navigation_step'
+                                    )
                                         THEN 'regenerate_answer'
                                     WHEN operation = 'knowledge_graph_extraction'
                                         THEN 'retry_graph_extraction'
@@ -236,7 +241,11 @@ class DesktopDiagnosticBundleService:
                                 prompt_contract_digest, status, failure_code,
                                 failure_stage, failure_signature,
                                 CASE
-                                    WHEN operation IN ('retrieval_plan', 'page_tree_selection')
+                                    WHEN operation IN (
+                                        'retrieval_plan',
+                                        'page_tree_selection',
+                                        'knowledge_navigation_step'
+                                    )
                                         THEN 'regenerate_answer'
                                     WHEN operation = 'knowledge_graph_extraction'
                                         THEN 'retry_graph_extraction'
@@ -345,6 +354,7 @@ class DesktopDiagnosticBundleService:
                         ),
                     },
                     "integrity.json": {
+                        "source_integrity": audit_source_integrity_in(connection).as_dict(),
                         "source_document_counts": _rows(
                             connection,
                             """

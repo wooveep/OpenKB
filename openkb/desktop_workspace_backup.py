@@ -39,18 +39,31 @@ def migrate_existing_database(
         current_version=current,
         target_version=latest_version,
     )
-    connection.execute("BEGIN IMMEDIATE")
+    foreign_keys_enabled = bool(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+    if foreign_keys_enabled:
+        # SQLite's documented table-rebuild migration sequence requires foreign
+        # keys to be disabled before the transaction. The validated backup and
+        # pre-commit foreign_key_check preserve the stronger external invariant.
+        connection.execute("PRAGMA foreign_keys = OFF")
     try:
-        schema_version = apply_migrations(
-            connection,
-            creating=False,
-            in_transaction=True,
-        )
-    except BaseException:
-        connection.rollback()
-        raise
-    connection.commit()
-    return schema_version
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            schema_version = apply_migrations(
+                connection,
+                creating=False,
+                in_transaction=True,
+            )
+            violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise sqlite3.IntegrityError("Migration produced invalid foreign-key references.")
+        except BaseException:
+            connection.rollback()
+            raise
+        connection.commit()
+        return schema_version
+    finally:
+        if foreign_keys_enabled:
+            connection.execute("PRAGMA foreign_keys = ON")
 
 
 def create_migration_backup(

@@ -26,7 +26,7 @@ def model_capability_profile(
     normalized = model.rsplit("/", 1)[-1].lower()
     known_context = _known_context_capacity(normalized)
     capacity = context_capacity or known_context or 16_000
-    supports_reasoning = normalized.startswith(("gpt-5", "o1", "o3", "o4"))
+    supports_reasoning = normalized.startswith(("gpt-5", "o1", "o3", "o4", "deepseek-"))
     supports_native_schema = normalized.startswith(
         ("gpt-4", "gpt-5", "o1", "o3", "o4", "deepseek-chat")
     )
@@ -54,5 +54,5 @@ def _known_context_capacity(model: str) -> int | None:
     if model.startswith("gpt-4o"):
         return 128_000
     if model.startswith("deepseek-"):
-        return 64_000
+        return 1_000_000
     return None

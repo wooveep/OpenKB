@@ -1,6 +1,6 @@
 /** Generated and user-authored Knowledge Workspace authority contracts. */
 
-export type DesktopKnowledgePageKind = "concept" | "entity"
+export type DesktopKnowledgePageKind = "concept" | "entity" | "procedure"
 export type DesktopKnowledgePagePublicationState = "draft" | "unpublished_changes" | "published"
 export type DesktopKnowledgeLifecycleState = "draft" | "stable" | "deprecated"
 export type DesktopKnowledgeProvenanceState = "source_backed" | "structural" | "legacy_unmapped" | "unsourced" | "invalid"

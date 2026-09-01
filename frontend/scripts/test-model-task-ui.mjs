@@ -307,6 +307,10 @@ try {
         "retrieval_plan_cancelled",
         "page_tree_selection_unavailable",
         "page_tree_selection_cancelled",
+        "knowledge_navigation_step_unverified",
+        "knowledge_navigation_budget_exhausted",
+        "knowledge_navigation_snapshot_changed",
+        "knowledge_navigation_no_progress",
         "answer_model_unavailable",
         "answer_model_fallback",
       ],
@@ -319,6 +323,10 @@ try {
   assert.match(degradationMarkup, /Retrieval planning was cancelled/)
   assert.match(degradationMarkup, /Page-tree selection is not configured/)
   assert.match(degradationMarkup, /Page-tree selection was cancelled/)
+  assert.match(degradationMarkup, /Knowledge navigation is unverified/)
+  assert.match(degradationMarkup, /Knowledge navigation reached its safety budget/)
+  assert.match(degradationMarkup, /Knowledge changed during navigation/)
+  assert.match(degradationMarkup, /Knowledge navigation found no additional evidence/)
   assert.match(degradationMarkup, /Answer model is not configured/)
   assert.match(degradationMarkup, /Answer model used a fallback/)
   assert.match(degradationMarkup, /Use Save and Verify/)

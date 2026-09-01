@@ -6,6 +6,7 @@ from openkb import desktop_knowledge_reanalysis_migrations as reanalysis_migrati
 from openkb import desktop_knowledge_verification_migrations as verification_migrations
 from openkb import desktop_page_tree_migrations as page_tree_migrations
 from openkb.desktop_catalog_migrations import CATALOG_MIGRATION_STATEMENTS
+from openkb.desktop_corpus_knowledge_migrations import CORPUS_KNOWLEDGE_MIGRATION_STATEMENTS
 from openkb.desktop_knowledge_adoption_migrations import (
     KNOWLEDGE_ADOPTION_MIGRATION_STATEMENTS,
     KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_STATEMENTS,
@@ -95,6 +96,7 @@ KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_VERSION = 49
 MODEL_OPERATION_AUDIT_MIGRATION_VERSION = 50
 KNOWLEDGE_GRAPH_CURRENT_REVISION_MIGRATION_VERSION = 51
 KNOWLEDGE_GRAPH_INTERPRETATION_MIGRATION_VERSION = 52
+CORPUS_KNOWLEDGE_MIGRATION_VERSION = 53
 
 
 DESKTOP_FEATURE_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
@@ -162,4 +164,5 @@ DESKTOP_FEATURE_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
         + KNOWLEDGE_GRAPH_RETRY_SCOPE_MIGRATION_STATEMENTS
         + PAGE_TREE_ENRICHMENT_RETRY_SCOPE_MIGRATION_STATEMENTS,
     ),
+    (CORPUS_KNOWLEDGE_MIGRATION_VERSION, CORPUS_KNOWLEDGE_MIGRATION_STATEMENTS),
 )

@@ -93,6 +93,34 @@ def test_duplicate_claim_merges_sources_without_treating_order_as_identity() -> 
     assert claim.source_evidence_ids == ("evidence-one", "evidence-two")
 
 
+def test_claim_source_limit_error_exposes_the_contract_bound() -> None:
+    payload = json.loads(_analysis_response(("evidence-one", "evidence-two")))
+    payload["concepts"][0]["claims"][0]["source_evidence_ids"] = [
+        f"evidence-{ordinal}" for ordinal in range(17)
+    ]
+
+    with pytest.raises(DesktopImportError, match="at most 16 supplied Evidence IDs"):
+        parse_knowledge_analysis(json.dumps(payload))
+
+
+def test_claim_preserves_ten_source_ids_above_the_legacy_bound() -> None:
+    payload = json.loads(_analysis_response(("evidence-one", "evidence-two")))
+    source_ids = [f"evidence-{ordinal}" for ordinal in range(10)]
+    payload["concepts"][0]["claims"][0]["source_evidence_ids"] = source_ids
+
+    analysis = parse_knowledge_analysis(json.dumps(payload))
+
+    assert analysis.concepts[0].claims[0].source_evidence_ids == tuple(source_ids)
+
+
+def test_candidate_field_error_explains_where_evidence_ids_belong() -> None:
+    payload = json.loads(_analysis_response(("evidence-one", "evidence-two")))
+    payload["concepts"][0]["source_evidence_ids"] = ["evidence-one"]
+
+    with pytest.raises(DesktopImportError, match="source_evidence_ids only inside claims"):
+        parse_knowledge_analysis(json.dumps(payload))
+
+
 def test_incoming_change_deduplicates_sources_after_canonical_d2_mapping() -> None:
     payload = json.loads(_analysis_response(("evidence-one", "evidence-two")))
     payload["concepts"][0]["claims"] = [

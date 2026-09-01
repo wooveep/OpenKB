@@ -170,6 +170,7 @@ export function DesktopKnowledgeWorkspacePanel({
   const grouped = useMemo(() => ({
     concept: items.filter((item) => item.kind === "concept"),
     entity: items.filter((item) => item.kind === "entity"),
+    procedure: items.filter((item) => item.kind === "procedure"),
   }), [items])
   const selectedDetail = detail?.identity === selected?.identity ? detail : null
   const selectedAdoption = selectedDetail?.authority === "generated"
@@ -373,7 +374,7 @@ export function DesktopKnowledgeWorkspacePanel({
           {loading ? (
             <p className="flex items-center gap-2 px-2 py-6 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />{t("desktop.knowledge.workspace.loading")}</p>
           ) : items.length ? (
-            (["concept", "entity"] as const).map((kind) => grouped[kind].length ? (
+            (["concept", "entity", "procedure"] as const).map((kind) => grouped[kind].length ? (
               <div className="mt-3 space-y-1" key={kind}>
                 <p className="px-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-muted-foreground">{t(`desktop.knowledgeBases.knowledgePages.${kind}`)}</p>
                 {grouped[kind].map((item) => (

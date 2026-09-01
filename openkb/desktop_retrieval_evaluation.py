@@ -149,30 +149,39 @@ class DesktopRetrievalEvaluator:
                 planning_cost = _retrieval_model_cost(planning.model_cost)
                 for variant in DESKTOP_EVALUATION_VARIANT_ORDER:
                     retrieval_started = self._clock()
-                    pack = self._retriever.retrieve_variant(
-                        case.question,
-                        variant=variant,
-                        retrieval_plan=planning.plan,
-                        degradations=tuple(
-                            dict.fromkeys(
-                                (
-                                    *planning.degradations,
-                                    *(
-                                        self._page_tree_provider.degradations
-                                        if self._page_tree_provider is not None
-                                        and variant in PAGE_TREE_EVALUATION_VARIANTS
-                                        else ()
-                                    ),
+                    if variant == "navigator":
+                        pack = self._retriever.retrieve(case.question)
+                        variant_planning_latency_ms = 0.0
+                        variant_planning_cost = DesktopEvaluationModelCost()
+                    else:
+                        pack = self._retriever.retrieve_variant(
+                            case.question,
+                            variant=variant,
+                            retrieval_plan=planning.plan,
+                            degradations=tuple(
+                                dict.fromkeys(
+                                    (
+                                        *planning.degradations,
+                                        *(
+                                            self._page_tree_provider.degradations
+                                            if self._page_tree_provider is not None
+                                            and variant in PAGE_TREE_EVALUATION_VARIANTS
+                                            else ()
+                                        ),
+                                    )
                                 )
-                            )
-                        ),
-                    )
+                            ),
+                        )
+                        variant_planning_latency_ms = planning_latency_ms
+                        variant_planning_cost = planning_cost
                     retrieval_latency_ms = (self._clock() - retrieval_started) * 1_000
                     answer_started = self._clock()
                     pack = prepare_grounded_evidence_pack(pack)
                     answer = _safe_answer(self._answer_generator, case.question, pack)
                     answer_latency_ms = (self._clock() - answer_started) * 1_000
-                    latency_ms = planning_latency_ms + retrieval_latency_ms + answer_latency_ms
+                    latency_ms = (
+                        variant_planning_latency_ms + retrieval_latency_ms + answer_latency_ms
+                    )
                     results.append(
                         _case_result(
                             case,
@@ -184,7 +193,9 @@ class DesktopRetrievalEvaluator:
                             latency_ms,
                             retrieval_latency_ms,
                             answer_latency_ms,
-                            planning_cost.plus(_retrieval_cost(pack)).plus(answer.model_cost),
+                            variant_planning_cost.plus(_retrieval_cost(pack)).plus(
+                                answer.model_cost
+                            ),
                         )
                     )
         metrics = {
@@ -480,13 +491,16 @@ def _case_result(
     model_cost: DesktopEvaluationModelCost,
 ) -> DesktopRetrievalEvaluationCaseResult:
     cited = {reference.evidence_id for reference in pack.evidence}
+    retrieved_at_k = {
+        reference.evidence_id for reference in pack.evidence[:DESKTOP_EVIDENCE_RECALL_K]
+    }
     expected = set(expected_evidence_ids)
     if expected:
-        evidence_recall = len(cited & expected) / len(expected)
+        evidence_recall = len(retrieved_at_k & expected) / len(expected)
         citation_precision = len(cited & expected) / len(cited) if cited else 0.0
     else:
-        evidence_recall = 1.0 if not cited else 0.0
-        citation_precision = evidence_recall
+        evidence_recall = 1.0 if not retrieved_at_k else 0.0
+        citation_precision = 1.0 if not cited else 0.0
     faithful = _answer_is_faithful(case, expected, cited, answer.text)
     trace = pack.retrieval_trace
     selection_triggered = (
@@ -576,7 +590,9 @@ def recompute_page_tree_evaluation_gate(
     """Rebuild a serialized report's metrics and gate from case-level results."""
     results = list(report.results)
     metrics = {
-        variant: _metrics_for(results, variant) for variant in DESKTOP_EVALUATION_VARIANT_ORDER
+        variant: _metrics_for(results, variant)
+        for variant in DESKTOP_EVALUATION_VARIANT_ORDER
+        if variant in report.metrics
     }
     if metrics != report.metrics:
         raise ValueError("Desktop retrieval evaluation metrics do not match its results.")

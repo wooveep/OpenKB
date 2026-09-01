@@ -116,9 +116,11 @@ def _expected_projection_files_in(connection: sqlite3.Connection) -> tuple[Path,
         Path("index.md"),
         Path("concept/index.md"),
         Path("entity/index.md"),
+        Path("procedure/index.md"),
         Path("generated/index.md"),
         Path("generated/concept/index.md"),
         Path("generated/entity/index.md"),
+        Path("generated/procedure/index.md"),
         Path("log.md"),
     }
     expected.update(
@@ -209,6 +211,8 @@ def canonical_okf_type(kind: str, entity_subtype: str | None = None) -> str:
     """Map OpenKB kind/subtype to one safe OKF type value."""
     if kind == "concept":
         return "Concept"
+    if kind == "procedure":
+        return "Procedure"
     if kind != "entity":
         raise ValueError(f"Unsupported OpenKB knowledge kind: {kind}")
     return entity_subtype if entity_subtype in _ENTITY_SUBTYPES else "Entity"
@@ -392,9 +396,11 @@ def _render_bundle_in(
     for relative in (
         Path("concept"),
         Path("entity"),
+        Path("procedure"),
         Path("generated"),
         Path("generated/concept"),
         Path("generated/entity"),
+        Path("generated/procedure"),
     ):
         (staged / relative).mkdir(parents=True, exist_ok=True)
     for document in documents:
@@ -496,15 +502,22 @@ def _render_indexes(staged: Path, documents: tuple[_ProjectionDocument, ...]) ->
         "# OpenKB Knowledge\n\n"
         "- [Concepts](concept/index.md)\n"
         "- [Entities](entity/index.md)\n"
+        "- [Procedures](procedure/index.md)\n"
         "- [Generated knowledge](generated/index.md)\n"
         "- [Knowledge Change Log](log.md)\n"
     )
     atomic_write_text(staged / "index.md", root)
     _write_listing(staged / "concept/index.md", "Concepts", _documents_at(documents, "concept"))
     _write_listing(staged / "entity/index.md", "Entities", _documents_at(documents, "entity"))
+    _write_listing(
+        staged / "procedure/index.md", "Procedures", _documents_at(documents, "procedure")
+    )
     atomic_write_text(
         staged / "generated/index.md",
-        "# Generated knowledge\n\n- [Concepts](concept/index.md)\n- [Entities](entity/index.md)\n",
+        "# Generated knowledge\n\n"
+        "- [Concepts](concept/index.md)\n"
+        "- [Entities](entity/index.md)\n"
+        "- [Procedures](procedure/index.md)\n",
     )
     _write_listing(
         staged / "generated/concept/index.md",
@@ -515,6 +528,11 @@ def _render_indexes(staged: Path, documents: tuple[_ProjectionDocument, ...]) ->
         staged / "generated/entity/index.md",
         "Generated Entities",
         _documents_at(documents, "generated/entity"),
+    )
+    _write_listing(
+        staged / "generated/procedure/index.md",
+        "Generated Procedures",
+        _documents_at(documents, "generated/procedure"),
     )
 
 

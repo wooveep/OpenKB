@@ -565,7 +565,10 @@ export interface DesktopDiagnosticBundle {
   files: string[]
 }
 
-export type DesktopKnowledgeExportMode = "knowledge_projection" | "self_contained"
+export type DesktopKnowledgeExportMode =
+  | "knowledge_projection"
+  | "self_contained"
+  | "portable_wiki"
 
 export interface DesktopKnowledgeExport {
   path: string

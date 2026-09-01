@@ -10,6 +10,7 @@ import pytest
 from openkb.desktop_answer_types import (
     DesktopEvidencePack,
     DesktopEvidenceRef,
+    DesktopKnowledgeGuidance,
     DesktopRetrievalPlan,
 )
 from openkb.desktop_catalog_store import rebuild_pending_catalog
@@ -30,10 +31,12 @@ from openkb.desktop_retrieval_evaluation import (
     DesktopRetrievalEvaluationReport,
     DesktopRetrievalEvaluationSuite,
     DesktopRetrievalEvaluator,
+    _case_result,
     _page_tree_gate,
 )
 from openkb.desktop_retrieval_evaluation_types import (
     EVALUATION_CATEGORIES,
+    DesktopEvaluationAnswer,
     DesktopEvaluationModelCost,
     DesktopRetrievalEvaluationCase,
     DesktopRetrievalEvaluationCaseResult,
@@ -41,6 +44,50 @@ from openkb.desktop_retrieval_evaluation_types import (
     evaluation_corpus_identity,
 )
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+
+
+def test_evidence_recall_at_six_ignores_routed_answer_context_beyond_six() -> None:
+    evidence = tuple(
+        DesktopEvidenceRef(
+            evidence_id=f"evidence-{ordinal}",
+            document_id="document",
+            document_name="guide.md",
+            section=f"Section {ordinal}",
+            locator={},
+            excerpt=f"Detail {ordinal}",
+            channels=("document_page_tree",),
+        )
+        for ordinal in range(1, 8)
+    )
+    pack = DesktopEvidencePack(
+        DesktopRetrievalPlan("question", ("question",), "deterministic"),
+        evidence,
+    )
+    case = DesktopRetrievalEvaluationCase(
+        "routed-context",
+        "multi_hop",
+        "question",
+        (),
+        ("expected",),
+        long_document=True,
+    )
+
+    result = _case_result(
+        case,
+        0,
+        "baseline",
+        ("evidence-7",),
+        pack,
+        DesktopEvaluationAnswer("expected"),
+        0.0,
+        0.0,
+        0.0,
+        DesktopEvaluationModelCost(),
+    )
+
+    assert result.evidence_recall_at_k == 0.0
+    assert result.citation_precision == pytest.approx(1 / 7)
+    assert result.answer_faithfulness == 1.0
 
 
 def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_path, monkeypatch):
@@ -126,6 +173,26 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
                 if node_ids:
                     selections.append({"document_id": tree["document_id"], "node_ids": node_ids})
             return json.dumps({"selections": selections})
+        if request.operation == "knowledge_navigation_step":
+            payload = json.loads(request.content)
+            evidence_ids = [item["evidence_id"] for item in payload["evidence"]]
+            return json.dumps(
+                {
+                    "schema_version": "openkb.knowledge-navigation-step.v1",
+                    "snapshot_id": payload["snapshot_id"],
+                    "objective": payload["objective"],
+                    "coverage": [
+                        {
+                            "aspect": aspect,
+                            "status": "covered" if evidence_ids else "missing",
+                            "evidence_ids": evidence_ids[:1],
+                        }
+                        for aspect in payload["objective"]["required_aspects"]
+                    ],
+                    "actions": [],
+                    "decision": "stop",
+                }
+            )
         assert request.operation == "grounded_answer"
         answer_requests.append(request)
         if request.content.rstrip().endswith("Evidence:"):
@@ -223,6 +290,7 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
         "local_graph",
         "document_page_tree",
         "catalog + document_page_tree",
+        "navigator",
     }
     assert (
         report.metrics["local_graph"].evidence_recall_at_k
@@ -517,6 +585,49 @@ def test_production_pack_bound_is_applied_before_evaluation_scoring() -> None:
 
     assert prepared.evidence == ()
     assert prepared.retrieval_trace.canonical_evidence_ids == ()
+
+
+def test_grounding_budget_reserves_output_and_caps_guidance_at_one_quarter() -> None:
+    plan = DesktopRetrievalPlan("question", ("question",), "deterministic")
+    evidence = tuple(
+        DesktopEvidenceRef(
+            f"evidence-{ordinal}",
+            f"document-{ordinal}",
+            f"document-{ordinal}.md",
+            "Section",
+            {},
+            f"Original evidence {ordinal}. " + "fact " * 80,
+            ("fts",),
+        )
+        for ordinal in range(8)
+    )
+    guidance = tuple(
+        DesktopKnowledgeGuidance(
+            route=f"procedures/route-{ordinal}",
+            kind="procedure",
+            authority="published_generation",
+            title=f"Procedure {ordinal}",
+            content_markdown="- Navigation guidance. " + "guide " * 50,
+            source_evidence_ids=(f"evidence-{ordinal}",),
+        )
+        for ordinal in range(4)
+    )
+
+    prepared = prepare_grounded_evidence_pack(
+        DesktopEvidencePack(plan, evidence, guidance=guidance),
+        context_capacity_tokens=4_096,
+    )
+
+    trace = prepared.retrieval_trace
+    assert trace.grounding_input_budget_tokens == int((4_096 - 2_048) * 0.7)
+    assert trace.evidence_input_tokens <= int(trace.grounding_input_budget_tokens * 0.75)
+    assert trace.guidance_input_tokens <= (
+        trace.grounding_input_budget_tokens - int(trace.grounding_input_budget_tokens * 0.75)
+    )
+    assert trace.evidence_input_tokens + trace.guidance_input_tokens <= (
+        trace.grounding_input_budget_tokens
+    )
+    assert trace.navigation_routes == tuple(item.route for item in prepared.guidance)
 
 
 def test_page_tree_gate_requires_standalone_gain_and_clean_execution() -> None:

@@ -95,8 +95,20 @@ class DesktopAnswerSourceImage:
 
 
 @dataclass(frozen=True)
+class DesktopKnowledgeGuidance:
+    """One source-valid virtual knowledge read used to organize an answer."""
+
+    route: str
+    kind: str
+    authority: str
+    title: str
+    content_markdown: str
+    source_evidence_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class DesktopEvidencePack:
-    """The source-only context passed to the optional answer model."""
+    """Original Evidence plus separately labelled navigation guidance."""
 
     retrieval_plan: DesktopRetrievalPlan
     evidence: tuple[DesktopEvidenceRef, ...]
@@ -104,6 +116,7 @@ class DesktopEvidencePack:
     source_images: tuple[DesktopAnswerSourceImage, ...] = ()
     retrieval_trace: DesktopRetrievalTrace = DesktopRetrievalTrace()
     retrieval_model_cost: DesktopRetrievalModelCost = DesktopRetrievalModelCost()
+    guidance: tuple[DesktopKnowledgeGuidance, ...] = ()
 
 
 @dataclass(frozen=True)

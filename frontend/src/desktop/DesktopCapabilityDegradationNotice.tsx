@@ -72,6 +72,13 @@ type DegradationKey =
   | "pageTreeSelectionUnavailable"
   | "pageTreeSelectionCancelled"
   | "pageTreeSelectionSuspended"
+  | "knowledgeNavigation"
+  | "knowledgeNavigationUnavailable"
+  | "knowledgeNavigationCancelled"
+  | "knowledgeNavigationSuspended"
+  | "knowledgeNavigationBudget"
+  | "knowledgeNavigationSnapshot"
+  | "knowledgeNavigationNoProgress"
   | "answerModel"
   | "answerModelUnavailable"
   | "answerModelFallback"
@@ -97,6 +104,18 @@ const DEGRADATION_METADATA: Readonly<Record<string, DegradationMetadata>> = {
   page_tree_selection_failed: { key: "pageTreeSelectionSuspended", action: "retry" },
   page_tree_selection_invalid: { key: "pageTreeSelectionSuspended", action: "retry" },
   page_tree_selection_suspended: { key: "pageTreeSelectionSuspended", action: "retry" },
+  knowledge_navigation_step_unverified: { key: "knowledgeNavigation", action: "model_settings" },
+  knowledge_navigation_step_unavailable: { key: "knowledgeNavigationUnavailable", action: "model_settings" },
+  knowledge_navigation_step_cancelled: { key: "knowledgeNavigationCancelled", action: "retry" },
+  knowledge_navigation_cancelled: { key: "knowledgeNavigationCancelled", action: "retry" },
+  knowledge_navigation_step_failed: { key: "knowledgeNavigationSuspended", action: "retry" },
+  knowledge_navigation_step_invalid: { key: "knowledgeNavigationSuspended", action: "retry" },
+  knowledge_navigation_step_suspended: { key: "knowledgeNavigationSuspended", action: "retry" },
+  knowledge_navigation_failed: { key: "knowledgeNavigationSuspended", action: "retry" },
+  knowledge_navigation_budget_exhausted: { key: "knowledgeNavigationBudget", action: null },
+  knowledge_navigation_snapshot_changed: { key: "knowledgeNavigationSnapshot", action: "retry" },
+  knowledge_navigation_snapshot_unavailable: { key: "knowledgeNavigationSnapshot", action: "retry" },
+  knowledge_navigation_no_progress: { key: "knowledgeNavigationNoProgress", action: null },
   answer_model_unverified: { key: "answerModel", action: "model_settings" },
   answer_model_unavailable: { key: "answerModelUnavailable", action: "model_settings" },
   answer_model_fallback: { key: "answerModelFallback", action: "retry" },

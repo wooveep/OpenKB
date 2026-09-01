@@ -1,0 +1,3 @@
+# Review knowledge with evidence and reusable decisions
+
+The Review Queue presents source evidence side by side and distinguishes identity decisions—merge, keep separate, set alias, change kind, or exclude noise—from claim decisions—set applicability, keep scoped variants, adopt a correction, or exclude an invalid claim. Batch actions are limited to issues sharing one deterministic reason. Submitted choices retain a minimal reusable decision signature and provenance after rejected content is deleted, so equivalent issues can be resolved consistently without retaining unnecessary source text or reducing every review to a generic accept/reject choice.

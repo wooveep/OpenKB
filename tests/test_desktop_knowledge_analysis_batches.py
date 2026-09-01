@@ -22,6 +22,7 @@ from openkb.desktop_knowledge_analysis_batches import (
     knowledge_analysis_merge_prompt,
     plan_knowledge_analysis_batches,
 )
+from openkb.desktop_knowledge_analysis_merge import parse_merged_description
 from openkb.desktop_knowledge_analysis_plan import (
     KnowledgeAnalysisPlan,
     hierarchical_merge_topology,
@@ -29,6 +30,8 @@ from openkb.desktop_knowledge_analysis_plan import (
 from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
 from openkb.desktop_model_gateway import (
     DesktopModelGateway,
+    DesktopModelOutputObservations,
+    DesktopModelProviderResponse,
     DesktopModelResult,
     DesktopModelTransportError,
 )
@@ -64,6 +67,44 @@ def _analysis(scope: str) -> str:
             "entities": [],
         }
     )
+
+
+def test_merge_description_is_deterministically_bounded_at_a_readable_boundary() -> None:
+    content = json.dumps({"document_description": "完整的一句描述。" * 600})
+
+    description = parse_merged_description(content)
+
+    assert len(description) <= 4_000
+    assert description.endswith("。")
+
+
+def test_aggregate_summary_is_bounded_while_covering_the_document_edges() -> None:
+    summary = [
+        {
+            "role": "key_topic",
+            "text": f"Topic {ordinal}",
+            "source_evidence_ids": [f"evidence-{ordinal}"],
+        }
+        for ordinal in range(40)
+    ]
+    payload = {
+        "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+        "analysis_scope": "document",
+        "document_description": "Long document.",
+        "document_summary": summary,
+        "concepts": [],
+        "entities": [],
+        "procedures": [],
+    }
+
+    analysis = parse_knowledge_analysis(json.dumps(payload), aggregate=True)
+
+    assert len(analysis.document_summary) == 32
+    retained_sources = {
+        source_id for unit in analysis.document_summary for source_id in unit.source_evidence_ids
+    }
+    assert "evidence-0" in retained_sources
+    assert "evidence-39" in retained_sources
 
 
 def test_batch_planner_preserves_natural_sections_until_one_section_exceeds_bound() -> None:
@@ -109,7 +150,7 @@ def test_one_document_dispatches_independent_analysis_batches_concurrently(
         nonlocal active_batch_calls, peak_batch_calls, started_batch_calls
         if request.operation == "knowledge_analysis_batch":
             assert request.generation_parameters is not None
-            assert request.generation_parameters["max_tokens"] == 4_096
+            assert request.generation_parameters["max_tokens"] == 8_000
             with lock:
                 active_batch_calls += 1
                 started_batch_calls += 1
@@ -133,6 +174,136 @@ def test_one_document_dispatches_independent_analysis_batches_concurrently(
     assert imported.document.availability == "available"
     assert started_batch_calls == 2
     assert peak_batch_calls == 2
+
+
+def test_output_limited_direct_analysis_is_split_instead_of_repaired(
+    tmp_path: Path,
+) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "long.md"
+    _long_source(source)
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    calls: list[tuple[str, str | None, int]] = []
+    truncated = False
+
+    def transport(request, _timeout_seconds):
+        nonlocal truncated
+        payload = json.loads(request.content)
+        evidence = payload.get("evidence", [])
+        calls.append((request.operation, request.batch_id, len(evidence)))
+        if request.operation in {"knowledge_analysis", "knowledge_analysis_batch"}:
+            assert request.generation_parameters is not None
+            assert request.generation_parameters["max_tokens"] == 16_384
+            if not truncated and len(evidence) > 1:
+                truncated = True
+                return DesktopModelProviderResponse(
+                    '{"schema_version":"openkb.knowledge-analysis.v2",',
+                    observations=DesktopModelOutputObservations(
+                        finish_reason="length",
+                        final_content_observed=True,
+                        final_chunk_count=1,
+                        final_character_count=50,
+                        output_limit_reached=True,
+                    ),
+                )
+            return _analysis("batch")
+        if request.operation == "knowledge_analysis_merge":
+            return json.dumps({"document_description": "Recovered after split."})
+        raise AssertionError(f"Unexpected repair after output truncation: {request.operation}")
+
+    imported = DesktopTextImportService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(
+            transport,
+            provider_name="deepseek",
+            model_name="deepseek-v4-pro",
+        ),
+    ).import_text(source)
+
+    assert imported.document.availability == "available"
+    assert truncated
+    assert calls[0][0] == "knowledge_analysis"
+    split_calls = [call for call in calls if call[1] and ":split:" in call[1]]
+    assert split_calls
+    assert all(evidence_count < calls[0][2] for _, _, evidence_count in split_calls)
+    assert all(operation != "structured_output_repair" for operation, _, _ in calls)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        checkpoint_json = connection.execute(
+            """
+            SELECT runtime.checkpoint_json
+            FROM stage_run_runtime AS runtime
+            JOIN stage_runs AS stages ON stages.stage_run_id = runtime.stage_run_id
+            WHERE runtime.job_id = ? AND stages.stage = 'model_analysis'
+            """,
+            (imported.job.job_id,),
+        ).fetchone()[0]
+    checkpoint = json.loads(str(checkpoint_json))
+    assert checkpoint["output_limit_recovery_from_operation"] == "knowledge_analysis"
+    assert checkpoint["output_limit_split_leaf_count"] == 2
+    assert checkpoint["output_limit_recovery_count"] == 1
+    assert checkpoint["prompt_contract_snapshot"]["version"].endswith(
+        ".knowledge_analysis_batch.v6"
+    )
+
+
+def test_output_limited_persisted_batch_records_split_checkpoint(tmp_path: Path) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "long.md"
+    _long_source(source)
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    operations: list[str] = []
+    truncated = False
+
+    def transport(request, _timeout_seconds):
+        nonlocal truncated
+        payload = json.loads(request.content)
+        operations.append(request.operation)
+        if request.operation == "knowledge_analysis_batch":
+            evidence = payload["evidence"]
+            if not truncated and int(payload["batch_ordinal"]) == 0 and len(evidence) > 1:
+                truncated = True
+                return DesktopModelProviderResponse(
+                    '{"schema_version":"openkb.knowledge-analysis.v1",',
+                    observations=DesktopModelOutputObservations(
+                        finish_reason="length",
+                        final_content_observed=True,
+                        final_chunk_count=1,
+                        final_character_count=50,
+                        output_limit_reached=True,
+                    ),
+                )
+            return _analysis("batch")
+        if request.operation == "knowledge_analysis_merge":
+            return json.dumps({"document_description": "Recovered persisted batch."})
+        raise AssertionError(request.operation)
+
+    imported = DesktopTextImportService(
+        kb_dir,
+        model_gateway=DesktopModelGateway(transport),
+    ).import_text(source)
+
+    assert imported.document.availability == "available"
+    assert truncated
+    assert "structured_output_repair" not in operations
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        checkpoints = tuple(
+            json.loads(str(row[0]))
+            for row in connection.execute(
+                """
+                SELECT checkpoint_json FROM knowledge_analysis_batches
+                WHERE job_id = ? ORDER BY batch_ordinal
+                """,
+                (imported.job.job_id,),
+            ).fetchall()
+        )
+    recovered = tuple(
+        checkpoint
+        for checkpoint in checkpoints
+        if checkpoint.get("output_limit_recovery_count") is not None
+    )
+    assert len(recovered) == 1
+    assert recovered[0]["output_limit_split_leaf_count"] == 2
+    assert recovered[0]["output_limit_recovery_count"] == 1
 
 
 def test_independent_description_merge_nodes_run_concurrently() -> None:
@@ -672,7 +843,7 @@ def test_document_merge_scope_can_represent_the_full_batch_union() -> None:
                 {
                     "text": f"Claim {candidate_ordinal}-{claim_ordinal}.",
                     "source_evidence_ids": (
-                        [f"evidence-{source_ordinal}" for source_ordinal in range(9)]
+                        [f"evidence-{source_ordinal}" for source_ordinal in range(17)]
                         if candidate_ordinal == 0 and claim_ordinal == 0
                         else []
                     ),
@@ -699,4 +870,4 @@ def test_document_merge_scope_can_represent_the_full_batch_union() -> None:
 
     assert len(analysis.concepts) == 33
     assert len(analysis.concepts[0].claims) == 65
-    assert len(analysis.concepts[0].claims[0].source_evidence_ids) == 9
+    assert len(analysis.concepts[0].claims[0].source_evidence_ids) == 17

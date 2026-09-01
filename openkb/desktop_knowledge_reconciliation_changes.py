@@ -19,7 +19,8 @@ from openkb.desktop_knowledge_titles import normalize_knowledge_title
 _MAX_CANDIDATES_PER_DOCUMENT = 32
 _MAX_CANDIDATE_CHARACTERS = 24_000
 _KIND_PREFIX = re.compile(
-    r"^\s*(?:(?P<english>concept|entity)|(?P<chinese>概念|实体))\s*[:：]\s*(?P<title>.+?)\s*$",
+    r"^\s*(?:(?P<english>concept|entity|procedure)|"
+    r"(?P<chinese>概念|实体|流程|过程|操作))\s*[:：]\s*(?P<title>.+?)\s*$",
     re.IGNORECASE,
 )
 _FIELD_PATTERN = re.compile(r"^\s*(?:[-*+]\s*)?(?P<key>[^:：\n]{1,80})\s*[:：]\s*\S")
@@ -27,7 +28,7 @@ _FIELD_PATTERN = re.compile(r"^\s*(?:[-*+]\s*)?(?P<key>[^:：\n]{1,80})\s*[:：]
 
 @dataclass(frozen=True)
 class IncomingKnowledgeChange:
-    """One bounded Concept or Entity candidate extracted from Document IR."""
+    """One bounded knowledge candidate extracted from Document IR."""
 
     source_block_id: str | None
     kind: str
@@ -147,11 +148,13 @@ def _kind_and_title(value: str) -> tuple[str, str, bool]:
         return "concept", value, False
     english = match.group("english")
     chinese = match.group("chinese")
-    kind = (
-        "entity"
-        if (english is not None and english.casefold() == "entity") or chinese == "实体"
-        else "concept"
-    )
+    explicit_kind = english.casefold() if english is not None else None
+    if explicit_kind == "entity" or chinese == "实体":
+        kind = "entity"
+    elif explicit_kind == "procedure" or chinese in {"流程", "过程", "操作"}:
+        kind = "procedure"
+    else:
+        kind = "concept"
     return kind, str(match.group("title")), True
 
 

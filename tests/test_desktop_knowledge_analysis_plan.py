@@ -130,7 +130,7 @@ def test_plan_is_committed_before_first_batch_model_call(tmp_path) -> None:
     assert len(plan["prompt_contract_digest"]) == 64
     assert plan["prompt_contract_snapshot"]["contracts"]["knowledge_analysis_batch"][
         "version"
-    ].endswith(".v3")
+    ].endswith(".v6")
     assert plan["document_ir_digest"]
     assert plan["batches"]
     assert plan["merge_topology"]
@@ -276,8 +276,8 @@ def test_analysis_execution_profile_reserves_final_json_before_reasoning(
     assert profile.adapter_identity == "deepseek"
     assert profile.adapter_version == "deepseek.v1"
     assert profile.structured_output_mode == "json_object"
-    assert profile.final_output_reserve_tokens == 4_096
-    assert profile.reasoning_allowance_tokens == int(4_096 * allowance_multiplier)
+    assert profile.final_output_reserve_tokens == 16_384
+    assert profile.reasoning_allowance_tokens == int(16_384 * allowance_multiplier)
     assert profile.provider_output_ceiling_tokens == (
         profile.final_output_reserve_tokens + profile.reasoning_allowance_tokens
     )
@@ -380,6 +380,8 @@ def test_analysis_profile_identity_covers_every_structured_prompt_contract() -> 
         "page_tree_enrichment",
         "knowledge_graph_extraction",
         "retrieval_plan",
+        "page_tree_selection",
+        "knowledge_navigation_step",
         "structured_output_repair",
     }
     bundle = analysis_prompt_contract_bundle()

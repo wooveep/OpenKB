@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
 from typing import cast
@@ -14,7 +14,9 @@ from openkb.desktop_answer_types import (
     DesktopEvidencePack,
     DesktopEvidenceRef,
     DesktopGroundedAnswer,
+    DesktopKnowledgeGuidance,
 )
+from openkb.desktop_model_execution_profile import estimate_model_tokens
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
@@ -28,12 +30,17 @@ from openkb.desktop_model_result_failure import (
 )
 from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
+from openkb.desktop_retrieval_trace import (
+    DesktopAnswerCoverageTrace,
+    DesktopRetrievalTrace,
+)
 from openkb.desktop_structured_output import structured_output_repair_contract_digest
 
 AnswerDeltaCallback = Callable[[str, str, bool, int], None]
 AnswerCancellationCallback = Callable[[], bool]
 AnswerModelEventCallback = Callable[[object], None]
-_MAX_CONTEXT_CHARS = 12_000
+_DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS = 4_096
+_EVIDENCE_GROUNDING_SHARE = 0.75
 _STREAM_CHUNK_CHARS = 96
 
 
@@ -149,7 +156,11 @@ class DesktopGroundedAnswerService:
                 retry_scope=retry_scope,
                 contracts=tuple(
                     contract
-                    for operation in ("retrieval_plan", "page_tree_selection")
+                    for operation in (
+                        "retrieval_plan",
+                        "page_tree_selection",
+                        "knowledge_navigation_step",
+                    )
                     for contract in (
                         (operation, prompt_contract_for(operation).digest),
                         (
@@ -162,6 +173,7 @@ class DesktopGroundedAnswerService:
             operation_retry_scopes = {
                 "retrieval_plan": retry_scope,
                 "page_tree_selection": retry_scope,
+                "knowledge_navigation_step": retry_scope,
             }
         try:
             pack = prepare_grounded_evidence_pack(
@@ -170,7 +182,8 @@ class DesktopGroundedAnswerService:
                     is_cancelled=is_cancelled,
                     on_model_event=on_model_event,
                     operation_retry_scopes=operation_retry_scopes,
-                )
+                ),
+                context_capacity_tokens=_answer_context_capacity(self._model_gateway),
             )
         finally:
             if retry_scope is not None:
@@ -292,10 +305,51 @@ def _interactive_gateway(
     return cast(DesktopModelGateway, select_lane("interactive"))
 
 
-def prepare_grounded_evidence_pack(pack: DesktopEvidencePack) -> DesktopEvidencePack:
-    """Apply the exact production context bound before generation and scoring."""
-    sent_evidence = _evidence_for_prompt(pack.evidence)
+def prepare_grounded_evidence_pack(
+    pack: DesktopEvidencePack,
+    *,
+    context_capacity_tokens: int | None = None,
+) -> DesktopEvidencePack:
+    """Apply the model-aware Evidence/Guidance budget before generation and scoring."""
+    capacity = context_capacity_tokens or _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
+    policy = prompt_contract_for("grounded_answer").token_budget_policy
+    reserve_value = policy.get("reserve_output_tokens")
+    share_value = policy.get("document_input_share")
+    reserve = reserve_value if isinstance(reserve_value, int) else 2_048
+    document_share = float(share_value) if isinstance(share_value, (int, float)) else 0.7
+    grounding_budget = max(0, int(max(0, capacity - reserve) * document_share))
+    evidence_budget = int(grounding_budget * _EVIDENCE_GROUNDING_SHARE)
+    guidance_budget = grounding_budget - evidence_budget
+    sent_evidence, evidence_tokens = _evidence_for_prompt(pack.evidence, evidence_budget)
     sent_evidence_ids = {reference.evidence_id for reference in sent_evidence}
+    evidence_bound_guidance = tuple(
+        item
+        for item in pack.guidance
+        if item.source_evidence_ids and set(item.source_evidence_ids) <= sent_evidence_ids
+    )
+    sent_guidance, guidance_tokens = _guidance_for_prompt(evidence_bound_guidance, guidance_budget)
+    coverage_aspects = _coverage_after_grounding_budget(
+        pack.retrieval_trace.coverage_aspects,
+        sent_evidence_ids,
+    )
+    coverage_gate_state = (
+        _coverage_state(coverage_aspects)
+        if coverage_aspects
+        else pack.retrieval_trace.coverage_gate_state
+    )
+    if not coverage_aspects and pack.guidance and len(sent_guidance) < len(pack.guidance):
+        coverage_gate_state = "partial" if sent_guidance else "uncovered"
+    trace = replace(
+        pack.retrieval_trace.with_canonical_evidence_ids(
+            tuple(reference.evidence_id for reference in sent_evidence)
+        ),
+        navigation_routes=tuple(item.route for item in sent_guidance),
+        grounding_input_budget_tokens=grounding_budget,
+        evidence_input_tokens=evidence_tokens,
+        guidance_input_tokens=guidance_tokens,
+        coverage_gate_state=coverage_gate_state,
+        coverage_aspects=coverage_aspects,
+    )
     return DesktopEvidencePack(
         retrieval_plan=pack.retrieval_plan,
         evidence=sent_evidence,
@@ -303,10 +357,9 @@ def prepare_grounded_evidence_pack(pack: DesktopEvidencePack) -> DesktopEvidence
         source_images=tuple(
             image for image in pack.source_images if image.evidence_id in sent_evidence_ids
         ),
-        retrieval_trace=pack.retrieval_trace.with_canonical_evidence_ids(
-            tuple(reference.evidence_id for reference in sent_evidence)
-        ),
+        retrieval_trace=trace,
         retrieval_model_cost=pack.retrieval_model_cost,
+        guidance=sent_guidance,
     )
 
 
@@ -338,7 +391,13 @@ def generate_grounded_answer(
             _deterministic_answer(question, pack.evidence), ("answer_model_unverified",)
         )
 
-    prompt = _answer_prompt(question, pack.evidence, conversation_context)
+    prompt = _answer_prompt(
+        question,
+        pack.evidence,
+        pack.guidance,
+        conversation_context,
+        pack.retrieval_trace,
+    )
     attempts = 0
 
     def observe(event) -> None:
@@ -395,22 +454,42 @@ def generate_grounded_answer(
 
 def _evidence_for_prompt(
     evidence: tuple[DesktopEvidenceRef, ...],
-) -> tuple[DesktopEvidenceRef, ...]:
+    budget_tokens: int,
+) -> tuple[tuple[DesktopEvidenceRef, ...], int]:
     included: list[DesktopEvidenceRef] = []
     used = 0
     for ordinal, reference in enumerate(evidence, start=1):
         item = f"[{ordinal}] {reference.document_name} — {reference.section}\n{reference.excerpt}\n"
-        if used + len(item) > _MAX_CONTEXT_CHARS:
+        item_tokens = estimate_model_tokens(item)
+        if used + item_tokens > budget_tokens:
             break
         included.append(reference)
-        used += len(item)
-    return tuple(included)
+        used += item_tokens
+    return tuple(included), used
+
+
+def _guidance_for_prompt(
+    guidance: tuple[DesktopKnowledgeGuidance, ...],
+    budget_tokens: int,
+) -> tuple[tuple[DesktopKnowledgeGuidance, ...], int]:
+    included: list[DesktopKnowledgeGuidance] = []
+    used = 0
+    for item in guidance:
+        rendered = _guidance_text(item)
+        item_tokens = estimate_model_tokens(rendered)
+        if used + item_tokens > budget_tokens:
+            break
+        included.append(item)
+        used += item_tokens
+    return tuple(included), used
 
 
 def _answer_prompt(
     question: str,
     evidence,
+    guidance: tuple[DesktopKnowledgeGuidance, ...] = (),
     conversation_context: tuple[tuple[str, str], ...] = (),
+    retrieval_trace: DesktopRetrievalTrace = DesktopRetrievalTrace(),
 ) -> str:
     prior = "\n\n".join(
         f"Previous user: {user}\nPrevious assistant: {assistant}"
@@ -420,8 +499,99 @@ def _answer_prompt(
         f"[{ordinal}] {reference.document_name} — {reference.section}\n{reference.excerpt}\n"
         for ordinal, reference in enumerate(evidence, start=1)
     )
+    navigation = "\n\n".join(_guidance_text(item) for item in guidance)
     history = f"Conversation context:\n{prior}\n\n" if prior else ""
-    return f"{history}Current question: {question}\n\nEvidence:\n{context}"
+    guidance_section = (
+        f"Knowledge Guidance (navigation only; not citation evidence):\n{navigation}\n\n"
+        if navigation
+        else ""
+    )
+    blueprint = _answer_blueprint(retrieval_trace, evidence)
+    blueprint_section = (
+        "Answer Blueprint (navigation only; labels and ordering are not citation evidence):\n"
+        f"{blueprint}\n\n"
+        if blueprint
+        else ""
+    )
+    return (
+        f"{history}Current question: {question}\n\n{guidance_section}{blueprint_section}"
+        "Original Evidence is the only factual authority; cite it by number.\n"
+        f"Evidence:\n{context}"
+    )
+
+
+def _answer_blueprint(
+    trace: DesktopRetrievalTrace,
+    evidence: tuple[DesktopEvidenceRef, ...],
+) -> str:
+    if not trace.coverage_aspects:
+        return ""
+    ordinals = {item.evidence_id: ordinal for ordinal, item in enumerate(evidence, start=1)}
+    lines = [
+        f"Answer kind: {trace.navigation_answer_kind or 'unspecified'}",
+        f"Stop reason: {trace.navigation_stop_reason or 'unspecified'}",
+    ]
+    for ordinal, item in enumerate(trace.coverage_aspects, start=1):
+        citations = [
+            f"[{ordinals[evidence_id]}]"
+            for evidence_id in item.evidence_ids
+            if evidence_id in ordinals
+        ]
+        support = ", ".join(citations) if citations else "source gap"
+        lines.append(f"{ordinal}. {item.aspect} — {item.status} — {support}")
+    return "\n".join(lines)
+
+
+def _coverage_after_grounding_budget(
+    coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    evidence_ids: set[str],
+) -> tuple[DesktopAnswerCoverageTrace, ...]:
+    values: list[DesktopAnswerCoverageTrace] = []
+    for item in coverage:
+        retained = tuple(
+            evidence_id for evidence_id in item.evidence_ids if evidence_id in evidence_ids
+        )
+        status = item.status
+        if status in {"covered", "partial"}:
+            if not retained:
+                status = "missing"
+            elif len(retained) < len(item.evidence_ids):
+                status = "partial"
+        values.append(DesktopAnswerCoverageTrace(item.aspect, status, retained))
+    return tuple(values)
+
+
+def _coverage_state(coverage: tuple[DesktopAnswerCoverageTrace, ...]) -> str:
+    if coverage and all(item.status in {"covered", "not_applicable"} for item in coverage):
+        return "covered"
+    if any(item.status in {"covered", "partial"} for item in coverage):
+        return "partial"
+    return "uncovered"
+
+
+def _guidance_text(item: DesktopKnowledgeGuidance) -> str:
+    return (
+        f"Route: {item.route}\nTitle: {item.title}\nKind: {item.kind}\n"
+        f"Authority: {item.authority}\n{item.content_markdown}"
+    )
+
+
+def _answer_context_capacity(gateway: DesktopModelGateway | None) -> int:
+    if gateway is None:
+        return _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
+    resolver = getattr(gateway, "capability_for_operation", None)
+    if not callable(resolver):
+        return _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
+    try:
+        capability = resolver("grounded_answer")
+    except Exception:
+        return _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
+    capacity = getattr(capability, "context_capacity", None)
+    return (
+        capacity
+        if isinstance(capacity, int) and capacity >= _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
+        else _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
+    )
 
 
 def _deterministic_answer(question: str, evidence) -> str:

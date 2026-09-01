@@ -1,0 +1,3 @@
+# Deepen retrieval with a virtual knowledge navigation view
+
+OpenKB keeps `DesktopRetrievalService.retrieve` as the one caller-facing retrieval interface and deepens its implementation with a generation-consistent virtual Knowledge Navigation View over the Catalog, source-backed Document Summaries, current generated and published user knowledge, and bounded DocumentIR/Evidence sections. The view is pinned to one Navigation Snapshot and may use the Knowledge Graph only for route discovery; it does not introduce a public Wiki Agent, a second retrieval stack, or a continuously synchronized runtime Wiki directory. This preserves the current answer, retry, conversation, and evaluation seam while recovering progressive knowledge navigation without creating another authority.

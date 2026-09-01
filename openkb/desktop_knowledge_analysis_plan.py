@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from openkb.desktop_import_artifacts import DocumentIRBlock
 from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
 from openkb.desktop_model_execution_profile import (
+    MINIMUM_ANALYSIS_FINAL_OUTPUT_TOKENS,
     DesktopModelExecutionProfile,
     analysis_prompt_contract_bundle,
 )
@@ -97,9 +98,7 @@ class KnowledgeAnalysisPlan:
             "final_output_reserve_tokens": self.final_output_reserve_tokens,
             "reasoning_allowance_tokens": self.reasoning_allowance_tokens,
             "execution_profile": (
-                self.execution_profile.as_dict()
-                if self.execution_profile is not None
-                else None
+                self.execution_profile.as_dict() if self.execution_profile is not None else None
             ),
             "batches": [batch.as_dict() for batch in self.batches],
             "merge_topology": [node.as_dict() for node in self.merge_topology],
@@ -134,9 +133,7 @@ class KnowledgeAnalysisPlan:
                 "final_output_reserve_tokens",
                 _integer(value, "output_budget_tokens"),
             ),
-            reasoning_allowance_tokens=_optional_integer(
-                value, "reasoning_allowance_tokens", 0
-            ),
+            reasoning_allowance_tokens=_optional_integer(value, "reasoning_allowance_tokens", 0),
             execution_profile=(
                 DesktopModelExecutionProfile.from_dict(raw_profile)
                 if raw_profile is not None
@@ -155,11 +152,28 @@ def knowledge_analysis_input_budget(
     capability: DesktopModelCapabilityProfile, contract: DesktopPromptContract
 ) -> int:
     """Bound latency and repair cost even when a model exposes a huge context window."""
-    output_budget = _positive_int(contract.token_budget_policy.get("reserve_output_tokens"), 4_096)
+    output_budget = knowledge_analysis_output_budget(capability, contract)
     return min(
         MAX_KNOWLEDGE_ANALYSIS_INPUT_TOKENS,
         capability.document_input_capacity,
         max(1, capability.context_capacity - output_budget),
+    )
+
+
+def knowledge_analysis_output_budget(
+    capability: DesktopModelCapabilityProfile, contract: DesktopPromptContract
+) -> int:
+    """Use the contract reserve when it fits, otherwise preserve half the context for input."""
+    requested = _positive_int(
+        contract.token_budget_policy.get("reserve_output_tokens"),
+        4_096,
+    )
+    return min(
+        requested,
+        max(
+            MINIMUM_ANALYSIS_FINAL_OUTPUT_TOKENS,
+            capability.context_capacity // 2,
+        ),
     )
 
 
@@ -174,9 +188,7 @@ def build_knowledge_analysis_plan(
     estimated_batch_tokens: tuple[int, ...],
     execution_profile: DesktopModelExecutionProfile | None = None,
 ) -> KnowledgeAnalysisPlan:
-    final_output_reserve = _positive_int(
-        contract.token_budget_policy.get("reserve_output_tokens"), 4_096
-    )
+    final_output_reserve = knowledge_analysis_output_budget(capability, contract)
     reasoning_allowance = 0
     output_budget = final_output_reserve
     input_budget = knowledge_analysis_input_budget(capability, contract)
@@ -198,10 +210,7 @@ def build_knowledge_analysis_plan(
     )
     snapshot_bundle = analysis_prompt_contract_bundle()
     bundle_digest = hashlib.sha256(_json(snapshot_bundle).encode("utf-8")).hexdigest()
-    if (
-        execution_profile is not None
-        and execution_profile.prompt_contract_digest != bundle_digest
-    ):
+    if execution_profile is not None and execution_profile.prompt_contract_digest != bundle_digest:
         raise ValueError("Model Execution Profile does not match the Prompt Contract bundle.")
     return KnowledgeAnalysisPlan(
         document_ir_digest=document_ir_digest(evidence),

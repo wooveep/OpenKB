@@ -46,6 +46,7 @@ ANALYSIS_MODEL_OPERATIONS = frozenset(
         "knowledge_analysis_merge",
         "page_tree_enrichment",
         "page_tree_selection",
+        "knowledge_navigation_step",
         "knowledge_graph_extraction",
         "retrieval_plan",
         "structured_output_repair",

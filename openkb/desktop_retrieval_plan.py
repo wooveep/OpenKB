@@ -36,7 +36,7 @@ def model_plan(question: str, content: str) -> DesktopRetrievalPlan:
     values = payload.get("terms")
     if not isinstance(values, list):
         raise ValueError("Retrieval Plan terms are missing.")
-    planned_terms = terms(" ".join(value for value in values if isinstance(value, str)))
+    planned_terms = _semantic_terms(values)
     if not planned_terms:
         raise ValueError("Retrieval Plan terms are empty.")
     return DesktopRetrievalPlan(query=question, terms=planned_terms, source="model")
@@ -45,9 +45,9 @@ def model_plan(question: str, content: str) -> DesktopRetrievalPlan:
 def with_baseline_terms(
     baseline: DesktopRetrievalPlan, model: DesktopRetrievalPlan
 ) -> DesktopRetrievalPlan:
-    """Keep deterministic question terms even when a valid model plan is incomplete."""
+    """Prefer model semantics while retaining deterministic recall within one bound."""
     combined: list[str] = []
-    for value in (*baseline.terms, *model.terms):
+    for value in (*model.terms, *baseline.terms):
         if value not in combined:
             combined.append(value)
         if len(combined) == _MAX_COMBINED_PLAN_TERMS:
@@ -57,6 +57,20 @@ def with_baseline_terms(
         terms=tuple(combined),
         source=model.source,
     )
+
+
+def _semantic_terms(values: list[object]) -> tuple[str, ...]:
+    selected: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        for match in _TERM_PATTERN.finditer(value.casefold()):
+            token = match.group(0)
+            if token not in selected:
+                selected.append(token)
+            if len(selected) == _MAX_PLAN_TERMS:
+                return tuple(selected)
+    return tuple(selected)
 
 
 def terms(value: str) -> tuple[str, ...]:

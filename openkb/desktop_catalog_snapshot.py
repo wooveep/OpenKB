@@ -386,9 +386,24 @@ def _ordered_nodes(leaves: tuple[CatalogNode, ...]) -> tuple[CatalogNode, ...]:
             "{}",
         ),
         CatalogNode(
-            "catalog:documents",
+            "catalog:procedures",
             "catalog:root",
             3,
+            1,
+            "group",
+            "system",
+            "procedures",
+            "Procedures",
+            "procedures",
+            "procedures",
+            None,
+            None,
+            "{}",
+        ),
+        CatalogNode(
+            "catalog:documents",
+            "catalog:root",
+            4,
             1,
             "group",
             "system",
@@ -404,7 +419,7 @@ def _ordered_nodes(leaves: tuple[CatalogNode, ...]) -> tuple[CatalogNode, ...]:
     ordered = sorted(
         leaves,
         key=lambda item: (
-            {"concept": 0, "entity": 1, "source_document": 2}[item.kind],
+            {"concept": 0, "entity": 1, "procedure": 2, "source_document": 3}[item.kind],
             item.normalized_title,
             item.node_id,
         ),
@@ -458,7 +473,11 @@ def _snapshot_digest(
 
 
 def _group_id(kind: str) -> str:
-    return "catalog:concepts" if kind == "concept" else "catalog:entities"
+    return {
+        "concept": "catalog:concepts",
+        "entity": "catalog:entities",
+        "procedure": "catalog:procedures",
+    }[kind]
 
 
 def _normalize(value: str) -> str:

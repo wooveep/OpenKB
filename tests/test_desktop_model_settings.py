@@ -376,19 +376,19 @@ def test_settings_export_selected_and_effective_deepseek_role_semantics() -> Non
     assert payload["effective_roles"] == {
         "default": {
             "model": "deepseek-v4-pro",
-            "context_capacity": 64_000,
+            "context_capacity": 1_000_000,
             "reasoning": None,
             "reasoning_source": "provider_default",
         },
         "analysis": {
             "model": "deepseek-v4-pro",
-            "context_capacity": 64_000,
+            "context_capacity": 1_000_000,
             "reasoning": "off",
             "reasoning_source": "analysis_safe_default",
         },
         "answer": {
             "model": "deepseek-v4-pro",
-            "context_capacity": 64_000,
+            "context_capacity": 1_000_000,
             "reasoning": None,
             "reasoning_source": "provider_default",
         },
@@ -597,6 +597,7 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
         content = "\n".join(archive.read(name).decode("utf-8") for name in archive.namelist())
         operation_diagnostics = json.loads(archive.read("model-operation-contracts.json"))
         graph_diagnostics = json.loads(archive.read("graph-diagnostics.json"))
+        integrity = json.loads(archive.read("integrity.json"))
     assert operation_diagnostics["contracts"]
     assert {
         "operation",
@@ -608,6 +609,11 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
     assert {"diagnostics", "feature_flags", "results", "current_results"} <= (
         graph_diagnostics.keys()
     )
+    assert integrity["source_integrity"]["schema_version"] == "openkb.source-integrity.v1"
+    assert integrity["source_integrity"]["status"] == "healthy"
+    assert integrity["source_integrity"]["counts"]["available_documents"] == 1
+    assert integrity["source_integrity"]["counts"]["document_ir_blocks"] >= 1
+    assert not any(integrity["source_integrity"]["issues"].values())
     assert "private-source-content" not in content
     assert "private-model-response" not in content
     assert "diagnostic-credential-secret" not in content
@@ -1061,9 +1067,12 @@ def test_engine_save_and_verify_persists_settings_and_returns_partial_role_resul
     assert calls == ["model_capability_analysis", "model_capability_answer"]
     saved = read_desktop_model_settings(kb_dir)
     assert saved.api_key == "saved-after-failure"
-    assert DesktopModelCapabilityStore(kb_dir).state(
-        answer_capability_profile_for_settings(saved)
-    ).status == "verified"
+    assert (
+        DesktopModelCapabilityStore(kb_dir)
+        .state(answer_capability_profile_for_settings(saved))
+        .status
+        == "verified"
+    )
 
 
 def test_engine_save_and_verify_cancellation_retains_completed_and_undispatched_roles(
@@ -1185,9 +1194,12 @@ def test_save_and_verify_finishes_dispatched_role_before_honoring_stop(
     assert calls == ["model_capability_analysis"]
     saved = read_desktop_model_settings(kb_dir)
     assert saved.api_key == "retained-after-stop"
-    assert DesktopModelCapabilityStore(kb_dir).state(
-        analysis_execution_profile_for_settings(saved)
-    ).status == "verified"
+    assert (
+        DesktopModelCapabilityStore(kb_dir)
+        .state(analysis_execution_profile_for_settings(saved))
+        .status
+        == "verified"
+    )
 
 
 def test_engine_save_and_verify_returns_saved_result_when_outer_request_is_cancelled(

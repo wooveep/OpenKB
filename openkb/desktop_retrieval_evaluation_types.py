@@ -434,7 +434,11 @@ def _evaluation_report(value: dict[object, object]) -> DesktopRetrievalEvaluatio
         if variant not in DESKTOP_EVALUATION_VARIANTS or variant in metrics:
             raise ValueError("Desktop retrieval evaluation report has an invalid variant.")
         metrics[cast(DesktopEvaluationVariant, variant)] = _report_metrics(raw_value)
-    if set(metrics) != DESKTOP_EVALUATION_VARIANTS:
+    accepted_variant_sets = (
+        DESKTOP_EVALUATION_VARIANTS,
+        DESKTOP_EVALUATION_VARIANTS - {"navigator"},
+    )
+    if set(metrics) not in accepted_variant_sets:
         raise ValueError("Desktop retrieval evaluation report has incomplete metrics.")
     providers = _report_providers(value.get("page_tree_providers", []))
     generations = _report_page_tree_generations(value.get("page_tree_generations", []))

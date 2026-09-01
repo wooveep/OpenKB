@@ -54,6 +54,12 @@ class DesktopStructuredOutputInvalidError(ValueError):
         self.failure_event_id = failure_event_id
 
 
+def structured_output_reached_limit(error: DesktopStructuredOutputInvalidError) -> bool:
+    """Return whether the provider explicitly stopped the initial result at its output bound."""
+    observations = error.initial_result.observations
+    return observations is not None and observations.output_limit_reached
+
+
 @dataclass(frozen=True)
 class DesktopValidatedStructuredOutput(Generic[ValidatedValue]):
     result: DesktopModelResult
@@ -105,6 +111,28 @@ def run_structured_output(
         prompt_contract_snapshot=active_snapshot,
     )
     initial = invoke(initial_request)
+    if initial.observations is not None and initial.observations.output_limit_reached:
+        limit_error = ValueError(
+            "The provider stopped at the output limit before structured output completed."
+        )
+        reject_model_result(
+            initial,
+            failure_code="model_response_invalid",
+            reason="Provider output stopped at its configured limit.",
+        )
+        failure_event_id = own_unrepaired_structured_model_failure(
+            operation=operation,
+            document_name=document_name,
+            source_material=source_material,
+            initial=initial,
+            error=limit_error,
+        )
+        raise DesktopStructuredOutputInvalidError(
+            initial_result=initial,
+            final_result=initial,
+            repair_attempted=False,
+            failure_event_id=failure_event_id,
+        ) from limit_error
     try:
         value = validate(normalize_structured_output(initial.content))
     except Exception as first_error:

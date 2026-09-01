@@ -530,7 +530,49 @@ function EvidenceDrawer({ version, tab, focusIndex, onTabChange, onClose, onOpen
     const frame = window.requestAnimationFrame(() => document.getElementById(`evidence-${version.answerVersionId}-${focusIndex}`)?.focus())
     return () => window.cancelAnimationFrame(frame)
   }, [focusIndex, tab, version])
-  return <Sheet open={version !== null} onOpenChange={(open) => { if (!open) onClose() }}><SheetContent className="w-full overflow-y-auto sm:max-w-[420px]"><SheetHeader><SheetTitle>{t("desktop.conversations.evidenceTitle")}</SheetTitle><SheetDescription>{t("desktop.conversations.evidenceDescription")}</SheetDescription></SheetHeader>{version ? <Tabs value={tab} onValueChange={(value) => onTabChange(value as "sources" | "images")} className="mt-5"><TabsList className="w-full"><TabsTrigger value="sources" className="flex-1">{t("desktop.conversations.sources", { count: version.citations.length })}</TabsTrigger><TabsTrigger value="images" className="flex-1">{t("desktop.conversations.images", { count: version.sourceImages.length })}</TabsTrigger></TabsList><TabsContent value="sources" className="space-y-2">{version.citations.map((citation, index) => <button id={`evidence-${version.answerVersionId}-${index}`} key={citation.evidenceId} type="button" disabled={!citation.sourceAvailable} onClick={() => onOpenOriginal(citation.documentId, citation.locator)} className="w-full rounded-lg border border-border/70 p-3 text-left text-sm outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"><strong>[{index + 1}] {citation.documentName} · {citation.section}</strong><span className="mt-1 block text-xs text-muted-foreground">{formatSourceLocator(citation.locator)}</span><span className="mt-2 line-clamp-4 block text-xs leading-5 text-muted-foreground">{citation.excerpt}</span>{!citation.sourceAvailable ? <span className="mt-2 block text-xs text-amber-700">{t("desktop.conversations.sourceUnavailable")}</span> : null}</button>)}</TabsContent><TabsContent value="images" className="grid gap-3 sm:grid-cols-2">{version.sourceImages.map((image) => image.sourceAvailable && image.filePath ? <button key={image.sourceImageId} type="button" onClick={() => onOpenOriginal(image.documentId, image.locator)} className="overflow-hidden rounded-lg border border-border/70 text-left"><img src={convertFileSrc(image.filePath)} alt={image.altText ?? image.name} className="h-40 w-full object-contain" /><span className="block truncate border-t px-2 py-1.5 text-xs">{image.altText ?? image.name}</span></button> : <div key={image.sourceImageId} className="rounded-lg border border-border/70 p-3 text-xs text-muted-foreground"><Images className="mb-2 size-5" />{t("desktop.conversations.sourceUnavailable")}</div>)}</TabsContent></Tabs> : null}</SheetContent></Sheet>
+  return <Sheet open={version !== null} onOpenChange={(open) => { if (!open) onClose() }}><SheetContent className="w-full overflow-y-auto sm:max-w-[420px]"><SheetHeader><SheetTitle>{t("desktop.conversations.evidenceTitle")}</SheetTitle><SheetDescription>{t("desktop.conversations.evidenceDescription")}</SheetDescription></SheetHeader>{version ? <><Tabs value={tab} onValueChange={(value) => onTabChange(value as "sources" | "images")} className="mt-5"><TabsList className="w-full"><TabsTrigger value="sources" className="flex-1">{t("desktop.conversations.sources", { count: version.citations.length })}</TabsTrigger><TabsTrigger value="images" className="flex-1">{t("desktop.conversations.images", { count: version.sourceImages.length })}</TabsTrigger></TabsList><TabsContent value="sources" className="space-y-2">{version.citations.map((citation, index) => <button id={`evidence-${version.answerVersionId}-${index}`} key={citation.evidenceId} type="button" disabled={!citation.sourceAvailable} onClick={() => onOpenOriginal(citation.documentId, citation.locator)} className="w-full rounded-lg border border-border/70 p-3 text-left text-sm outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"><strong>[{index + 1}] {citation.documentName} · {citation.section}</strong><span className="mt-1 block text-xs text-muted-foreground">{formatSourceLocator(citation.locator)}</span><span className="mt-2 line-clamp-4 block text-xs leading-5 text-muted-foreground">{citation.excerpt}</span>{!citation.sourceAvailable ? <span className="mt-2 block text-xs text-amber-700">{t("desktop.conversations.sourceUnavailable")}</span> : null}</button>)}</TabsContent><TabsContent value="images" className="grid gap-3 sm:grid-cols-2">{version.sourceImages.map((image) => image.sourceAvailable && image.filePath ? <button key={image.sourceImageId} type="button" onClick={() => onOpenOriginal(image.documentId, image.locator)} className="overflow-hidden rounded-lg border border-border/70 text-left"><img src={convertFileSrc(image.filePath)} alt={image.altText ?? image.name} className="h-40 w-full object-contain" /><span className="block truncate border-t px-2 py-1.5 text-xs">{image.altText ?? image.name}</span></button> : <div key={image.sourceImageId} className="rounded-lg border border-border/70 p-3 text-xs text-muted-foreground"><Images className="mb-2 size-5" />{t("desktop.conversations.sourceUnavailable")}</div>)}</TabsContent></Tabs><NavigationTraceDetails trace={version.retrievalTrace} /></> : null}</SheetContent></Sheet>
+}
+
+function NavigationTraceDetails({ trace }: { trace: DesktopAnswerVersion["retrievalTrace"] }) {
+  const { t } = useTranslation("common")
+  const visible = trace.navigationSnapshotIds.length > 0
+    || trace.navigationReadCount > 0
+    || trace.navigationRoundCount > 0
+    || trace.groundingInputBudgetTokens > 0
+  if (!visible) return null
+  return (
+    <details className="mt-4 rounded-lg border border-border/70 bg-muted/20 p-3 text-xs">
+      <summary className="cursor-pointer font-medium">{t("desktop.conversations.navigationTrace.title")}</summary>
+      <dl className="mt-3 grid grid-cols-[1fr_auto] gap-x-3 gap-y-2 text-muted-foreground">
+        <dt>{t("desktop.conversations.navigationTrace.coverage")}</dt>
+        <dd>{t(`desktop.conversations.navigationTrace.coverageStates.${trace.coverageGateState || "not_applicable"}`)}</dd>
+        <dt>{t("desktop.conversations.navigationTrace.rounds")}</dt><dd>{trace.navigationRoundCount}</dd>
+        <dt>{t("desktop.conversations.navigationTrace.stopReason")}</dt>
+        <dd>{t(`desktop.conversations.navigationTrace.stopReasons.${trace.navigationStopReason || "legacy"}`)}</dd>
+        <dt>{t("desktop.conversations.navigationTrace.modelCalls")}</dt><dd>{trace.navigationModelCalls}</dd>
+        <dt>{t("desktop.conversations.navigationTrace.reads")}</dt><dd>{trace.navigationReadCount}</dd>
+        <dt>{t("desktop.conversations.navigationTrace.logicalReads")}</dt><dd>{trace.navigationLogicalReadCount}</dd>
+        <dt>{t("desktop.conversations.navigationTrace.sourceWindows")}</dt><dd>{trace.sourceWindowCount}</dd>
+        <dt>{t("desktop.conversations.navigationTrace.sourceTokens")}</dt><dd>{trace.navigationSourceTokens}</dd>
+        <dt>{t("desktop.conversations.navigationTrace.linkHops")}</dt><dd>{trace.linkHopCount}</dd>
+        <dt>{t("desktop.conversations.navigationTrace.pageTreeSupplements")}</dt><dd>{trace.pageTreeSupplementCount}</dd>
+        <dt>{t("desktop.conversations.navigationTrace.budget")}</dt><dd>{trace.evidenceInputTokens} + {trace.guidanceInputTokens} / {trace.groundingInputBudgetTokens}</dd>
+      </dl>
+      {trace.coverageAspects.length ? (
+        <div className="mt-3 border-t border-border/60 pt-3">
+          <p className="font-medium">{t("desktop.conversations.navigationTrace.aspects")}</p>
+          <ul className="mt-1 space-y-1 text-muted-foreground">
+            {trace.coverageAspects.map((item) => (
+              <li key={item.aspect}>
+                {item.aspect} · {t(`desktop.conversations.navigationTrace.aspectStates.${item.status}`)} · {t("desktop.conversations.navigationTrace.evidenceCount", { count: item.evidenceIds.length })}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {trace.navigationRoutes.length ? <div className="mt-3 border-t border-border/60 pt-3"><p className="font-medium">{t("desktop.conversations.navigationTrace.routes")}</p><ul className="mt-1 space-y-1 text-muted-foreground">{trace.navigationRoutes.map((route) => <li key={route} className="break-all">{route}</li>)}</ul></div> : null}
+    </details>
+  )
 }
 
 function validEvidenceOrdinals(text: string, evidenceCount: number): number[] {

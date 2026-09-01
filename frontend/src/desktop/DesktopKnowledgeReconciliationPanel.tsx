@@ -291,9 +291,7 @@ function ConflictCard({
         />
         <p className="font-medium">{conflict.title}</p>
         <span className="rounded-full bg-background px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-          {conflict.kind === "entity"
-            ? t("desktop.knowledgeBases.reconciliation.entity")
-            : t("desktop.knowledgeBases.reconciliation.concept")}
+          {t(`desktop.knowledgeBases.reconciliation.${conflict.kind}`)}
         </span>
         {decisionLabel ? (
           <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
