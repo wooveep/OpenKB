@@ -451,6 +451,7 @@ function Test-ShellProcessTree {
     $startInfo.EnvironmentVariables["TEMP"] = $temporaryData
     $startInfo.EnvironmentVariables["TMP"] = $temporaryData
     $startInfo.EnvironmentVariables["OPENKB_DESKTOP_RUNTIME_DIR"] = Join-Path $shellProfile "Runtime"
+    $startInfo.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"] = Join-Path $shellProfile "WebView2"
     $startInfo.EnvironmentVariables["HTTP_PROXY"] = "http://127.0.0.1:9"
     $startInfo.EnvironmentVariables["HTTPS_PROXY"] = "http://127.0.0.1:9"
     $startInfo.EnvironmentVariables["ALL_PROXY"] = "http://127.0.0.1:9"

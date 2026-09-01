@@ -22,6 +22,7 @@ from openkb.desktop_knowledge_inventory import (
     source_section_anchor,
 )
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels
+from openkb.desktop_knowledge_relationships import generation_relationships_in
 from openkb.desktop_knowledge_routes import knowledge_route
 from openkb.desktop_portable_wiki_preview import portable_wiki_snapshot_in
 from openkb.desktop_portable_wiki_validation import (
@@ -68,6 +69,12 @@ class _KnowledgePage:
 
 
 @dataclass(frozen=True)
+class _RelatedKnowledge:
+    title: str
+    route: str
+
+
+@dataclass(frozen=True)
 class _RouteEntry:
     route: str
     path: str
@@ -101,6 +108,7 @@ def render_portable_wiki_in(
     user_pages = _user_pages_in(connection)
     generated_pages = _generated_pages_in(connection)
     pages = _assign_page_routes((*user_pages, *generated_pages), inventory)
+    related = _related_knowledge_in(connection, inventory)
     source_paths = {document.document_id: f"{document.source_route}.md" for document in documents}
 
     content_routes = tuple(
@@ -133,6 +141,9 @@ def render_portable_wiki_in(
             page,
             evidence_locations=evidence_locations,
             source_paths=source_paths,
+            related=related.get(page.identity, ())
+            if page.authority == "published_generation"
+            else (),
         )
 
     atomic_write_text(staging / "index.md", _index_markdown(content_routes))
@@ -352,12 +363,38 @@ def _assign_page_routes(
     )
 
 
+def _related_knowledge_in(
+    connection: sqlite3.Connection,
+    inventory: tuple[DesktopKnowledgeRoute, ...],
+) -> dict[str, tuple[_RelatedKnowledge, ...]]:
+    snapshot = connection.execute(
+        "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1"
+    ).fetchone()
+    if snapshot is None:
+        return {}
+    routes = {
+        (item.kind, item.identity): item.route
+        for item in inventory
+        if item.authority == "published_generation"
+    }
+    grouped: defaultdict[str, list[_RelatedKnowledge]] = defaultdict(list)
+    for relationship in generation_relationships_in(connection, int(snapshot[0])):
+        target_route = routes.get((relationship.target_kind, relationship.target_item_key))
+        if target_route is None:
+            continue
+        grouped[relationship.source_item_key].append(
+            _RelatedKnowledge(relationship.target_title, target_route)
+        )
+    return {identity: tuple(values) for identity, values in grouped.items()}
+
+
 def _write_knowledge_page(
     staging: Path,
     page: _KnowledgePage,
     *,
     evidence_locations: dict[str, _EvidenceLocation],
     source_paths: dict[str, str],
+    related: tuple[_RelatedKnowledge, ...],
 ) -> None:
     path = staging / f"{page.route}.md"
     authority = (
@@ -370,6 +407,13 @@ def _write_knowledge_page(
         f"> {authority} · {page.lifecycle_state} · {page.provenance_state}\n\n"
         f"{page.content_markdown.strip()}"
     )
+    if related:
+        page_path = f"{page.route}.md"
+        links = "\n".join(
+            f"- [{relation.title}]({_relative_page_link(page_path, relation.route)})"
+            for relation in related
+        )
+        content = f"{content}\n\n## Related knowledge\n\n{links}"
     content = _append_sources(
         content,
         page.evidence_ids,
@@ -378,6 +422,10 @@ def _write_knowledge_page(
         source_paths=source_paths,
     )
     _write_markdown(path, content)
+
+
+def _relative_page_link(page_path: str, target_route: str) -> str:
+    return posixpath.relpath(f"{target_route}.md", posixpath.dirname(page_path))
 
 
 def _write_summary_page(

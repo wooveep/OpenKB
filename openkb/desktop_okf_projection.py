@@ -15,6 +15,7 @@ from typing import Literal
 import yaml
 
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels
+from openkb.desktop_knowledge_relationships import generation_relationships_in
 from openkb.desktop_okf_compatibility import lint_okf_projection
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import atomic_write_text, kb_ingest_lock
@@ -52,6 +53,17 @@ class _ProjectionSource:
 
 
 @dataclass(frozen=True)
+class _ProjectionRelation:
+    target_identity: str
+    target_kind: str
+    target_title: str
+
+    @property
+    def target_path(self) -> Path:
+        return Path("generated") / self.target_kind / f"{self.target_identity}.md"
+
+
+@dataclass(frozen=True)
 class _ProjectionDocument:
     identity: str
     kind: str
@@ -72,6 +84,7 @@ class _ProjectionDocument:
     tags: tuple[str, ...] = ()
     analysis: dict[str, str] | None = None
     sources: tuple[_ProjectionSource, ...] = ()
+    related: tuple[_ProjectionRelation, ...] = ()
 
     @property
     def relative_path(self) -> Path:
@@ -323,6 +336,16 @@ def _current_generation_in(connection: sqlite3.Connection) -> list[_ProjectionDo
         ORDER BY items.kind, items.item_key
         """
     ).fetchall()
+    related: dict[str, list[_ProjectionRelation]] = {}
+    if rows:
+        for relationship in generation_relationships_in(connection, int(rows[0][0])):
+            related.setdefault(relationship.source_item_key, []).append(
+                _ProjectionRelation(
+                    target_identity=relationship.target_item_key,
+                    target_kind=relationship.target_kind,
+                    target_title=relationship.target_title,
+                )
+            )
     return [
         _ProjectionDocument(
             generation_id=int(row[0]),
@@ -340,6 +363,7 @@ def _current_generation_in(connection: sqlite3.Connection) -> list[_ProjectionDo
             tags=decode_knowledge_labels(row[10]),
             analysis=_analysis_metadata(row[11]),
             sources=_generation_sources_in(connection, int(row[0]), str(row[1])),
+            related=tuple(related.get(str(row[1]), ())),
         )
         for row in rows
     ]
@@ -456,11 +480,27 @@ def _render_document(document: _ProjectionDocument) -> str:
             extension["aliases"] = list(document.aliases)
     metadata["openkb"] = extension
     body = document.content_markdown.rstrip("\n")
+    related = _related_markdown(document)
+    if related:
+        body = f"{body}\n\n{related}" if body else related
     footnotes = "\n".join(
         f"[^{source.source_id}]: {_source_title(source)}" for source in document.sources
     )
     suffix = f"\n\n{footnotes}" if footnotes else ""
     return f"{_yaml_frontmatter(metadata)}\n# {document.title}\n\n{body}{suffix}\n"
+
+
+def _related_markdown(document: _ProjectionDocument) -> str:
+    if not document.related:
+        return ""
+    links = []
+    for relation in document.related:
+        relative = os.path.relpath(
+            relation.target_path,
+            document.relative_path.parent,
+        ).replace(os.sep, "/")
+        links.append(f"- [{relation.target_title}]({relative})")
+    return "## Related knowledge\n\n" + "\n".join(links)
 
 
 def _analysis_metadata(value: object) -> dict[str, str] | None:

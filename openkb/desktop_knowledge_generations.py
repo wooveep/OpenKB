@@ -14,6 +14,10 @@ from openkb.desktop_corpus_benchmark import (
     corpus_benchmark_report_in,
 )
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels, encode_knowledge_labels
+from openkb.desktop_knowledge_relationships import (
+    generation_relationship_issues_in,
+    rebuild_generation_relationships_in,
+)
 from openkb.desktop_knowledge_sources import merge_claim_source_markers
 from openkb.desktop_okf_projection import (
     activate_okf_projection,
@@ -119,6 +123,7 @@ def publish_generation_changes_in(
         )
     for change in changes:
         _upsert_generation_change_in(connection, generation_id, change, now)
+    rebuild_generation_relationships_in(connection, generation_id)
     connection.execute(
         """
         INSERT INTO knowledge_generation_state (singleton, current_generation_id)
@@ -238,6 +243,7 @@ def publish_corpus_generation_in(
         )
     for change in changes:
         _upsert_generation_change_in(connection, generation_id, change, now)
+    rebuild_generation_relationships_in(connection, generation_id)
     connection.executemany(
         """
         INSERT INTO knowledge_generation_documents (generation_id, document_id)
@@ -394,6 +400,7 @@ def corpus_generation_qualification_issues_in(
     ).fetchone()
     if invalid_sources is not None and int(invalid_sources[0]) > 0:
         issues.append("invalid_item_source")
+    issues.extend(generation_relationship_issues_in(connection, generation_id))
     duplicates = connection.execute(
         """
         SELECT COUNT(*) FROM (

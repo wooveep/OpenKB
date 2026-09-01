@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import posixpath
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -19,7 +22,17 @@ from openkb.desktop_catalog_store import (
     rebuild_pending_catalog,
 )
 from openkb.desktop_import_runner import DesktopTextImportService
+from openkb.desktop_knowledge_export import DesktopKnowledgeExportService
+from openkb.desktop_knowledge_generations import (
+    KnowledgeGenerationChange,
+    KnowledgeGenerationSource,
+    current_generation_id_in,
+    knowledge_content_sha256,
+    publish_generation_changes_in,
+)
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
+from openkb.desktop_knowledge_sources import stable_source_id
+from openkb.desktop_okf_projection import materialize_okf_projection
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
@@ -145,9 +158,7 @@ def test_catalog_persists_typed_links_with_routes_and_source_bindings(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     kb_dir = _controlled_kb(tmp_path, monkeypatch)
-    pages, alpha, beta, alpha_evidence, beta_evidence = _source_backed_pages(
-        kb_dir, tmp_path
-    )
+    pages, alpha, beta, alpha_evidence, beta_evidence = _source_backed_pages(kb_dir, tmp_path)
     pages.publish(alpha.page_id)
     assert rebuild_pending_catalog(kb_dir)
 
@@ -195,6 +206,142 @@ def test_catalog_persists_typed_links_with_routes_and_source_bindings(
     assert supported_by is not None
     assert supported_by[0].startswith("sources/")
     assert supported_by[1:] == ("supported_by", "knowledge_source_binding", 1)
+
+
+def test_generated_relations_are_structured_authority_and_markdown_projection(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kb_dir = _controlled_kb(tmp_path, monkeypatch)
+    source = tmp_path / "deployment.md"
+    source.write_text(
+        "# Deployment\n\nInstall Glusterfs before creating the replicated volume.\n\n"
+        "# Storage\n\nGlusterfs provides replicated storage for both nodes.\n",
+        encoding="utf-8",
+    )
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    pages = DesktopKnowledgePageService(kb_dir)
+    procedure_evidence = pages.search_sources("Install Glusterfs")[0].evidence_id
+    entity_evidence = pages.search_sources("replicated storage")[0].evidence_id
+    procedure_content = "## Steps\n\n1. Install Glusterfs before creating the replicated volume."
+    entity_content = "Glusterfs provides replicated storage for both nodes."
+    database = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database) as connection:
+        generation_id = publish_generation_changes_in(
+            connection,
+            current_generation_id=current_generation_id_in(connection),
+            changes=(
+                KnowledgeGenerationChange(
+                    document_id=imported.document.document_id,
+                    kind="procedure",
+                    title="Dual-node deployment",
+                    normalized_title="dual-node deployment",
+                    content_markdown=procedure_content,
+                    content_sha256=knowledge_content_sha256(procedure_content),
+                    sources=(
+                        KnowledgeGenerationSource(
+                            stable_source_id(procedure_evidence),
+                            procedure_evidence,
+                            "Install Glusterfs before creating the replicated volume.",
+                        ),
+                    ),
+                    identity_id="procedure-identity",
+                ),
+                KnowledgeGenerationChange(
+                    document_id=imported.document.document_id,
+                    kind="entity",
+                    title="Glusterfs",
+                    normalized_title="glusterfs",
+                    content_markdown=entity_content,
+                    content_sha256=knowledge_content_sha256(entity_content),
+                    sources=(
+                        KnowledgeGenerationSource(
+                            stable_source_id(entity_evidence),
+                            entity_evidence,
+                            entity_content,
+                        ),
+                    ),
+                    identity_id="entity-identity",
+                ),
+            ),
+            now="2026-09-02T00:00:00+00:00",
+        )
+        connection.execute(
+            "UPDATE knowledge_generations SET qualification_state = 'qualified' "
+            "WHERE generation_id = ?",
+            (generation_id,),
+        )
+        connection.commit()
+
+        relation = connection.execute(
+            """
+            SELECT source_item_key, target_item_key, relation_kind, provenance
+            FROM knowledge_generation_relationships
+            WHERE generation_id = ? AND source_item_key = 'procedure-identity'
+                AND target_item_key = 'entity-identity'
+            """,
+            (generation_id,),
+        ).fetchone()
+        assert relation == (
+            "procedure-identity",
+            "entity-identity",
+            "references",
+            "corpus_claim_title_mention",
+        )
+        assert connection.execute(
+            """
+            SELECT binding_role, evidence_id
+            FROM knowledge_generation_relationship_sources
+            WHERE generation_id = ? AND source_item_key = 'procedure-identity'
+                AND target_item_key = 'entity-identity'
+            ORDER BY binding_role, evidence_id
+            """,
+            (generation_id,),
+        ).fetchall() == [
+            ("source", procedure_evidence),
+            ("target", entity_evidence),
+        ]
+
+    assert "[" not in procedure_content
+    assert rebuild_pending_catalog(kb_dir)
+    with sqlite3.connect(database) as connection:
+        catalog_generation = str(
+            connection.execute(
+                "SELECT current_generation_id FROM knowledge_catalog_state"
+            ).fetchone()[0]
+        )
+        assert connection.execute(
+            """
+            SELECT relation_kind, provenance, lifecycle_eligible
+            FROM knowledge_catalog_relationships
+            WHERE generation_id = ? AND source_node_id = 'generated:procedure-identity'
+                AND target_node_id = 'generated:entity-identity'
+            """,
+            (catalog_generation,),
+        ).fetchone() == ("references", "corpus_claim_title_mention", 1)
+
+    materialize_okf_projection(kb_dir)
+    projected = (
+        kb_dir / "knowledge-pages" / "generated" / "procedure" / "procedure-identity.md"
+    ).read_text(encoding="utf-8")
+    assert "[Glusterfs](../entity/entity-identity.md)" in projected
+
+    destination = tmp_path / "exports"
+    destination.mkdir()
+    exporter = DesktopKnowledgeExportService(kb_dir)
+    preview = exporter.preview(mode="portable_wiki")
+    exported = exporter.export(
+        destination,
+        mode="portable_wiki",
+        expected_snapshot_id=preview.snapshot_id,
+    )
+    root = Path(exported.path)
+    manifest = json.loads((root / "wiki-manifest.json").read_text(encoding="utf-8"))
+    routes = {entry["identity"]: entry["path"] for entry in manifest["routes"]}
+    procedure_path = routes["procedure-identity"]
+    entity_path = routes["entity-identity"]
+    relative_entity = posixpath.relpath(entity_path, posixpath.dirname(procedure_path))
+    procedure_wiki = (root / procedure_path).read_text(encoding="utf-8")
+    assert f"[Glusterfs]({relative_entity})" in procedure_wiki
 
 
 def test_catalog_failure_serves_previous_generation_and_task_reason(

@@ -14,6 +14,7 @@ from urllib.parse import unquote, urlsplit
 
 from openkb.desktop_knowledge_inventory import eligible_knowledge_routes_in
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels
+from openkb.desktop_knowledge_relationships import generation_relationships_in
 
 _MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 
@@ -107,7 +108,7 @@ def build_catalog_snapshot_in(
     )
     inventory = eligible_knowledge_routes_in(connection)
     routes = {(item.authority, item.kind, item.identity): item.route for item in inventory}
-    links = _knowledge_links(values, nodes, sources, routes)
+    links = _knowledge_links(connection, values, nodes, sources, routes)
     digest = _snapshot_digest(nodes, sources, links)
     return CatalogSnapshot(source_revision, digest, nodes, sources, links)
 
@@ -449,6 +450,7 @@ def _ordered_nodes(leaves: tuple[CatalogNode, ...]) -> tuple[CatalogNode, ...]:
 
 
 def _knowledge_links(
+    connection: sqlite3.Connection,
     values: tuple[_KnowledgeValue, ...],
     nodes: tuple[CatalogNode, ...],
     sources: tuple[CatalogSource, ...],
@@ -461,6 +463,62 @@ def _knowledge_links(
         if source.availability == "available":
             sources_by_node[source.node_id].append(source)
     links: dict[tuple[str, str, str], CatalogLink] = {}
+
+    generation = connection.execute(
+        "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1"
+    ).fetchone()
+    if generation is not None:
+        for relationship in generation_relationships_in(connection, int(generation[0])):
+            source_node = node_by_id.get(f"generated:{relationship.source_item_key}")
+            target_node = node_by_id.get(f"generated:{relationship.target_item_key}")
+            source_route_value = _catalog_route(source_node, routes)
+            target_route_value = _catalog_route(target_node, routes)
+            if (
+                source_node is None
+                or target_node is None
+                or source_route_value is None
+                or target_route_value is None
+            ):
+                continue
+            source_catalog_bindings = _selected_relationship_sources(
+                sources_by_node[source_node.node_id], relationship.source_evidence_ids
+            )
+            target_catalog_bindings = _selected_relationship_sources(
+                sources_by_node[target_node.node_id], relationship.target_evidence_ids
+            )
+            if not source_catalog_bindings or not target_catalog_bindings:
+                continue
+            relationship_sources = tuple(
+                sorted(
+                    (
+                        *(
+                            _relationship_source("source", source)
+                            for source in source_catalog_bindings
+                        ),
+                        *(
+                            _relationship_source("target", source)
+                            for source in target_catalog_bindings
+                        ),
+                    ),
+                    key=lambda item: (
+                        item.binding_role,
+                        item.document_id,
+                        item.evidence_id,
+                        item.source_id,
+                    ),
+                )
+            )
+            link = CatalogLink(
+                from_node_id=source_node.node_id,
+                to_node_id=target_node.node_id,
+                source_route=source_route_value,
+                target_route=target_route_value,
+                relation_kind=relationship.relation_kind,
+                provenance=relationship.provenance,
+                lifecycle_eligible=True,
+                source_bindings=relationship_sources,
+            )
+            links.setdefault((link.from_node_id, link.to_node_id, link.relation_kind), link)
 
     for value in values:
         source_route_value = _catalog_route(value.node, routes)
@@ -491,7 +549,7 @@ def _knowledge_links(
                 source_bindings=relationship_sources,
                 weight=0.25,
             )
-            links[(link.from_node_id, link.to_node_id, link.relation_kind)] = link
+            links.setdefault((link.from_node_id, link.to_node_id, link.relation_kind), link)
 
         for match in _MARKDOWN_LINK.finditer(value.content_markdown):
             target = _resolved_link(value.relative_path, match.group(1))
@@ -532,7 +590,7 @@ def _knowledge_links(
                 lifecycle_eligible=True,
                 source_bindings=relationship_sources,
             )
-            links[(link.from_node_id, link.to_node_id, link.relation_kind)] = link
+            links.setdefault((link.from_node_id, link.to_node_id, link.relation_kind), link)
     return tuple(links[key] for key in sorted(links))
 
 
@@ -554,6 +612,19 @@ def _relationship_source(binding_role: str, source: CatalogSource) -> CatalogRel
         document_id=source.document_id,
         availability=source.availability,
     )
+
+
+def _selected_relationship_sources(
+    candidates: list[CatalogSource], evidence_ids: tuple[str, ...]
+) -> tuple[CatalogSource, ...]:
+    selected = {
+        source.evidence_id: source
+        for source in candidates
+        if source.availability == "available" and source.evidence_id in evidence_ids
+    }
+    if set(selected) != set(evidence_ids):
+        return ()
+    return tuple(selected[evidence_id] for evidence_id in evidence_ids)
 
 
 def _resolved_link(source_path: str, raw_target: str) -> str | None:
