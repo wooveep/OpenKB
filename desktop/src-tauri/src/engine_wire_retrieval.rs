@@ -31,6 +31,10 @@ pub struct EvidenceRef {
     pub locator: Value,
     pub excerpt: String,
     pub channels: Vec<String>,
+    #[serde(default, alias = "version_label")]
+    pub version_label: Option<String>,
+    #[serde(default, alias = "version_side")]
+    pub version_side: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -111,6 +115,26 @@ pub struct RetrievalTrace {
     pub evidence_input_tokens: u64,
     #[serde(default, alias = "guidance_input_tokens")]
     pub guidance_input_tokens: u64,
+    #[serde(default, alias = "version_navigation_snapshot_id")]
+    pub version_navigation_snapshot_id: String,
+    #[serde(default, alias = "version_catalog_revision_id")]
+    pub version_catalog_revision_id: String,
+    #[serde(default, alias = "version_catalog_digest")]
+    pub version_catalog_digest: String,
+    #[serde(default, alias = "version_scope_mode")]
+    pub version_scope_mode: String,
+    #[serde(default, alias = "version_scope_status")]
+    pub version_scope_status: String,
+    #[serde(default, alias = "version_scope_lineage_ids")]
+    pub version_scope_lineage_ids: Vec<String>,
+    #[serde(default, alias = "version_scope_labels")]
+    pub version_scope_labels: Vec<String>,
+    #[serde(default, alias = "version_scope_document_ids")]
+    pub version_scope_document_ids: Vec<String>,
+    #[serde(default, alias = "version_scope_selection_reason")]
+    pub version_scope_selection_reason: String,
+    #[serde(default, alias = "version_scope_degradation_reason")]
+    pub version_scope_degradation_reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

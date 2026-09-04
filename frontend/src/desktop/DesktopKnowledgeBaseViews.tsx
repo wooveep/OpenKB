@@ -139,6 +139,7 @@ export function ActiveKnowledgeBaseView({
           initialTab={knowledgeInitialTab}
           requestedPageId={requestedKnowledgePageId}
           onReviewChanged={onReviewChanged}
+          onOpenOriginal={onOpenRawDocument}
         />
       ) : null}
       {section === "settings" ? <div className="mx-auto max-w-5xl"><DesktopModelSettingsPanel key={knowledgeBase.kbDir} kbDir={knowledgeBase.kbDir} /></div> : null}

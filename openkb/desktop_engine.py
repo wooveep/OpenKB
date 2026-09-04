@@ -414,6 +414,9 @@ class DesktopEngineServer:
             return reanalysis.dispatch_knowledge_reanalysis_request(self, request, cancel_event)
         if request.method in {
             "workbench.document_version_candidates",
+            "workbench.document_version_catalog",
+            "workbench.confirm_document_lineage",
+            "workbench.document_version_diffs",
             "workbench.resolve_document_version_candidate",
         }:
             from openkb.desktop_engine_document_versions import dispatch_document_version_request

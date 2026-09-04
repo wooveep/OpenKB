@@ -35,6 +35,10 @@ import {
   type DesktopDocumentVersionCandidate,
   type DesktopDocumentVersionCandidates,
   type DesktopDocumentVersionCandidateDecision,
+  type DesktopDocumentLineageDecision,
+  type DesktopDocumentVersionCatalog,
+  type DesktopDocumentVersionDiffs,
+  type DesktopVersionFilter,
   type DesktopImportJobs,
   type DesktopRawDocument,
   type DesktopRecoveryOverride,
@@ -48,11 +52,11 @@ import {
   runtimeLaunchIntents,
   toDesktopBridgeError,
 } from "./bridge-normalizers"
-import { TauriKnowledgePageBridge } from "./tauri-knowledge-page-bridge"
+import { TauriDocumentVersionBridge } from "./tauri-document-version-bridge"
 import { UnavailableKnowledgeReanalysisBridge } from "./unavailable-knowledge-reanalysis-bridge"
 
 /** Production Bridge: the sole React caller of Tauri commands and channels. */
-export class TauriDesktopBridge extends TauriKnowledgePageBridge implements DesktopBridge {
+export class TauriDesktopBridge extends TauriDocumentVersionBridge implements DesktopBridge {
   async handshake(): Promise<DesktopBridgeHandshake> {
     return this.call<DesktopBridgeHandshake>("desktop_bridge_handshake")
   }
@@ -238,8 +242,16 @@ export class TauriDesktopBridge extends TauriKnowledgePageBridge implements Desk
     return this.call<DesktopImportJobs>("desktop_import_jobs")
   }
 
-  async askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer> {
-    return this.call<DesktopGroundedAnswer>("desktop_ask_grounded", { question, requestId })
+  async askGrounded(
+    question: string,
+    requestId: string,
+    versionFilter?: DesktopVersionFilter,
+  ): Promise<DesktopGroundedAnswer> {
+    return this.call<DesktopGroundedAnswer>("desktop_ask_grounded", {
+      question,
+      requestId,
+      versionFilter,
+    })
   }
 
   async retryInterruptedAnswer(
@@ -287,8 +299,18 @@ export class TauriDesktopBridge extends TauriKnowledgePageBridge implements Desk
     return conversation(await this.call<unknown>("desktop_save_conversation_draft", { conversationId, draftText, requestId }))
   }
 
-  async askConversation(conversationId: string, question: string, requestId: string): Promise<DesktopConversation> {
-    return conversation(await this.call<unknown>("desktop_ask_conversation", { conversationId, question, requestId }))
+  async askConversation(
+    conversationId: string,
+    question: string,
+    requestId: string,
+    versionFilter?: DesktopVersionFilter,
+  ): Promise<DesktopConversation> {
+    return conversation(await this.call<unknown>("desktop_ask_conversation", {
+      conversationId,
+      question,
+      requestId,
+      versionFilter,
+    }))
   }
 
   async regenerateConversationAnswer(conversationId: string, assistantMessageId: string, requestId: string): Promise<DesktopConversation> {
@@ -297,22 +319,6 @@ export class TauriDesktopBridge extends TauriKnowledgePageBridge implements Desk
 
   async selectAnswerVersion(conversationId: string, assistantMessageId: string, answerVersionId: string, requestId: string): Promise<DesktopConversation> {
     return conversation(await this.call<unknown>("desktop_select_answer_version", { conversationId, assistantMessageId, answerVersionId, requestId }))
-  }
-
-  async documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates> {
-    return this.call<DesktopDocumentVersionCandidates>("desktop_document_version_candidates")
-  }
-
-  async resolveDocumentVersionCandidate(
-    candidateId: string,
-    decision: DesktopDocumentVersionCandidateDecision,
-    requestId: string,
-  ): Promise<DesktopDocumentVersionCandidate> {
-    return this.call<DesktopDocumentVersionCandidate>("desktop_resolve_document_version_candidate", {
-      candidateId,
-      decision,
-      requestId,
-    })
   }
 
   async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {
@@ -542,9 +548,14 @@ class UnavailableDesktopBridge extends UnavailableKnowledgeReanalysisBridge impl
     return this.unavailable()
   }
 
-  askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer> {
+  askGrounded(
+    question: string,
+    requestId: string,
+    versionFilter?: DesktopVersionFilter,
+  ): Promise<DesktopGroundedAnswer> {
     void question
     void requestId
+    void versionFilter
     return this.unavailable()
   }
 
@@ -599,10 +610,16 @@ class UnavailableDesktopBridge extends UnavailableKnowledgeReanalysisBridge impl
     return this.unavailable()
   }
 
-  askConversation(conversationId: string, question: string, requestId: string): Promise<DesktopConversation> {
+  askConversation(
+    conversationId: string,
+    question: string,
+    requestId: string,
+    versionFilter?: DesktopVersionFilter,
+  ): Promise<DesktopConversation> {
     void conversationId
     void question
     void requestId
+    void versionFilter
     return this.unavailable()
   }
 
@@ -622,6 +639,24 @@ class UnavailableDesktopBridge extends UnavailableKnowledgeReanalysisBridge impl
   }
 
   documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates> {
+    return this.unavailable()
+  }
+
+  documentVersionCatalog(): Promise<DesktopDocumentVersionCatalog> {
+    return this.unavailable()
+  }
+
+  confirmDocumentLineage(
+    decision: DesktopDocumentLineageDecision,
+    requestId: string,
+  ): Promise<DesktopDocumentVersionCatalog> {
+    void decision
+    void requestId
+    return this.unavailable()
+  }
+
+  documentVersionDiffs(lineageId: string): Promise<DesktopDocumentVersionDiffs> {
+    void lineageId
     return this.unavailable()
   }
 

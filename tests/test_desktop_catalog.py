@@ -10,16 +10,24 @@ from pathlib import Path
 import pytest
 
 from openkb import desktop_catalog_store as catalog_store
-from openkb import desktop_retrieval
+from openkb import desktop_retrieval, desktop_retrieval_candidates
+from openkb.desktop_candidate_registry import publish_candidate_registry_generation_in
 from openkb.desktop_catalog_retrieval import (
     CATALOG_DIRECT_WEIGHT,
     CATALOG_STALE_MULTIPLIER,
     catalog_route_rows_in,
 )
 from openkb.desktop_catalog_store import (
+    lease_catalog_generation,
     lease_current_catalog,
     queue_catalog_rebuild_in,
     rebuild_pending_catalog,
+)
+from openkb.desktop_corpus_synthesis_generation import (
+    bind_generation_graph_inputs_in,
+    capture_corpus_candidate_inputs_in,
+    create_pending_corpus_manifest_in,
+    refresh_corpus_identity_mappings_in,
 )
 from openkb.desktop_import_runner import DesktopTextImportService
 from openkb.desktop_knowledge_export import DesktopKnowledgeExportService
@@ -30,6 +38,8 @@ from openkb.desktop_knowledge_generations import (
     knowledge_content_sha256,
     publish_generation_changes_in,
 )
+from openkb.desktop_knowledge_graph_interpretation import GraphDispositionCounts
+from openkb.desktop_knowledge_graph_store import persist_semantic_graph_interpretation_in
 from openkb.desktop_knowledge_inventory import eligible_knowledge_routes_in
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
 from openkb.desktop_knowledge_relationship_migrations import (
@@ -38,9 +48,17 @@ from openkb.desktop_knowledge_relationship_migrations import (
     _MAX_RELATIONSHIPS_PER_SOURCE_ITEM,
     relationship_rebuild_statements,
 )
+from openkb.desktop_knowledge_relationships import rebuild_generation_relationships_in
 from openkb.desktop_knowledge_sources import stable_source_id
 from openkb.desktop_okf_projection import materialize_okf_projection
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
+from openkb.desktop_semantic_graph import (
+    SemanticClaimReference,
+    SemanticGraphInterpretation,
+    SemanticRelation,
+    load_semantic_graph_document_in,
+    replace_document_semantic_relations_in,
+)
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
@@ -388,6 +406,135 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
             for evidence_id, claim_text in evidence[4:]
         )
         assert len(procedure_sources) == len(entity_sources) == 4
+        now = "2026-09-02T00:00:00+00:00"
+        candidates = (
+            (
+                "procedure-candidate",
+                "procedure",
+                "Dual-node deployment",
+                "dual-node deployment",
+                procedure_sources,
+            ),
+            (
+                "entity-candidate",
+                "entity",
+                "Glusterfs",
+                "glusterfs",
+                entity_sources,
+            ),
+        )
+        for candidate_id, kind, title, normalized_title, sources in candidates:
+            connection.execute(
+                """
+                INSERT INTO knowledge_document_candidates (
+                    candidate_id, document_id, kind, title, normalized_title,
+                    entity_subtype, aliases_json, tags_json, admission_state,
+                    admission_reason, analysis_provenance_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, NULL, '[]', '[]', 'admitted',
+                    'eligible', '{}', ?)
+                """,
+                (
+                    candidate_id,
+                    imported.document.document_id,
+                    kind,
+                    title,
+                    normalized_title,
+                    now,
+                ),
+            )
+            for claim_ordinal, generation_source in enumerate(sources):
+                connection.execute(
+                    """
+                    INSERT INTO knowledge_document_candidate_claims (
+                        candidate_id, claim_ordinal, role, claim_text, applicability_json
+                    ) VALUES (?, ?, 'fact', ?, '[]')
+                    """,
+                    (candidate_id, claim_ordinal, generation_source.claim_text),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO knowledge_document_candidate_claim_sources (
+                        candidate_id, claim_ordinal, evidence_id
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (candidate_id, claim_ordinal, generation_source.evidence_id),
+                )
+        identities = (
+            (
+                "procedure-identity",
+                "procedure-candidate",
+                "procedure",
+                "Dual-node deployment",
+                "dual-node deployment",
+            ),
+            (
+                "entity-identity",
+                "entity-candidate",
+                "entity",
+                "Glusterfs",
+                "glusterfs",
+            ),
+        )
+        for identity_id, candidate_id, kind, title, normalized_title in identities:
+            connection.execute(
+                """
+                INSERT INTO knowledge_identities (
+                    identity_id, kind, canonical_title, normalized_title,
+                    status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'active', ?, ?)
+                """,
+                (identity_id, kind, title, normalized_title, now, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO knowledge_identity_candidates (
+                    identity_id, candidate_id, match_basis, created_at
+                ) VALUES (?, ?, 'exact_title', ?)
+                """,
+                (identity_id, candidate_id, now),
+            )
+        registry = publish_candidate_registry_generation_in(
+            connection,
+            document_id=imported.document.document_id,
+            analysis_provenance_json="{}",
+            now=now,
+        )
+        assert registry.generation is not None
+        graph_document = load_semantic_graph_document_in(connection, imported.document.document_id)
+        assert graph_document is not None
+        interpretation = SemanticGraphInterpretation(
+            relations=(
+                SemanticRelation(
+                    "procedure-candidate",
+                    "entity-candidate",
+                    "USES",
+                    (SemanticClaimReference("procedure-candidate", 0),),
+                    (procedure_sources[0].evidence_id,),
+                    "[]",
+                ),
+            ),
+            lifecycle="completed",
+            quality="full",
+            issues=(),
+            counts=GraphDispositionCounts(retained=3, weakened=0, rejected=0),
+        )
+        graph_result_id = persist_semantic_graph_interpretation_in(
+            connection,
+            imported.document.document_id,
+            interpretation,
+            node_count=2,
+            capability_identity="catalog-test",
+            prompt_contract_digest="catalog-test",
+            candidate_generation_id=registry.generation.generation_id,
+            candidate_generation_digest=registry.generation.registry_digest,
+        )
+        replace_document_semantic_relations_in(
+            connection,
+            graph_document,
+            interpretation,
+            graph_result_id=graph_result_id,
+        )
+        candidate_inputs = capture_corpus_candidate_inputs_in(connection)
         generation_id = publish_generation_changes_in(
             connection,
             current_generation_id=current_generation_id_in(connection),
@@ -413,11 +560,34 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
                     identity_id="entity-identity",
                 ),
             ),
-            now="2026-09-02T00:00:00+00:00",
+            now=now,
         )
+        create_pending_corpus_manifest_in(
+            connection,
+            generation_id=generation_id,
+            parent_generation_id=None,
+            document_ids=(imported.document.document_id,),
+            candidate_inputs=candidate_inputs,
+            now=now,
+        )
+        refresh_corpus_identity_mappings_in(connection, generation_id, now=now)
+        bind_generation_graph_inputs_in(connection, generation_id, now=now)
+        rebuild_generation_relationships_in(connection, generation_id)
         connection.execute(
             "UPDATE knowledge_generations SET qualification_state = 'qualified' "
             "WHERE generation_id = ?",
+            (generation_id,),
+        )
+        connection.execute(
+            "UPDATE knowledge_generation_manifests "
+            "SET lifecycle_state = 'active', dossier_state = 'ready', graph_state = 'ready' "
+            "WHERE generation_id = ?",
+            (generation_id,),
+        )
+        connection.execute(
+            "INSERT INTO knowledge_generation_state (singleton, current_generation_id) "
+            "VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET "
+            "current_generation_id = excluded.current_generation_id",
             (generation_id,),
         )
         connection.commit()
@@ -434,8 +604,8 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
         assert relation == (
             "procedure-identity",
             "entity-identity",
-            "references",
-            "corpus_claim_title_mention",
+            "USES",
+            "semantic_relation_analysis",
         )
         relationship_sources = connection.execute(
             """
@@ -447,19 +617,15 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
             """,
             (generation_id,),
         ).fetchall()
-        assert [role for role, _evidence_id in relationship_sources].count("source") == 3
-        assert [role for role, _evidence_id in relationship_sources].count("target") == 3
-        assert {evidence_id for role, evidence_id in relationship_sources if role == "source"} < {
+        assert [role for role, _evidence_id in relationship_sources].count("source") == 4
+        assert [role for role, _evidence_id in relationship_sources].count("target") == 4
+        assert [role for role, _evidence_id in relationship_sources].count("assertion") == 1
+        assert {evidence_id for role, evidence_id in relationship_sources if role == "source"} == {
             source.evidence_id for source in procedure_sources
         }
-        assert {evidence_id for role, evidence_id in relationship_sources if role == "target"} < {
+        assert {evidence_id for role, evidence_id in relationship_sources if role == "target"} == {
             source.evidence_id for source in entity_sources
         }
-
-        connection.execute("DROP TABLE knowledge_generation_relationship_sources")
-        connection.execute("DROP TABLE knowledge_generation_relationships")
-        connection.execute("DELETE FROM schema_migrations WHERE version >= 56")
-        connection.commit()
 
     DesktopKnowledgeBaseRuntime().open(kb_dir)
     with sqlite3.connect(database) as connection:
@@ -475,7 +641,7 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
                     relation_kind, binding_role
             )
             """
-        ).fetchone() == (3,)
+        ).fetchone() == (4,)
 
     assert "[" not in procedure_content
     assert rebuild_pending_catalog(kb_dir)
@@ -493,7 +659,7 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
                 AND target_node_id = 'generated:entity-identity'
             """,
             (catalog_generation,),
-        ).fetchone() == ("references", "corpus_claim_title_mention", 1)
+        ).fetchone() == ("USES", "semantic_relation_analysis", 1)
 
     materialize_okf_projection(kb_dir)
     projected = (
@@ -600,7 +766,7 @@ def test_catalog_faults_drop_only_the_optional_channel(tmp_path, monkeypatch) ->
 
     with monkeypatch.context() as scoped:
         scoped.setattr(
-            desktop_retrieval,
+            desktop_retrieval_candidates,
             "catalog_route_rows_in",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("query fault")),
         )
@@ -614,7 +780,11 @@ def test_catalog_faults_drop_only_the_optional_channel(tmp_path, monkeypatch) ->
             return False
 
     with monkeypatch.context() as scoped:
-        scoped.setattr(desktop_retrieval, "lease_current_catalog", lambda _kb_dir: BrokenLease())
+        scoped.setattr(
+            desktop_retrieval,
+            "lease_catalog_generation",
+            lambda _kb_dir, _generation_id: BrokenLease(),
+        )
         lease_failure = DesktopEvidenceRetriever(kb_dir).retrieve("Alpha baseline evidence")
 
     for pack in (query_failure, lease_failure):
@@ -669,3 +839,19 @@ def test_catalog_reader_leases_are_scoped_to_their_knowledge_base(
             "SELECT status, COUNT(*) FROM knowledge_catalog_generations GROUP BY status"
         ).fetchall()
     assert sorted(remaining) == [("current", 1), ("recent", 1)]
+
+
+def test_catalog_snapshot_lease_reads_the_pinned_previous_generation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kb_dir = _controlled_kb(tmp_path, monkeypatch)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with lease_current_catalog(kb_dir) as first:
+        assert first is not None
+        with sqlite3.connect(database_path) as connection:
+            with connection:
+                queue_catalog_rebuild_in(connection, "snapshot-next")
+        assert rebuild_pending_catalog(kb_dir)
+
+        with lease_catalog_generation(kb_dir, first.generation_id) as pinned:
+            assert pinned == first

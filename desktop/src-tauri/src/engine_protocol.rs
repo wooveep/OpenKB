@@ -9,16 +9,17 @@ use crate::engine_wire::{
 };
 pub use crate::engine_wire::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, BridgeResult,
-    CancelResult, DiagnosticBundleResult, DocumentVersionCandidate,
-    DocumentVersionCandidateDecision, DocumentVersionCandidatesResult, EngineHealth,
-    GroundedAnswer, GroundedAnswersResult, ImportControlResult, ImportJobsResult,
-    ImportSourceInspection, KnowledgeBaseActivationResult, KnowledgeGraphExtractionControlResult,
-    KnowledgePageKind, KnowledgeReanalysisOverview, KnowledgeReanalysisRun,
-    KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
-    KnowledgeReconciliationDecision, MissingSourceBindingResult, MissingSourceCandidatesResult,
-    MissingSourceDismissalResult, ModelConnectionTest, ModelSettings, ModelSettingsDraft,
-    PageTreeEnrichmentControlResult, RawDocument, RecoveryOverride,
-    SaveAndVerifyModelConfiguration, TextDocumentImportResult,
+    CancelResult, DiagnosticBundleResult, DocumentLineageDecision, DocumentVersionCandidate,
+    DocumentVersionCandidateDecision, DocumentVersionCandidatesResult,
+    DocumentVersionCatalogSnapshot, DocumentVersionDiffsResult, EngineHealth, GroundedAnswer,
+    GroundedAnswersResult, ImportControlResult, ImportJobsResult, ImportSourceInspection,
+    KnowledgeBaseActivationResult, KnowledgeGraphExtractionControlResult, KnowledgePageKind,
+    KnowledgeReanalysisOverview, KnowledgeReanalysisRun, KnowledgeReconciliationCommit,
+    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision,
+    MissingSourceBindingResult, MissingSourceCandidatesResult, MissingSourceDismissalResult,
+    ModelConnectionTest, ModelSettings, ModelSettingsDraft, PageTreeEnrichmentControlResult,
+    RawDocument, RecoveryOverride, SaveAndVerifyModelConfiguration, TextDocumentImportResult,
+    VersionFilter,
 };
 pub use crate::engine_wire_knowledge_export::{
     KnowledgeExportMode, KnowledgeExportPreview, KnowledgeExportResult,

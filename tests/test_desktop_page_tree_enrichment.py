@@ -247,11 +247,16 @@ def test_invalid_enrichment_repair_marks_final_usage_as_model_result_failure(tmp
     assert service.pending_document_ids(gateway) == ()
     assert service.retry_document(imported.document.document_id, gateway)
     assert service.pending_document_ids(gateway) == (imported.document.document_id,)
-    assert DesktopModelOperationContractStore(kb_dir).state(
-        operation="page_tree_enrichment",
-        capability_identity=profile.capability_evidence_profile.identity,
-        prompt_contract_digest=prompt_contract_for("page_tree_enrichment").digest,
-    ).status == "suspended"
+    assert (
+        DesktopModelOperationContractStore(kb_dir)
+        .state(
+            operation="page_tree_enrichment",
+            capability_identity=profile.capability_evidence_profile.identity,
+            prompt_contract_digest=prompt_contract_for("page_tree_enrichment").digest,
+        )
+        .status
+        == "suspended"
+    )
 
 
 def test_repeated_page_tree_retry_uses_fresh_scope_and_revokes_cancelled_authority(tmp_path):
@@ -301,8 +306,7 @@ def test_repeated_page_tree_retry_uses_fresh_scope_and_revokes_cancelled_authori
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         first_scope = str(
             connection.execute(
-                "SELECT retry_scope FROM document_page_tree_enrichment_tasks "
-                "WHERE document_id = ?",
+                "SELECT retry_scope FROM document_page_tree_enrichment_tasks WHERE document_id = ?",
                 (imported.document.document_id,),
             ).fetchone()[0]
         )
@@ -331,8 +335,7 @@ def test_repeated_page_tree_retry_uses_fresh_scope_and_revokes_cancelled_authori
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         second_scope = str(
             connection.execute(
-                "SELECT retry_scope FROM document_page_tree_enrichment_tasks "
-                "WHERE document_id = ?",
+                "SELECT retry_scope FROM document_page_tree_enrichment_tasks WHERE document_id = ?",
                 (imported.document.document_id,),
             ).fetchone()[0]
         )
@@ -379,8 +382,7 @@ def test_page_tree_retry_does_not_publish_scope_until_both_contracts_are_prepare
 
     def observe_authorization(connection, *, retry_scope, **kwargs):
         row = connection.execute(
-            "SELECT retry_scope FROM document_page_tree_enrichment_tasks "
-            "WHERE document_id = ?",
+            "SELECT retry_scope FROM document_page_tree_enrichment_tasks WHERE document_id = ?",
             (imported.document.document_id,),
         ).fetchone()
         observed.append(
@@ -390,9 +392,7 @@ def test_page_tree_retry_does_not_publish_scope_until_both_contracts_are_prepare
                 retry_scope,
             )
         )
-        return authorize_model_operation_retry_in(
-            connection, retry_scope=retry_scope, **kwargs
-        )
+        return authorize_model_operation_retry_in(connection, retry_scope=retry_scope, **kwargs)
 
     monkeypatch.setattr(
         "openkb.desktop_model_result_failure._authorize_model_operation_retry_in",
@@ -722,7 +722,7 @@ def test_desktop_import_starts_engine_owned_enrichment_after_document_publicatio
     workspace.create(kb_dir)
 
     def transport(request, _timeout):
-        if request.operation == "knowledge_analysis":
+        if request.operation == "knowledge_fact_harvest":
             return json.dumps(
                 {
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,

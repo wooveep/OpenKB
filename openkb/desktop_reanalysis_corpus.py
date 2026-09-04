@@ -5,10 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from openkb.desktop_corpus_knowledge import (
-    replace_document_corpus_analysis_in,
-    synthesize_qualified_corpus_in,
-)
+from openkb.desktop_corpus_knowledge import synthesize_qualified_corpus_in
 from openkb.desktop_import_artifacts import DocumentIRBlock
 from openkb.desktop_knowledge_analysis import (
     DesktopKnowledgeAnalysis,
@@ -21,6 +18,7 @@ from openkb.desktop_knowledge_analysis_reuse import (
     canonical_analysis_document_id_in,
     canonical_analysis_evidence_map_in,
 )
+from openkb.desktop_knowledge_candidate_pipeline import materialize_candidate_registry_in
 from openkb.desktop_missing_sources import record_missing_source_candidates_in
 
 
@@ -58,7 +56,7 @@ def activate_completed_corpus_reanalysis_in(
     for document_id, analysis, provenance_json, evidence in prepared:
         reusable = ReusableKnowledgeAnalysis(analysis, provenance_json, evidence)
         evidence_map = canonical_analysis_evidence_map_in(connection, document_id, reusable)
-        replace_document_corpus_analysis_in(
+        materialize_candidate_registry_in(
             connection,
             document_id=document_id,
             analysis=analysis,
@@ -74,7 +72,10 @@ def activate_completed_corpus_reanalysis_in(
             evidence=evidence,
             analysis_provenance_json=provenance_json,
         )
-    return synthesize_qualified_corpus_in(connection, now=now)
+    return synthesize_qualified_corpus_in(
+        connection,
+        now=now,
+    )
 
 
 def _checkpoint(value: str) -> dict[str, object]:

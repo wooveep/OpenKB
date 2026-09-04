@@ -169,14 +169,14 @@ class GraphExtractionBoundary:
             node_ids.add(node.local_id)
             nodes_by_evidence[node.evidence_id] = evidence_node_count + 1
             nodes.append(node)
-        node_evidence = {node.local_id: node.evidence_id for node in nodes}
+        node_metadata = {node.local_id: (node.evidence_id, node.node_type) for node in nodes}
         edges: list[GraphEdge] = []
         edges_by_evidence: dict[str, int] = {}
         for index, value in enumerate(raw_edges):
             if isinstance(value, dict):
                 issues.extend(_unexpected_field_issues(value, _EDGE_FIELDS, f"edges[{index}]"))
             try:
-                edge, issue = _edge(value, index, evidence_text, node_evidence)
+                edge, issue = _edge(value, index, evidence_text, node_metadata)
             except _CandidateProblem as problem:
                 issues.append(problem.issue)
                 repairable = repairable or problem.repairable
@@ -279,7 +279,7 @@ def _edge(
     value: object,
     index: int,
     evidence_text: dict[str, str],
-    node_evidence: dict[str, str],
+    node_metadata: dict[str, tuple[str, str]],
 ) -> tuple[GraphEdge | None, KnowledgeGraphIssue | None]:
     if not isinstance(value, dict):
         raise _problem("invalid_candidate", f"edges[{index}]", "shape", repairable=True)
@@ -323,18 +323,30 @@ def _edge(
             None,
             KnowledgeGraphIssue("self_edge", f"edges[{index}]", "rejected", "semantic"),
         )
-    source_evidence = node_evidence.get(source)
-    target_evidence = node_evidence.get(target)
-    if source_evidence is None:
+    source_metadata = node_metadata.get(source)
+    target_metadata = node_metadata.get(target)
+    if source_metadata is None:
         raise _problem("unknown_source", f"edges[{index}].source_id", "semantic")
-    if target_evidence is None:
+    if target_metadata is None:
         raise _problem("unknown_target", f"edges[{index}].target_id", "semantic")
+    source_evidence, source_type = source_metadata
+    target_evidence, target_type = target_metadata
     if source_evidence != evidence_id or target_evidence != evidence_id:
         raise _problem("cross_evidence_edge", f"edges[{index}]", "semantic")
     normalized_type = re.sub(r"[\s-]+", "_", edge_type.upper())
     canonical_type = (
         normalized_type if normalized_type in KNOWLEDGE_GRAPH_EDGE_TYPES else "RELATED_TO"
     )
+    if not _legacy_relation_endpoint_allowed(canonical_type, source_type, target_type):
+        return (
+            None,
+            KnowledgeGraphIssue(
+                "invalid_relation_endpoints",
+                f"edges[{index}]",
+                "rejected",
+                "semantic",
+            ),
+        )
     issue = (
         None
         if canonical_type == normalized_type
@@ -360,6 +372,23 @@ def _edge(
         ),
         issue,
     )
+
+
+def _legacy_relation_endpoint_allowed(
+    relation_type: str,
+    source_type: str,
+    target_type: str,
+) -> bool:
+    """Keep the compatibility extractor from inventing structural semantics."""
+    if relation_type == "PART_OF":
+        return (source_type, target_type) == ("entity", "entity")
+    if relation_type == "IS_A":
+        return source_type in {"entity", "concept"} and target_type == "concept"
+    if relation_type == "LOCATED_IN":
+        return (source_type, target_type) == ("entity", "entity")
+    if relation_type == "REPLACES":
+        return source_type == target_type
+    return True
 
 
 def _string(

@@ -49,9 +49,14 @@ class DesktopKnowledgeRoute:
 
 def eligible_knowledge_routes_in(
     connection: sqlite3.Connection,
+    *,
+    allowed_document_ids: frozenset[str] | None = None,
 ) -> tuple[DesktopKnowledgeRoute, ...]:
     """Return the one eligible inventory shared by navigation and export."""
-    primary_candidates = (*_document_routes_in(connection), *_knowledge_routes_in(connection))
+    primary_candidates = (
+        *_document_routes_in(connection, allowed_document_ids=allowed_document_ids),
+        *_knowledge_routes_in(connection, allowed_document_ids=allowed_document_ids),
+    )
     primary_assigned = _assign_unique_routes(
         (
             (f"{item.authority}:{item.kind}:{item.identity}", item.route)
@@ -73,7 +78,11 @@ def eligible_knowledge_routes_in(
     source_routes = {
         item.identity: item.route for item in primary if item.authority == "source_document"
     }
-    section_candidates = _source_section_routes_in(connection, source_routes)
+    section_candidates = _source_section_routes_in(
+        connection,
+        source_routes,
+        allowed_document_ids=allowed_document_ids,
+    )
     section_assigned = _assign_unique_routes(
         (
             (f"{item.authority}:{item.kind}:{item.identity}", item.route)
@@ -113,14 +122,20 @@ def route_kind_spec(kind: str) -> RouteKindSpec:
 
 def _document_routes_in(
     connection: sqlite3.Connection,
+    *,
+    allowed_document_ids: frozenset[str] | None = None,
 ) -> tuple[DesktopKnowledgeRoute, ...]:
+    if allowed_document_ids == frozenset():
+        return ()
+    scope_sql, scope_parameters = _document_scope_sql("document_id", allowed_document_ids)
     rows = connection.execute(
-        """
+        f"""
         SELECT document_id, display_name
         FROM source_documents
-        WHERE availability = 'available'
+        WHERE availability = 'available' {scope_sql}
         ORDER BY display_name, created_at, document_id
-        """
+        """,
+        scope_parameters,
     ).fetchall()
     routes: list[DesktopKnowledgeRoute] = []
     for document_id_value, title_value in rows:
@@ -152,9 +167,16 @@ def _document_routes_in(
 
 def _knowledge_routes_in(
     connection: sqlite3.Connection,
+    *,
+    allowed_document_ids: frozenset[str] | None = None,
 ) -> tuple[DesktopKnowledgeRoute, ...]:
+    if allowed_document_ids == frozenset():
+        return ()
+    occurrence_scope_sql, scope_parameters = _document_scope_sql(
+        "occurrences.document_id", allowed_document_ids
+    )
     user_rows = connection.execute(
-        """
+        f"""
         SELECT pages.page_id, pages.kind, pages.title, revisions.revision_id
         FROM knowledge_pages AS pages
         JOIN knowledge_page_revisions AS revisions
@@ -178,13 +200,15 @@ def _knowledge_routes_in(
                       ON documents.document_id = occurrences.document_id
                     WHERE occurrences.evidence_id = sources.evidence_id
                       AND documents.availability = 'available'
+                      {occurrence_scope_sql}
                 )
           )
         ORDER BY pages.kind, pages.normalized_title, pages.page_id
-        """
+        """,
+        scope_parameters,
     ).fetchall()
     generated_rows = connection.execute(
-        """
+        f"""
         SELECT items.item_key, items.kind, items.title, items.generation_id
         FROM knowledge_generation_state AS state
         JOIN knowledge_generations AS generations
@@ -213,10 +237,12 @@ def _knowledge_routes_in(
                       ON documents.document_id = occurrences.document_id
                     WHERE occurrences.evidence_id = sources.evidence_id
                       AND documents.availability = 'available'
+                      {occurrence_scope_sql}
                 )
           )
         ORDER BY items.kind, items.normalized_title, items.item_key
-        """
+        """,
+        scope_parameters,
     ).fetchall()
     routes = [
         DesktopKnowledgeRoute(
@@ -248,17 +274,24 @@ def _knowledge_routes_in(
 def _source_section_routes_in(
     connection: sqlite3.Connection,
     source_routes: dict[str, str],
+    *,
+    allowed_document_ids: frozenset[str] | None = None,
 ) -> tuple[DesktopKnowledgeRoute, ...]:
+    if allowed_document_ids == frozenset():
+        return ()
+    scope_sql, scope_parameters = _document_scope_sql("blocks.document_id", allowed_document_ids)
     rows = connection.execute(
-        """
+        f"""
         SELECT blocks.document_id, blocks.heading_path, MIN(blocks.ordinal)
         FROM document_ir_blocks AS blocks
         JOIN source_documents AS documents ON documents.document_id = blocks.document_id
         WHERE documents.availability = 'available'
+          {scope_sql}
           AND trim(blocks.heading_path) NOT IN ('', '[]')
         GROUP BY blocks.document_id, blocks.heading_path
         ORDER BY documents.display_name, blocks.document_id, MIN(blocks.ordinal)
-        """
+        """,
+        scope_parameters,
     ).fetchall()
     routes: list[DesktopKnowledgeRoute] = []
     for document_id_value, heading_path_value, _ordinal in rows:
@@ -315,6 +348,18 @@ def _heading_parts(value: str) -> tuple[str, ...]:
     if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
         return ()
     return tuple(" ".join(item.split()) for item in parsed if item.strip())
+
+
+def _document_scope_sql(
+    column: str, allowed_document_ids: frozenset[str] | None
+) -> tuple[str, tuple[object, ...]]:
+    if allowed_document_ids is None:
+        return "", ()
+    allowed = tuple(sorted(allowed_document_ids))
+    return (
+        f"AND {column} IN ({', '.join('?' for _ in allowed)})",
+        allowed,
+    )
 
 
 def _assign_unique_routes(

@@ -132,7 +132,17 @@ fn grounded_answer_accepts_python_retrieval_trace_fields() {
         "question": "Compare Alpha and Beta",
         "answer_text": "They are related. [1]",
         "retrieval_plan": {"query": "Compare Alpha and Beta", "terms": ["alpha", "beta"], "source": "model"},
-        "citations": [],
+        "citations": [{
+            "evidence_id": "evidence-1",
+            "document_id": "document-1",
+            "document_name": "alpha.md",
+            "section": "Overview",
+            "locator": {},
+            "excerpt": "Alpha evidence.",
+            "channels": ["fts"],
+            "version_label": "v2.0",
+            "version_side": "target"
+        }],
         "degradations": [],
         "status": "completed",
         "created_at": "2026-08-20T00:00:00+00:00",
@@ -149,11 +159,27 @@ fn grounded_answer_accepts_python_retrieval_trace_fields() {
             "degradation_reasons": [],
             "selected_node_ids": ["node-1"],
             "canonical_evidence_ids": ["evidence-1"],
-            "fusion_policy_version": "openkb.rrf-protected-baseline.v1"
+            "fusion_policy_version": "openkb.rrf-protected-baseline.v1",
+            "version_navigation_snapshot_id": "version-snapshot-1",
+            "version_catalog_revision_id": "version-catalog-1",
+            "version_catalog_digest": "catalog-digest-1",
+            "version_scope_mode": "comparison",
+            "version_scope_status": "resolved",
+            "version_scope_lineage_ids": ["lineage-1"],
+            "version_scope_labels": ["v1.0", "v2.0"],
+            "version_scope_document_ids": ["document-0", "document-1"],
+            "version_scope_selection_reason": "explicit_comparison",
+            "version_scope_degradation_reason": ""
         }
     }))
     .expect("Retrieval Trace should deserialize");
 
     assert_eq!(answer.retrieval_trace.page_tree_generation_ids, ["tree-1"]);
     assert_eq!(answer.retrieval_trace.channels[0].candidate_count, 2);
+    assert_eq!(answer.retrieval_trace.version_scope_mode, "comparison");
+    assert_eq!(
+        answer.retrieval_trace.version_scope_labels,
+        ["v1.0", "v2.0"]
+    );
+    assert_eq!(answer.citations[0].version_label.as_deref(), Some("v2.0"));
 }

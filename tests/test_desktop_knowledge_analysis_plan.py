@@ -29,6 +29,7 @@ from openkb.desktop_knowledge_analysis_plan import (
     hierarchical_merge_topology,
     knowledge_analysis_input_budget,
 )
+from openkb.desktop_knowledge_analysis_requests import request_pinned_to_plan
 from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
 from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
 from openkb.desktop_model_execution_profile import (
@@ -36,7 +37,11 @@ from openkb.desktop_model_execution_profile import (
     analysis_prompt_contract_bundle,
     build_analysis_execution_profile,
 )
-from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelTransportError
+from openkb.desktop_model_gateway import (
+    DesktopModelGateway,
+    DesktopModelRequest,
+    DesktopModelTransportError,
+)
 from openkb.desktop_model_settings import save_desktop_model_settings
 from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
@@ -130,7 +135,7 @@ def test_plan_is_committed_before_first_batch_model_call(tmp_path) -> None:
     assert len(plan["prompt_contract_digest"]) == 64
     assert plan["prompt_contract_snapshot"]["contracts"]["knowledge_analysis_batch"][
         "version"
-    ].endswith(".v7")
+    ].endswith(".v9")
     assert plan["document_ir_digest"]
     assert plan["batches"]
     assert plan["merge_topology"]
@@ -160,7 +165,12 @@ def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_an_older_plan(tmp_
             "SELECT plan_json FROM knowledge_analysis_plans WHERE job_id = ?", (job_id,)
         ).fetchone()
         plan = json.loads(plan_json)
-        snapshot = plan["prompt_contract_snapshot"]["contracts"]["knowledge_analysis"]
+        contracts = plan["prompt_contract_snapshot"]["contracts"]
+        contracts.pop("knowledge_fact_harvest")
+        contracts.pop("document_entity_inventory")
+        contracts.pop("entity_dossier_planning")
+        plan["prompt_contract_snapshot"]["primary_operation"] = "knowledge_analysis_batch"
+        snapshot = contracts["knowledge_analysis"]
         snapshot["version"] = "openkb.prompt.knowledge_analysis.v1"
         snapshot["instructions"] = legacy_instructions
         bundle = json.dumps(
@@ -235,7 +245,7 @@ def test_token_estimator_is_conservative_for_chinese_and_ascii() -> None:
     assert estimate_model_tokens("abcdefgh") == 2
 
 
-def test_large_context_profiles_cap_analysis_batches_at_twelve_thousand_tokens() -> None:
+def test_large_context_profiles_use_the_verified_document_capacity() -> None:
     capability = DesktopModelCapabilityProfile(
         context_capacity=128_000,
         document_input_capacity=100_000,
@@ -246,7 +256,7 @@ def test_large_context_profiles_cap_analysis_batches_at_twelve_thousand_tokens()
 
     assert (
         knowledge_analysis_input_budget(capability, prompt_contract_for("knowledge_analysis_batch"))
-        == 12_000
+        == 100_000
     )
 
 
@@ -259,8 +269,8 @@ def test_analysis_execution_profile_reserves_final_json_before_reasoning(
     allowance_multiplier: float,
 ) -> None:
     capability = DesktopModelCapabilityProfile(
-        context_capacity=64_000,
-        document_input_capacity=48_000,
+        context_capacity=256_000,
+        document_input_capacity=192_000,
         supports_native_json_schema=False,
         supports_streaming=True,
         supports_reasoning=True,
@@ -274,15 +284,120 @@ def test_analysis_execution_profile_reserves_final_json_before_reasoning(
     )
 
     assert profile.adapter_identity == "deepseek"
-    assert profile.adapter_version == "deepseek.v1"
+    assert profile.adapter_version == "deepseek.v2"
     assert profile.structured_output_mode == "json_object"
     assert profile.final_output_reserve_tokens == 16_384
     assert profile.reasoning_allowance_tokens == int(16_384 * allowance_multiplier)
     assert profile.provider_output_ceiling_tokens == (
         profile.final_output_reserve_tokens + profile.reasoning_allowance_tokens
     )
-    assert profile.document_input_budget_tokens <= 12_000
+    assert profile.document_input_budget_tokens == capability.document_input_capacity
     assert profile.identity == profile.identity
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "reasoning_allowance", "output_ceiling"),
+    (
+        ("off", 0, 16_384),
+        ("low", 8_192, 24_576),
+        ("medium", 16_384, 32_768),
+        ("high", 32_768, 49_152),
+    ),
+)
+def test_known_large_output_analysis_model_treats_its_maximum_as_a_ceiling(
+    reasoning: str,
+    reasoning_allowance: int,
+    output_ceiling: int,
+) -> None:
+    capability = DesktopModelCapabilityProfile(
+        context_capacity=1_000_000,
+        document_input_capacity=750_000,
+        supports_native_json_schema=False,
+        supports_streaming=True,
+        supports_reasoning=True,
+        maximum_output_tokens=384_000,
+    )
+
+    profile = build_analysis_execution_profile(
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        capability=capability,
+        reasoning_effort=reasoning,
+    )
+
+    assert profile.final_output_reserve_tokens == 16_384
+    assert profile.reasoning_allowance_tokens == reasoning_allowance
+    assert profile.provider_output_ceiling_tokens == output_ceiling
+    assert profile.provider_output_ceiling_tokens < capability.maximum_output_tokens
+    assert profile.document_input_budget_tokens == capability.document_input_capacity
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "output_ceiling"),
+    (
+        ("off", 32_768),
+        ("low", 49_152),
+        ("medium", 65_536),
+        ("high", 98_304),
+    ),
+)
+def test_relation_analysis_uses_its_larger_contract_budget_only(
+    reasoning: str,
+    output_ceiling: int,
+) -> None:
+    capability = DesktopModelCapabilityProfile(
+        context_capacity=1_000_000,
+        document_input_capacity=750_000,
+        supports_native_json_schema=False,
+        supports_streaming=True,
+        supports_reasoning=True,
+        maximum_output_tokens=384_000,
+    )
+
+    profile = build_analysis_execution_profile(
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        capability=capability,
+        reasoning_effort=reasoning,
+        operation="knowledge_relation_analysis",
+    )
+
+    assert profile.final_output_reserve_tokens == 32_768
+    assert profile.provider_output_ceiling_tokens == output_ceiling
+    assert profile.provider_output_ceiling_tokens < capability.maximum_output_tokens
+    assert profile.document_input_budget_tokens == capability.document_input_capacity
+
+
+def test_verified_large_context_keeps_a_363k_token_document_in_one_batch() -> None:
+    evidence = (
+        (
+            "evidence-large",
+            DocumentIRBlock(
+                block_id="block-large",
+                ordinal=0,
+                kind="paragraph",
+                text="a" * (363_000 * 4),
+                heading_path=("Full document",),
+                line_start=1,
+                line_end=1,
+            ),
+        ),
+    )
+
+    batches = plan_knowledge_analysis_batches(
+        evidence,
+        document_name="large.docx",
+        input_budget_tokens=750_000,
+    )
+
+    assert batches == (evidence,)
+    assert batches[0][0][1].text == evidence[0][1].text
+    assert (
+        estimate_knowledge_analysis_batch_tokens(
+            "large.docx", evidence, batch_ordinal=0, batch_total=1
+        )
+        >= 363_000
+    )
 
 
 def test_small_deepseek_context_keeps_room_for_final_description_merge() -> None:
@@ -331,8 +446,8 @@ def test_analysis_execution_profile_fails_before_dispatch_when_minimum_batch_can
 def test_complete_execution_profile_round_trips_and_changes_plan_identity() -> None:
     evidence = _representative_evidence(2)
     capability = DesktopModelCapabilityProfile(
-        context_capacity=64_000,
-        document_input_capacity=48_000,
+        context_capacity=256_000,
+        document_input_capacity=192_000,
         supports_native_json_schema=False,
         supports_streaming=True,
         supports_reasoning=True,
@@ -372,13 +487,59 @@ def test_complete_execution_profile_round_trips_and_changes_plan_identity() -> N
     assert high_plan.plan_identity != off_plan.plan_identity
 
 
+def test_pinned_requests_use_each_operations_own_output_reserve() -> None:
+    evidence = _representative_evidence(2)
+    capability = DesktopModelCapabilityProfile(
+        context_capacity=1_000_000,
+        document_input_capacity=750_000,
+        supports_native_json_schema=False,
+        supports_streaming=True,
+        supports_reasoning=True,
+        maximum_output_tokens=384_000,
+    )
+    profile = build_analysis_execution_profile(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        capability=capability,
+        reasoning_effort="high",
+        operation="knowledge_fact_harvest",
+    )
+    plan = build_knowledge_analysis_plan(
+        evidence=evidence,
+        planned_batches=(evidence,),
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        capability=capability,
+        contract=prompt_contract_for("knowledge_fact_harvest"),
+        estimated_batch_tokens=(100,),
+        execution_profile=profile,
+    )
+
+    def ceiling(operation: str) -> int:
+        pinned = request_pinned_to_plan(
+            DesktopModelRequest(operation, "document.md", "{}"),
+            plan,
+            batch_id=operation,
+        )
+        assert pinned.generation_parameters is not None
+        return int(pinned.generation_parameters["max_tokens"])
+
+    assert ceiling("knowledge_fact_harvest") == 49_152
+    assert ceiling("document_entity_inventory") == 24_576
+    assert ceiling("entity_dossier_planning") == 12_288
+
+
 def test_analysis_profile_identity_covers_every_structured_prompt_contract() -> None:
     operations = {
+        "knowledge_fact_harvest",
+        "document_entity_inventory",
+        "entity_dossier_planning",
         "knowledge_analysis",
         "knowledge_analysis_batch",
         "knowledge_analysis_merge",
         "page_tree_enrichment",
         "knowledge_graph_extraction",
+        "knowledge_relation_analysis",
         "retrieval_plan",
         "page_tree_selection",
         "knowledge_navigation_step",
@@ -532,7 +693,7 @@ def test_completed_hierarchical_merge_nodes_are_reused_on_recovery(tmp_path) -> 
     def transport(request, _timeout_seconds):
         nonlocal failed_once
         payload = json.loads(request.content)
-        if request.operation == "knowledge_analysis_batch":
+        if request.operation == "knowledge_fact_harvest":
             return json.dumps(
                 {
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
@@ -606,7 +767,7 @@ def test_recovery_uses_the_analysis_model_pinned_before_settings_changed(
             nonlocal failed
             calls.append((self.model, request.operation))
             payload = json.loads(request.content)
-            if request.operation == "knowledge_analysis_batch":
+            if request.operation == "knowledge_fact_harvest":
                 if int(payload["batch_ordinal"]) == 1 and not failed:
                     failed = True
                     raise DesktopModelTransportError("input")

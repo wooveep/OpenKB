@@ -8,6 +8,10 @@ import pytest
 from jsonschema import validate as validate_json_schema
 from jsonschema.exceptions import ValidationError
 
+from openkb.desktop_knowledge_entity_types import (
+    ENTITY_SUBTYPE_ONTOLOGY_VERSION,
+    ENTITY_SUBTYPES,
+)
 from openkb.desktop_knowledge_graph_interpretation import (
     GraphEvidence,
     GraphExtractionBoundary,
@@ -27,6 +31,9 @@ from openkb.desktop_structured_output import (
 
 def test_every_runtime_model_operation_has_a_canonical_versioned_contract() -> None:
     required = {
+        "knowledge_fact_harvest",
+        "document_entity_inventory",
+        "entity_dossier_planning",
         "knowledge_analysis",
         "knowledge_analysis_batch",
         "knowledge_analysis_merge",
@@ -53,9 +60,8 @@ def test_retrieval_plan_contract_requests_atomic_semantic_terms() -> None:
     contract = prompt_contract_for("retrieval_plan")
 
     assert "separate semantic concepts or actions" in contract.instructions
-    assert "双节点" in contract.instructions
-    assert "超融合" in contract.instructions
-    assert "安装部署" in contract.instructions
+    assert "languages without whitespace word boundaries" in contract.instructions
+    assert "prefer atomic phrases" in contract.instructions
     assert contract.output_schema is not None
     terms_schema = contract.output_schema["properties"]["terms"]
     assert isinstance(terms_schema, dict)
@@ -93,6 +99,8 @@ def test_navigation_contract_prioritizes_end_to_end_how_to_coverage() -> None:
     assert "generic start route" in instructions
     assert "whole-source outline" in instructions
     assert "adjacent detail routes" in instructions
+    assert "cross-reference" in instructions
+    assert "does not cover the referenced step" in instructions
     assert "omit an Evidence ID unless it appears exactly" in instructions
 
 
@@ -108,13 +116,21 @@ def test_grounded_answer_contract_preserves_evidence_backed_how_to_detail() -> N
     assert "Evidence Phase Index" in instructions
     assert "navigation-unconfirmed aspect is not a source gap" in instructions
     assert "Do not add generic validation, backup, or safety advice" in instructions
-    assert "architecture and scope" in instructions
-    assert "system preparation" in instructions
-    assert "cluster or resource-pool registration" in instructions
+    assert "Derive phase names and ordering only from supplied Original Evidence" in instructions
+    assert "never apply a built-in product or deployment checklist" in instructions
+    assert "question-relevant core sequence" in instructions
     assert "preserve consecutive evidence-backed substeps" in instructions
+    assert "Repeated Evidence Occurrence Index" in instructions
+    assert "mandatory output occurrence" in instructions
+    assert "Never describe multiple indexed positions as one occurrence" in instructions
+    assert (
+        "Copy product names, acronyms, version numbers, section identifiers, command text"
+        in instructions
+    )
+    assert "never concatenate hierarchical chapter and section numbers" in instructions
     assert "cited core checklist first" in instructions
     assert "question-relevant Source steps label" in instructions
-    assert "expansion, recovery, NTP, or optional detail" in instructions
+    assert "optional or unrequested branches" in instructions
     assert "Every validation or warning list item requires its own citation" in instructions
     assert "Never emit a Knowledge Guidance citation" in instructions
 
@@ -133,16 +149,16 @@ def test_knowledge_analysis_contract_bounds_structured_output_size() -> None:
     instructions = contract.instructions
     normalized_instructions = " ".join(instructions.split())
 
-    assert "at most 16 candidates per kind" in instructions
-    assert "at most 8 concise claims" in instructions
-    assert "at most 16 supplied Evidence IDs per claim" in normalized_instructions
+    assert "at most 32 candidates per kind" in instructions
+    assert "at most 64 concise claims" in instructions
+    assert "at most 32 supplied Evidence IDs per claim" in normalized_instructions
     assert (
         "source_evidence_ids only inside claims or document_summary units"
         in normalized_instructions
     )
     assert "Paths, commands, scripts, addresses" in instructions
     assert "one user-completable operational goal" in instructions
-    assert "within 2,000 characters" in instructions
+    assert "within 4,000 characters" in instructions
     assert contract.output_schema is not None
     properties = contract.output_schema["properties"]
     assert isinstance(properties, dict)
@@ -160,7 +176,7 @@ def test_knowledge_analysis_contract_bounds_structured_output_size() -> None:
     assert isinstance(claim_properties, dict)
     source_ids = claim_properties["source_evidence_ids"]
     assert isinstance(source_ids, dict)
-    assert source_ids["maxItems"] == 16
+    assert source_ids["maxItems"] == 32
     assert {"document_summary", "procedures"} <= set(properties)
     assert contract.output_example is not None
     assert contract.output_example["procedures"] == []
@@ -189,6 +205,11 @@ def test_knowledge_analysis_schema_requires_the_complete_locally_validated_shape
         candidate_properties = candidate["properties"]
         assert isinstance(candidate_properties, dict)
         assert ("subtype" in candidate_properties) is (kind == "entities")
+        if kind == "entities":
+            subtype = candidate_properties["subtype"]
+            assert isinstance(subtype, dict)
+            assert subtype["enum"] == sorted(ENTITY_SUBTYPES)
+            assert "subtype" in candidate["required"]
         claims = candidate_properties["claims"]
         assert isinstance(claims, dict)
         claim = claims["items"]
@@ -200,15 +221,58 @@ def test_knowledge_analysis_schema_requires_the_complete_locally_validated_shape
             "applicability",
         }
 
+    assert contract.input_shape["entity_subtype_ontology_version"] == (
+        ENTITY_SUBTYPE_ONTOLOGY_VERSION
+    )
+
 
 def test_changed_knowledge_analysis_prompt_versions_are_pinned() -> None:
     expected_versions = {
-        "knowledge_analysis": 7,
-        "knowledge_analysis_batch": 7,
+        "knowledge_analysis": 9,
+        "knowledge_analysis_batch": 9,
         "knowledge_analysis_merge": 6,
+        "knowledge_fact_harvest": 1,
+        "document_entity_inventory": 1,
+        "entity_dossier_planning": 1,
     }
     for operation, version in expected_versions.items():
         assert prompt_contract_for(operation).version == f"openkb.prompt.{operation}.v{version}"
+
+
+def test_inventory_and_dossier_contracts_are_id_only_and_operation_specific() -> None:
+    harvest = prompt_contract_for("knowledge_fact_harvest")
+    inventory = prompt_contract_for("document_entity_inventory")
+    dossier = prompt_contract_for("entity_dossier_planning")
+
+    assert harvest.token_budget_policy["reserve_output_tokens"] == 16_384
+    assert inventory.token_budget_policy["reserve_output_tokens"] == 8_192
+    assert dossier.token_budget_policy["reserve_output_tokens"] == 4_096
+    assert inventory.output_schema is not None
+    assert dossier.output_schema is not None
+    serialized_inventory = json.dumps(inventory.output_schema, sort_keys=True)
+    serialized_dossier = json.dumps(dossier.output_schema, sort_keys=True)
+    assert '"body"' not in serialized_inventory
+    assert '"body"' not in serialized_dossier
+    assert '"claim_ids"' in serialized_inventory
+    assert '"claim_ids"' in serialized_dossier
+
+
+def test_semantic_relation_contract_is_node_free_and_identity_bound() -> None:
+    contract = prompt_contract_for("knowledge_relation_analysis")
+
+    assert contract.version == "openkb.prompt.knowledge_relation_analysis.v3"
+    assert contract.output_schema is not None
+    assert set(contract.output_schema["properties"]) == {"relations"}
+    assert "never create, rename, merge, split, or reclassify a node" in contract.instructions
+    assert "Examine every supplied claim" in contract.instructions
+    assert "return empty only when" in contract.instructions
+    assert "invokes, operates through, or is configured with" in contract.instructions
+    assert "at most one relationship type" in contract.instructions
+    assert "never more than four" in contract.instructions
+    assert "no_identity_creation" in contract.validation_rules
+    relations = contract.output_schema["properties"]["relations"]
+    assert relations["maxItems"] == 64
+    assert relations["items"]["properties"]["supporting_claims"]["maxItems"] == 4
 
 
 def test_every_structured_contract_has_a_canonical_schema_valid_json_example() -> None:

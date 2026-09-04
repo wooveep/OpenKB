@@ -163,11 +163,13 @@ def _answer_from_row(
             locator=_json_object(str(citation[5])),
             excerpt=str(citation[6]),
             channels=normalize_retrieval_channels(_string_values(_json_list(str(citation[7])))),
+            version_label=str(citation[8]) if citation[8] is not None else None,
+            version_side=str(citation[9]) if citation[9] is not None else None,
         )
         for citation in connection.execute(
             """
             SELECT evidence_id, ordinal, document_id, document_name, section, locator_json,
-                excerpt, channels_json
+                excerpt, channels_json, version_label, version_side
             FROM grounded_answer_citations
             WHERE answer_id = ?
             ORDER BY ordinal
@@ -226,8 +228,8 @@ def _replace_answer_sources(connection: sqlite3.Connection, answer: DesktopGroun
         """
         INSERT INTO grounded_answer_citations (
             answer_id, evidence_id, ordinal, document_id, document_name, section,
-            locator_json, excerpt, channels_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            locator_json, excerpt, channels_json, version_label, version_side
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -240,6 +242,8 @@ def _replace_answer_sources(connection: sqlite3.Connection, answer: DesktopGroun
                 json.dumps(citation.locator, ensure_ascii=False),
                 citation.excerpt,
                 json.dumps(citation.channels, ensure_ascii=False),
+                citation.version_label,
+                citation.version_side,
             )
             for ordinal, citation in enumerate(answer.citations)
         ],

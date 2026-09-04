@@ -14,7 +14,7 @@ import logging
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +33,7 @@ from openkb.desktop_knowledge_graph_store import (
     persist_graph_interpretation_in,
     persist_graph_payload_in,
 )
+from openkb.desktop_legacy_graph_retrieval import legacy_graph_evidence_ids_in
 from openkb.desktop_logging import log_event
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
@@ -52,6 +53,8 @@ from openkb.desktop_model_result_failure import (
     suspend_model_operation_contract,
 )
 from openkb.desktop_prompt_contracts import prompt_contract_for
+from openkb.desktop_semantic_graph_retrieval import semantic_graph_evidence_ids_in
+from openkb.desktop_semantic_graph_service import DesktopSemanticGraphService
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
     DesktopValidatedStructuredOutput,
@@ -65,10 +68,6 @@ _MAX_EXTRACTION_EVIDENCE = 12
 _MAX_MODEL_EVIDENCE_CHARS = 1_200
 _MAX_MODEL_INPUT_CHARS = 12_000
 _MAX_LABEL_CHARS = 320
-_MAX_GRAPH_HOPS = 2
-_MAX_GRAPH_ROOTS = 12
-_MAX_GRAPH_EXPANDED_NODES = 32
-_MAX_GRAPH_CANDIDATES = 8
 _GRAPH_QUERY_BUDGET_SECONDS = 0.075
 _MAX_LOGGED_GRAPH_ISSUES = 32
 _CONFIRMED_GRAPH_PROTOCOL_FAILURES = frozenset(
@@ -79,6 +78,16 @@ _CONFIRMED_GRAPH_PROTOCOL_FAILURES = frozenset(
     }
 )
 CancellationCallback = Callable[[], bool]
+
+
+@dataclass(frozen=True)
+class PinnedGraphGenerations:
+    """Graph authorities captured by one immutable navigation snapshot."""
+
+    semantic_generation_id: int | None
+    legacy_result_ids: tuple[str, ...]
+
+
 ModelEventCallback = Callable[[object], None]
 FailureCallback = Callable[[str, str], None]
 PublishOperation = Callable[[sqlite3.Connection], bool]
@@ -126,6 +135,19 @@ class DesktopKnowledgeGraphService:
             self._model_gateway
         ):
             return False
+        semantic_result = DesktopSemanticGraphService(
+            self._kb_dir,
+            model_gateway=self._model_gateway,
+        ).extract_document_if_admitted(
+            document_id,
+            is_cancelled=is_cancelled,
+            on_model_event=on_model_event,
+            on_failure=on_failure,
+            publish_transaction=publish_transaction,
+            retry_scope=retry_scope,
+        )
+        if semantic_result is not None:
+            return semantic_result
         try:
             evidence = self._unextracted_evidence(document_id)
         except (OSError, sqlite3.Error):
@@ -220,9 +242,7 @@ class DesktopKnowledgeGraphService:
                 self._kb_dir,
                 self._model_gateway,
                 model_output,
-                authority=DesktopModelOperationCompletionAuthority.for_retry_scope(
-                    retry_scope
-                ),
+                authority=DesktopModelOperationCompletionAuthority.for_retry_scope(retry_scope),
             )
         try:
             return self._persist(
@@ -482,107 +502,47 @@ def local_graph_evidence_ids(
     *,
     terms: tuple[str, ...],
     anchor_evidence_ids: tuple[str, ...],
+    allowed_document_ids: frozenset[str] | None = None,
     query_budget_seconds: float = _GRAPH_QUERY_BUDGET_SECONDS,
     deadline: float | None = None,
+    generation_snapshot: PinnedGraphGenerations | None = None,
 ) -> tuple[str, ...]:
     """Return a bounded 1–2-hop evidence set without merging same-name nodes."""
     normalized_terms = tuple(
         value for value in (_normalized_label(term) for term in terms) if value
     )
-    anchors = tuple(dict.fromkeys(anchor_evidence_ids))[:_MAX_GRAPH_ROOTS]
+    anchors = tuple(dict.fromkeys(anchor_evidence_ids))
+    if allowed_document_ids == frozenset():
+        return ()
     if not normalized_terms and not anchors:
         return ()
     deadline = deadline if deadline is not None else graph_query_deadline(query_budget_seconds)
-
-    conditions: list[str] = []
-    parameters: list[object] = []
-    if anchors:
-        conditions.append(f"evidence_id IN ({_placeholders(anchors)})")
-        parameters.extend(anchors)
-    for term in normalized_terms:
-        conditions.append("instr(normalized_label, ?) > 0")
-        parameters.append(term)
-    root_rows = bounded_graph_rows(
+    semantic_evidence = semantic_graph_evidence_ids_in(
         connection,
-        f"""
-        SELECT node_id, evidence_id, normalized_label
-        FROM current_knowledge_graph_nodes
-        WHERE {" OR ".join(conditions)}
-        ORDER BY evidence_id, node_id
-        LIMIT ?
-        """,
-        (*parameters, _MAX_GRAPH_ROOTS),
-        deadline,
+        terms=normalized_terms,
+        anchor_evidence_ids=anchors,
+        allowed_document_ids=allowed_document_ids,
+        generation_id=(
+            generation_snapshot.semantic_generation_id if generation_snapshot is not None else None
+        ),
+        use_current_generation=generation_snapshot is None,
+        fetch_rows=lambda statement, parameters: bounded_graph_rows(
+            connection, statement, parameters, deadline
+        ),
     )
-    if not root_rows:
-        return ()
-
-    root_ids = [str(row[0]) for row in root_rows]
-    evidence_ids: list[str] = []
-    _append_unique(evidence_ids, (str(row[1]) for row in root_rows))
-    labels = tuple(dict.fromkeys(str(row[2]) for row in root_rows))
-    if labels:
-        equivalent_rows = bounded_graph_rows(
-            connection,
-            f"""
-            SELECT node_id, evidence_id
-            FROM current_knowledge_graph_nodes
-            WHERE normalized_label IN ({_placeholders(labels)})
-            ORDER BY evidence_id, node_id
-            LIMIT ?
-            """,
-            (*labels, _MAX_GRAPH_ROOTS),
-            deadline,
-        )
-        _append_unique(root_ids, (str(row[0]) for row in equivalent_rows))
-        _append_unique(evidence_ids, (str(row[1]) for row in equivalent_rows))
-
-    root_ids = root_ids[:_MAX_GRAPH_EXPANDED_NODES]
-    seen_nodes = set(root_ids)
-    frontier = list(root_ids)
-    for _hop in range(_MAX_GRAPH_HOPS):
-        if not frontier or len(seen_nodes) >= _MAX_GRAPH_EXPANDED_NODES:
-            break
-        edge_rows = bounded_graph_rows(
-            connection,
-            f"""
-            SELECT evidence_id, source_node_id, target_node_id
-            FROM current_knowledge_graph_edges
-            WHERE source_node_id IN ({_placeholders(tuple(frontier))})
-                OR target_node_id IN ({_placeholders(tuple(frontier))})
-            ORDER BY edge_id
-            LIMIT ?
-            """,
-            (*frontier, *frontier, _MAX_GRAPH_EXPANDED_NODES - len(seen_nodes)),
-            deadline,
-        )
-        _append_unique(evidence_ids, (str(row[0]) for row in edge_rows))
-        next_ids: list[str] = []
-        for _evidence_id, source_id, target_id in edge_rows:
-            for node_id in (str(source_id), str(target_id)):
-                if node_id not in seen_nodes:
-                    seen_nodes.add(node_id)
-                    next_ids.append(node_id)
-                    if len(seen_nodes) == _MAX_GRAPH_EXPANDED_NODES:
-                        break
-            if len(seen_nodes) == _MAX_GRAPH_EXPANDED_NODES:
-                break
-        if not next_ids:
-            break
-        node_rows = bounded_graph_rows(
-            connection,
-            f"""
-            SELECT node_id, evidence_id
-            FROM current_knowledge_graph_nodes
-            WHERE node_id IN ({_placeholders(tuple(next_ids))})
-            ORDER BY node_id
-            """,
-            tuple(next_ids),
-            deadline,
-        )
-        _append_unique(evidence_ids, (str(row[1]) for row in node_rows))
-        frontier = next_ids
-    return tuple(evidence_ids[:_MAX_GRAPH_CANDIDATES])
+    if semantic_evidence is not None:
+        return semantic_evidence
+    return legacy_graph_evidence_ids_in(
+        terms=normalized_terms,
+        anchor_evidence_ids=anchors,
+        allowed_document_ids=allowed_document_ids,
+        result_ids=(
+            generation_snapshot.legacy_result_ids if generation_snapshot is not None else None
+        ),
+        fetch_rows=lambda statement, parameters: bounded_graph_rows(
+            connection, statement, parameters, deadline
+        ),
+    )
 
 
 def record_query_diagnostic(kb_dir: Path, error_code: str) -> None:
@@ -738,18 +698,6 @@ def _section_label(value: str) -> str:
 
 def _normalized_label(value: str) -> str:
     return " ".join(value.split()).casefold()[:_MAX_LABEL_CHARS]
-
-
-def _append_unique(values: list[str], incoming: Iterable[str]) -> None:
-    for value in incoming:
-        if value not in values:
-            values.append(value)
-
-
-def _placeholders(values: tuple[object, ...]) -> str:
-    if not values:
-        raise ValueError("SQLite placeholders require at least one value.")
-    return ", ".join("?" for _ in values)
 
 
 def _timestamp() -> str:

@@ -96,10 +96,10 @@ def test_duplicate_claim_merges_sources_without_treating_order_as_identity() -> 
 def test_claim_source_limit_error_exposes_the_contract_bound() -> None:
     payload = json.loads(_analysis_response(("evidence-one", "evidence-two")))
     payload["concepts"][0]["claims"][0]["source_evidence_ids"] = [
-        f"evidence-{ordinal}" for ordinal in range(17)
+        f"evidence-{ordinal}" for ordinal in range(33)
     ]
 
-    with pytest.raises(DesktopImportError, match="at most 16 supplied Evidence IDs"):
+    with pytest.raises(DesktopImportError, match="at most 32 supplied Evidence IDs"):
         parse_knowledge_analysis(json.dumps(payload))
 
 
@@ -118,6 +118,42 @@ def test_candidate_field_error_explains_where_evidence_ids_belong() -> None:
     payload["concepts"][0]["source_evidence_ids"] = ["evidence-one"]
 
     with pytest.raises(DesktopImportError, match="source_evidence_ids only inside claims"):
+        parse_knowledge_analysis(json.dumps(payload))
+
+
+def test_new_corpus_analysis_rejects_an_unregistered_entity_subtype() -> None:
+    payload = json.loads(_analysis_response(("evidence-one", "evidence-two")))
+    payload.update(
+        {
+            "document_summary": [],
+            "procedures": [],
+        }
+    )
+    payload["concepts"][0]["claims"][0].update(
+        {
+            "role": "definition",
+            "applicability": {
+                "product_version": "",
+                "platform": "",
+                "deployment_scenario": "",
+                "time_boundary": "",
+            },
+        }
+    )
+    payload["entities"][0]["claims"][0].update(
+        {
+            "role": "definition",
+            "applicability": {
+                "product_version": "",
+                "platform": "",
+                "deployment_scenario": "",
+                "time_boundary": "",
+            },
+        }
+    )
+    payload["entities"][0]["subtype"] = "model_invented_type"
+
+    with pytest.raises(DesktopImportError, match=r"entities\[0\]\.subtype"):
         parse_knowledge_analysis(json.dumps(payload))
 
 
@@ -182,7 +218,7 @@ def test_structured_analysis_publishes_source_backed_unverified_knowledge(
     )
 
     assert result["document"]["availability"] == "available"
-    assert operations.count("knowledge_analysis") == 1
+    assert operations.count("knowledge_fact_harvest") == 1
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         checkpoint_json = connection.execute(
             """

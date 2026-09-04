@@ -270,7 +270,7 @@ def _repair_input(
             "operation": operation,
             "output_schema": schema,
             "output_example": output_example,
-            "validation_errors": [_safe_validation_error(validation_error)],
+            "validation_errors": _safe_validation_errors(validation_error),
             "invalid_result": invalid_result,
             "evidence_bound_source_material": source_material,
         },
@@ -283,6 +283,20 @@ def _repair_input(
 def _safe_validation_error(error: Exception) -> str:
     message = " ".join(str(error).split())
     return message[:1_000] or type(error).__name__
+
+
+def _safe_validation_errors(error: Exception) -> list[str]:
+    validation_errors = getattr(error, "validation_errors", None)
+    if not isinstance(validation_errors, tuple) or not all(
+        isinstance(message, str) for message in validation_errors
+    ):
+        return [_safe_validation_error(error)]
+    safe_messages: list[str] = []
+    for message in validation_errors[:16]:
+        normalized = " ".join(message.split())[:1_000]
+        if normalized and normalized not in safe_messages:
+            safe_messages.append(normalized)
+    return safe_messages or [_safe_validation_error(error)]
 
 
 def _schema_name(version: str) -> str:

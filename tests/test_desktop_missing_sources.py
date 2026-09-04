@@ -332,7 +332,7 @@ def test_bulk_dismiss_redacts_long_document_batch_and_merge_checkpoints(
 
     def transport(request, _timeout_seconds):
         payload = json.loads(request.content)
-        if request.operation == "knowledge_analysis_batch":
+        if request.operation == "knowledge_fact_harvest":
             evidence_id = str(payload["evidence"][0]["evidence_id"])
             return json.dumps(
                 {

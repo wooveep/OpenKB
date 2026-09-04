@@ -8,18 +8,27 @@ from pathlib import Path
 
 import pytest
 
-from openkb.desktop_answer_types import DesktopEvidenceRef, DesktopKnowledgeGuidance
+from openkb.desktop_answer_budget import answer_output_reserve_for_context
+from openkb.desktop_answer_types import (
+    DesktopEvidencePack,
+    DesktopEvidenceRef,
+    DesktopKnowledgeGuidance,
+    DesktopRetrievalPlan,
+)
 from openkb.desktop_grounded_answer import (
     DesktopGroundedAnswerService,
-    _answer_output_token_budget,
     _answer_prompt,
+    generate_grounded_answer,
 )
 from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_model_gateway import (
     DesktopModelGateway,
     DesktopModelOutputObservations,
     DesktopModelProviderResponse,
+    DesktopModelResult,
 )
+from openkb.desktop_model_roles import DesktopRoleModelGateway
+from openkb.desktop_model_settings import DesktopModelSettings
 from openkb.desktop_retrieval import _source_image_matches_evidence
 from openkb.desktop_retrieval_trace import DesktopRetrievalTrace
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
@@ -111,6 +120,113 @@ def test_how_to_answer_prompt_groups_original_evidence_into_major_phases() -> No
     assert "Stop reason" not in prompt
 
 
+def test_how_to_answer_prompt_maps_repeated_warning_to_each_source_step() -> None:
+    occurrence_key = "_openkb_source_occurrences"
+    evidence = (
+        DesktopEvidenceRef(
+            "reconfigure",
+            "manual",
+            "Manual",
+            "Recovery",
+            {},
+            "Reconfigure database synchronization.",
+            ("knowledge_navigation_source_window",),
+        ),
+        DesktopEvidenceRef(
+            "reinstall-note",
+            "manual",
+            "Manual",
+            "Recovery",
+            {
+                occurrence_key: [
+                    {"ordinal": 10, "previous_evidence_id": "reconfigure"},
+                    {"ordinal": 12, "previous_evidence_id": "start-services"},
+                ]
+            },
+            "For a reinstall recovery, do not perform this step.",
+            ("knowledge_navigation_source_window",),
+        ),
+        DesktopEvidenceRef(
+            "start-services",
+            "manual",
+            "Manual",
+            "Recovery",
+            {},
+            "Start the Java and host-agent services.",
+            ("knowledge_navigation_source_window",),
+        ),
+    )
+
+    prompt = _answer_prompt(
+        "How do I recover the database?",
+        evidence,
+        retrieval_trace=DesktopRetrievalTrace(navigation_answer_kind="how_to"),
+    )
+
+    assert "Repeated Evidence Occurrence Index" in prompt
+    assert "After step [1], repeat and cite warning/exception [2]" in prompt
+    assert "After step [3], repeat and cite warning/exception [2]" in prompt
+
+
+def test_answer_completion_restores_a_deduplicated_note_at_each_source_position() -> None:
+    from openkb.desktop_grounded_answer_outline import complete_repeated_evidence_occurrences
+
+    occurrence_key = "_openkb_source_occurrences"
+    evidence = (
+        DesktopEvidenceRef("configure", "manual", "Manual", "Recovery", {}, "Configure.", ()),
+        DesktopEvidenceRef(
+            "note",
+            "manual",
+            "Manual",
+            "Recovery",
+            {
+                occurrence_key: [
+                    {"ordinal": 10, "previous_evidence_id": "configure"},
+                    {"ordinal": 12, "previous_evidence_id": "start"},
+                ]
+            },
+            r"\\For this recovery mode, do not perform this step.\\",
+            (),
+        ),
+        DesktopEvidenceRef("start", "manual", "Manual", "Recovery", {}, "Start.", ()),
+    )
+    draft = "Configure the system. [1]\n\nDo not perform this step. [2]\n\nStart services. [3]"
+
+    completed = complete_repeated_evidence_occurrences(draft, evidence)
+
+    assert completed.count("[2]") == 2
+    assert completed.index("Start services. [3]") < completed.rindex("[2]")
+    assert r"\\For this recovery" not in completed
+    assert "For this recovery mode, do not perform this step. [2]" in completed
+
+
+def test_answer_completion_does_not_duplicate_already_repeated_evidence() -> None:
+    from openkb.desktop_grounded_answer_outline import complete_repeated_evidence_occurrences
+
+    occurrence_key = "_openkb_source_occurrences"
+    evidence = (
+        DesktopEvidenceRef("first", "manual", "Manual", "Flow", {}, "First.", ()),
+        DesktopEvidenceRef(
+            "note",
+            "manual",
+            "Manual",
+            "Flow",
+            {
+                occurrence_key: [
+                    {"ordinal": 2, "previous_evidence_id": "first"},
+                    {"ordinal": 4, "previous_evidence_id": "second"},
+                ]
+            },
+            "Repeat this note.",
+            (),
+        ),
+        DesktopEvidenceRef("second", "manual", "Manual", "Flow", {}, "Second.", ()),
+    )
+    draft = "First. [1]\n\nRepeat this note. [2]\n\nSecond. [3]\n\nRepeat this note. [2]"
+
+    assert complete_repeated_evidence_occurrences(draft, evidence) == draft
+
+
 def test_citation_guard_removes_uncited_validation_items_only() -> None:
     from openkb.desktop_grounded_answer import _citation_guarded_answer
 
@@ -136,9 +252,10 @@ def test_citation_guard_removes_uncited_validation_items_only() -> None:
 
 
 def test_answer_output_budget_expands_only_for_large_context_models() -> None:
-    assert _answer_output_token_budget(4_096) == 2_048
-    assert _answer_output_token_budget(16_384) == 2_048
-    assert _answer_output_token_budget(32_768) == 4_096
+    assert answer_output_reserve_for_context(4_096) == 2_048
+    assert answer_output_reserve_for_context(16_384) == 2_048
+    assert answer_output_reserve_for_context(32_768) == 4_096
+    assert answer_output_reserve_for_context(1_000_000) == 32_768
 
 
 def test_grounded_answer_persists_available_evidence_citations(tmp_path):
@@ -359,6 +476,50 @@ def test_answer_result_failures_are_explicit_interrupted_cards_without_retry(
     assert answer.answer_text == ""
     assert answer.citations
     assert DesktopGroundedAnswerService(kb_dir).list() == (answer,)
+
+
+def test_grounded_answer_reserves_default_reasoning_before_final_output() -> None:
+    requests = []
+
+    class CapturingAnswerGateway:
+        def stream(self, request, **kwargs):
+            requests.append(request)
+            kwargs["on_delta"](1, "Grounded answer [1].")
+            return DesktopModelResult("answer-call", "Grounded answer [1].", 1)
+
+    terminal = CapturingAnswerGateway()
+    gateway = DesktopRoleModelGateway(
+        settings=DesktopModelSettings(
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            api_base_url="https://api.deepseek.com",
+            api_key="test-key",
+            max_concurrent_model_calls=1,
+        ),
+        default_gateway=terminal,  # type: ignore[arg-type]
+        analysis_gateway=terminal,  # type: ignore[arg-type]
+        answer_gateway=terminal,  # type: ignore[arg-type]
+    )
+    pack = DesktopEvidencePack(
+        retrieval_plan=DesktopRetrievalPlan("question", ("question",), "deterministic"),
+        evidence=(
+            DesktopEvidenceRef(
+                "evidence-1",
+                "document-1",
+                "manual.md",
+                "Answer",
+                {},
+                "Grounded evidence.",
+                ("fts",),
+            ),
+        ),
+    )
+
+    generation = generate_grounded_answer("question", pack, model_gateway=gateway)
+
+    assert generation.answer_text == "Grounded answer [1]."
+    assert len(requests) == 1
+    assert requests[0].generation_parameters == {"max_tokens": 40_960}
 
 
 def test_reasoning_only_answer_is_replaced_only_after_an_explicit_successful_retry(

@@ -10,11 +10,9 @@ from dataclasses import dataclass
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
 from openkb.desktop_knowledge_analysis import (
     KNOWLEDGE_ANALYSIS_BATCH_SCOPE,
-    KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
     DesktopKnowledgeAnalysis,
     knowledge_analysis_prompt,
     knowledge_analysis_provenance_from_checkpoint,
-    knowledge_analysis_provenance_json,
     parse_knowledge_analysis,
 )
 from openkb.desktop_knowledge_analysis_batch_planning import (
@@ -26,6 +24,18 @@ from openkb.desktop_knowledge_analysis_batch_planning import (
 from openkb.desktop_knowledge_analysis_batch_store import (
     DesktopKnowledgeAnalysisBatchStore,
     KnowledgeAnalysisBatch,
+)
+from openkb.desktop_knowledge_analysis_checkpoints import (
+    analysis_from_document_checkpoint as _analysis_from_document_checkpoint,
+)
+from openkb.desktop_knowledge_analysis_checkpoints import (
+    harvest_from_inventory_checkpoint as _harvest_from_inventory_checkpoint,
+)
+from openkb.desktop_knowledge_analysis_checkpoints import (
+    parse_batch_checkpoint,
+)
+from openkb.desktop_knowledge_analysis_checkpoints import (
+    result_checkpoint as _result_checkpoint,
 )
 from openkb.desktop_knowledge_analysis_merge import (
     deterministic_description as _deterministic_description,
@@ -41,7 +51,6 @@ from openkb.desktop_knowledge_analysis_merge import (
 )
 from openkb.desktop_knowledge_analysis_output_recovery import (
     analyze_batch_with_output_limit_recovery,
-    output_limit_split_leaf_count,
 )
 from openkb.desktop_knowledge_analysis_plan import (
     KnowledgeAnalysisMergeNodePlan,
@@ -54,15 +63,15 @@ from openkb.desktop_knowledge_analysis_progress import knowledge_analysis_progre
 from openkb.desktop_knowledge_analysis_requests import (
     analysis_pipeline_digest as _analysis_pipeline_digest,
 )
-from openkb.desktop_knowledge_analysis_requests import (
-    plan_prompt_digest as _prompt_contract_digest,
-)
+from openkb.desktop_knowledge_analysis_requests import current_analysis_pipeline_digest
 from openkb.desktop_knowledge_analysis_requests import (
     prompt_snapshot_digest as _snapshot_digest,
 )
 from openkb.desktop_knowledge_analysis_requests import (
     request_pinned_to_plan as _request_pinned_to_plan,
 )
+from openkb.desktop_knowledge_analysis_validation import validate_evidence_scope
+from openkb.desktop_knowledge_inventory_stage import apply_document_inventory_stage
 from openkb.desktop_model_capabilities import (
     DesktopModelCapabilityProfile,
     model_capability_profile,
@@ -91,11 +100,7 @@ KNOWLEDGE_ANALYSIS_BATCH_SYSTEM_PROMPT = _BATCH_CONTRACT.instructions
 KNOWLEDGE_ANALYSIS_MERGE_SYSTEM_PROMPT = _MERGE_CONTRACT.instructions
 KNOWLEDGE_ANALYSIS_BATCH_PROMPT_DIGEST = _BATCH_CONTRACT.digest
 KNOWLEDGE_ANALYSIS_MERGE_PROMPT_DIGEST = _MERGE_CONTRACT.digest
-KNOWLEDGE_ANALYSIS_BATCH_PIPELINE_DIGEST = hashlib.sha256(
-    (KNOWLEDGE_ANALYSIS_BATCH_PROMPT_DIGEST + ":" + KNOWLEDGE_ANALYSIS_MERGE_PROMPT_DIGEST).encode(
-        "utf-8"
-    )
-).hexdigest()
+KNOWLEDGE_ANALYSIS_BATCH_PIPELINE_DIGEST = current_analysis_pipeline_digest()
 _INVALID_RESULT_ACTION = "Retry with a model that follows the Knowledge Analysis schema."
 
 
@@ -114,6 +119,7 @@ def run_knowledge_analysis(
     job_id: str,
     stage_run_id: str,
     document_name: str,
+    document_version_id: str | None = None,
     evidence: tuple[tuple[str, DocumentIRBlock], ...],
     page_tree: PageTreeGeneration | None = None,
     provider: str,
@@ -133,7 +139,7 @@ def run_knowledge_analysis(
         page_tree_analysis_sections(page_tree, evidence) if page_tree is not None else ()
     )
     capability = capability_profile or model_capability_profile(model)
-    contract = prompt_contract_for("knowledge_analysis_batch")
+    contract = prompt_contract_for("knowledge_fact_harvest")
     input_budget_tokens = (
         execution_profile.document_input_budget_tokens
         if execution_profile is not None
@@ -171,6 +177,14 @@ def run_knowledge_analysis(
         planned_batches=planned_batches,
         proposed_plan=proposed_plan,
     )
+    contracts = plan.prompt_contract_snapshot.get("contracts")
+    has_fact_contract = isinstance(contracts, dict) and "knowledge_fact_harvest" in contracts
+    direct_harvest_operation = (
+        "knowledge_fact_harvest" if has_fact_contract else "knowledge_analysis"
+    )
+    batch_harvest_operation = (
+        "knowledge_fact_harvest" if has_fact_contract else "knowledge_analysis_batch"
+    )
     if not batches:
         prompt = knowledge_analysis_prompt(
             document_name, evidence, knowledge_language=knowledge_language
@@ -189,7 +203,7 @@ def run_knowledge_analysis(
                 direct_batch,
                 analyze=lambda current: (
                     _validated_analysis_call(
-                        operation="knowledge_analysis",
+                        operation=direct_harvest_operation,
                         document_name=document_name,
                         prompt=prompt,
                         analyze=analyze,
@@ -215,26 +229,44 @@ def run_knowledge_analysis(
             )
         except DesktopStructuredOutputInvalidError as error:
             raise result_failure(error, suggested_action=_INVALID_RESULT_ACTION) from error
-        result = recovered.result
-        analysis = recovered.analysis
-        prompt_operation = "knowledge_analysis"
+        harvest = recovered.analysis
+        harvest_result = recovered.result
         recovery_metadata: dict[str, object] = {}
         if recovered.output_limit_recovery_count:
-            analysis = DesktopKnowledgeAnalysis(
-                analysis.document_description,
-                analysis.concepts,
-                analysis.entities,
-                analysis.analysis_scope,
-                analysis.procedures,
-                analysis.document_summary,
-                analysis.corpus_ready,
+            harvest = DesktopKnowledgeAnalysis(
+                harvest.document_description,
+                harvest.concepts,
+                harvest.entities,
+                harvest.analysis_scope,
+                harvest.procedures,
+                harvest.document_summary,
+                harvest.corpus_ready,
             )
-            prompt_operation = "knowledge_analysis_batch"
             recovery_metadata = {
-                "output_limit_recovery_from_operation": "knowledge_analysis",
+                "output_limit_recovery_from_operation": direct_harvest_operation,
                 "output_limit_split_leaf_count": recovered.split_leaf_count,
                 "output_limit_recovery_count": recovered.output_limit_recovery_count,
             }
+        inventory_stage = apply_document_inventory_stage(
+            document_version_id=document_version_id or job_id,
+            document_name=document_name,
+            harvest=harvest,
+            harvest_result=harvest_result,
+            harvest_operation=(
+                batch_harvest_operation
+                if recovered.output_limit_recovery_count
+                else direct_harvest_operation
+            ),
+            evidence=evidence,
+            plan=plan,
+            analyze=analyze,
+            on_operation_validated=on_operation_validated,
+            knowledge_language=knowledge_language,
+            database_path=store.database_path,
+        )
+        analysis = inventory_stage.analysis
+        result = inventory_stage.result
+        prompt_operation = inventory_stage.operation
         checkpoint = _result_checkpoint(
             analysis,
             result,
@@ -243,16 +275,15 @@ def run_knowledge_analysis(
             model=model,
             prompt_operation=prompt_operation,
             engine_version=engine_version,
-            extra=recovery_metadata,
+            extra={
+                **recovery_metadata,
+                **inventory_stage.metadata,
+                "analysis_prompt_digest": _analysis_pipeline_digest(plan),
+            },
         )
         return KnowledgeAnalysisRun(
             analysis,
-            knowledge_analysis_provenance_json(
-                provider=provider,
-                model=model,
-                prompt_digest=_prompt_contract_digest(plan, prompt_operation),
-                engine_version=engine_version,
-            ),
+            knowledge_analysis_provenance_from_checkpoint(checkpoint),
             checkpoint,
         )
 
@@ -313,7 +344,7 @@ def run_knowledge_analysis(
             plan=plan,
             provider=provider,
             model=model,
-            prompt_operation="knowledge_analysis_batch",
+            prompt_operation=batch_harvest_operation,
             engine_version=engine_version,
             extra={
                 "batch_id": batch.batch_id,
@@ -349,7 +380,8 @@ def run_knowledge_analysis(
     merged_checkpoint = store.merge_checkpoint(job_id)
     if merged_checkpoint is not None:
         merged = _analysis_from_document_checkpoint(merged_checkpoint)
-        _validate_merge_sources(merged, tuple(analyses))
+        harvested = _harvest_from_inventory_checkpoint(merged_checkpoint) or merged
+        _validate_merge_sources(harvested, tuple(analyses))
     else:
         honor_control()
         store.start_merge(job_id)
@@ -376,6 +408,21 @@ def run_knowledge_analysis(
                 corpus_ready=deterministic.corpus_ready,
             )
             _validate_merge_sources(merged, tuple(analyses))
+            inventory_stage = apply_document_inventory_stage(
+                document_version_id=document_version_id or job_id,
+                document_name=document_name,
+                harvest=merged,
+                harvest_result=result,
+                harvest_operation="knowledge_analysis_merge",
+                evidence=evidence,
+                plan=plan,
+                analyze=analyze,
+                on_operation_validated=on_operation_validated,
+                knowledge_language=knowledge_language,
+                database_path=store.database_path,
+            )
+            merged = inventory_stage.analysis
+            result = inventory_stage.result
         except DesktopModelCallError as error:
             store.fail_merge(job_id, error.failure.code)
             raise
@@ -388,11 +435,12 @@ def run_knowledge_analysis(
             plan=plan,
             provider=provider,
             model=model,
-            prompt_operation="knowledge_analysis_merge",
+            prompt_operation=inventory_stage.operation,
             engine_version=engine_version,
             extra={
                 "batch_count": len(batches),
                 "analysis_prompt_digest": _analysis_pipeline_digest(plan),
+                **inventory_stage.metadata,
                 "batch_checkpoint_sha256s": [
                     hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
                     for value in batch_checkpoints
@@ -410,26 +458,6 @@ def run_knowledge_analysis(
         knowledge_analysis_provenance_from_checkpoint(merged_checkpoint),
         merged_checkpoint,
     )
-
-
-def parse_batch_checkpoint(checkpoint: object) -> DesktopKnowledgeAnalysis:
-    if not isinstance(checkpoint, dict) or not isinstance(
-        checkpoint.get("normalized_result"), dict
-    ):
-        raise _state_error("Knowledge Analysis batch checkpoint is invalid.")
-    return parse_knowledge_analysis(
-        _json(checkpoint["normalized_result"]),
-        expected_scope=KNOWLEDGE_ANALYSIS_BATCH_SCOPE,
-        aggregate=output_limit_split_leaf_count(checkpoint) > 1,
-    )
-
-
-def _analysis_from_document_checkpoint(checkpoint: object) -> DesktopKnowledgeAnalysis:
-    if not isinstance(checkpoint, dict) or not isinstance(
-        checkpoint.get("normalized_result"), dict
-    ):
-        raise _state_error("Knowledge Analysis merge checkpoint is invalid.")
-    return parse_knowledge_analysis(_json(checkpoint["normalized_result"]), aggregate=True)
 
 
 def _validated_analysis_call(
@@ -492,8 +520,13 @@ def _analyze_batch(
         input_budget_tokens=plan.input_budget_tokens,
         knowledge_language=knowledge_language,
     )
+    contracts = plan.prompt_contract_snapshot.get("contracts")
     return _validated_analysis_call(
-        operation="knowledge_analysis_batch",
+        operation=(
+            "knowledge_fact_harvest"
+            if isinstance(contracts, dict) and "knowledge_fact_harvest" in contracts
+            else "knowledge_analysis_batch"
+        ),
         document_name=document_name,
         prompt=prompt,
         analyze=analyze,
@@ -702,23 +735,17 @@ def _result_from_merge_node_checkpoint(
 def _validate_batch_sources(
     analysis: DesktopKnowledgeAnalysis,
     batch: KnowledgeAnalysisBatch,
-    *,
-    result: DesktopModelResult | None = None,
 ) -> None:
-    allowed = {evidence_id for evidence_id, _block in batch.evidence}
-    if any(
-        evidence_id not in allowed
-        for candidate in analysis.candidates
-        for claim in candidate.claims
-        for evidence_id in claim.source_evidence_ids
-    ) or any(
-        evidence_id not in allowed
-        for unit in analysis.document_summary
-        for evidence_id in unit.source_evidence_ids
-    ):
-        raise _invalid_model_result(
-            "Knowledge Analysis batch referenced Evidence outside its input.", result
-        )
+    validate_evidence_scope(
+        (
+            ("concepts", analysis.concepts),
+            ("entities", analysis.entities),
+            ("procedures", analysis.procedures),
+        ),
+        analysis.document_summary,
+        allowed_evidence_ids={evidence_id for evidence_id, _block in batch.evidence},
+        scope_label="current batch input",
+    )
 
 
 def _validate_merge_sources(
@@ -750,38 +777,6 @@ def _invalid_model_result(message: str, result: DesktopModelResult | None) -> De
     if result is not None:
         error.attempt_count = result.attempt_count
     return error
-
-
-def _result_checkpoint(
-    analysis: DesktopKnowledgeAnalysis,
-    result: DesktopModelResult,
-    *,
-    plan: KnowledgeAnalysisPlan,
-    provider: str,
-    model: str,
-    prompt_operation: str,
-    engine_version: str,
-    extra: dict[str, object] | None = None,
-) -> dict[str, object]:
-    prompt_snapshot = prompt_snapshot_for_operation(plan, prompt_operation)
-    checkpoint: dict[str, object] = {
-        "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
-        "analysis_scope": analysis.analysis_scope,
-        "provider": provider,
-        "model": model,
-        "prompt_digest": _snapshot_digest(prompt_snapshot),
-        "prompt_contract_snapshot": prompt_snapshot,
-        "engine_version": engine_version,
-        "attempt_metadata": {
-            "call_id": result.call_id,
-            "attempt_count": result.attempt_count,
-        },
-        "response_sha256": hashlib.sha256(result.content.encode("utf-8")).hexdigest(),
-        "normalized_result": analysis.as_dict(),
-    }
-    if extra:
-        checkpoint.update(extra)
-    return checkpoint
 
 
 def _json(value: object) -> str:

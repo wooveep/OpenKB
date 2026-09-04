@@ -457,6 +457,30 @@
         "keepSeparate": "Keep as separate source",
         "saved": "Document version decision saved."
       },
+      "versionCatalog": {
+        "title": "Version history",
+        "description": "Confirm version labels, order, and the current full snapshot before version-aware answers are enabled.",
+        "reviewTitle": "Complete version metadata",
+        "lineageName": "Document series",
+        "aliases": "Aliases (comma-separated)",
+        "scheme": "Version scheme",
+        "versionLabel": "Version label",
+        "branch": "Branch",
+        "current": "Current",
+        "predecessor": "Previous version",
+        "snapshotKind": "Snapshot kind",
+        "none": "None",
+        "yes": "Yes",
+        "no": "No",
+        "fullSnapshot": "Full snapshot",
+        "delta": "Delta",
+        "unknown": "Unknown",
+        "confirm": "Confirm version history",
+        "versionCount": "{{count}} versions",
+        "unconfirmed": "Unconfirmed",
+        "diffSummary": "{{changed}} content changes · {{moved}} moved",
+        "openVersion": "Open {{version}}"
+      },
       "missingSource": {
         "title": "Missing source claims",
         "category": "Missing Source",
@@ -963,6 +987,16 @@
       "evidenceDescription": "Only sources that were sent to the answer model for this version.",
       "sources": "Sources {{count}}",
       "images": "Images {{count}}",
+      "versionFilter": {
+        "label": "Version",
+        "automatic": "Automatic (latest)",
+        "latest": "Latest · {{lineage}}",
+        "compare": "Compare {{from}} ↔ {{to}}",
+        "all": "All versions · {{lineage}}",
+        "resolved": "{{mode}} · {{labels}}",
+        "latestResolved": "Latest confirmed versions",
+        "degraded": "Fallback version · {{labels}}"
+      },
       "navigationTrace": {
         "title": "Knowledge navigation trace",
         "coverage": "Evidence coverage",

@@ -6,9 +6,12 @@ import json
 import sqlite3
 
 from openkb.desktop_answer_types import DesktopEvidenceRef
+from openkb.desktop_scoped_evidence import ScopedEvidenceView
 
 SOURCE_SECTION_MAX_CHARACTERS = 12_000
 FULL_SOURCE_MAX_CHARACTERS = 6_000
+SOURCE_OCCURRENCE_CONTEXT_KEY = "_openkb_source_occurrences"
+SOURCE_BLOCK_KIND_CONTEXT_KEY = "_openkb_source_block_kind"
 
 
 def source_section_evidence_in(
@@ -16,9 +19,10 @@ def source_section_evidence_in(
     evidence_id: str,
     *,
     terms: tuple[str, ...] = (),
+    scoped_view: ScopedEvidenceView | None = None,
 ) -> tuple[DesktopEvidenceRef, ...]:
     """Read one logical section as separately bound canonical EvidenceRefs."""
-    occurrences = source_occurrences_in(connection, evidence_id)
+    occurrences = source_occurrences_in(connection, evidence_id, scoped_view=scoped_view)
     if not occurrences:
         return ()
     occurrence = min(occurrences, key=lambda item: source_occurrence_sort_key(item, terms))
@@ -41,6 +45,7 @@ def source_section_evidence_in(
         (document_id,),
     ).fetchall()
     selected = _bounded_source_rows(rows, anchor_ordinal)
+    occurrence_contexts = _repeated_occurrence_contexts(selected)
     references: list[DesktopEvidenceRef] = []
     seen: set[str] = set()
     for row in selected:
@@ -54,7 +59,13 @@ def source_section_evidence_in(
                 document_id=document_id,
                 document_name=document_name,
                 section=section_from_heading_path(str(row[3])),
-                locator=_json_object(str(row[4])),
+                locator=_locator_with_occurrence_contexts(
+                    {
+                        **_json_object(str(row[4])),
+                        SOURCE_BLOCK_KIND_CONTEXT_KEY: str(row[1]),
+                    },
+                    occurrence_contexts.get(selected_evidence_id, ()),
+                ),
                 excerpt=str(row[2]).strip(),
                 channels=("knowledge_navigation_source_window",),
             )
@@ -68,8 +79,23 @@ def bounded_source_text(rows: list[tuple[object, ...]], anchor_ordinal: int) -> 
 
 
 def source_occurrences_in(
-    connection: sqlite3.Connection, evidence_id: str
+    connection: sqlite3.Connection,
+    evidence_id: str,
+    *,
+    scoped_view: ScopedEvidenceView | None = None,
 ) -> list[tuple[object, ...]]:
+    if scoped_view is not None:
+        cte, parameters = scoped_view.sql_cte()
+        return connection.execute(
+            f"""
+            {cte}
+            SELECT document_id, display_name, ordinal, heading_path,
+                locator_json, occurrence_rank
+            FROM scoped_evidence_occurrences
+            WHERE evidence_id = ? ORDER BY occurrence_rank
+            """,
+            (*parameters, evidence_id),
+        ).fetchall()
     return connection.execute(
         """
         SELECT occurrences.document_id, documents.display_name, blocks.ordinal,
@@ -232,3 +258,37 @@ def _json_object(value: str) -> dict[str, object]:
     except json.JSONDecodeError:
         return {}
     return decoded if isinstance(decoded, dict) else {}
+
+
+def _repeated_occurrence_contexts(
+    rows: tuple[tuple[object, ...], ...],
+) -> dict[str, tuple[dict[str, object], ...]]:
+    contexts: dict[str, list[dict[str, object]]] = {}
+    for index, row in enumerate(rows):
+        evidence_id = str(row[5])
+        context: dict[str, object] = {"ordinal": int(str(row[0]))}
+        previous_id = _previous_distinct_evidence_id(rows, index, evidence_id)
+        if previous_id:
+            context["previous_evidence_id"] = previous_id
+        contexts.setdefault(evidence_id, []).append(context)
+    return {
+        evidence_id: tuple(values) for evidence_id, values in contexts.items() if len(values) > 1
+    }
+
+
+def _previous_distinct_evidence_id(
+    rows: tuple[tuple[object, ...], ...], index: int, evidence_id: str
+) -> str:
+    for previous in reversed(rows[:index]):
+        previous_id = str(previous[5])
+        if previous_id != evidence_id:
+            return previous_id
+    return ""
+
+
+def _locator_with_occurrence_contexts(
+    locator: dict[str, object], contexts: tuple[dict[str, object], ...]
+) -> dict[str, object]:
+    if not contexts:
+        return locator
+    return {**locator, SOURCE_OCCURRENCE_CONTEXT_KEY: [dict(item) for item in contexts]}

@@ -18,7 +18,9 @@ from openkb.desktop_knowledge_analysis import (
     knowledge_analysis_from_checkpoint,
     knowledge_analysis_provenance_from_checkpoint,
 )
+from openkb.desktop_knowledge_analysis_requests import current_analysis_pipeline_digest
 from openkb.desktop_knowledge_reconciliation_changes import IncomingKnowledgeChange
+from openkb.desktop_prompt_contracts import prompt_contract_for
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,8 @@ def persisted_analysis_prompt_digest_in(
     merge_digest = _optional_string(checkpoint.get("prompt_digest"))
     batch_count = checkpoint.get("batch_count")
     if type(batch_count) is not int or batch_count < 2 or merge_digest is None:
+        if _uses_current_pipeline_contract(checkpoint, merge_digest):
+            return current_analysis_pipeline_digest()
         return merge_digest
     table = (
         "knowledge_analysis_batches"
@@ -80,7 +84,27 @@ def persisted_analysis_prompt_digest_in(
     if len(batch_digests) != 1:
         return None
     batch_digest = next(iter(batch_digests))
+    if batch_digest == prompt_contract_for("knowledge_fact_harvest").digest and (
+        merge_digest == prompt_contract_for("knowledge_analysis_merge").digest
+    ):
+        return current_analysis_pipeline_digest()
     return hashlib.sha256(f"{batch_digest}:{merge_digest}".encode("utf-8")).hexdigest()
+
+
+def _uses_current_pipeline_contract(
+    checkpoint: dict[str, object], prompt_digest: str | None
+) -> bool:
+    snapshot = checkpoint.get("prompt_contract_snapshot")
+    operation = snapshot.get("operation") if isinstance(snapshot, dict) else None
+    return (
+        isinstance(operation, str)
+        and operation
+        in {
+            "knowledge_fact_harvest",
+            "document_entity_inventory",
+        }
+        and prompt_digest == prompt_contract_for(operation).digest
+    )
 
 
 def canonical_analysis_changes_in(

@@ -55,6 +55,11 @@ class DesktopKnowledgeAnalysisBatchStore:
         )
         self._execution_token = execution_token
 
+    @property
+    def database_path(self) -> Path:
+        """Expose the read-only corpus authority needed by global Inventory recall."""
+        return self._database_path
+
     def persisted_plan(self, job_id: str) -> KnowledgeAnalysisPlan | None:
         """Return the immutable plan that a resumed job must continue exactly."""
         with kb_ingest_lock(self._state_dir):

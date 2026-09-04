@@ -17,10 +17,12 @@ from openkb.desktop_prompt_contracts import prompt_contract_for
 if TYPE_CHECKING:
     from openkb.desktop_model_settings import DesktopModelSettings
 
-MAX_ANALYSIS_DOCUMENT_INPUT_TOKENS = 12_000
 MINIMUM_USEFUL_ANALYSIS_BATCH_TOKENS = 512
 MINIMUM_ANALYSIS_FINAL_OUTPUT_TOKENS = 4_096
 _ANALYSIS_PLAN_OPERATIONS = (
+    "knowledge_fact_harvest",
+    "document_entity_inventory",
+    "entity_dossier_planning",
     "knowledge_analysis",
     "knowledge_analysis_batch",
     "knowledge_analysis_merge",
@@ -28,6 +30,7 @@ _ANALYSIS_PLAN_OPERATIONS = (
     "page_tree_selection",
     "knowledge_navigation_step",
     "knowledge_graph_extraction",
+    "knowledge_relation_analysis",
     "retrieval_plan",
     "structured_output_repair",
 )
@@ -240,6 +243,7 @@ class DesktopAnswerCapabilityProfile:
     reasoning_source: str
     context_capacity: int
     reasoning_allowance_tokens: int
+    maximum_output_tokens: int | None
     capability_version: str = "openkb.answer-streaming.v2"
     role: str = "answer"
 
@@ -285,6 +289,7 @@ class DesktopAnswerCapabilityProfile:
             "reasoning_effort": self.reasoning_effort,
             "reasoning_source": self.reasoning_source,
             "reasoning_allowance_tokens": self.reasoning_allowance_tokens,
+            "maximum_output_tokens": self.maximum_output_tokens,
             "context_capacity": self.context_capacity,
             "prompt_material_tokens": self.prompt_material_tokens,
             "prompt_contract_digest": self.prompt_contract_digest,
@@ -296,7 +301,7 @@ class DesktopAnswerCapabilityProfile:
 def analysis_prompt_contract_bundle() -> dict[str, object]:
     """Return the canonical prompt material pinned by every Analysis plan."""
     return {
-        "primary_operation": "knowledge_analysis_batch",
+        "primary_operation": "knowledge_fact_harvest",
         "contracts": {
             operation: prompt_contract_for(operation).snapshot()
             for operation in _ANALYSIS_PLAN_OPERATIONS
@@ -311,8 +316,9 @@ def build_analysis_execution_profile(
     capability: DesktopModelCapabilityProfile,
     reasoning_effort: str,
     api_base_url: str = "",
+    operation: str = "knowledge_analysis",
 ) -> DesktopModelExecutionProfile:
-    """Resolve one complete Analysis profile without making a provider request."""
+    """Resolve one operation-specific Analysis profile without provider I/O."""
     adapter = model_protocol_for(provider)
     if not adapter.supports_structured_analysis or adapter.structured_output_mode is None:
         raise DesktopModelCapacityError(
@@ -331,8 +337,12 @@ def build_analysis_execution_profile(
     bundle = analysis_prompt_contract_bundle()
     contracts = bundle["contracts"]
     assert isinstance(contracts, dict)
-    snapshots = tuple(contracts.values())
-    requested_final_reserve = max(_reserve_output_tokens(snapshot) for snapshot in snapshots)
+    operation_snapshot = contracts.get(operation)
+    if not isinstance(operation_snapshot, dict):
+        operation_snapshot = contracts["knowledge_analysis"]
+    requested_final_reserve = _reserve_output_tokens(operation_snapshot)
+    prompt_material = _prompt_material_tokens(operation_snapshot)
+    numerator = _REASONING_ALLOWANCE_NUMERATORS[reasoning_effort]
     final_reserve = min(
         requested_final_reserve,
         max(
@@ -340,12 +350,9 @@ def build_analysis_execution_profile(
             capability.context_capacity // 2,
         ),
     )
-    numerator = _REASONING_ALLOWANCE_NUMERATORS[reasoning_effort]
     reasoning_allowance = final_reserve * numerator // 2
     output_ceiling = final_reserve + reasoning_allowance
-    prompt_material = max(_prompt_material_tokens(snapshot) for snapshot in snapshots)
     document_budget = min(
-        MAX_ANALYSIS_DOCUMENT_INPUT_TOKENS,
         capability.document_input_capacity,
         capability.context_capacity - prompt_material - output_ceiling,
     )
@@ -385,6 +392,8 @@ def build_analysis_execution_profile(
 
 def analysis_execution_profile_for_settings(
     settings: DesktopModelSettings,
+    *,
+    operation: str = "knowledge_analysis",
 ) -> DesktopModelExecutionProfile:
     """Resolve the exact Analysis profile represented by one settings draft."""
     return build_analysis_execution_profile(
@@ -393,6 +402,7 @@ def analysis_execution_profile_for_settings(
         capability=settings.capability_for_role("analysis"),
         reasoning_effort=settings.reasoning_for_role("analysis") or "off",
         api_base_url=settings.api_base_url,
+        operation=operation,
     )
 
 
@@ -423,6 +433,7 @@ def answer_capability_profile_for_settings(
         reasoning_source=settings.reasoning_source_for_role("answer"),
         context_capacity=capability.context_capacity,
         reasoning_allowance_tokens=reasoning_allowance,
+        maximum_output_tokens=capability.maximum_output_tokens,
     )
     required_capacity = profile.prompt_material_tokens + profile.provider_output_ceiling_tokens
     if required_capacity > profile.context_capacity:

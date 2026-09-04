@@ -13,10 +13,10 @@ from typing import Callable
 from openkb import __version__
 from openkb.config import ensure_preferred_knowledge_language
 from openkb.desktop_catalog_store import queue_catalog_rebuild_in, start_catalog_rebuilds
+from openkb.desktop_corpus_knowledge_pipeline import CorpusKnowledgeSynthesisPipeline
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
 from openkb.desktop_import_clock import timestamp
 from openkb.desktop_knowledge_analysis import (
-    KNOWLEDGE_ANALYSIS_PROMPT_DIGEST,
     KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
     DesktopKnowledgeAnalysis,
 )
@@ -25,7 +25,6 @@ from openkb.desktop_knowledge_analysis_batch_store import (
 )
 from openkb.desktop_knowledge_analysis_batches import (
     KNOWLEDGE_ANALYSIS_BATCH_PIPELINE_DIGEST,
-    plan_knowledge_analysis_batches,
     run_knowledge_analysis,
 )
 from openkb.desktop_knowledge_analysis_reuse import (
@@ -82,7 +81,7 @@ from openkb.desktop_okf_projection import (
     discard_okf_projection_staging,
     stage_okf_projection_in,
 )
-from openkb.desktop_page_tree import PageTreeGeneration, page_tree_analysis_sections
+from openkb.desktop_page_tree import PageTreeGeneration
 from openkb.desktop_page_tree_store import lease_current_page_tree, load_current_page_tree_in
 from openkb.desktop_reanalysis_corpus import activate_completed_corpus_reanalysis_in
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
@@ -406,6 +405,7 @@ class DesktopKnowledgeReanalysisService:
                     job_id=job_id,
                     stage_run_id=job_id,
                     document_name=document_name,
+                    document_version_id=document_id,
                     evidence=evidence,
                     page_tree=page_tree,
                     provider=analysis_execution.provider,
@@ -440,6 +440,7 @@ class DesktopKnowledgeReanalysisService:
                     run.provenance_json,
                     run.checkpoint,
                     execution_token,
+                    gateway,
                 )
         except DesktopModelCallError as error:
             analysis_gate.suspend_result_failure(gateway, error)
@@ -595,8 +596,10 @@ class DesktopKnowledgeReanalysisService:
         provenance_json: str,
         checkpoint: dict[str, object],
         execution_token: str,
+        gateway: DesktopModelGateway,
     ) -> None:
         staged_projection: Path | None = None
+        refine_corpus = False
         with kb_ingest_lock(self._state_dir):
             connection = _connect(self._database_path)
             try:
@@ -656,7 +659,12 @@ class DesktopKnowledgeReanalysisService:
                 run_id = _run_id_for_job_in(connection, job_id)
                 _refresh_run_in(connection, run_id, now)
                 if analysis.corpus_ready:
-                    activate_completed_corpus_reanalysis_in(connection, run_id=run_id, now=now)
+                    refined_generation = activate_completed_corpus_reanalysis_in(
+                        connection,
+                        run_id=run_id,
+                        now=now,
+                    )
+                    refine_corpus = refined_generation is not None
                 if current_generation_id_in(connection) != initial_generation:
                     queue_catalog_rebuild_in(connection, "successful_reanalysis")
                     staged_projection = stage_okf_projection_in(connection, self._kb_dir)
@@ -668,14 +676,22 @@ class DesktopKnowledgeReanalysisService:
                 raise
             finally:
                 connection.close()
-            if staged_projection is not None:
-                try:
-                    activate_okf_projection(self._kb_dir, staged_projection)
-                except Exception:
-                    logger.exception("Could not activate Knowledge Reanalysis OKF projection.")
-                finally:
-                    discard_okf_projection_staging(staged_projection)
-            start_catalog_rebuilds(self._kb_dir)
+        if staged_projection is not None:
+            try:
+                activate_okf_projection(self._kb_dir, staged_projection)
+            except Exception:
+                logger.exception("Could not activate Knowledge Reanalysis OKF projection.")
+            finally:
+                discard_okf_projection_staging(staged_projection)
+        if refine_corpus:
+            try:
+                CorpusKnowledgeSynthesisPipeline(self._kb_dir).run_generation(
+                    force_generation=True,
+                    gateway=gateway,
+                )
+            except Exception:
+                logger.exception("Could not refine Reanalysis Entity Dossiers.")
+        start_catalog_rebuilds(self._kb_dir)
 
     def _fail_job(self, job_id: str, execution_token: str, error_code: str, reason: str) -> None:
         with kb_ingest_lock(self._state_dir):
@@ -747,13 +763,8 @@ def expected_prompt_digest(
     evidence: tuple[tuple[str, DocumentIRBlock], ...],
     page_tree: PageTreeGeneration | None = None,
 ) -> str:
-    sections = page_tree_analysis_sections(page_tree, evidence) if page_tree is not None else ()
-    batches = plan_knowledge_analysis_batches(evidence, natural_sections=sections or None)
-    return (
-        KNOWLEDGE_ANALYSIS_PROMPT_DIGEST
-        if len(batches) <= 1
-        else KNOWLEDGE_ANALYSIS_BATCH_PIPELINE_DIGEST
-    )
+    del evidence, page_tree
+    return KNOWLEDGE_ANALYSIS_BATCH_PIPELINE_DIGEST
 
 
 def _connect(database_path: Path) -> sqlite3.Connection:

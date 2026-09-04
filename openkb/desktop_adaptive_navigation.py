@@ -55,6 +55,7 @@ NAVIGATION_STEP_SCHEMA_VERSION = "openkb.knowledge-navigation-step.v1"
 NAVIGATION_MAX_ROUNDS = 3
 NAVIGATION_MAX_MODEL_CALLS = 8
 NAVIGATION_MAX_LOGICAL_READS = 24
+NAVIGATION_MAX_LOGICAL_READS_PER_ROUND = NAVIGATION_MAX_LOGICAL_READS // NAVIGATION_MAX_ROUNDS
 NAVIGATION_MAX_SOURCE_TOKENS = 24_000
 NAVIGATION_MAX_SEARCH_ACTIONS = 6
 NAVIGATION_MAX_WALL_SECONDS = 120.0
@@ -81,16 +82,6 @@ _TROUBLESHOOTING = re.compile(
     re.IGNORECASE,
 )
 _EXPLANATION = re.compile(r"\b(why|explain|relationship|works?)\b|为什么|原理|解释|关系")
-_ACTION_WORDS = re.compile(
-    r"install|deploy|configure|set\s*up|build|migrate|validate|verify|repair|recover|"
-    r"安装|部署|配置|搭建|迁移|验证|检查|修复|恢复",
-    re.IGNORECASE,
-)
-_CONSTRAINTS = re.compile(
-    r"\b(?:v?\d+(?:\.\d+)*|single|double|two[- ]node|windows|linux)\b|"
-    r"双节点|单节点|两节点|版本|集群|离线|在线",
-    re.IGNORECASE,
-)
 _QUESTION_FORM = re.compile(
     r"\b(?:what|who|when|where|which|why|how)\b|什么|谁|何时|哪里|哪个|为什么|如何|怎么|怎样",
     re.IGNORECASE,
@@ -188,10 +179,8 @@ class NavigationBudget:
 
 
 def initial_navigation_objective(question: str, plan: DesktopRetrievalPlan) -> NavigationObjective:
-    """Create a deterministic seed objective; model steps may refine only its scope."""
-    answer_kind = _answer_kind(question)
-    constraints = _unique(match.group(0) for match in _CONSTRAINTS.finditer(question))
-    user_actions = _unique(match.group(0) for match in _ACTION_WORDS.finditer(question))
+    """Create only the objective fields that deterministic code can establish safely."""
+    answer_kind = answer_kind_for_question(question)
     terms = _unique(plan.terms)
     return NavigationObjective(
         answer_kind=answer_kind,
@@ -199,8 +188,8 @@ def initial_navigation_objective(question: str, plan: DesktopRetrievalPlan) -> N
         requested_scope=" ".join(question.split()),
         named_entities=terms[:8],
         concepts=terms[8:12],
-        user_actions=user_actions[:8],
-        constraints=constraints[:8],
+        user_actions=(),
+        constraints=(),
         required_aspects=_required_aspects(answer_kind),
     )
 
@@ -279,6 +268,7 @@ def run_navigation_step(
     visited_action_ids: frozenset[str],
     budget: NavigationBudget,
     round_number: int,
+    preferred_evidence_ids: tuple[str, ...] = (),
     is_cancelled: Callable[[], bool] | None = None,
     on_model_event: Callable[[object], None] | None = None,
     retry_scope: str | None = None,
@@ -319,6 +309,7 @@ def run_navigation_step(
         visited_action_ids=visited_action_ids,
         budget=budget,
         round_number=round_number,
+        preferred_evidence_ids=preferred_evidence_ids,
     )
     attempts = 0
     response_characters = 0
@@ -475,7 +466,14 @@ def _navigation_prompt(
     visited_action_ids: frozenset[str],
     budget: NavigationBudget,
     round_number: int,
+    preferred_evidence_ids: tuple[str, ...],
 ) -> str:
+    observation_evidence_ids = _unique(
+        (
+            *preferred_evidence_ids,
+            *(evidence_id for item in current_coverage for evidence_id in item.evidence_ids),
+        )
+    )
     payload = {
         "schema_version": NAVIGATION_STEP_SCHEMA_VERSION,
         "snapshot_id": snapshot_id,
@@ -491,7 +489,11 @@ def _navigation_prompt(
                 "section": item.section,
                 "excerpt": item.excerpt[:2_400],
             }
-            for item in _diverse_evidence(pack.evidence, maximum=24)
+            for item in _diverse_evidence(
+                pack.evidence,
+                maximum=24,
+                preferred_ids=observation_evidence_ids,
+            )
         ],
         "guidance": [
             {
@@ -515,26 +517,44 @@ def _navigation_prompt(
 
 
 def _diverse_evidence(
-    evidence: tuple[DesktopEvidenceRef, ...], *, maximum: int
+    evidence: tuple[DesktopEvidenceRef, ...],
+    *,
+    maximum: int,
+    preferred_ids: tuple[str, ...] = (),
 ) -> tuple[DesktopEvidenceRef, ...]:
-    """Expose each source section once before spending observation slots on more blocks."""
+    """Expose current coverage evidence, then distinct sections, then extra blocks."""
     if maximum <= 0:
         return ()
     selected: list[DesktopEvidenceRef] = []
-    seen_sections: set[tuple[str, str]] = set()
+    selected_ids: set[str] = set()
+    evidence_by_id = {item.evidence_id: item for item in evidence}
+    for evidence_id in preferred_ids:
+        item = evidence_by_id.get(evidence_id)
+        if item is None or item.evidence_id in selected_ids:
+            continue
+        selected.append(item)
+        selected_ids.add(item.evidence_id)
+        if len(selected) == maximum:
+            return tuple(selected)
+    seen_sections = {
+        (item.document_id, " ".join(item.section.split()).casefold()) for item in selected
+    }
     for item in evidence:
+        if item.evidence_id in selected_ids:
+            continue
         section_key = (item.document_id, " ".join(item.section.split()).casefold())
         if section_key in seen_sections:
             continue
         seen_sections.add(section_key)
         selected.append(item)
+        selected_ids.add(item.evidence_id)
         if len(selected) == maximum:
             return tuple(selected)
-    selected_ids = {item.evidence_id for item in selected}
     for item in evidence:
         if item.evidence_id in selected_ids:
             continue
         selected.append(item)
+        selected_ids.add(item.evidence_id)
         if len(selected) == maximum:
             break
     return tuple(selected)
@@ -685,7 +705,8 @@ def _simple_lookup_evidence_ids(
     )
 
 
-def _answer_kind(question: str) -> str:
+def answer_kind_for_question(question: str) -> str:
+    """Classify generic answer shape without interpreting subject-matter vocabulary."""
     if _HOW_TO.search(question):
         return "how_to"
     if _TROUBLESHOOTING.search(question):

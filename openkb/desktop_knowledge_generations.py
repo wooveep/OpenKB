@@ -13,6 +13,18 @@ from openkb.desktop_corpus_benchmark import (
     CORPUS_BENCHMARK_SCHEMA_VERSION,
     corpus_benchmark_report_in,
 )
+from openkb.desktop_corpus_synthesis_generation import (
+    CorpusCandidateInput,
+    activate_qualified_corpus_generation_in,
+    bind_generation_graph_inputs_in,
+    corpus_generation_manifest_in,
+    create_pending_corpus_manifest_in,
+    fail_corpus_manifest_in,
+    qualify_corpus_manifest_in,
+    refresh_corpus_identity_mappings_in,
+    refresh_corpus_manifest_digest_in,
+)
+from openkb.desktop_entity_dossier_store import build_generation_entity_dossiers_in
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels, encode_knowledge_labels
 from openkb.desktop_knowledge_relationships import (
     generation_relationship_issues_in,
@@ -80,9 +92,10 @@ def publish_generation_changes_in(
     current_generation_id: int | None,
     changes: tuple[KnowledgeGenerationChange, ...],
     now: str,
+    activate: bool = True,
 ) -> int:
     """Create one snapshot with all selected changes, inside the caller's transaction."""
-    if not changes:
+    if not changes and current_generation_id is None:
         raise ValueError("A published knowledge generation needs at least one change.")
     cursor = connection.execute(
         """
@@ -124,14 +137,16 @@ def publish_generation_changes_in(
     for change in changes:
         _upsert_generation_change_in(connection, generation_id, change, now)
     rebuild_generation_relationships_in(connection, generation_id)
-    connection.execute(
-        """
-        INSERT INTO knowledge_generation_state (singleton, current_generation_id)
-        VALUES (1, ?)
-        ON CONFLICT(singleton) DO UPDATE SET current_generation_id = excluded.current_generation_id
-        """,
-        (generation_id,),
-    )
+    if activate:
+        connection.execute(
+            """
+            INSERT INTO knowledge_generation_state (singleton, current_generation_id)
+            VALUES (1, ?)
+            ON CONFLICT(singleton) DO UPDATE
+            SET current_generation_id = excluded.current_generation_id
+            """,
+            (generation_id,),
+        )
     return generation_id
 
 
@@ -217,6 +232,10 @@ def publish_corpus_generation_in(
     carry_forward_identity_ids: tuple[str, ...],
     synthesis_schema_version: str,
     now: str,
+    candidate_inputs: tuple[CorpusCandidateInput, ...] | None = None,
+    language: str = "en",
+    dossier_planner=None,
+    defer_completion: bool = False,
 ) -> int | None:
     """Atomically replace generated knowledge with one structurally qualified corpus snapshot."""
     if not changes:
@@ -234,6 +253,21 @@ def publish_corpus_generation_in(
     if cursor.lastrowid is None:
         raise RuntimeError("Corpus knowledge generation insert returned no identifier.")
     generation_id = int(cursor.lastrowid)
+    connection.executemany(
+        """
+        INSERT INTO knowledge_generation_documents (generation_id, document_id)
+        VALUES (?, ?)
+        """,
+        ((generation_id, document_id) for document_id in dict.fromkeys(document_ids)),
+    )
+    create_pending_corpus_manifest_in(
+        connection,
+        generation_id=generation_id,
+        parent_generation_id=current_generation_id,
+        document_ids=_generation_document_ids_in(connection, generation_id),
+        now=now,
+        candidate_inputs=candidate_inputs,
+    )
     if current_generation_id is not None and carry_forward_identity_ids:
         _carry_forward_generation_identities_in(
             connection,
@@ -243,38 +277,17 @@ def publish_corpus_generation_in(
         )
     for change in changes:
         _upsert_generation_change_in(connection, generation_id, change, now)
-    rebuild_generation_relationships_in(connection, generation_id)
-    connection.executemany(
-        """
-        INSERT INTO knowledge_generation_documents (generation_id, document_id)
-        VALUES (?, ?)
-        """,
-        ((generation_id, document_id) for document_id in dict.fromkeys(document_ids)),
+    refresh_corpus_identity_mappings_in(connection, generation_id, now=now)
+    if defer_completion:
+        refresh_corpus_manifest_digest_in(connection, generation_id, now=now)
+        return generation_id
+    return complete_prepared_corpus_generation_in(
+        connection,
+        generation_id,
+        language=language,
+        now=now,
+        planner=dossier_planner,
     )
-    _record_corpus_benchmark_in(connection, generation_id)
-    if corpus_generation_qualification_issues_in(connection, generation_id):
-        connection.execute(
-            "UPDATE knowledge_generations SET qualification_state = 'failed' "
-            "WHERE generation_id = ?",
-            (generation_id,),
-        )
-        return current_generation_id
-    connection.execute(
-        """
-        UPDATE knowledge_generations SET qualification_state = 'qualified'
-        WHERE generation_id = ?
-        """,
-        (generation_id,),
-    )
-    connection.execute(
-        """
-        INSERT INTO knowledge_generation_state (singleton, current_generation_id)
-        VALUES (1, ?)
-        ON CONFLICT(singleton) DO UPDATE SET current_generation_id = excluded.current_generation_id
-        """,
-        (generation_id,),
-    )
-    return generation_id
 
 
 def publish_incremental_corpus_generation_in(
@@ -285,9 +298,13 @@ def publish_incremental_corpus_generation_in(
     document_ids: tuple[str, ...],
     synthesis_schema_version: str,
     now: str,
+    candidate_inputs: tuple[CorpusCandidateInput, ...] | None = None,
+    language: str = "en",
+    dossier_planner=None,
+    defer_completion: bool = False,
 ) -> int | None:
     """Qualify affected identities while preserving every unaffected current item."""
-    if not changes:
+    if not changes and current_generation_id is None:
         return current_generation_id
     if any(not change.sources or change.identity_id is None for change in changes):
         raise ValueError("Qualified corpus knowledge requires identities and source bindings.")
@@ -296,6 +313,7 @@ def publish_incremental_corpus_generation_in(
         current_generation_id=current_generation_id,
         changes=changes,
         now=now,
+        activate=False,
     )
     connection.execute(
         """
@@ -321,28 +339,86 @@ def publish_incremental_corpus_generation_in(
         """,
         ((generation_id, document_id) for document_id in dict.fromkeys(document_ids)),
     )
+    create_pending_corpus_manifest_in(
+        connection,
+        generation_id=generation_id,
+        parent_generation_id=current_generation_id,
+        document_ids=_generation_document_ids_in(connection, generation_id),
+        now=now,
+        candidate_inputs=candidate_inputs,
+    )
+    refresh_corpus_identity_mappings_in(connection, generation_id, now=now)
+    if defer_completion:
+        refresh_corpus_manifest_digest_in(connection, generation_id, now=now)
+        return generation_id
+    return complete_prepared_corpus_generation_in(
+        connection,
+        generation_id,
+        language=language,
+        now=now,
+        planner=dossier_planner,
+    )
+
+
+def complete_prepared_corpus_generation_in(
+    connection: sqlite3.Connection,
+    generation_id: int,
+    *,
+    language: str,
+    now: str,
+    planner=None,
+) -> int | None:
+    """Finish a prepared generation after model work, then atomically activate it."""
+    manifest = corpus_generation_manifest_in(connection, generation_id)
+    if manifest is None or manifest.lifecycle_state not in {"pending", "identity_ready"}:
+        return current_generation_id_in(connection)
+    dossier_issues = build_generation_entity_dossiers_in(
+        connection,
+        generation_id,
+        language="zh" if language == "zh" else "en",
+        now=now,
+        planner=planner,
+    )
+    bind_generation_graph_inputs_in(connection, generation_id, now=now)
+    rebuild_generation_relationships_in(connection, generation_id)
+    refresh_corpus_manifest_digest_in(connection, generation_id, now=now)
     _record_corpus_benchmark_in(connection, generation_id)
-    if corpus_generation_qualification_issues_in(connection, generation_id):
+    qualification_issues = (
+        *dossier_issues,
+        *corpus_generation_qualification_issues_in(connection, generation_id),
+        *qualify_corpus_manifest_in(connection, generation_id, now=now),
+    )
+    if qualification_issues:
+        lifecycle_state = (
+            "superseded"
+            if any(
+                issue in {"candidate_generation_superseded", "candidate_dependency_unavailable"}
+                for issue in qualification_issues
+            )
+            else "failed"
+        )
         connection.execute(
             "UPDATE knowledge_generations SET qualification_state = 'failed' "
             "WHERE generation_id = ?",
             (generation_id,),
         )
-        if current_generation_id is None:
-            connection.execute("DELETE FROM knowledge_generation_state WHERE singleton = 1")
-        else:
-            connection.execute(
-                "UPDATE knowledge_generation_state SET current_generation_id = ? "
-                "WHERE singleton = 1",
-                (current_generation_id,),
-            )
-        return current_generation_id
+        fail_corpus_manifest_in(
+            connection,
+            generation_id,
+            now=now,
+            lifecycle_state=lifecycle_state,
+        )
+        return current_generation_id_in(connection)
     connection.execute(
         "UPDATE knowledge_generations SET qualification_state = 'qualified' "
         "WHERE generation_id = ?",
         (generation_id,),
     )
-    return generation_id
+    return (
+        generation_id
+        if activate_qualified_corpus_generation_in(connection, generation_id, now=now)
+        else current_generation_id_in(connection)
+    )
 
 
 def corpus_generation_qualification_issues_in(
@@ -438,6 +514,19 @@ def _record_corpus_benchmark_in(connection: sqlite3.Connection, generation_id: i
     connection.execute(
         "UPDATE knowledge_generations SET qualification_report_json = ? WHERE generation_id = ?",
         (report.as_json(), generation_id),
+    )
+
+
+def _generation_document_ids_in(
+    connection: sqlite3.Connection, generation_id: int
+) -> tuple[str, ...]:
+    return tuple(
+        str(row[0])
+        for row in connection.execute(
+            "SELECT document_id FROM knowledge_generation_documents "
+            "WHERE generation_id = ? ORDER BY document_id",
+            (generation_id,),
+        ).fetchall()
     )
 
 

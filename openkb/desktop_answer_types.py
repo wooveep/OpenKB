@@ -53,6 +53,8 @@ class DesktopEvidenceRef:
     locator: dict[str, object]
     excerpt: str
     channels: tuple[str, ...]
+    version_label: str | None = None
+    version_side: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -63,6 +65,8 @@ class DesktopEvidenceRef:
             "locator": self.locator,
             "excerpt": self.excerpt,
             "channels": list(self.channels),
+            "version_label": self.version_label,
+            "version_side": self.version_side,
         }
 
 

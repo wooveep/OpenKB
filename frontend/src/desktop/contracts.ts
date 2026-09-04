@@ -42,12 +42,22 @@ import type {
   DesktopKnowledgeWorkspaceItem,
   DesktopKnowledgeWorkspaceItemRequest,
 } from "./knowledge-page-contracts"
+import type {
+  DesktopDocumentLineageDecision,
+  DesktopDocumentVersionCandidate,
+  DesktopDocumentVersionCandidateDecision,
+  DesktopDocumentVersionCandidates,
+  DesktopDocumentVersionCatalog,
+  DesktopDocumentVersionDiffs,
+  DesktopVersionFilter,
+} from "./contracts-document-versions"
 export type * from "./knowledge-reanalysis-contracts"
 export type * from "./model-call-lifecycle-contracts"
 export type * from "./contracts-import-observability"
 export type * from "./model-settings-contracts"
 export type * from "./contracts-retrieval"
 export type * from "./knowledge-page-contracts"
+export type * from "./contracts-document-versions"
 
 export const DESKTOP_BRIDGE_PROTOCOL_VERSION = 1
 
@@ -419,24 +429,6 @@ export interface DesktopGlobalSearchResults {
   results: DesktopGlobalSearchResult[]
 }
 
-export type DesktopDocumentVersionCandidateDecision = "link_to_candidate" | "keep_separate"
-
-export interface DesktopDocumentVersionCandidate {
-  candidateId: string
-  documentId: string
-  documentName: string
-  candidateDocumentId: string
-  candidateDocumentName: string
-  lexicalScore: number
-  characterScore: number
-  reason: "lexical_character_similarity"
-  status: "pending" | "accepted" | "rejected" | "dismissed"
-}
-
-export interface DesktopDocumentVersionCandidates {
-  candidates: DesktopDocumentVersionCandidate[]
-}
-
 export type DesktopKnowledgeReconciliationBaselineKind =
   | "published_generation"
   | "user_revision"
@@ -645,7 +637,11 @@ export interface DesktopBridge {
     requestId: string,
   ): Promise<DesktopKnowledgeReanalysisRun>
   retryKnowledgeReanalysis(jobId: string, requestId: string): Promise<DesktopKnowledgeReanalysisRun>
-  askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer>
+  askGrounded(
+    question: string,
+    requestId: string,
+    versionFilter?: DesktopVersionFilter,
+  ): Promise<DesktopGroundedAnswer>
   retryInterruptedAnswer(answerId: string, requestId: string): Promise<DesktopGroundedAnswer>
   groundedAnswers(): Promise<DesktopGroundedAnswers>
   conversations(search?: string): Promise<DesktopConversationList>
@@ -655,7 +651,12 @@ export interface DesktopBridge {
   renameConversation(conversationId: string, title: string, requestId: string): Promise<DesktopConversation>
   deleteConversation(conversationId: string, requestId: string): Promise<DesktopConversationList>
   saveConversationDraft(conversationId: string, draftText: string, requestId: string): Promise<DesktopConversation>
-  askConversation(conversationId: string, question: string, requestId: string): Promise<DesktopConversation>
+  askConversation(
+    conversationId: string,
+    question: string,
+    requestId: string,
+    versionFilter?: DesktopVersionFilter,
+  ): Promise<DesktopConversation>
   regenerateConversationAnswer(conversationId: string, assistantMessageId: string, requestId: string): Promise<DesktopConversation>
   selectAnswerVersion(conversationId: string, assistantMessageId: string, answerVersionId: string, requestId: string): Promise<DesktopConversation>
   knowledgeWorkspace(query?: string): Promise<DesktopKnowledgeWorkspace>
@@ -694,6 +695,12 @@ export interface DesktopBridge {
     requestId: string,
   ): Promise<DesktopKnowledgePage>
   documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates>
+  documentVersionCatalog(): Promise<DesktopDocumentVersionCatalog>
+  confirmDocumentLineage(
+    decision: DesktopDocumentLineageDecision,
+    requestId: string,
+  ): Promise<DesktopDocumentVersionCatalog>
+  documentVersionDiffs(lineageId: string): Promise<DesktopDocumentVersionDiffs>
   resolveDocumentVersionCandidate(
     candidateId: string,
     decision: DesktopDocumentVersionCandidateDecision,

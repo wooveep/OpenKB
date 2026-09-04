@@ -5,10 +5,15 @@ from __future__ import annotations
 import sqlite3
 
 from openkb.desktop_knowledge_sources import AVAILABLE_EVIDENCE_OCCURRENCES_CTE
+from openkb.desktop_scoped_evidence import ScopedEvidenceView
 
 
 def knowledge_source_rows_in(
-    connection: sqlite3.Connection, terms: tuple[str, ...], *, limit: int
+    connection: sqlite3.Connection,
+    terms: tuple[str, ...],
+    *,
+    limit: int,
+    scoped_view: ScopedEvidenceView | None = None,
 ) -> list[tuple[object, ...]]:
     """Rank unique mapped Evidence by published Knowledge Claim wording."""
     if not terms:
@@ -23,9 +28,14 @@ def knowledge_source_rows_in(
             )
         )
         parameters.extend((term, term))
+    occurrence_cte, scope_parameters = (
+        scoped_view.sql_cte("available_evidence_occurrences")
+        if scoped_view is not None
+        else (AVAILABLE_EVIDENCE_OCCURRENCES_CTE, ())
+    )
     return connection.execute(
         f"""
-        {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+        {occurrence_cte}
         , mapped AS (
             SELECT pages.title, sources.claim_text, sources.evidence_id,
                 pages.page_id AS identity,
@@ -80,5 +90,5 @@ def knowledge_source_rows_in(
         ORDER BY channel_score DESC, lifecycle_tier DESC, trust_tier DESC, identity, ordinal
         LIMIT ?
         """,
-        (*parameters, limit),
+        (*scope_parameters, *parameters, limit),
     ).fetchall()

@@ -599,12 +599,45 @@ Document titles, table-of-contents entries, revision records, isolated literals,
 and one-off parameter values remain metadata or claims rather than identities.
 _Avoid_: extract every heading, delayed noise cleanup, Entity Resolution
 
+**Candidate Registry Generation**:
+The explicit, document-scoped dependency snapshot created whenever one validated
+Knowledge Analysis is materialized. It has a stable generation identity, the
+complete candidate-and-claim digest, admission counts, and Evidence bindings. An
+empty current generation means analysis succeeded with no admitted identities;
+an absent generation means the dependency is unavailable. Semantic Relation
+Analysis and publication remain bound to the exact current generation.
+_Avoid_: candidate row count, implicit legacy marker, Generated Knowledge Generation
+
 **Knowledge Identity**:
 The corpus-stable identity for one reusable Concept or Entity subject, or for one
 user-completable Procedure goal. Supporting subtopics become sections; an
 operation with an independently useful goal or lifecycle receives its own
 Procedure identity and may be referenced by a broader Procedure.
 _Avoid_: source section, topic keyword, whole-product omnibus page
+
+**Knowledge Identity Graph**:
+The rebuildable corpus graph whose nodes are admitted, corpus-stable Knowledge
+Identities and whose typed edges are evidence-bound Semantic Relation
+Assertions. It links Concepts, Entities, and Procedures without turning source
+headings, claims, commands, paths, parameters, or PageTree nodes into semantic
+identities. Query-time traversal resolves every selected node and edge back to
+original Available EvidenceRefs before answer generation.
+_Avoid_: Document PageTree, evidence-fragment graph, heading graph
+
+**Semantic Relation Assertion**:
+A typed, directed relationship between two admitted Document Knowledge
+Candidates, supported by one or more claims belonging to an endpoint and by the
+EvidenceRefs for those claims. Relation analysis may select existing candidate
+IDs but may not create, rename, merge, or reclassify identities. Corpus
+consolidation maps both endpoints to Knowledge Identities before publication.
+_Avoid_: free-text predicate, model-created node, unsupported co-occurrence
+
+**Component Entity**:
+A durable, named component that is independently queryable and therefore earns
+an Entity identity; its membership in another Entity is expressed by a
+`PART_OF` Semantic Relation Assertion. An unnamed part, field, step, command,
+path, or parameter remains a claim about its owner rather than a graph node.
+_Avoid_: every part noun, section nesting, Procedure step
 
 **Canonical Knowledge Title**:
 The stable display title for a Knowledge Identity, chosen from an evidence-backed
@@ -654,6 +687,20 @@ The evidence-preserving resolution of Document Knowledge Candidates into
 high-confidence generated identities; ambiguous identity matches remain review
 work rather than being merged automatically.
 _Avoid_: Knowledge Analysis Merge, Knowledge Reconciliation
+
+**Semantic Relation Analysis**:
+The post-admission, document-scoped Model Analysis that inspects every
+evidence-bound claim in token-bounded batches and emits only relationships among
+the supplied candidate IDs. Each batch carries all claim owners plus admitted
+identities named literally by a canonical title or alias in those claims; the
+same eligibility rule is enforced at the output boundary. Content is split or
+explicitly paused when it cannot fit, never silently prefix-truncated. An
+explicit output-limit stop after final output recursively splits only the
+affected claim batch; reasoning-only exhaustion is a Model Result Failure, not
+batch compression. Invalid endpoints, incompatible type pairs, or unsupported
+claim references are rejected and recorded at the model boundary, while
+independently valid edges remain usable as a degraded result.
+_Avoid_: identity extraction, PageTree construction, first-N evidence scan
 
 **Automatic Knowledge Identity Match**:
 A same-kind consolidation decision supported by an identical normalized title
@@ -903,6 +950,14 @@ values are maxima rather than fixed per-kind allocations; independent reads may
 be batched, and the Answer Coverage Gate stops work as soon as scope is covered.
 _Avoid_: model turn limit, target read count, open-ended agent loop
 
+**Navigation Evidence Envelope**:
+The model-capacity-aware ceiling on unique Available EvidenceRefs and source
+tokens retained while Navigation merges its reads. Small or unknown Answer
+models use the conservative baseline; verified large-context models receive a
+larger bounded envelope. It never changes the evidence-only authority rule and
+does not require filling the available context.
+_Avoid_: fixed first-N citation cap, provider output ceiling, Knowledge Guidance
+
 **Answer Coverage Gate**:
 The evidence-bound comparison of a Navigation Objective's required aspects with
 collected Available Evidence. Every aspect is covered, partial, missing, or not
@@ -916,6 +971,14 @@ The ordered, navigation-only projection of Answer Coverage and its canonical
 Evidence IDs passed to the answer model. It organizes synthesis but cannot add a
 fact or replace Original Evidence citations.
 _Avoid_: generated answer, Knowledge Guidance, chain of thought
+
+**Evidence Occurrence Postcondition**:
+The deterministic final-answer check that preserves the positional meaning of
+canonical Evidence repeated after multiple source steps. When the answer cites a
+step but omits that step's repeated occurrence, OpenKB restores the exact
+Evidence excerpt and citation at that position; it never generates a substitute
+claim or repairs a step the answer did not cite.
+_Avoid_: corpus-specific answer patch, semantic inference, uncited completion
 
 **Retrieval Trace**:
 The compact source-content-free record of the Navigation Objective summary,

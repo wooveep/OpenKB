@@ -28,6 +28,10 @@ import type {
   DesktopDocumentVersionCandidate,
   DesktopDocumentVersionCandidates,
   DesktopDocumentVersionCandidateDecision,
+  DesktopDocumentLineageDecision,
+  DesktopDocumentVersionCatalog,
+  DesktopDocumentVersionDiffs,
+  DesktopVersionFilter,
   DesktopImportTask,
   DesktopRecoveryOverride,
   DesktopTextDocumentImport,
@@ -40,6 +44,7 @@ import {
   sourceName,
   updateImportTasks,
 } from "./memory-bridge-helpers"
+import { MemoryDocumentVersionStore } from "./memory-document-version-store"
 import { MemoryModelSettingsBridge } from "./memory-model-settings"
 
 function emptyRetrievalTrace(canonicalEvidenceIds: string[] = []) {
@@ -71,6 +76,16 @@ function emptyRetrievalTrace(canonicalEvidenceIds: string[] = []) {
     groundingInputBudgetTokens: 0,
     evidenceInputTokens: 0,
     guidanceInputTokens: 0,
+    versionNavigationSnapshotId: "",
+    versionCatalogRevisionId: "",
+    versionCatalogDigest: "",
+    versionScopeMode: "all_available",
+    versionScopeStatus: "not_applicable",
+    versionScopeLineageIds: [],
+    versionScopeLabels: [],
+    versionScopeDocumentIds: [],
+    versionScopeSelectionReason: "memory_bridge",
+    versionScopeDegradationReason: "",
   }
 }
 
@@ -94,7 +109,7 @@ export class MemoryDesktopBridge extends MemoryModelSettingsBridge implements De
   private groundedAnswerResults: DesktopGroundedAnswer[] = []
   private conversationResults: DesktopConversation[] = []
   private lastConversationId: string | null = null
-  private documentVersionCandidateResults: DesktopDocumentVersionCandidate[] = []
+  private readonly documentVersions = new MemoryDocumentVersionStore()
 
   constructor(
     handshakeResult: DesktopBridgeHandshake = {
@@ -327,13 +342,19 @@ export class MemoryDesktopBridge extends MemoryModelSettingsBridge implements De
     throw new Error("Knowledge Reanalysis is not available in the renderer preview.")
   }
 
-  async askGrounded(question: string, requestId: string): Promise<DesktopGroundedAnswer> {
+  async askGrounded(
+    question: string,
+    requestId: string,
+    versionFilter?: DesktopVersionFilter,
+  ): Promise<DesktopGroundedAnswer> {
     if (this.activeKnowledgeBaseResult === null) {
       throw new Error("Open a Desktop Knowledge Base before asking a question.")
     }
-    const source = this.importJobResults.find(
-      (task) => task.document?.availability === "available",
-    )?.document
+    const source = this.importJobResults.find((task) => (
+      task.document?.availability === "available"
+      && (!versionFilter?.documentIds.length
+        || versionFilter.documentIds.includes(task.document.documentId))
+    ))?.document
     const citations = source ? [{
       evidenceId: `evidence-${source.documentId}`,
       documentId: source.documentId,
@@ -478,12 +499,21 @@ export class MemoryDesktopBridge extends MemoryModelSettingsBridge implements De
     return this.updateConversation(conversationId, (conversation) => ({ ...conversation, draftText }))
   }
 
-  async askConversation(conversationId: string, question: string, requestId: string): Promise<DesktopConversation> {
+  async askConversation(
+    conversationId: string,
+    question: string,
+    requestId: string,
+    versionFilter?: DesktopVersionFilter,
+  ): Promise<DesktopConversation> {
     const conversation = requireConversation(this.conversationResults, conversationId)
     const now = new Date().toISOString()
     const userMessageId = `user-${requestId}`
     const assistantMessageId = `assistant-${requestId}`
-    const source = this.importJobResults.find((task) => task.document?.availability === "available")?.document
+    const source = this.importJobResults.find((task) => (
+      task.document?.availability === "available"
+      && (!versionFilter?.documentIds.length
+        || versionFilter.documentIds.includes(task.document.documentId))
+    ))?.document
     const citations = source ? [{
       evidenceId: `evidence-${source.documentId}`,
       documentId: source.documentId,
@@ -571,9 +601,22 @@ export class MemoryDesktopBridge extends MemoryModelSettingsBridge implements De
   }
 
   async documentVersionCandidates(): Promise<DesktopDocumentVersionCandidates> {
-    return {
-      candidates: this.documentVersionCandidateResults.filter((candidate) => candidate.status === "pending"),
-    }
+    return this.documentVersions.pendingCandidates()
+  }
+
+  async documentVersionCatalog(): Promise<DesktopDocumentVersionCatalog> {
+    return this.documentVersions.catalogSnapshot()
+  }
+
+  async confirmDocumentLineage(
+    decision: DesktopDocumentLineageDecision,
+    requestId: string,
+  ): Promise<DesktopDocumentVersionCatalog> {
+    return this.documentVersions.confirmLineage(decision, requestId, this.importJobResults)
+  }
+
+  async documentVersionDiffs(lineageId: string): Promise<DesktopDocumentVersionDiffs> {
+    return this.documentVersions.diffsForLineage(lineageId)
   }
 
   async resolveDocumentVersionCandidate(
@@ -582,19 +625,7 @@ export class MemoryDesktopBridge extends MemoryModelSettingsBridge implements De
     requestId: string,
   ): Promise<DesktopDocumentVersionCandidate> {
     void requestId
-    const candidate = this.documentVersionCandidateResults.find((item) => item.candidateId === candidateId)
-    if (!candidate) throw new Error("The selected document version candidate was not found.")
-    if (candidate.status !== "pending") throw new Error("The selected document version candidate is resolved.")
-    const status: DesktopDocumentVersionCandidate["status"] = decision === "link_to_candidate"
-      ? "accepted"
-      : "rejected"
-    const resolved = { ...candidate, status }
-    this.documentVersionCandidateResults = this.documentVersionCandidateResults.map((item) => (
-      item.documentId === candidate.documentId
-        ? item.candidateId === candidateId ? resolved : { ...item, status: "dismissed" }
-        : item
-    ))
-    return resolved
+    return this.documentVersions.resolveCandidate(candidateId, decision)
   }
 
   async pauseImportJob(jobId: string): Promise<DesktopImportControlResult> {
@@ -737,6 +768,7 @@ export class MemoryDesktopBridge extends MemoryModelSettingsBridge implements De
     this.groundedAnswerResults = []
     this.conversationResults = []
     this.lastConversationId = null
+    this.documentVersions.reset()
     this.resetKnowledgePages()
     return {
       knowledgeBase: this.activeKnowledgeBaseResult,

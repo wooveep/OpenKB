@@ -9,6 +9,11 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
+from openkb.desktop_candidate_registry import (
+    CandidateRegistryStatus,
+    candidate_registry_outcome_in,
+)
+from openkb.desktop_corpus_knowledge_pipeline import CorpusKnowledgeSynthesisPipeline
 from openkb.desktop_knowledge_graph import DesktopKnowledgeGraphService
 from openkb.desktop_model_event import normalize_model_event
 from openkb.desktop_model_gateway import DesktopModelGateway
@@ -19,6 +24,7 @@ from openkb.desktop_model_result_failure import (
 )
 from openkb.desktop_model_usage import model_activity_for_call_in
 from openkb.desktop_prompt_contracts import prompt_contract_for
+from openkb.desktop_semantic_graph import semantic_graph_operation_for_document_in
 from openkb.desktop_structured_output import structured_output_repair_contract_digest
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
@@ -48,23 +54,54 @@ class DesktopKnowledgeGraphExtractionTasks:
             connection = self._connect()
             try:
                 with connection:
+                    registry = candidate_registry_outcome_in(connection, document_id)
+                    operation = semantic_graph_operation_for_document_in(connection, document_id)
+                    prompt_digest = prompt_contract_for(operation).digest
+                    generation = registry.generation
+                    input_provenance = (
+                        "semantic" if registry.status in {"ready", "empty"} else registry.status
+                    )
                     cursor = connection.execute(
                         """
                         INSERT INTO knowledge_graph_extraction_tasks (
                             document_id, status, reason, provider, model, prompt_digest,
-                            created_at, updated_at
+                            created_at, updated_at, input_provenance,
+                            candidate_generation_id, candidate_generation_digest
                         )
-                        SELECT document_id, 'pending', 'initial', ?, ?, ?, ?, ?
+                        SELECT document_id, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?
                         FROM source_documents
                         WHERE document_id = ? AND availability = 'available'
-                        ON CONFLICT(document_id) DO NOTHING
+                        ON CONFLICT(document_id) DO UPDATE SET
+                            status = 'pending', reason = excluded.reason,
+                            provider = excluded.provider, model = excluded.model,
+                            prompt_digest = excluded.prompt_digest,
+                            execution_token = NULL, retry_scope = NULL,
+                            error_code = NULL, error_reason = NULL,
+                            updated_at = excluded.updated_at, completed_at = NULL,
+                            input_provenance = excluded.input_provenance,
+                            candidate_generation_id = excluded.candidate_generation_id,
+                            candidate_generation_digest = excluded.candidate_generation_digest
+                        WHERE knowledge_graph_extraction_tasks.input_provenance
+                                IS NOT excluded.input_provenance
+                           OR knowledge_graph_extraction_tasks.candidate_generation_id
+                                IS NOT excluded.candidate_generation_id
+                           OR knowledge_graph_extraction_tasks.candidate_generation_digest
+                                IS NOT excluded.candidate_generation_digest
                         """,
                         (
+                            (
+                                "candidate_generation_unavailable"
+                                if registry.status == "dependency_unavailable"
+                                else "initial"
+                            ),
                             gateway.provider_name,
                             gateway.model_name,
-                            PROMPT_DIGEST,
+                            prompt_digest,
                             now,
                             now,
+                            input_provenance,
+                            generation.generation_id if generation is not None else None,
+                            generation.registry_digest if generation is not None else None,
                             document_id,
                         ),
                     )
@@ -146,6 +183,15 @@ class DesktopKnowledgeGraphExtractionTasks:
             connection = self._connect()
             try:
                 with connection:
+                    registry = candidate_registry_outcome_in(connection, document_id)
+                    if registry.status == "dependency_unavailable":
+                        return False
+                    operation = semantic_graph_operation_for_document_in(connection, document_id)
+                    prompt_digest = prompt_contract_for(operation).digest
+                    generation = registry.generation
+                    input_provenance = (
+                        "semantic" if registry.status in {"ready", "empty"} else registry.status
+                    )
                     previous = connection.execute(
                         """
                         SELECT retry_scope FROM knowledge_graph_extraction_tasks
@@ -164,7 +210,9 @@ class DesktopKnowledgeGraphExtractionTasks:
                         SET status = 'pending', reason = 'explicit_retry',
                             provider = ?, model = ?, prompt_digest = ?,
                             execution_token = NULL, retry_scope = ?, error_code = NULL,
-                            error_reason = NULL, updated_at = ?, completed_at = NULL
+                            error_reason = NULL, updated_at = ?, completed_at = NULL,
+                            input_provenance = ?, candidate_generation_id = ?,
+                            candidate_generation_digest = ?
                         WHERE document_id = ? AND (
                                 status IN ('pending', 'failed')
                                 OR (
@@ -188,9 +236,12 @@ class DesktopKnowledgeGraphExtractionTasks:
                         (
                             gateway.provider_name,
                             gateway.model_name,
-                            PROMPT_DIGEST,
+                            prompt_digest,
                             retry_scope,
                             _timestamp(),
+                            input_provenance,
+                            generation.generation_id if generation is not None else None,
+                            generation.registry_digest if generation is not None else None,
                             document_id,
                             document_id,
                         ),
@@ -202,19 +253,22 @@ class DesktopKnowledgeGraphExtractionTasks:
                             gateway,
                             retry_scope=retry_scope,
                             contracts=(
-                                ("knowledge_graph_extraction", None),
+                                (operation, None),
+                                (
+                                    "structured_output_repair",
+                                    structured_output_repair_contract_digest(operation),
+                                ),
+                                ("entity_dossier_planning", None),
                                 (
                                     "structured_output_repair",
                                     structured_output_repair_contract_digest(
-                                        "knowledge_graph_extraction"
+                                        "entity_dossier_planning"
                                     ),
                                 ),
                             ),
                         )
                         if previous_scope is not None:
-                            revoke_model_operation_retry_scope_in(
-                                connection, previous_scope
-                            )
+                            revoke_model_operation_retry_scope_in(connection, previous_scope)
             finally:
                 connection.close()
         return accepted
@@ -224,32 +278,60 @@ class DesktopKnowledgeGraphExtractionTasks:
         try:
             rows = connection.execute(
                 """
-                SELECT tasks.document_id, tasks.retry_scope
+                SELECT tasks.document_id, tasks.retry_scope, tasks.input_provenance,
+                    COALESCE(generations.admitted_count, 0)
                 FROM knowledge_graph_extraction_tasks AS tasks
                 JOIN source_documents AS documents ON documents.document_id = tasks.document_id
+                LEFT JOIN knowledge_candidate_registry_state AS registry
+                  ON registry.document_id = tasks.document_id
+                LEFT JOIN knowledge_candidate_generations AS generations
+                  ON generations.candidate_generation_id = tasks.candidate_generation_id
                 WHERE tasks.status = 'pending'
                     AND (tasks.error_code IS NULL
                         OR tasks.error_code = 'model_operation_suspended')
                     AND tasks.provider = ? AND tasks.model = ?
-                    AND tasks.prompt_digest = ? AND documents.availability = 'available'
+                    AND documents.availability = 'available'
+                    AND tasks.input_provenance != 'dependency_unavailable'
+                    AND (
+                        (tasks.input_provenance = 'explicit_legacy'
+                            AND registry.provenance_state = 'explicit_legacy')
+                        OR
+                        (tasks.input_provenance = 'semantic'
+                            AND registry.provenance_state = 'semantic'
+                            AND registry.current_candidate_generation_id
+                                = tasks.candidate_generation_id
+                            AND generations.registry_digest
+                                = tasks.candidate_generation_digest)
+                    )
                     AND (tasks.reason != 'explicit_retry' OR tasks.retry_scope IS NOT NULL)
                 ORDER BY CASE WHEN tasks.reason = 'explicit_retry' THEN 0 ELSE 1 END,
                     tasks.updated_at, tasks.document_id LIMIT 50
                 """,
-                (gateway.provider_name, gateway.model_name, PROMPT_DIGEST),
+                (gateway.provider_name, gateway.model_name),
             ).fetchall()
             documents = tuple(
-                (str(row[0]), str(row[1]) if row[1] is not None else None) for row in rows
+                (
+                    str(row[0]),
+                    str(row[1]) if row[1] is not None else None,
+                    (
+                        "knowledge_graph_extraction"
+                        if str(row[2]) == "explicit_legacy"
+                        else "knowledge_relation_analysis"
+                    ),
+                    "empty" if str(row[2]) == "semantic" and int(row[3]) == 0 else "ready",
+                )
+                for row in rows
             )
         finally:
             connection.close()
         return tuple(
             document_id
-            for document_id, retry_scope in documents
-            if model_operation_dispatch_possible(
+            for document_id, retry_scope, operation, registry_status in documents
+            if registry_status == "empty"
+            or model_operation_dispatch_possible(
                 self.kb_dir,
                 gateway,
-                operation="knowledge_graph_extraction",
+                operation=operation,
                 retry_scope=retry_scope,
             )
         )
@@ -265,7 +347,7 @@ class DesktopKnowledgeGraphExtractionTasks:
         claim = self._claim(document_id, gateway)
         if claim is None:
             return False
-        token, document_name, retry_scope = claim
+        token, document_name, retry_scope, operation, registry_status = claim
 
         def claim_stopped() -> bool:
             return should_stop() or not self._claim_is_active(document_id, token)
@@ -273,10 +355,10 @@ class DesktopKnowledgeGraphExtractionTasks:
         if claim_stopped():
             self._finish(document_id, token, "pending", INTERRUPTED_CODE, INTERRUPTED_REASON)
             return False
-        if not model_operation_dispatch_possible(
+        if registry_status != "empty" and not model_operation_dispatch_possible(
             self.kb_dir,
             gateway,
-            operation="knowledge_graph_extraction",
+            operation=operation,
             retry_scope=retry_scope,
         ):
             self._finish(
@@ -305,6 +387,13 @@ class DesktopKnowledgeGraphExtractionTasks:
                 retry_scope=retry_scope,
             )
             if published_claim:
+                if registry_status != "explicit_legacy":
+                    CorpusKnowledgeSynthesisPipeline(self.kb_dir).run_generation(
+                        should_stop=should_stop,
+                        force_generation=True,
+                        gateway=gateway,
+                        retry_scope=retry_scope,
+                    )
                 logger.info("knowledge_graph_extraction_completed document_id=%s", document_id)
                 return True
             if claim_stopped():
@@ -336,8 +425,25 @@ class DesktopKnowledgeGraphExtractionTasks:
                 connection.execute("BEGIN IMMEDIATE")
                 owned = connection.execute(
                     """
-                    SELECT retry_scope FROM knowledge_graph_extraction_tasks
-                    WHERE document_id = ? AND status = 'running' AND execution_token = ?
+                    SELECT tasks.retry_scope
+                    FROM knowledge_graph_extraction_tasks AS tasks
+                    LEFT JOIN knowledge_candidate_registry_state AS registry
+                      ON registry.document_id = tasks.document_id
+                    LEFT JOIN knowledge_candidate_generations AS generations
+                      ON generations.candidate_generation_id = tasks.candidate_generation_id
+                    WHERE tasks.document_id = ? AND tasks.status = 'running'
+                        AND tasks.execution_token = ?
+                        AND (
+                            (tasks.input_provenance = 'explicit_legacy'
+                                AND registry.provenance_state = 'explicit_legacy')
+                            OR
+                            (tasks.input_provenance = 'semantic'
+                                AND registry.provenance_state = 'semantic'
+                                AND registry.current_candidate_generation_id
+                                    = tasks.candidate_generation_id
+                                AND generations.registry_digest
+                                    = tasks.candidate_generation_digest)
+                        )
                     """,
                     (document_id, token),
                 ).fetchone()
@@ -373,29 +479,52 @@ class DesktopKnowledgeGraphExtractionTasks:
         self,
         document_id: str,
         gateway: DesktopModelGateway,
-    ) -> tuple[str, str, str | None] | None:
+    ) -> tuple[str, str, str | None, str, CandidateRegistryStatus] | None:
         with kb_ingest_lock(self.state_dir):
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 row = connection.execute(
                     """
-                    SELECT documents.display_name, tasks.reason, tasks.retry_scope
+                    SELECT documents.display_name, tasks.reason, tasks.retry_scope,
+                        tasks.input_provenance, COALESCE(generations.admitted_count, 0)
                     FROM knowledge_graph_extraction_tasks AS tasks
                     JOIN source_documents AS documents ON documents.document_id = tasks.document_id
+                    LEFT JOIN knowledge_candidate_registry_state AS registry
+                      ON registry.document_id = tasks.document_id
+                    LEFT JOIN knowledge_candidate_generations AS generations
+                      ON generations.candidate_generation_id = tasks.candidate_generation_id
                     WHERE tasks.document_id = ? AND tasks.status = 'pending'
                         AND (tasks.error_code IS NULL
                             OR tasks.error_code = 'model_operation_suspended')
                         AND tasks.provider = ?
-                        AND tasks.model = ? AND tasks.prompt_digest = ?
+                        AND tasks.model = ?
                         AND documents.availability = 'available'
+                        AND tasks.input_provenance != 'dependency_unavailable'
+                        AND (
+                            (tasks.input_provenance = 'explicit_legacy'
+                                AND registry.provenance_state = 'explicit_legacy')
+                            OR
+                            (tasks.input_provenance = 'semantic'
+                                AND registry.provenance_state = 'semantic'
+                                AND registry.current_candidate_generation_id
+                                    = tasks.candidate_generation_id
+                                AND generations.registry_digest
+                                    = tasks.candidate_generation_digest)
+                        )
                         AND (tasks.reason != 'explicit_retry' OR tasks.retry_scope IS NOT NULL)
                     """,
-                    (document_id, gateway.provider_name, gateway.model_name, PROMPT_DIGEST),
+                    (document_id, gateway.provider_name, gateway.model_name),
                 ).fetchone()
                 if row is None:
                     connection.rollback()
                     return None
+                operation = (
+                    "knowledge_graph_extraction"
+                    if str(row[3]) == "explicit_legacy"
+                    else "knowledge_relation_analysis"
+                )
+                prompt_digest = prompt_contract_for(operation).digest
                 token = uuid.uuid4().hex
                 cursor = connection.execute(
                     """
@@ -403,11 +532,11 @@ class DesktopKnowledgeGraphExtractionTasks:
                     SET status = 'running', execution_token = ?,
                         attempt_count = attempt_count + 1, model_attempt = 0,
                         call_id = NULL, error_code = NULL, error_reason = NULL,
-                        updated_at = ?, completed_at = NULL
+                        prompt_digest = ?, updated_at = ?, completed_at = NULL
                     WHERE document_id = ? AND status = 'pending'
                         AND (error_code IS NULL OR error_code = 'model_operation_suspended')
                     """,
-                    (token, _timestamp(), document_id),
+                    (token, prompt_digest, _timestamp(), document_id),
                 )
                 if cursor.rowcount != 1:
                     connection.rollback()
@@ -416,7 +545,12 @@ class DesktopKnowledgeGraphExtractionTasks:
                 retry_scope = (
                     str(row[2]) if str(row[1]) == "explicit_retry" and row[2] is not None else None
                 )
-                return token, str(row[0]), retry_scope
+                registry_status: CandidateRegistryStatus = (
+                    "explicit_legacy"
+                    if str(row[3]) == "explicit_legacy"
+                    else ("empty" if int(row[4]) == 0 else "ready")
+                )
+                return token, str(row[0]), retry_scope, operation, registry_status
             except BaseException:
                 connection.rollback()
                 raise
@@ -431,8 +565,25 @@ class DesktopKnowledgeGraphExtractionTasks:
                 return (
                     connection.execute(
                         """
-                        SELECT 1 FROM knowledge_graph_extraction_tasks
-                        WHERE document_id = ? AND status = 'running' AND execution_token = ?
+                        SELECT 1
+                        FROM knowledge_graph_extraction_tasks AS tasks
+                        LEFT JOIN knowledge_candidate_registry_state AS registry
+                          ON registry.document_id = tasks.document_id
+                        LEFT JOIN knowledge_candidate_generations AS generations
+                          ON generations.candidate_generation_id = tasks.candidate_generation_id
+                        WHERE tasks.document_id = ? AND tasks.status = 'running'
+                            AND tasks.execution_token = ?
+                            AND (
+                                (tasks.input_provenance = 'explicit_legacy'
+                                    AND registry.provenance_state = 'explicit_legacy')
+                                OR
+                                (tasks.input_provenance = 'semantic'
+                                    AND registry.provenance_state = 'semantic'
+                                    AND registry.current_candidate_generation_id
+                                        = tasks.candidate_generation_id
+                                    AND generations.registry_digest
+                                        = tasks.candidate_generation_digest)
+                            )
                         """,
                         (document_id, token),
                     ).fetchone()

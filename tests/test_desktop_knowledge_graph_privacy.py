@@ -113,7 +113,7 @@ def test_regular_failure_log_excludes_source_quotes_and_raw_model_content(
 
 
 def test_degraded_graph_interpretation_survives_actual_jsonl_filtering(tmp_path) -> None:
-    source_secret = "private source text 8fda6"
+    source_secret = "Atlas private source text 8fda6"
     interpretation = GraphExtractionBoundary.interpret(
         json.dumps(
             {
@@ -123,7 +123,7 @@ def test_degraded_graph_interpretation_survives_actual_jsonl_filtering(tmp_path)
                         "evidence_id": "evidence-1",
                         "type": "entity",
                         "label": "Atlas",
-                        "support_quote": "private",
+                        "support_quote": "Atlas",
                     },
                     {
                         "id": "rejected",

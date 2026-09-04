@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 from openkb.desktop_knowledge_sources import AVAILABLE_EVIDENCE_OCCURRENCES_CTE
+from openkb.desktop_scoped_evidence import ScopedEvidenceView
 
 CATALOG_DIRECT_WEIGHT = 0.45
 CATALOG_LINK_WEIGHT = 0.15
@@ -17,6 +18,7 @@ def catalog_route_rows_in(
     terms: tuple[str, ...],
     *,
     limit: int,
+    scoped_view: ScopedEvidenceView | None = None,
 ) -> list[tuple[object, ...]]:
     """Return unique evidence reached from matched nodes and one ordinary link hop."""
     if not terms:
@@ -27,9 +29,14 @@ def catalog_route_rows_in(
         score_parts.append("CASE WHEN instr(nodes.search_text, ?) > 0 THEN 1 ELSE 0 END")
         parameters.append(term)
     score_expression = " + ".join(score_parts)
+    occurrence_cte, scope_parameters = (
+        scoped_view.sql_cte("available_evidence_occurrences")
+        if scoped_view is not None
+        else (AVAILABLE_EVIDENCE_OCCURRENCES_CTE, ())
+    )
     return connection.execute(
         f"""
-        {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+        {occurrence_cte}
         , matched_nodes AS (
             SELECT nodes.node_id, ({score_expression}) AS node_score,
                 CASE
@@ -114,5 +121,12 @@ def catalog_route_rows_in(
         ORDER BY route_weight DESC, node_score DESC, hop, evidence_id
         LIMIT ?
         """,
-        (*parameters, generation_id, generation_id, generation_id, limit),
+        (
+            *scope_parameters,
+            *parameters,
+            generation_id,
+            generation_id,
+            generation_id,
+            limit,
+        ),
     ).fetchall()

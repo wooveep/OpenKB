@@ -74,6 +74,83 @@ def _empty_analysis(scope: str) -> str:
     )
 
 
+def _corpus_analysis_response(evidence_id: str) -> str:
+    return json.dumps(
+        {
+            "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+            "analysis_scope": "document",
+            "document_description": "Runtime service documentation.",
+            "document_summary": [
+                {
+                    "role": "purpose",
+                    "text": "This document describes the Runtime service.",
+                    "source_evidence_ids": [evidence_id],
+                }
+            ],
+            "concepts": [],
+            "entities": [
+                {
+                    "title": "Runtime",
+                    "subtype": "service",
+                    "aliases": [],
+                    "tags": ["local"],
+                    "claims": [
+                        {
+                            "role": "capability",
+                            "text": "The Runtime service uses a local mode.",
+                            "applicability": {
+                                "product_version": "unspecified",
+                                "platform": "unspecified",
+                                "deployment_scenario": "local",
+                                "time_boundary": "unspecified",
+                            },
+                            "source_evidence_ids": [evidence_id],
+                        }
+                    ],
+                }
+            ],
+            "procedures": [],
+        }
+    )
+
+
+def _inventory_response(request) -> str:
+    snapshot = json.loads(request.content)
+    return json.dumps(
+        {
+            "document_version_id": snapshot["document_version_id"],
+            "analysis_generation_id": snapshot["analysis_generation_id"],
+            "decisions": [
+                {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision": "create",
+                    "canonical_title": proposal["title"],
+                    "entity_subtype": proposal["proposed_subtype"],
+                    "claim_ids": [claim["claim_id"] for claim in proposal["claims"]],
+                    "target_identity_id": None,
+                    "reason_codes": ["durable_named_entity"],
+                    "supporting_proposal_ids": [proposal["proposal_id"]],
+                    "corpus_brief_ids": [],
+                }
+                for proposal in snapshot["proposals"]
+            ],
+        }
+    )
+
+
+def _dossier_response(request) -> str:
+    snapshot = json.loads(request.content)
+    return json.dumps(
+        {
+            "generation_id": snapshot["generation_id"],
+            "identity_id": snapshot["identity_id"],
+            "summary_claim_ids": [claim["claim_id"] for claim in snapshot["claims"]],
+            "sections": [],
+            "related_identity_ids": [],
+        }
+    )
+
+
 def test_reanalysis_routes_changes_to_review_without_overwriting_current_knowledge(
     tmp_path: Path,
 ) -> None:
@@ -104,6 +181,74 @@ def test_reanalysis_routes_changes_to_review_without_overwriting_current_knowled
             "SELECT COUNT(*) FROM knowledge_reconciliation_candidates "
             "WHERE status = 'pending_conflict'"
         ).fetchone() == (1,)
+
+
+def test_corpus_reanalysis_publishes_candidates_then_plans_dossiers_outside_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        "openkb.desktop_knowledge_generations._record_corpus_benchmark_in",
+        lambda connection, generation_id: connection.execute(
+            "UPDATE knowledge_generations SET qualification_report_json = ? "
+            "WHERE generation_id = ?",
+            ('{"schema_version":"openkb.corpus-benchmark.v3","passed":true}', generation_id),
+        ),
+    )
+    kb_dir, document_id = _imported_document(tmp_path)
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+    operations: list[str] = []
+
+    def transport(request, _timeout_seconds):
+        operations.append(request.operation)
+        if request.operation == "knowledge_fact_harvest":
+            evidence_id = str(json.loads(request.content)["evidence"][0]["evidence_id"])
+            return _corpus_analysis_response(evidence_id)
+        if request.operation == "document_entity_inventory":
+            return _inventory_response(request)
+        if request.operation == "entity_dossier_planning":
+            with sqlite3.connect(database_path, timeout=0.1) as probe:
+                probe.execute("BEGIN IMMEDIATE")
+                probe.rollback()
+            return _dossier_response(request)
+        raise AssertionError(request.operation)
+
+    service = DesktopKnowledgeReanalysisService(kb_dir)
+    run = service.create_run((document_id,), provider="provider", model="model")
+    service.run_job(
+        run.jobs[0].job_id,
+        DesktopModelGateway(transport, provider_name="provider", model_name="model"),
+    )
+
+    assert service.overview()["runs"][0]["status"] == "completed"
+    assert operations == [
+        "knowledge_fact_harvest",
+        "document_entity_inventory",
+        "entity_dossier_planning",
+    ]
+    with sqlite3.connect(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT provenance_state, current_candidate_generation_id "
+                "FROM knowledge_candidate_registry_state WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()[0]
+            == "semantic"
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM knowledge_candidate_generations WHERE document_id = ?",
+            (document_id,),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT tasks.status, manifests.dossier_state "
+            "FROM knowledge_corpus_synthesis_tasks AS tasks "
+            "JOIN knowledge_generation_manifests AS manifests "
+            "ON manifests.generation_id = tasks.generation_id "
+            "ORDER BY tasks.generation_id DESC LIMIT 1"
+        ).fetchone() == ("completed", "ready")
 
 
 def test_historical_schema_is_outdated_without_blocking_reanalysis_overview(
@@ -348,7 +493,7 @@ def test_reanalysis_batches_preserve_duplicate_evidence_occurrences(
     run = service.create_run((document.document_id,), provider="provider", model="model")
 
     def transport(request, _timeout_seconds):
-        if request.operation == "knowledge_analysis_batch":
+        if request.operation == "knowledge_fact_harvest":
             return _empty_analysis("batch")
         if request.operation == "knowledge_analysis_merge":
             return _empty_analysis("document")
@@ -389,7 +534,7 @@ def test_reanalysis_retry_reuses_completed_long_document_batch(
 
     def transport(request, _timeout_seconds):
         nonlocal failed_once
-        if request.operation == "knowledge_analysis_batch":
+        if request.operation == "knowledge_fact_harvest":
             ordinal = int(json.loads(request.content)["batch_ordinal"])
             operations.append(f"batch:{ordinal}")
             if ordinal == 1 and not failed_once:

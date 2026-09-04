@@ -14,6 +14,8 @@ export interface DesktopEvidenceRef {
   locator: Record<string, unknown>
   excerpt: string
   channels: string[]
+  versionLabel?: string | null
+  versionSide?: string | null
 }
 
 export interface DesktopAnswerSourceImage {
@@ -69,6 +71,16 @@ export interface DesktopRetrievalTrace {
   groundingInputBudgetTokens: number
   evidenceInputTokens: number
   guidanceInputTokens: number
+  versionNavigationSnapshotId: string
+  versionCatalogRevisionId: string
+  versionCatalogDigest: string
+  versionScopeMode: string
+  versionScopeStatus: string
+  versionScopeLineageIds: string[]
+  versionScopeLabels: string[]
+  versionScopeDocumentIds: string[]
+  versionScopeSelectionReason: string
+  versionScopeDegradationReason: string
 }
 
 export interface DesktopGroundedAnswer {

@@ -25,6 +25,14 @@ const knowledgePageSource = await readFile(
   resolve(frontendDir, "src/desktop/DesktopKnowledgePagePanel.tsx"),
   "utf8",
 )
+const documentVersionReviewSource = await readFile(
+  resolve(frontendDir, "src/desktop/DesktopDocumentVersionCandidatePanel.tsx"),
+  "utf8",
+)
+const conversationSource = await readFile(
+  resolve(frontendDir, "src/desktop/DesktopConversationPanel.tsx"),
+  "utf8",
+)
 const mutationReloadSource = knowledgeWorkspaceSource.slice(
   knowledgeWorkspaceSource.indexOf("const reloadAfterUserMutation"),
   knowledgeWorkspaceSource.indexOf("useEffect(() =>", knowledgeWorkspaceSource.indexOf("const reloadAfterUserMutation")),
@@ -59,6 +67,12 @@ assert.match(knowledgePageSource, /onKnowledgePagesChangedRef\.current/)
 assert.match(knowledgePageSource, /mountedRef\.current \? preferredPageId : null/)
 assert.match(knowledgePageSource, /notifyKnowledgePagesChanged/)
 assert.match(knowledgePageSource, /!embedded \? \(/)
+assert.match(documentVersionReviewSource, /branchLabels/)
+assert.match(documentVersionReviewSource, /draft\.aliases/)
+assert.match(documentVersionReviewSource, /oldLocator/)
+assert.match(documentVersionReviewSource, /newLocator/)
+assert.match(conversationSource, /citation\.versionLabel/)
+assert.match(conversationSource, /citation\.versionSide/)
 await i18next.use(initReactI18next).init({
   lng: "en",
   fallbackLng: "en",
@@ -344,7 +358,7 @@ try {
     React.createElement(EffectiveModelRoleSettings, {
       adapter: {
         identity: "deepseek",
-        version: "deepseek.v1",
+        version: "deepseek.v2",
         structuredOutputMode: "json_object",
         supportsStructuredAnalysis: true,
         supportedReasoning: ["high", "low", "medium", "off"],

@@ -44,8 +44,16 @@ from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_retrieval_fusion import RetrievalCandidate, fuse_candidates
 from openkb.desktop_retrieval_plan import deterministic_plan, model_plan, with_baseline_terms
-from openkb.desktop_retrieval_trace import DesktopAnswerCoverageTrace
-from openkb.desktop_source_sections import bounded_source_text, source_section_evidence_in
+from openkb.desktop_retrieval_trace import (
+    DesktopAnswerCoverageTrace,
+    DesktopRetrievalTrace,
+)
+from openkb.desktop_source_sections import (
+    SOURCE_BLOCK_KIND_CONTEXT_KEY,
+    SOURCE_OCCURRENCE_CONTEXT_KEY,
+    bounded_source_text,
+    source_section_evidence_in,
+)
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseRuntime,
     desktop_state_database_path,
@@ -417,6 +425,275 @@ def test_navigation_observation_exposes_distinct_sections_before_repeated_blocks
         "database-outline",
     ]
     assert len(selected) == 24
+
+
+def test_navigation_observation_prioritizes_newly_recovered_aspect_evidence() -> None:
+    from openkb.desktop_adaptive_navigation import _diverse_evidence
+
+    unrelated = tuple(
+        DesktopEvidenceRef(
+            evidence_id=f"unrelated-{ordinal}",
+            document_id="deployment-guide",
+            document_name="Deployment Guide",
+            section=f"Unrelated section {ordinal}",
+            locator={},
+            excerpt=f"Unrelated detail {ordinal}.",
+            channels=("catalog",),
+        )
+        for ordinal in range(24)
+    )
+    recovered = tuple(
+        DesktopEvidenceRef(
+            evidence_id=f"recovery-{ordinal}",
+            document_id="deployment-guide",
+            document_name="Deployment Guide",
+            section="Database synchronization recovery / Recovery method",
+            locator={},
+            excerpt=f"Recovery step {ordinal}.",
+            channels=("knowledge_navigation_source_window",),
+        )
+        for ordinal in range(16)
+    )
+
+    selected = _diverse_evidence(
+        (*unrelated, *recovered),
+        maximum=24,
+        preferred_ids=tuple(item.evidence_id for item in recovered),
+    )
+
+    assert [item.evidence_id for item in selected[:16]] == [item.evidence_id for item in recovered]
+    assert len(selected) == 24
+
+
+def test_navigation_next_round_observes_the_previous_action_sequence_first(
+    tmp_path,
+) -> None:
+    kb_dir = _knowledge_base(tmp_path)
+    database_path = desktop_state_database_path(kb_dir)
+    seed = DesktopEvidenceRef(
+        evidence_id="recovery-heading",
+        document_id="deployment-guide",
+        document_name="Deployment Guide",
+        section="Database synchronization recovery",
+        locator={},
+        excerpt="Database synchronization recovery",
+        channels=("document_page_tree",),
+    )
+    initial = DesktopEvidencePack(
+        deterministic_plan("Alpha 如何安装部署"),
+        (seed,),
+    )
+    procedure = tuple(
+        DesktopEvidenceRef(
+            evidence_id=f"procedure-{ordinal}",
+            document_id="deployment-guide",
+            document_name="Deployment Guide",
+            section="Database synchronization recovery / Recovery method",
+            locator={},
+            excerpt=(
+                "重新配置数据库同步，见部署文档第四章1.4.2小节“同步功能配置”"
+                if ordinal == 0
+                else f"Recovery step {ordinal}."
+            ),
+            channels=("knowledge_navigation_source_window",),
+        )
+        for ordinal in range(18)
+    )
+    synchronization = tuple(
+        DesktopEvidenceRef(
+            evidence_id=f"synchronization-{ordinal}",
+            document_id="deployment-guide",
+            document_name="Deployment Guide",
+            section="MySQL replication / 1.4.2同步功能配置",
+            locator={},
+            excerpt=f"Synchronization command {ordinal}.",
+            channels=("knowledge_navigation_source_window",),
+        )
+        for ordinal in range(30)
+    )
+    distractors = tuple(
+        DesktopEvidenceRef(
+            evidence_id=f"distractor-{ordinal}",
+            document_id="deployment-guide",
+            document_name="Deployment Guide",
+            section="Unrelated prerequisite handling",
+            locator={},
+            excerpt=f"Distractor {ordinal}.",
+            channels=("knowledge_navigation_source_window",),
+        )
+        for ordinal in range(18)
+    )
+    second_round_evidence_ids: list[str] = []
+
+    def transport(request, _timeout_seconds):
+        prompt = json.loads(request.content)
+        aspects = prompt["objective"]["required_aspects"]
+        if prompt["round"] == 1:
+            return json.dumps(
+                {
+                    "schema_version": "openkb.knowledge-navigation-step.v1",
+                    "snapshot_id": prompt["snapshot_id"],
+                    "objective": prompt["objective"],
+                    "coverage": [
+                        {"aspect": aspect, "status": "missing", "evidence_ids": []}
+                        for aspect in aspects
+                    ],
+                    "actions": [
+                        {
+                            "kind": "read_source_sections",
+                            "aspect": "ordered_actions",
+                            "evidence_ids": [seed.evidence_id],
+                        },
+                        {
+                            "kind": "search_routes",
+                            "aspect": "prerequisites",
+                            "terms": ["unrelated prerequisite"],
+                        },
+                    ],
+                    "decision": "continue",
+                }
+            )
+        if prompt["round"] == 2:
+            second_round_evidence_ids.extend(item["evidence_id"] for item in prompt["evidence"])
+        return json.dumps(
+            {
+                "schema_version": "openkb.knowledge-navigation-step.v1",
+                "snapshot_id": prompt["snapshot_id"],
+                "objective": prompt["objective"],
+                "coverage": [
+                    {
+                        "aspect": aspect,
+                        "status": "partial",
+                        "evidence_ids": [prompt["evidence"][0]["evidence_id"]],
+                    }
+                    for aspect in aspects
+                ],
+                "actions": [],
+                "decision": "stop",
+            }
+        )
+
+    def retrieve_round(**kwargs):
+        if kwargs["retrieval_plan"].terms[0] == "同步功能配置":
+            evidence = synchronization
+        else:
+            evidence = procedure if kwargs["_navigation_source_anchors"] else distractors
+        return DesktopEvidencePack(kwargs["retrieval_plan"], evidence)
+
+    pack = run_navigation_session(
+        kb_dir=kb_dir,
+        database_path=database_path,
+        question="Alpha 如何安装部署",
+        pinned_snapshot_id=current_navigation_snapshot_id(database_path),
+        initial_pack=initial,
+        model_gateway=DesktopModelGateway(transport),
+        retrieve_round=retrieve_round,
+    )
+
+    assert second_round_evidence_ids[:18] == [item.evidence_id for item in procedure]
+    final_evidence_ids = {item.evidence_id for item in pack.evidence}
+    assert {item.evidence_id for item in procedure} <= final_evidence_ids
+    assert {item.evidence_id for item in synchronization[:21]} <= final_evidence_ids
+
+
+def test_navigation_follows_an_unresolved_named_source_cross_reference_when_model_stops(
+    tmp_path,
+) -> None:
+    kb_dir = _knowledge_base(tmp_path)
+    database_path = desktop_state_database_path(kb_dir)
+    cross_reference = DesktopEvidenceRef(
+        evidence_id="recovery-cross-reference",
+        document_id="deployment-guide",
+        document_name="Deployment Guide",
+        section="Database synchronization recovery / Recovery method",
+        locator={},
+        excerpt="重新配置数据库同步，见部署文档第四章1.4.2小节“同步功能配置”",
+        channels=("knowledge_navigation_source_window",),
+    )
+    initial = DesktopEvidencePack(
+        deterministic_plan("管理节点数据库不同步了如何修复"),
+        (cross_reference,),
+    )
+    requested_terms: list[tuple[str, ...]] = []
+
+    def transport(request, _timeout_seconds):
+        prompt = json.loads(request.content)
+        return json.dumps(
+            {
+                "schema_version": "openkb.knowledge-navigation-step.v1",
+                "snapshot_id": prompt["snapshot_id"],
+                "objective": prompt["objective"],
+                "coverage": [
+                    {
+                        "aspect": aspect,
+                        "status": "partial" if aspect == "ordered_actions" else "missing",
+                        "evidence_ids": (
+                            [cross_reference.evidence_id] if aspect == "ordered_actions" else []
+                        ),
+                    }
+                    for aspect in prompt["objective"]["required_aspects"]
+                ],
+                "actions": [],
+                "decision": "stop",
+            }
+        )
+
+    def retrieve_round(**kwargs):
+        requested_terms.append(kwargs["retrieval_plan"].terms)
+        target = DesktopEvidenceRef(
+            evidence_id="synchronization-configuration",
+            document_id="deployment-guide",
+            document_name="Deployment Guide",
+            section="MySQL replication / 1.4.2同步功能配置",
+            locator={},
+            excerpt="show master status;",
+            channels=("knowledge_navigation_source_window",),
+        )
+        return DesktopEvidencePack(kwargs["retrieval_plan"], (target,))
+
+    pack = run_navigation_session(
+        kb_dir=kb_dir,
+        database_path=database_path,
+        question="管理节点数据库不同步了如何修复",
+        pinned_snapshot_id=current_navigation_snapshot_id(database_path),
+        initial_pack=initial,
+        model_gateway=DesktopModelGateway(transport),
+        retrieve_round=retrieve_round,
+    )
+
+    assert requested_terms
+    assert requested_terms[0][0] == "同步功能配置"
+    assert "synchronization-configuration" in {item.evidence_id for item in pack.evidence}
+
+
+def test_navigation_does_not_follow_an_unsafe_named_source_cross_reference() -> None:
+    from openkb.desktop_navigation_references import unresolved_reference_actions
+
+    unsafe_reference = DesktopEvidenceRef(
+        evidence_id="unsafe-cross-reference",
+        document_id="deployment-guide",
+        document_name="Deployment Guide",
+        section="Recovery",
+        locator={},
+        excerpt="See “SELECT * FROM private_records” for details.",
+        channels=("knowledge_navigation_source_window",),
+    )
+    coverage = (
+        DesktopAnswerCoverageTrace(
+            "ordered_actions",
+            "partial",
+            (unsafe_reference.evidence_id,),
+        ),
+    )
+
+    actions = unresolved_reference_actions(
+        (unsafe_reference,),
+        coverage,
+        visited_action_ids=frozenset(),
+        maximum=1,
+    )
+
+    assert actions == ()
 
 
 def test_navigation_read_selection_spends_one_logical_read_per_unique_route() -> None:
@@ -868,7 +1145,7 @@ def test_navigation_source_window_surfaces_shallow_phases_before_nested_details(
     ]
 
 
-def test_navigation_source_window_reserves_procedure_checkpoints_before_deep_outline() -> None:
+def test_navigation_source_window_puts_unique_sections_before_repeated_details() -> None:
     from openkb.desktop_knowledge_navigation import _phase_diverse_source_window
 
     def reference(evidence_id: str, section: str, excerpt: str) -> DesktopEvidenceRef:
@@ -927,14 +1204,20 @@ def test_navigation_source_window_reserves_procedure_checkpoints_before_deep_out
     )
 
     evidence_ids = [item.evidence_id for item in reordered]
-    assert evidence_ids[:4] == ["chapter", "system", "network", "ha"]
-    assert evidence_ids.index("both-nodes") < evidence_ids.index("keepalived")
-    assert evidence_ids.index("nic-warning") < evidence_ids.index("keepalived")
-    assert evidence_ids.index("failover") < evidence_ids.index("keepalived")
-    assert evidence_ids.index("home-capacity") < evidence_ids.index("keepalived")
+    assert evidence_ids[:8] == [
+        "chapter",
+        "system",
+        "network",
+        "ha",
+        "both-nodes",
+        "partition",
+        "keepalived",
+        "failover",
+    ]
+    assert evidence_ids[8:] == ["swap-warning", "home-capacity", "nic-warning"]
 
 
-def test_navigation_source_window_does_not_let_many_shallow_phases_crowd_out_safety() -> None:
+def test_navigation_source_window_orders_same_depth_sections_by_source_position() -> None:
     from openkb.desktop_knowledge_navigation import _phase_diverse_source_window
 
     def reference(evidence_id: str, section: str, excerpt: str) -> DesktopEvidenceRef:
@@ -970,11 +1253,11 @@ def test_navigation_source_window_does_not_let_many_shallow_phases_crowd_out_saf
     )
 
     evidence_ids = [item.evidence_id for item in reordered]
-    assert evidence_ids.index("safety") < evidence_ids.index("phase-8")
-    assert evidence_ids.index("safety") < evidence_ids.index("deep-routine")
+    assert evidence_ids[:11] == ["chapter", *(f"phase-{ordinal}" for ordinal in range(1, 11))]
+    assert evidence_ids[11:] == ["safety", "deep-routine"]
 
 
-def test_navigation_source_window_defers_unrequested_expansion_checkpoint() -> None:
+def test_navigation_source_window_uses_hierarchy_without_lifecycle_policy() -> None:
     from openkb.desktop_knowledge_navigation import _phase_diverse_source_window
 
     def reference(evidence_id: str, section: str, excerpt: str) -> DesktopEvidenceRef:
@@ -990,65 +1273,69 @@ def test_navigation_source_window_defers_unrequested_expansion_checkpoint() -> N
 
     reordered = _phase_diverse_source_window(
         (
-            reference("chapter", "Deployment", "Deployment"),
-            reference("management", "Deployment / Management HA", "Configure management HA."),
-            reference("expansion", "Deployment / Expansion", "Expansion"),
-            reference(
-                "keepalived",
-                "Deployment / Management HA / Keepalived",
-                "Both nodes install Keepalived.",
-            ),
-            reference(
-                "expansion-both",
-                "Deployment / Expansion / Add hosts",
-                "Both nodes create the expansion path.",
-            ),
-        ),
-        terms=("dual-node", "deployment"),
+            reference("chapter", "Guide", "Guide"),
+            reference("first", "Guide / Amber", "First phase."),
+            reference("second", "Guide / Violet", "Second phase."),
+            reference("first-detail", "Guide / Amber / Detail", "First detail."),
+            reference("second-detail", "Guide / Violet / Detail", "Second detail."),
+        )
     )
 
-    evidence_ids = [item.evidence_id for item in reordered]
-    assert evidence_ids.index("keepalived") < evidence_ids.index("expansion-both")
+    assert [item.evidence_id for item in reordered] == [
+        "chapter",
+        "first",
+        "second",
+        "first-detail",
+        "second-detail",
+    ]
 
 
 def test_navigation_source_outline_uses_first_substantive_block_per_phase() -> None:
     from openkb.desktop_knowledge_navigation import _phase_diverse_source_window
 
-    def reference(evidence_id: str, section: str, excerpt: str) -> DesktopEvidenceRef:
+    def reference(
+        evidence_id: str,
+        section: str,
+        excerpt: str,
+        *,
+        kind: str,
+    ) -> DesktopEvidenceRef:
         return DesktopEvidenceRef(
             evidence_id=evidence_id,
             document_id="deployment-guide",
             document_name="Deployment Guide",
             section=section,
-            locator={},
+            locator={SOURCE_BLOCK_KIND_CONTEXT_KEY: kind},
             excerpt=excerpt,
             channels=("knowledge_navigation_source_window",),
         )
 
     reordered = _phase_diverse_source_window(
         (
-            reference("keepalived-heading", "1. Keepalived", "1. Keepalived"),
-            reference("keepalived-scope", "1. Keepalived", "两台主机均需执行"),
+            reference("alpha-heading", "1. Alpha", "1. Alpha", kind="heading"),
+            reference("alpha-first", "1. Alpha", "First substantive block.", kind="paragraph"),
             reference(
-                "keepalived-install",
-                "1. Keepalived",
-                "在两台主机上传并安装 keepalived.tar.gz。",
+                "alpha-second",
+                "1. Alpha",
+                "Second substantive block.",
+                kind="paragraph",
             ),
-            reference("mysql-heading", "2. MySQL", "2. MySQL"),
+            reference("beta-heading", "2. Beta", "2. Beta", kind="heading"),
             reference(
-                "mysql-config",
-                "2. MySQL",
-                "两台主机分别配置不同的 server-id。",
+                "beta-first",
+                "2. Beta",
+                "First substantive block.",
+                kind="paragraph",
             ),
         )
     )
 
     assert [item.evidence_id for item in reordered] == [
-        "keepalived-install",
-        "mysql-config",
-        "keepalived-scope",
-        "keepalived-heading",
-        "mysql-heading",
+        "alpha-first",
+        "beta-first",
+        "alpha-second",
+        "alpha-heading",
+        "beta-heading",
     ]
 
 
@@ -1081,11 +1368,36 @@ def test_navigation_source_window_defers_images_behind_substantive_steps() -> No
     ]
 
 
-def test_navigation_merge_preserves_prior_phase_diversity_from_dense_supplement() -> None:
-    from openkb.desktop_navigation_session import (
-        NAVIGATION_MAX_EVIDENCE_REFS,
-        _allocate_evidence,
+def test_navigation_flat_source_window_preserves_source_order_for_substantive_blocks() -> None:
+    from openkb.desktop_knowledge_navigation import _phase_diverse_source_window
+
+    def reference(evidence_id: str, excerpt: str) -> DesktopEvidenceRef:
+        return DesktopEvidenceRef(
+            evidence_id=evidence_id,
+            document_id="deployment-guide",
+            document_name="Deployment Guide",
+            section="Guide / One section",
+            locator={},
+            excerpt=excerpt,
+            channels=("knowledge_navigation_source_window",),
+        )
+
+    references = (
+        reference("first", "Opaque content one."),
+        reference("second", "Opaque content two."),
+        reference("third", "Opaque content three."),
+        reference("fourth", "Opaque content four."),
     )
+
+    reordered = _phase_diverse_source_window(references)
+
+    assert tuple(item.evidence_id for item in reordered) == tuple(
+        item.evidence_id for item in references
+    )
+
+
+def test_navigation_merge_preserves_prior_section_diversity_from_dense_supplement() -> None:
+    from openkb.desktop_navigation_session import _allocate_evidence
 
     def reference(evidence_id: str, section: str) -> DesktopEvidenceRef:
         return DesktopEvidenceRef(
@@ -1099,18 +1411,49 @@ def test_navigation_merge_preserves_prior_phase_diversity_from_dense_supplement(
         )
 
     current = tuple(
-        reference(f"phase-{ordinal}", f"部署流程 / {ordinal}. 阶段") for ordinal in range(1, 13)
+        reference(f"section-{ordinal}", f"Guide / {ordinal}. Section") for ordinal in range(1, 13)
     )
     supplement = tuple(
-        reference(f"bcache-detail-{ordinal}", "部署流程 / Bcache / 安装")
-        for ordinal in range(1, 33)
+        reference(f"detail-{ordinal}", "Guide / Detailed subsection") for ordinal in range(1, 33)
     )
 
     evidence = _allocate_evidence(current, supplement, ())
     evidence_ids = {item.evidence_id for item in evidence}
 
-    assert len(evidence) == NAVIGATION_MAX_EVIDENCE_REFS
-    assert {f"phase-{ordinal}" for ordinal in range(1, 13)} <= evidence_ids
+    assert len(evidence) == len(current) + len(supplement)
+    assert {f"section-{ordinal}" for ordinal in range(1, 13)} <= evidence_ids
+
+
+def test_navigation_merge_preserves_repeated_source_occurrence_context() -> None:
+    from openkb.desktop_navigation_session import _allocate_evidence
+
+    canonical = DesktopEvidenceRef(
+        evidence_id="reinstall-note",
+        document_id="deployment-guide",
+        document_name="Deployment Guide",
+        section="Recovery",
+        locator={"paragraph": 10},
+        excerpt="For a reinstall recovery, do not perform this step.",
+        channels=("fts",),
+    )
+    source_window = replace(
+        canonical,
+        locator={
+            "paragraph": 10,
+            SOURCE_OCCURRENCE_CONTEXT_KEY: [
+                {"ordinal": 10, "previous_evidence_id": "reconfigure"},
+                {"ordinal": 12, "previous_evidence_id": "start-services"},
+            ],
+        },
+        channels=("knowledge_navigation_source_window",),
+    )
+
+    evidence = _allocate_evidence((canonical,), (source_window,), ())
+
+    assert (
+        evidence[0].locator[SOURCE_OCCURRENCE_CONTEXT_KEY]
+        == source_window.locator[SOURCE_OCCURRENCE_CONTEXT_KEY]
+    )
 
 
 def test_navigation_merge_preserves_prior_ordered_steps_from_dense_supplement() -> None:
@@ -1214,7 +1557,7 @@ def test_navigation_merge_lets_routed_evidence_displace_fts_only_seed_noise() ->
     assert len(evidence) == NAVIGATION_MAX_EVIDENCE_REFS
 
 
-def test_navigation_merge_demotes_scope_mismatched_catalog_seed_noise() -> None:
+def test_navigation_merge_demotes_unrouted_catalog_seed_noise_by_provenance() -> None:
     from openkb.desktop_navigation_session import (
         NAVIGATION_MAX_EVIDENCE_REFS,
         _allocate_evidence,
@@ -1258,7 +1601,6 @@ def test_navigation_merge_demotes_scope_mismatched_catalog_seed_noise() -> None:
         (*scoped, unrelated),
         (routed,),
         (),
-        terms=("Alpha", "installation"),
     )
 
     evidence_ids = {item.evidence_id for item in evidence}
@@ -1309,6 +1651,226 @@ def test_navigation_merge_reserves_new_evidence_for_uncovered_aspects() -> None:
     )
 
     assert {"storage-recovery", "validation-recovery"} <= {item.evidence_id for item in evidence}
+
+
+def test_navigation_merge_keeps_a_complete_targeted_procedure_section() -> None:
+    from openkb.desktop_navigation_evidence import new_action_evidence_ids
+    from openkb.desktop_navigation_session import _allocate_evidence
+
+    def reference(
+        evidence_id: str,
+        section: str,
+        excerpt: str,
+    ) -> DesktopEvidenceRef:
+        return DesktopEvidenceRef(
+            evidence_id=evidence_id,
+            document_id="deployment-guide",
+            document_name="Deployment Guide",
+            section=section,
+            locator={},
+            excerpt=excerpt,
+            channels=("knowledge_navigation_source_window",),
+        )
+
+    current = tuple(
+        reference(
+            f"seed-{ordinal}",
+            f"Deployment guide / Unrelated phase {ordinal}",
+            f"Unrelated seed detail {ordinal}.",
+        )
+        for ordinal in range(40)
+    )
+    procedure_excerpts = (
+        "Locate the active controller.",
+        "Pause services on both nodes.",
+        "atlasctl manager stop",
+        "atlasctl gateway stop",
+        "atlasctl worker stop",
+        "Create a snapshot on the active controller.",
+        "atlas-backup --create",
+        "Copy snapshot-001.dat to the standby node.",
+        "Open the standby data console.",
+        "select workspace;",
+        "restore snapshot-001.dat;",
+        "Reconfigure replication.",
+        "Resume services on both nodes.",
+        "atlasctl manager start",
+        "atlasctl gateway start",
+        "atlasctl worker start",
+    )
+    supplement = tuple(
+        reference(
+            f"recovery-step-{ordinal}",
+            "Appendix / Management database synchronization recovery / Recovery method",
+            excerpt,
+        )
+        for ordinal, excerpt in enumerate(procedure_excerpts, start=1)
+    )
+    prior_ids = frozenset(item.evidence_id for item in current)
+    aspect_ids = new_action_evidence_ids(supplement, prior_ids=prior_ids)
+    coverage = (
+        DesktopAnswerCoverageTrace(
+            "ordered_actions",
+            "partial",
+            (supplement[0].evidence_id,),
+        ),
+    )
+
+    evidence = _allocate_evidence(
+        current,
+        supplement,
+        coverage,
+        aspect_evidence_ids={"ordered_actions": aspect_ids},
+    )
+    evidence_ids = {item.evidence_id for item in evidence}
+
+    assert {item.evidence_id for item in supplement} <= evidence_ids
+    assert len(evidence) == len(current) + len(supplement)
+
+
+def test_navigation_direct_read_promotes_prior_blocks_from_the_same_source_sequence() -> None:
+    from openkb.desktop_navigation_evidence import targeted_source_sequence_evidence_ids
+
+    def reference(evidence_id: str, section: str) -> DesktopEvidenceRef:
+        return DesktopEvidenceRef(
+            evidence_id=evidence_id,
+            document_id="deployment-guide",
+            document_name="Deployment Guide",
+            section=section,
+            locator={},
+            excerpt=evidence_id,
+            channels=("knowledge_navigation_source_window",),
+        )
+
+    prior_step = reference("prior-stop-command", "Recovery / Recovery method")
+    new_step = reference("new-backup-command", "Recovery / Recovery method")
+    unrelated_prior = reference("prior-ntp-command", "Deployment / NTP")
+
+    promoted = targeted_source_sequence_evidence_ids(
+        (unrelated_prior, prior_step, new_step),
+        prior_ids=frozenset((unrelated_prior.evidence_id, prior_step.evidence_id)),
+    )
+
+    assert promoted == (prior_step.evidence_id, new_step.evidence_id)
+
+
+def test_navigation_merge_keeps_targeted_source_sequence_ahead_of_fallback_aspects() -> None:
+    from openkb.desktop_navigation_session import (
+        NAVIGATION_MAX_EVIDENCE_REFS,
+        _allocate_evidence,
+    )
+
+    def reference(
+        evidence_id: str,
+        section: str,
+        channels: tuple[str, ...],
+    ) -> DesktopEvidenceRef:
+        return DesktopEvidenceRef(
+            evidence_id=evidence_id,
+            document_id="deployment-guide",
+            document_name="Deployment Guide",
+            section=section,
+            locator={},
+            excerpt=evidence_id,
+            channels=channels,
+        )
+
+    current = tuple(
+        reference(f"seed-{ordinal}", f"Unrelated / {ordinal}", ("catalog",))
+        for ordinal in range(40)
+    )
+    procedure = tuple(
+        reference(
+            f"recovery-step-{ordinal}",
+            "Appendix / Database synchronization recovery / Recovery method",
+            ("knowledge_navigation_source_window",),
+        )
+        for ordinal in range(22)
+    )
+    fallback = tuple(
+        reference(
+            f"prerequisite-fallback-{ordinal}",
+            f"Unrelated prerequisite / {ordinal}",
+            ("knowledge_source",),
+        )
+        for ordinal in range(22)
+    )
+    coverage = (
+        DesktopAnswerCoverageTrace("prerequisites", "missing"),
+        DesktopAnswerCoverageTrace("ordered_actions", "missing"),
+    )
+
+    evidence = _allocate_evidence(
+        current,
+        (*procedure, *fallback),
+        coverage,
+        aspect_evidence_ids={
+            "ordered_actions": tuple(item.evidence_id for item in procedure),
+            "prerequisites": tuple(item.evidence_id for item in fallback),
+        },
+    )
+
+    evidence_ids = {item.evidence_id for item in evidence}
+    assert {item.evidence_id for item in procedure} <= evidence_ids
+    assert len(evidence) == NAVIGATION_MAX_EVIDENCE_REFS
+
+
+def test_navigation_merge_preserves_earlier_direct_reads_before_reference_followup() -> None:
+    from openkb.desktop_navigation_session import _allocate_evidence
+
+    def reference(evidence_id: str, section: str) -> DesktopEvidenceRef:
+        return DesktopEvidenceRef(
+            evidence_id=evidence_id,
+            document_id="deployment-guide",
+            document_name="Deployment Guide",
+            section=section,
+            locator={},
+            excerpt=evidence_id,
+            channels=("knowledge_navigation_source_window",),
+        )
+
+    recovery = tuple(reference(f"recovery-{ordinal}", "Recovery method") for ordinal in range(24))
+    synchronization = tuple(
+        reference(f"synchronization-{ordinal}", "Synchronization configuration")
+        for ordinal in range(30)
+    )
+
+    evidence = _allocate_evidence(
+        recovery,
+        synchronization,
+        (),
+        priority_evidence_ids=tuple(item.evidence_id for item in (*recovery, *synchronization)),
+    )
+    evidence_ids = {item.evidence_id for item in evidence}
+
+    assert {item.evidence_id for item in recovery} <= evidence_ids
+    assert {item.evidence_id for item in synchronization} <= evidence_ids
+    assert len(evidence) == len(recovery) + len(synchronization)
+
+
+def test_navigation_merge_ignores_a_coverage_binding_evicted_by_an_earlier_group() -> None:
+    from openkb.desktop_navigation_session import _allocate_evidence
+
+    available = DesktopEvidenceRef(
+        evidence_id="available",
+        document_id="deployment-guide",
+        document_name="Deployment Guide",
+        section="Recovery",
+        locator={},
+        excerpt="Available recovery evidence.",
+        channels=("knowledge_navigation_source_window",),
+    )
+    coverage = (
+        DesktopAnswerCoverageTrace(
+            "ordered_actions",
+            "partial",
+            (available.evidence_id, "evicted-between-action-groups"),
+        ),
+    )
+
+    evidence = _allocate_evidence((available,), (), coverage)
+
+    assert evidence == (available,)
 
 
 def test_last_round_observation_retains_partial_aspect_coverage() -> None:
@@ -1721,6 +2283,7 @@ def test_seed_source_windows_prefer_ranked_wiki_phase_over_generic_tree_anchor(
             baseline_evidence=(broad,),
             max_reads=2,
             max_source_windows=1,
+            answer_kind="how_to",
         )
 
     assert tuple(item.evidence_id for item in result.source_windows) == ("semantic",)
@@ -2092,6 +2655,46 @@ def test_fusion_keeps_the_bounded_source_window_for_a_duplicate_evidence_id() ->
     assert evidence[0].channels == (
         "knowledge_navigation_source_window",
         "structure_lexical",
+    )
+
+
+def test_fusion_keeps_source_occurrence_context_for_equal_canonical_text() -> None:
+    baseline_reference = DesktopEvidenceRef(
+        evidence_id="shared-note",
+        document_id="document",
+        document_name="guide.md",
+        section="Recovery",
+        locator={"paragraph": 10},
+        excerpt="For reinstall recovery, skip this step.",
+        channels=("fts",),
+    )
+    source_reference = replace(
+        baseline_reference,
+        locator={
+            "paragraph": 10,
+            SOURCE_OCCURRENCE_CONTEXT_KEY: [
+                {"ordinal": 10, "previous_evidence_id": "sync"},
+                {"ordinal": 12, "previous_evidence_id": "services"},
+            ],
+        },
+        channels=("knowledge_navigation_source_window",),
+    )
+    baseline = RetrievalCandidate(baseline_reference, "fts", 1)
+    source_window = RetrievalCandidate(
+        source_reference,
+        "knowledge_navigation_source_window",
+        1,
+    )
+
+    evidence = fuse_candidates(
+        (baseline, source_window),
+        protected=(baseline,),
+        routed=(source_window,),
+    )
+
+    assert (
+        evidence[0].locator[SOURCE_OCCURRENCE_CONTEXT_KEY]
+        == source_reference.locator[SOURCE_OCCURRENCE_CONTEXT_KEY]
     )
 
 
@@ -2666,6 +3269,52 @@ def test_source_section_keeps_each_neighbor_bound_to_its_own_evidence(tmp_path) 
     assert any("do not select" in reference.excerpt for reference in references)
 
 
+def test_source_section_records_where_repeated_evidence_applies(tmp_path) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "recovery.md"
+    repeated_note = "For a reinstall recovery, do not perform this step."
+    source.write_text(
+        "# Recovery\n\n"
+        "1. Reconfigure database synchronization.\n\n"
+        f"   {repeated_note}\n\n"
+        "2. Start the Java and host-agent services.\n\n"
+        f"   {repeated_note}\n\n"
+        "3. Verify the recovered service.\n",
+        encoding="utf-8",
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        anchor_id = str(
+            connection.execute(
+                "SELECT evidence_id FROM evidence_refs WHERE text LIKE '%Reconfigure%'"
+            ).fetchone()[0]
+        )
+        references = source_section_evidence_in(
+            connection,
+            anchor_id,
+            terms=("recovery", "database"),
+        )
+
+    note_references = tuple(
+        reference for reference in references if repeated_note in reference.excerpt
+    )
+    assert len(note_references) == 1
+    contexts = note_references[0].locator[SOURCE_OCCURRENCE_CONTEXT_KEY]
+    assert len(contexts) == 2
+    previous_ids = {str(context["previous_evidence_id"]) for context in contexts}
+    preceding_text = {
+        reference.evidence_id: reference.excerpt
+        for reference in references
+        if reference.evidence_id in previous_ids
+    }
+    assert set(preceding_text.values()) == {
+        "1. Reconfigure database synchronization.",
+        "2. Start the Java and host-agent services.",
+    }
+
+
 def test_navigation_rejects_unsafe_actions_and_preserves_seed_evidence(tmp_path) -> None:
     kb_dir = _knowledge_base(tmp_path)
     operations: list[str] = []
@@ -2826,18 +3475,22 @@ def test_navigation_supplements_after_page_tree_evidence_is_known(tmp_path, monk
         baseline_evidence,
         max_reads,
         max_source_windows,
+        focus_terms,
         excluded_routes,
         requested_routes,
         requested_evidence_ids,
+        answer_kind,
     ) -> DesktopKnowledgeNavigationResult:
         del (
             catalog_generation_id,
             terms,
             max_reads,
             max_source_windows,
+            focus_terms,
             excluded_routes,
             requested_routes,
             requested_evidence_ids,
+            answer_kind,
         )
         observed_baselines.append(baseline_evidence)
         return DesktopKnowledgeNavigationResult()
@@ -3059,6 +3712,40 @@ def test_query_matching_source_sections_seed_distinct_procedure_phases(
     } <= {item.section for item in result.source_windows}
 
 
+def test_navigation_focus_terms_prioritize_an_exact_referenced_section(tmp_path) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "operations.md"
+    source.write_text(
+        "# Atlas operations\n\n" + ("Background material. " * 400) + "\n\n"
+        "## Alpha beta overview\n\nAlpha beta overview detail.\n\n"
+        "## Zephyr handoff\n\nPerform the exact handoff steps.\n",
+        encoding="utf-8",
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        catalog_generation_id = str(
+            connection.execute(
+                "SELECT current_generation_id FROM knowledge_catalog_state WHERE singleton = 1"
+            ).fetchone()[0]
+        )
+        result = build_knowledge_navigation_in(
+            connection,
+            catalog_generation_id=catalog_generation_id,
+            terms=("alpha", "beta", "overview", "Zephyr handoff"),
+            focus_terms=("Zephyr handoff",),
+            baseline_evidence=(),
+            max_reads=2,
+            max_source_windows=1,
+            answer_kind="how_to",
+        )
+
+    assert any(read.title.endswith("Zephyr handoff") for read in result.reads)
+    assert result.source_windows
+    assert all(item.section.endswith("Zephyr handoff") for item in result.source_windows)
+
+
 def test_dense_how_to_routes_surface_summary_and_whole_source_within_prompt_budget(
     tmp_path, monkeypatch
 ) -> None:
@@ -3157,7 +3844,7 @@ def test_whole_source_read_reserves_the_broad_matching_chapter_anchor(tmp_path) 
     assert first[2] == "Install cluster"
 
 
-def test_whole_source_outline_does_not_prefer_unrequested_expansion_scope(tmp_path) -> None:
+def test_whole_source_outline_uses_relevance_then_source_order(tmp_path) -> None:
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "install-guide.md"
     source.write_text(
@@ -3201,7 +3888,7 @@ def test_whole_source_outline_does_not_prefer_unrequested_expansion_scope(tmp_pa
         first = _source_relevance_in(connection, evidence_ids[0], terms)
 
     assert first is not None
-    assert first[2].endswith("System install")
+    assert first[2].endswith("Compute node")
 
 
 def test_source_anchor_phase_key_collapses_adjacent_details_not_major_phases() -> None:
@@ -3672,6 +4359,138 @@ def test_navigation_executes_the_last_admitted_round_before_budget_stop(tmp_path
     assert "round-3-evidence" in {item.evidence_id for item in pack.evidence}
     assert pack.retrieval_trace.navigation_round_count == 3
     assert pack.retrieval_trace.navigation_stop_reason == "budget_exhausted"
+
+
+def test_navigation_reserves_logical_reads_for_observing_a_first_round_supplement(
+    tmp_path,
+) -> None:
+    kb_dir = _knowledge_base(tmp_path)
+    database_path = desktop_state_database_path(kb_dir)
+    seed = DesktopEvidenceRef(
+        evidence_id="seed",
+        document_id="seed-document",
+        document_name="seed.md",
+        section="Overview",
+        locator={},
+        excerpt="Database recovery overview.",
+        channels=("fts",),
+    )
+    initial = DesktopEvidencePack(
+        deterministic_plan("How should database recovery be performed?"),
+        (seed,),
+        retrieval_trace=DesktopRetrievalTrace(
+            navigation_read_count=8,
+            source_window_count=4,
+            page_tree_supplement_count=1,
+        ),
+    )
+    observed_rounds: list[int] = []
+
+    def transport(request, _timeout_seconds):
+        assert request.operation == "knowledge_navigation_step"
+        prompt = json.loads(request.content)
+        round_number = int(prompt["round"])
+        observed_rounds.append(round_number)
+        aspects = prompt["objective"]["required_aspects"]
+        if round_number == 1:
+            return json.dumps(
+                {
+                    "schema_version": "openkb.knowledge-navigation-step.v1",
+                    "snapshot_id": prompt["snapshot_id"],
+                    "objective": prompt["objective"],
+                    "coverage": [
+                        {"aspect": aspect, "status": "missing", "evidence_ids": []}
+                        for aspect in aspects
+                    ],
+                    "actions": [
+                        {
+                            "kind": "search_routes",
+                            "aspect": aspect,
+                            "terms": [f"recover-{ordinal}"],
+                        }
+                        for ordinal, aspect in enumerate(aspects[:3], start=1)
+                    ],
+                    "decision": "continue",
+                }
+            )
+        return json.dumps(
+            {
+                "schema_version": "openkb.knowledge-navigation-step.v1",
+                "snapshot_id": prompt["snapshot_id"],
+                "objective": prompt["objective"],
+                "coverage": [
+                    {
+                        "aspect": aspect,
+                        "status": "partial",
+                        "evidence_ids": [prompt["evidence"][0]["evidence_id"]],
+                    }
+                    for aspect in aspects
+                ],
+                "actions": [],
+                "decision": "stop",
+            }
+        )
+
+    def retrieve_round(**kwargs):
+        target = kwargs["retrieval_plan"].terms[0]
+        evidence = DesktopEvidenceRef(
+            evidence_id=target,
+            document_id="recovery-document",
+            document_name="recovery.md",
+            section="Recovery method",
+            locator={},
+            excerpt=f"Evidence for {target}.",
+            channels=("knowledge_navigation_source_window",),
+        )
+        return DesktopEvidencePack(
+            kwargs["retrieval_plan"],
+            (evidence,),
+            retrieval_trace=DesktopRetrievalTrace(
+                navigation_read_count=kwargs["_navigation_max_reads"],
+                source_window_count=kwargs["_navigation_max_source_windows"],
+            ),
+        )
+
+    pack = run_navigation_session(
+        kb_dir=kb_dir,
+        database_path=database_path,
+        question="How should database recovery be performed?",
+        pinned_snapshot_id=current_navigation_snapshot_id(database_path),
+        initial_pack=initial,
+        model_gateway=DesktopModelGateway(transport),
+        retrieve_round=retrieve_round,
+    )
+
+    assert observed_rounds == [1, 2]
+    assert pack.retrieval_trace.navigation_logical_read_count < 24
+    assert pack.retrieval_trace.navigation_stop_reason == "partial"
+
+
+def test_navigation_reference_followup_reserves_a_source_window_with_two_reads() -> None:
+    from openkb.desktop_navigation_session import _group_read_budget, _group_read_limits
+
+    reference_action = NavigationAction(
+        "search_routes",
+        "commands_or_configuration",
+        terms=("同步功能配置",),
+    )
+
+    knowledge_reads, source_windows = _group_read_limits(
+        (reference_action,),
+        read_budget=2,
+        reference_action_ids=frozenset((reference_action.identity,)),
+    )
+
+    assert (knowledge_reads, source_windows) == (1, 1)
+    assert (
+        _group_read_budget(
+            (reference_action,),
+            remaining_reads=3,
+            groups_left=2,
+            reference_action_ids=frozenset((reference_action.identity,)),
+        )
+        == 3
+    )
 
 
 def test_navigation_discards_a_supplement_if_snapshot_changes_during_read(tmp_path) -> None:

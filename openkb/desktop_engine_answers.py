@@ -7,8 +7,10 @@ from threading import Event
 from typing import TYPE_CHECKING
 
 from openkb.desktop_engine_model_lifecycle import emit_model_lifecycle
+from openkb.desktop_engine_version_scope import optional_version_filter_param
 from openkb.desktop_grounded_answer import DesktopGroundedAnswerService
 from openkb.desktop_model_terminal import DesktopTerminalModelEvent
+from openkb.desktop_version_scope import RetrievalRequest
 
 if TYPE_CHECKING:
     from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
@@ -61,7 +63,10 @@ def dispatch_grounded_answer_request(
 
     if request.method == "workbench.ask_grounded":
         answer = service.answer(
-            _required_string_param(request, "question"),
+            RetrievalRequest(
+                question=_required_string_param(request, "question"),
+                version_filter=optional_version_filter_param(request),
+            ),
             on_delta=on_delta,
             is_cancelled=is_cancelled,
             on_model_event=on_model_event,

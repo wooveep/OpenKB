@@ -350,7 +350,7 @@ def test_analysis_capability_check_uses_the_exact_pinned_protocol() -> None:
 
     assert request.operation == "model_capability_analysis"
     assert request.provider_adapter == "deepseek"
-    assert request.provider_adapter_version == "deepseek.v1"
+    assert request.provider_adapter_version == "deepseek.v2"
     assert request.structured_output_mode == "json_object"
     assert request.reasoning_effort == "high"
     assert request.supports_streaming is True
@@ -388,7 +388,7 @@ def test_unverified_profile_preserves_parsed_import_without_provider_call(
 
         def __call__(self, request, _timeout_seconds):
             calls.append(request.operation)
-            if request.operation == "knowledge_analysis":
+            if request.operation == "knowledge_fact_harvest":
                 return json.dumps(
                     {
                         "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
@@ -415,12 +415,12 @@ def test_unverified_profile_preserves_parsed_import_without_provider_call(
     assert stages["document_ir"]["status"] == "completed"
     assert stages["evidence"]["status"] == "completed"
 
-    profile = gateway.execution_profile_for_operation("knowledge_analysis")
+    profile = gateway.execution_profile_for_operation("knowledge_fact_harvest")
     DesktopModelCapabilityStore(kb_dir).mark_verified(profile)
     result = importer.resume_text(task["job"]["job_id"])
 
     assert result.document.availability == "available"
-    assert "knowledge_analysis" in calls
+    assert "knowledge_fact_harvest" in calls
 
 
 def test_protocol_result_failure_suspends_analysis_operation_before_corroboration(
@@ -459,7 +459,7 @@ def test_protocol_result_failure_suspends_analysis_operation_before_corroboratio
     monkeypatch.setattr(desktop_model_transport, "DesktopLiteLLMTransport", FakeTransport)
     gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert gateway is not None
-    profile = gateway.execution_profile_for_operation("knowledge_analysis")
+    profile = gateway.execution_profile_for_operation("knowledge_fact_harvest")
     capability_store = DesktopModelCapabilityStore(kb_dir)
     capability_store.mark_verified(profile)
 
@@ -469,15 +469,15 @@ def test_protocol_result_failure_suspends_analysis_operation_before_corroboratio
     state = capability_store.state(profile)
     assert state.status == "verified"
     operation_state = DesktopModelOperationContractStore(kb_dir).state(
-        operation="knowledge_analysis",
+        operation="knowledge_fact_harvest",
         capability_identity=profile.capability_evidence_profile.identity,
-        prompt_contract_digest=prompt_contract_for("knowledge_analysis").digest,
+        prompt_contract_digest=prompt_contract_for("knowledge_fact_harvest").digest,
     )
     assert operation_state.status == "suspended"
     assert operation_state.failure_code == "reasoning_output_exhausted"
 
 
-def test_invalid_structured_import_suspends_only_knowledge_analysis_contract(
+def test_invalid_structured_import_suspends_only_fact_harvest_contract(
     tmp_path, monkeypatch
 ) -> None:
     kb_dir = tmp_path / "knowledge"
@@ -516,7 +516,7 @@ def test_invalid_structured_import_suspends_only_knowledge_analysis_contract(
     monkeypatch.setattr(desktop_model_transport, "DesktopLiteLLMTransport", FakeTransport)
     gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert gateway is not None
-    profile = gateway.execution_profile_for_operation("knowledge_analysis")
+    profile = gateway.execution_profile_for_operation("knowledge_fact_harvest")
     capability_store = DesktopModelCapabilityStore(kb_dir)
     capability_store.mark_verified(profile)
 
@@ -525,7 +525,7 @@ def test_invalid_structured_import_suspends_only_knowledge_analysis_contract(
         service.import_text(source)
 
     assert captured.value.code == "model_response_invalid"
-    assert calls == ["knowledge_analysis", "structured_output_repair"]
+    assert calls == ["knowledge_fact_harvest", "structured_output_repair"]
     task = service.list_import_jobs()["jobs"][0]
     assert task["job"]["status"] == "quarantined"
     assert len(task["model_calls"]) == 2
@@ -549,9 +549,9 @@ def test_invalid_structured_import_suspends_only_knowledge_analysis_contract(
     state = capability_store.state(profile)
     assert state.status == "verified"
     operation_state = DesktopModelOperationContractStore(kb_dir).state(
-        operation="knowledge_analysis",
+        operation="knowledge_fact_harvest",
         capability_identity=profile.capability_evidence_profile.identity,
-        prompt_contract_digest=prompt_contract_for("knowledge_analysis").digest,
+        prompt_contract_digest=prompt_contract_for("knowledge_fact_harvest").digest,
     )
     assert operation_state.status == "suspended"
     assert operation_state.failure_stage == "domain_validation"
@@ -565,7 +565,7 @@ def test_invalid_structured_import_suspends_only_knowledge_analysis_contract(
     with pytest.raises(DesktopImportError) as blocked:
         service.import_text(second_source)
     assert blocked.value.code == "model_operation_suspended"
-    assert calls == ["knowledge_analysis", "structured_output_repair"]
+    assert calls == ["knowledge_fact_harvest", "structured_output_repair"]
 
     with pytest.raises(DesktopImportError):
         service.recover_text(
@@ -573,9 +573,9 @@ def test_invalid_structured_import_suspends_only_knowledge_analysis_contract(
             DesktopRecoveryOverride(legacy_recovery_choice="restart_current_plan"),
         )
     assert calls == [
-        "knowledge_analysis",
+        "knowledge_fact_harvest",
         "structured_output_repair",
-        "knowledge_analysis",
+        "knowledge_fact_harvest",
         "structured_output_repair",
     ]
 
@@ -623,7 +623,7 @@ def test_recovery_marks_the_actual_analysis_contract_ready_after_settings_change
     )
     original_gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert original_gateway is not None
-    original_profile = original_gateway.execution_profile_for_operation("knowledge_analysis")
+    original_profile = original_gateway.execution_profile_for_operation("knowledge_fact_harvest")
     capability_store = DesktopModelCapabilityStore(kb_dir)
     capability_store.mark_verified(original_profile)
     service = DesktopTextImportService(kb_dir, model_gateway=original_gateway)
@@ -634,7 +634,7 @@ def test_recovery_marks_the_actual_analysis_contract_ready_after_settings_change
     save_desktop_model_settings(kb_dir, **settings_args, analysis_reasoning="high")
     changed_gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert changed_gateway is not None
-    changed_profile = changed_gateway.execution_profile_for_operation("knowledge_analysis")
+    changed_profile = changed_gateway.execution_profile_for_operation("knowledge_fact_harvest")
     assert changed_profile.capability_evidence_profile.identity != (
         original_profile.capability_evidence_profile.identity
     )
@@ -651,24 +651,24 @@ def test_recovery_marks_the_actual_analysis_contract_ready_after_settings_change
 
     assert recovered.document.availability == "available"
     assert calls == [
-        "knowledge_analysis",
+        "knowledge_fact_harvest",
         "structured_output_repair",
-        "knowledge_analysis",
+        "knowledge_fact_harvest",
     ]
     store = DesktopModelOperationContractStore(kb_dir)
     assert (
         store.state(
-            operation="knowledge_analysis",
+            operation="knowledge_fact_harvest",
             capability_identity=original_profile.capability_evidence_profile.identity,
-            prompt_contract_digest=prompt_contract_for("knowledge_analysis").digest,
+            prompt_contract_digest=prompt_contract_for("knowledge_fact_harvest").digest,
         ).status
         == "suspended"
     )
     assert (
         store.state(
-            operation="knowledge_analysis",
+            operation="knowledge_fact_harvest",
             capability_identity=changed_profile.capability_evidence_profile.identity,
-            prompt_contract_digest=prompt_contract_for("knowledge_analysis").digest,
+            prompt_contract_digest=prompt_contract_for("knowledge_fact_harvest").digest,
         ).status
         == "ready"
     )

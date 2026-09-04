@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 
+from openkb.desktop_document_summary import bounded_document_summary_units
 from openkb.desktop_knowledge_analysis import (
     KNOWLEDGE_ANALYSIS_BATCH_SCOPE,
     DesktopKnowledgeAnalysis,
     KnowledgeAnalysisCandidate,
     KnowledgeAnalysisClaim,
     KnowledgeAnalysisSummaryUnit,
-    bounded_document_summary_units,
 )
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
 

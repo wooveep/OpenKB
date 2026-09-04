@@ -8,6 +8,7 @@ import sqlite3
 from openkb.desktop_answer_types import DesktopEvidenceRef
 from openkb.desktop_knowledge_sources import AVAILABLE_EVIDENCE_OCCURRENCES_CTE
 from openkb.desktop_retrieval_fusion import RetrievalCandidate
+from openkb.desktop_scoped_evidence import ScopedEvidenceView
 
 _CHANNEL_LIMIT = 12
 _SCORE_COLUMNS = frozenset(("display_name", "heading_path", "text"))
@@ -18,6 +19,7 @@ def scored_rows(
     terms: tuple[str, ...],
     *,
     weighted_columns: tuple[tuple[str, int], ...],
+    scoped_view: ScopedEvidenceView | None = None,
 ) -> list[tuple[object, ...]]:
     """Select a bounded channel ranking from every Available Knowledge occurrence."""
     score_parts: list[str] = []
@@ -29,9 +31,14 @@ def scored_rows(
             score_parts.append(f"CASE WHEN instr(lower({column}), ?) > 0 THEN {weight} ELSE 0 END")
             parameters.append(term)
     score_expression = " + ".join(score_parts)
+    occurrence_cte, scope_parameters = (
+        scoped_view.sql_cte("available_evidence_occurrences")
+        if scoped_view is not None
+        else (AVAILABLE_EVIDENCE_OCCURRENCES_CTE, ())
+    )
     return connection.execute(
         f"""
-        {AVAILABLE_EVIDENCE_OCCURRENCES_CTE}
+        {occurrence_cte}
         SELECT evidence_id, document_id, display_name, heading_path, locator_json, text
         FROM (
             SELECT evidence_id, document_id, display_name, heading_path, locator_json, text,
@@ -43,7 +50,7 @@ def scored_rows(
         ORDER BY channel_score DESC, document_id, evidence_id
         LIMIT ?
         """,
-        (*parameters, _CHANNEL_LIMIT),
+        (*scope_parameters, *parameters, _CHANNEL_LIMIT),
     ).fetchall()
 
 
@@ -83,7 +90,7 @@ def json_object(value: str) -> dict[str, object]:
     return dict(decoded) if isinstance(decoded, dict) else {}
 
 
-def placeholders(values: tuple[str, ...]) -> str:
+def placeholders(values: tuple[object, ...]) -> str:
     if not values:
-        raise ValueError("Evidence lookup requires at least one identifier.")
+        raise ValueError("SQLite placeholders require at least one value.")
     return ", ".join("?" for _ in values)

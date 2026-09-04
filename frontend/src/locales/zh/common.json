@@ -457,6 +457,30 @@
         "keepSeparate": "保留为独立来源",
         "saved": "文档版本决定已保存。"
       },
+      "versionCatalog": {
+        "title": "版本历史",
+        "description": "确认版本标签、前驱顺序与当前完整快照后，系统才会启用版本感知问答。",
+        "reviewTitle": "完善版本元数据",
+        "lineageName": "文档系列",
+        "aliases": "别名（逗号分隔）",
+        "scheme": "版本方案",
+        "versionLabel": "版本标签",
+        "branch": "分支",
+        "current": "当前版本",
+        "predecessor": "前一版本",
+        "snapshotKind": "快照类型",
+        "none": "无",
+        "yes": "是",
+        "no": "否",
+        "fullSnapshot": "完整快照",
+        "delta": "增量文档",
+        "unknown": "未知",
+        "confirm": "确认版本历史",
+        "versionCount": "{{count}} 个版本",
+        "unconfirmed": "待确认",
+        "diffSummary": "{{changed}} 项内容变化 · {{moved}} 项移动",
+        "openVersion": "打开 {{version}}"
+      },
       "missingSource": {
         "title": "缺少来源的事实声明",
         "category": "缺少来源",
@@ -963,6 +987,16 @@
       "evidenceDescription": "这里只展示该版本实际发送给回答模型的来源。",
       "sources": "来源 {{count}}",
       "images": "图片 {{count}}",
+      "versionFilter": {
+        "label": "版本",
+        "automatic": "自动（最新版本）",
+        "latest": "最新 · {{lineage}}",
+        "compare": "比较 {{from}} ↔ {{to}}",
+        "all": "全部版本 · {{lineage}}",
+        "resolved": "{{mode}} · {{labels}}",
+        "latestResolved": "已确认谱系的最新版本",
+        "degraded": "回退版本 · {{labels}}"
+      },
       "navigationTrace": {
         "title": "知识导航记录",
         "coverage": "补证覆盖",

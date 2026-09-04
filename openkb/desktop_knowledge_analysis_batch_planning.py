@@ -14,7 +14,6 @@ from openkb.desktop_knowledge_analysis import (
 from openkb.desktop_knowledge_analysis_batch_store import KnowledgeAnalysisBatch
 from openkb.desktop_knowledge_analysis_plan import estimate_model_tokens
 
-_MAX_EVIDENCE_TEXT_CHARACTERS = 12_000
 _BATCH_ENVELOPE_RESERVE_TOKENS = 64
 
 
@@ -229,7 +228,7 @@ def _evidence_payload(item: tuple[str, DocumentIRBlock]) -> dict[str, object]:
         "kind": block.kind,
         "section": " / ".join(block.heading_path),
         "locator": block.locator or {"line_start": block.line_start, "line_end": block.line_end},
-        "text": block.text[:_MAX_EVIDENCE_TEXT_CHARACTERS],
+        "text": block.text,
     }
 
 

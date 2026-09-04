@@ -3,6 +3,7 @@
 //! OpenKB Desktop Shell: native window ownership and typed Engine mediation.
 
 mod desktop_diagnostic_commands;
+mod desktop_document_version_commands;
 mod desktop_knowledge_page_commands;
 mod desktop_knowledge_reanalysis_commands;
 mod desktop_logging;
@@ -20,6 +21,11 @@ mod process_tree;
 use desktop_diagnostic_commands::{
     desktop_diagnostic_status, desktop_reveal_application_log_directory,
     desktop_reveal_sensitive_trace_directory, desktop_stop_sensitive_trace,
+};
+use desktop_document_version_commands::{
+    desktop_confirm_document_lineage, desktop_document_version_candidates,
+    desktop_document_version_catalog, desktop_document_version_diffs,
+    desktop_resolve_document_version_candidate,
 };
 use desktop_knowledge_page_commands::{
     desktop_adopt_knowledge_item, desktop_bind_knowledge_page_source,
@@ -45,13 +51,12 @@ use desktop_model_settings_commands::{
 use desktop_runtime::DesktopRuntimeState;
 use engine_protocol::{
     ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
-    DiagnosticBundleResult, DocumentVersionCandidate, DocumentVersionCandidateDecision,
-    DocumentVersionCandidatesResult, EngineHealth, EngineSupervisor, GroundedAnswer,
-    GroundedAnswersResult, ImportControlResult, ImportJobsResult, ImportSourceInspection,
-    KnowledgeBaseActivationResult, KnowledgeGraphExtractionControlResult,
-    KnowledgeReconciliationCommit, KnowledgeReconciliationConflictsResult,
-    KnowledgeReconciliationDecision, PageTreeEnrichmentControlResult, RawDocument,
-    RecoveryOverride, TextDocumentImportResult,
+    DiagnosticBundleResult, EngineHealth, EngineSupervisor, GroundedAnswer, GroundedAnswersResult,
+    ImportControlResult, ImportJobsResult, ImportSourceInspection, KnowledgeBaseActivationResult,
+    KnowledgeGraphExtractionControlResult, KnowledgeReconciliationCommit,
+    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision,
+    PageTreeEnrichmentControlResult, RawDocument, RecoveryOverride, TextDocumentImportResult,
+    VersionFilter,
 };
 use process_tree::ProcessTreeJob;
 use std::{path::Path, sync::Arc};
@@ -230,15 +235,18 @@ async fn desktop_import_jobs(
 async fn desktop_ask_grounded(
     state: State<'_, DesktopState>,
     question: String,
+    version_filter: Option<VersionFilter>,
     request_id: String,
 ) -> Result<GroundedAnswer, BridgeError> {
     let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.ask_grounded(question, request_id))
-        .await
-        .map_err(|error| BridgeError {
-            code: "desktop_command_failed".to_owned(),
-            message: format!("Desktop grounded answer task stopped unexpectedly: {error}"),
-        })?
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.ask_grounded(question, version_filter, request_id)
+    })
+    .await
+    .map_err(|error| BridgeError {
+        code: "desktop_command_failed".to_owned(),
+        message: format!("Desktop grounded answer task stopped unexpectedly: {error}"),
+    })?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -365,11 +373,12 @@ async fn desktop_ask_conversation(
     state: State<'_, DesktopState>,
     conversation_id: String,
     question: String,
+    version_filter: Option<VersionFilter>,
     request_id: String,
 ) -> Result<serde_json::Value, BridgeError> {
     let engine = Arc::clone(&state.engine);
     tauri::async_runtime::spawn_blocking(move || {
-        engine.ask_conversation(conversation_id, question, request_id)
+        engine.ask_conversation(conversation_id, question, version_filter, request_id)
     })
     .await
     .map_err(desktop_join_error!("conversation answer"))?
@@ -429,19 +438,6 @@ async fn desktop_export_diagnostic_bundle(
 }
 
 #[tauri::command]
-async fn desktop_document_version_candidates(
-    state: State<'_, DesktopState>,
-) -> Result<DocumentVersionCandidatesResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.document_version_candidates())
-        .await
-        .map_err(|error| BridgeError {
-            code: "desktop_command_failed".to_owned(),
-            message: format!("Desktop document-version lookup stopped unexpectedly: {error}"),
-        })?
-}
-
-#[tauri::command]
 async fn desktop_knowledge_reconciliation_conflicts(
     state: State<'_, DesktopState>,
 ) -> Result<KnowledgeReconciliationConflictsResult, BridgeError> {
@@ -493,24 +489,6 @@ async fn desktop_commit_knowledge_reconciliation_decisions(
     .map_err(|error| BridgeError {
         code: "desktop_command_failed".to_owned(),
         message: format!("Desktop knowledge-reconciliation commit stopped unexpectedly: {error}"),
-    })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_resolve_document_version_candidate(
-    state: State<'_, DesktopState>,
-    candidate_id: String,
-    decision: DocumentVersionCandidateDecision,
-    request_id: String,
-) -> Result<DocumentVersionCandidate, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.resolve_document_version_candidate(candidate_id, decision, request_id)
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop document-version decision stopped unexpectedly: {error}"),
     })?
 }
 
@@ -739,6 +717,9 @@ fn main() {
             desktop_preview_knowledge_bundle,
             desktop_export_knowledge_bundle,
             desktop_document_version_candidates,
+            desktop_document_version_catalog,
+            desktop_confirm_document_lineage,
+            desktop_document_version_diffs,
             desktop_knowledge_reconciliation_conflicts,
             desktop_stage_knowledge_reconciliation_decisions,
             desktop_commit_knowledge_reconciliation_decisions,

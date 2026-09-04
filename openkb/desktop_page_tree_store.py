@@ -22,13 +22,12 @@ from openkb.desktop_page_tree import (
     DETERMINISTIC_PROVIDER_KIND,
     DETERMINISTIC_PROVIDER_VERSION,
     PAGE_TREE_FAILURE_CODE,
-    PageTreeEvidenceBinding,
     PageTreeGeneration,
-    PageTreeImageBinding,
     PageTreeNode,
     PageTreeStageOutcome,
     build_deterministic_page_tree,
 )
+from openkb.desktop_page_tree_bindings import load_page_tree_bindings_in
 from openkb.desktop_page_tree_enrichment import active_page_tree_summaries_in
 from openkb.desktop_page_tree_rebuild_state import (
     claim_page_tree_rebuild,
@@ -301,6 +300,8 @@ def load_page_tree_generation_in(
     connection: sqlite3.Connection,
     document_id: str,
     generation_id: str,
+    *,
+    require_current: bool = True,
 ) -> PageTreeGeneration:
     """Load one immutable provider generation through the OpenKB PageTree contract."""
     row = connection.execute(
@@ -312,7 +313,7 @@ def load_page_tree_generation_in(
         """,
         (document_id, generation_id),
     ).fetchone()
-    if row is None or str(row[5]) != "current":
+    if row is None or (require_current and str(row[5]) != "current"):
         raise ValueError("The current Document PageTree generation is not current.")
     node_rows = connection.execute(
         """
@@ -321,8 +322,7 @@ def load_page_tree_generation_in(
         """,
         (generation_id,),
     ).fetchall()
-    evidence_by_node = _evidence_bindings_in(connection, generation_id)
-    images_by_node = _image_bindings_in(connection, generation_id)
+    evidence_by_node, images_by_node = load_page_tree_bindings_in(connection, generation_id)
     enriched_summaries = active_page_tree_summaries_in(connection, document_id, generation_id)
     nodes = tuple(
         PageTreeNode(
@@ -360,12 +360,44 @@ def load_page_tree_generation_in(
 @contextmanager
 def lease_current_page_tree(kb_dir: Path, document_id: str) -> Iterator[PageTreeGeneration | None]:
     """Keep a request's current immutable generation until its work finishes."""
+    with _lease_page_tree_generation(kb_dir, document_id, generation_id=None) as generation:
+        yield generation
+
+
+@contextmanager
+def lease_page_tree_generation(
+    kb_dir: Path, document_id: str, generation_id: str
+) -> Iterator[PageTreeGeneration | None]:
+    """Keep one snapshot-selected immutable PageTree generation until work finishes."""
+    if not generation_id:
+        yield None
+        return
+    with _lease_page_tree_generation(
+        kb_dir, document_id, generation_id=generation_id
+    ) as generation:
+        yield generation
+
+
+@contextmanager
+def _lease_page_tree_generation(
+    kb_dir: Path, document_id: str, *, generation_id: str | None
+) -> Iterator[PageTreeGeneration | None]:
     resolved = kb_dir.expanduser().resolve()
     state_dir = desktop_state_dir(resolved)
+    generation: PageTreeGeneration | None = None
     with kb_ingest_lock(state_dir):
         connection = _connect(desktop_state_database_path(resolved))
         try:
-            generation = load_current_page_tree_in(connection, document_id)
+            generation = (
+                load_current_page_tree_in(connection, document_id)
+                if generation_id is None
+                else load_page_tree_generation_in(
+                    connection,
+                    document_id,
+                    generation_id,
+                    require_current=False,
+                )
+            )
             if generation is not None:
                 with _GENERATION_LEASE_LOCK:
                     generation_id = generation.generation_id
@@ -415,44 +447,6 @@ def _delete_unleased_superseded_in(connection: sqlite3.Connection, document_id: 
         "DELETE FROM document_page_tree_generations WHERE generation_id = ?",
         ((value,) for value in deletable),
     )
-
-
-def _evidence_bindings_in(
-    connection: sqlite3.Connection, generation_id: str
-) -> dict[str, list[PageTreeEvidenceBinding]]:
-    rows = connection.execute(
-        """
-        SELECT node_id, evidence_id, block_ordinal
-        FROM document_page_tree_node_evidence
-        WHERE generation_id = ? ORDER BY node_id, association_order
-        """,
-        (generation_id,),
-    ).fetchall()
-    values: dict[str, list[PageTreeEvidenceBinding]] = {}
-    for node_id, evidence_id, ordinal in rows:
-        values.setdefault(str(node_id), []).append(
-            PageTreeEvidenceBinding(str(evidence_id), int(ordinal))
-        )
-    return values
-
-
-def _image_bindings_in(
-    connection: sqlite3.Connection, generation_id: str
-) -> dict[str, list[PageTreeImageBinding]]:
-    rows = connection.execute(
-        """
-        SELECT node_id, source_image_id, image_ordinal
-        FROM document_page_tree_node_images
-        WHERE generation_id = ? ORDER BY node_id, association_order
-        """,
-        (generation_id,),
-    ).fetchall()
-    values: dict[str, list[PageTreeImageBinding]] = {}
-    for node_id, image_id, ordinal in rows:
-        values.setdefault(str(node_id), []).append(
-            PageTreeImageBinding(str(image_id), int(ordinal))
-        )
-    return values
 
 
 def rebuild_pending_page_trees(kb_dir: Path) -> None:

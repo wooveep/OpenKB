@@ -1,17 +1,18 @@
 //! Grounded-answer request methods for the private Engine transport.
 
-use super::{BridgeError, BridgeResult, EngineSupervisor, GroundedAnswer};
+use super::{BridgeError, BridgeResult, EngineSupervisor, GroundedAnswer, VersionFilter};
 use serde_json::json;
 
 impl EngineSupervisor {
     pub fn ask_grounded(
         &self,
         question: String,
+        version_filter: Option<VersionFilter>,
         request_id: String,
     ) -> BridgeResult<GroundedAnswer> {
         self.request_grounded_answer(
             "workbench.ask_grounded",
-            json!({ "question": question }),
+            json!({ "question": question, "version_filter": version_filter }),
             request_id,
             "Engine grounded answer response has an invalid shape",
         )

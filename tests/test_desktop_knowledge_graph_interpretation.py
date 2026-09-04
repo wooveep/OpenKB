@@ -226,6 +226,54 @@ def test_all_rejected_nonempty_response_fails_instead_of_publishing_empty() -> N
     assert "Not in the source" not in interpretation.failure_signature
 
 
+def test_part_of_requires_durable_entity_endpoints() -> None:
+    interpretation = GraphExtractionBoundary.interpret(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "step-one",
+                        "evidence_id": "evidence-1",
+                        "type": "claim",
+                        "label": "Stop services",
+                        "support_quote": "Stop services",
+                    },
+                    {
+                        "id": "step-two",
+                        "evidence_id": "evidence-1",
+                        "type": "claim",
+                        "label": "Back up the database",
+                        "support_quote": "Back up the database",
+                    },
+                ],
+                "edges": [
+                    {
+                        "evidence_id": "evidence-1",
+                        "source_id": "step-one",
+                        "target_id": "step-two",
+                        "type": "PART_OF",
+                        "support_quote": "Stop services, then back up the database.",
+                    }
+                ],
+            }
+        ),
+        (
+            GraphEvidence(
+                "evidence-1",
+                "Stop services. Back up the database. Stop services, then back up the database.",
+            ),
+        ),
+    )
+
+    assert interpretation.lifecycle == "completed"
+    assert interpretation.quality == "degraded"
+    assert interpretation.payload is not None
+    assert interpretation.payload.edges == ()
+    assert [(issue.code, issue.path) for issue in interpretation.issues] == [
+        ("invalid_relation_endpoints", "edges[0]")
+    ]
+
+
 def test_unusable_top_level_content_is_a_precise_repairable_failure() -> None:
     interpretation = GraphExtractionBoundary.interpret(
         "not-json",

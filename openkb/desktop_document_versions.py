@@ -10,6 +10,14 @@ import uuid
 from collections.abc import Iterable
 from pathlib import Path
 
+from openkb.desktop_document_version_catalog import (
+    DocumentLineageDecision,
+    DocumentVersionCatalogSnapshot,
+    confirm_document_lineage_in,
+    current_document_version_catalog_in,
+    publish_document_version_catalog_revision_in,
+)
+from openkb.desktop_document_version_diff import DocumentVersionDiff, DocumentVersionDiffBuilder
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
 from openkb.desktop_import_types import DesktopDocumentVersionCandidate
 from openkb.desktop_lexical import cjk_bigrams, is_cjk_text
@@ -46,11 +54,12 @@ class DesktopDocumentVersionService:
         """
         profile = _profile_text(block.text for block in blocks)
         terms = _lexical_terms(profile)
-        if not profile or len(terms) < 2:
-            return ()
         connection = self._connect()
         try:
             with connection:
+                if not profile or len(terms) < 2:
+                    publish_document_version_catalog_revision_in(connection, now=_timestamp())
+                    return ()
                 document = connection.execute(
                     """
                     SELECT document_content_fingerprints.normalized_body_sha256
@@ -93,9 +102,67 @@ class DesktopDocumentVersionService:
                             _timestamp(),
                         ),
                     )
+                publish_document_version_catalog_revision_in(connection, now=_timestamp())
                 return self._pending_candidates_in(connection, document_id=document_id)
         finally:
             connection.close()
+
+    def catalog_snapshot(self) -> DocumentVersionCatalogSnapshot:
+        """Return the currently published immutable Version Catalog revision."""
+        connection = self._connect()
+        try:
+            snapshot = current_document_version_catalog_in(connection)
+            if snapshot is None:
+                raise DesktopImportError(
+                    "document_version_catalog_unavailable",
+                    "The Document Version Catalog is unavailable.",
+                )
+            return snapshot
+        finally:
+            connection.close()
+
+    def list_diffs(self, lineage_id: str) -> tuple[DocumentVersionDiff, ...]:
+        """Read deterministic diffs already materialized for a confirmed lineage."""
+        return DocumentVersionDiffBuilder(self._kb_dir).list_for_lineage(lineage_id)
+
+    def confirm_lineage(self, decision: DocumentLineageDecision) -> DocumentVersionCatalogSnapshot:
+        """Apply one complete user-reviewed lineage decision under optimistic concurrency."""
+        with kb_ingest_lock(self._state_dir):
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                snapshot = confirm_document_lineage_in(connection, decision, now=_timestamp())
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+        lineage = next(
+            item
+            for item in snapshot.lineages
+            if set(member.document_id for member in item.members)
+            == set(member.document_id for member in decision.members)
+        )
+        builder = DocumentVersionDiffBuilder(self._kb_dir)
+        for member in lineage.members:
+            if member.predecessor_document_id is not None:
+                now = _timestamp()
+                try:
+                    builder.build(
+                        lineage_id=lineage.lineage_id,
+                        from_document_id=member.predecessor_document_id,
+                        to_document_id=member.document_id,
+                        now=now,
+                    )
+                except (DesktopImportError, OSError, sqlite3.Error, ValueError):
+                    builder.record_failed(
+                        lineage_id=lineage.lineage_id,
+                        from_document_id=member.predecessor_document_id,
+                        to_document_id=member.document_id,
+                        now=now,
+                    )
+        return snapshot
 
     def list_candidates(self) -> tuple[DesktopDocumentVersionCandidate, ...]:
         """Return only still-actionable candidates for the Desktop review queue."""
@@ -157,6 +224,16 @@ class DesktopDocumentVersionService:
                     source_id = candidate_source_id
                     resolution = "linked_existing_source"
                     other_resolution = "other_candidate_selected"
+                    connection.execute(
+                        """
+                        UPDATE document_version_sources
+                        SET lineage_state = 'needs_order_review', current_document_id = NULL,
+                            current_set_origin = NULL, current_set_at = NULL,
+                            metadata_revision = metadata_revision + 1, updated_at = ?
+                        WHERE source_id = ?
+                        """,
+                        (now, source_id),
+                    )
                 else:
                     source_id = document_id
                     resolution = "kept_independent"
@@ -198,6 +275,7 @@ class DesktopDocumentVersionService:
                     """,
                     (other_resolution, now, document_id, candidate_id),
                 )
+                publish_document_version_catalog_revision_in(connection, now=now)
                 connection.commit()
                 candidate = self._candidate_by_id_in(connection, candidate_id)
                 if candidate is None:

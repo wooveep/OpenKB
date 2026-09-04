@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from openkb.desktop_conversations import DesktopConversationService
 from openkb.desktop_engine_model_lifecycle import emit_model_lifecycle
+from openkb.desktop_engine_version_scope import optional_version_filter_param
 from openkb.desktop_model_terminal import DesktopTerminalModelEvent
 
 if TYPE_CHECKING:
@@ -96,6 +97,7 @@ def dispatch_conversation_request(
             on_delta=on_delta,
             is_cancelled=is_cancelled,
             on_model_event=on_model_event,
+            version_filter=optional_version_filter_param(request),
         )
     if request.method == "workbench.regenerate_conversation_answer":
         return service.regenerate(

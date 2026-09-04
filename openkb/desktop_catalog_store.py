@@ -162,21 +162,55 @@ def rebuild_pending_catalog(kb_dir: Path) -> bool:
 @contextmanager
 def lease_current_catalog(kb_dir: Path) -> Iterator[CatalogGenerationLease | None]:
     """Keep the current and one recent immutable generation safe during retrieval."""
+    with _lease_catalog_generation(kb_dir, generation_id=None) as lease:
+        yield lease
+
+
+@contextmanager
+def lease_catalog_generation(
+    kb_dir: Path, generation_id: str
+) -> Iterator[CatalogGenerationLease | None]:
+    """Keep one snapshot-selected immutable Catalog generation safe during retrieval."""
+    if not generation_id:
+        yield None
+        return
+    with _lease_catalog_generation(kb_dir, generation_id=generation_id) as lease:
+        yield lease
+
+
+@contextmanager
+def _lease_catalog_generation(
+    kb_dir: Path, *, generation_id: str | None
+) -> Iterator[CatalogGenerationLease | None]:
     resolved = kb_dir.expanduser().resolve()
     state_dir = desktop_state_dir(resolved)
     lease: CatalogGenerationLease | None = None
     with kb_ingest_lock(state_dir):
         connection = _connect(desktop_state_database_path(resolved))
         try:
-            row = connection.execute(
-                """
-                SELECT state.current_generation_id, generations.source_revision, state.is_stale
-                FROM knowledge_catalog_state AS state
-                JOIN knowledge_catalog_generations AS generations
-                    ON generations.generation_id = state.current_generation_id
-                WHERE state.singleton = 1
-                """
-            ).fetchone()
+            if generation_id is None:
+                row = connection.execute(
+                    """
+                    SELECT state.current_generation_id, generations.source_revision,
+                        state.is_stale
+                    FROM knowledge_catalog_state AS state
+                    JOIN knowledge_catalog_generations AS generations
+                        ON generations.generation_id = state.current_generation_id
+                    WHERE state.singleton = 1
+                    """
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT generations.generation_id, generations.source_revision,
+                        CASE WHEN state.current_generation_id = generations.generation_id
+                            THEN state.is_stale ELSE 0 END
+                    FROM knowledge_catalog_generations AS generations
+                    JOIN knowledge_catalog_state AS state ON state.singleton = 1
+                    WHERE generations.generation_id = ?
+                    """,
+                    (generation_id,),
+                ).fetchone()
             if row is not None:
                 lease = CatalogGenerationLease(str(row[0]), int(row[1]), bool(row[2]))
                 lease_key = (resolved, lease.generation_id)

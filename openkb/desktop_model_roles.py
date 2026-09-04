@@ -41,6 +41,9 @@ AnalysisCapabilityInvalidator = Callable[
 
 ANALYSIS_MODEL_OPERATIONS = frozenset(
     {
+        "knowledge_fact_harvest",
+        "document_entity_inventory",
+        "entity_dossier_planning",
         "knowledge_analysis",
         "knowledge_analysis_batch",
         "knowledge_analysis_merge",
@@ -48,6 +51,7 @@ ANALYSIS_MODEL_OPERATIONS = frozenset(
         "page_tree_selection",
         "knowledge_navigation_step",
         "knowledge_graph_extraction",
+        "knowledge_relation_analysis",
         "retrieval_plan",
         "structured_output_repair",
         "model_capability_analysis",
@@ -154,10 +158,14 @@ class DesktopRoleModelGateway(DesktopModelGateway):
         if verifier is None:
             return True
         try:
-            profile = answer_capability_profile_for_settings(self._settings)
+            profile = self.answer_capability_profile()
         except (DesktopModelCapacityError, DesktopModelSettingsError):
             return False
         return verifier(profile)
+
+    def answer_capability_profile(self) -> DesktopAnswerCapabilityProfile:
+        """Return the same Answer reasoning budget proven by the capability check."""
+        return answer_capability_profile_for_settings(self._settings)
 
     def invalidate_analysis_capability(self, failure_code: str, reason: str) -> None:
         invalidator = self._analysis_capability_invalidator
@@ -193,7 +201,7 @@ class DesktopRoleModelGateway(DesktopModelGateway):
             raise DesktopModelSettingsError(
                 "Only structured Analysis operations use an Analysis execution profile."
             )
-        return analysis_execution_profile_for_settings(self._settings)
+        return analysis_execution_profile_for_settings(self._settings, operation=operation)
 
     def analyze(self, request: DesktopModelRequest, **kwargs) -> DesktopModelResult:
         role, gateway = self._gateway_for(request.operation, request.model_name)
@@ -296,12 +304,19 @@ class DesktopRoleModelGateway(DesktopModelGateway):
             and role == "analysis"
             and "max_tokens" not in generation_parameters
         ):
+            budget_operation = (
+                request.parent_operation
+                if request.operation == "structured_output_repair"
+                and request.parent_operation is not None
+                else request.operation
+            )
             generation_parameters["max_tokens"] = build_analysis_execution_profile(
                 provider=self._settings.provider,
                 model=selected_model,
                 capability=capability,
                 reasoning_effort=reasoning or "off",
                 api_base_url=self._settings.api_base_url,
+                operation=budget_operation,
             ).provider_output_ceiling_tokens
         capability_identity = request.capability_identity
         if role == "analysis" and capability_identity is None:
@@ -311,6 +326,7 @@ class DesktopRoleModelGateway(DesktopModelGateway):
                 capability=capability,
                 reasoning_effort=reasoning or "off",
                 api_base_url=self._settings.api_base_url,
+                operation=request.operation,
             ).capability_evidence_profile.identity
         return replace(
             request,

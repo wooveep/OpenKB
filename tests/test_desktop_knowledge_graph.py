@@ -28,10 +28,16 @@ from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_knowledge_graph import (
     DesktopKnowledgeGraphQueryError,
     DesktopKnowledgeGraphService,
+    PinnedGraphGenerations,
     _EvidenceInput,
     _model_input,
     _model_payload_from_text,
     local_graph_evidence_ids,
+)
+from openkb.desktop_knowledge_graph_store import (
+    GraphNode,
+    GraphPayload,
+    persist_graph_payload_in,
 )
 from openkb.desktop_knowledge_graph_tasks import DesktopKnowledgeGraphExtractionTasks
 from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
@@ -93,6 +99,81 @@ def test_graph_validator_rejects_evidence_omitted_from_the_bounded_prompt():
             ),
             included,
         )
+
+
+def test_legacy_graph_lookup_reads_the_snapshot_result_after_current_advances(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "snapshot.txt"
+    source.write_text("Pinned graph evidence remains available.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    document = DesktopTextImportService(kb_dir).import_text(source).document
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+
+    with sqlite3.connect(database_path) as connection:
+        evidence_id = str(connection.execute("SELECT evidence_id FROM evidence_refs").fetchone()[0])
+        assert persist_graph_payload_in(
+            connection,
+            document.document_id,
+            GraphPayload(
+                nodes=(
+                    GraphNode(
+                        "pinned",
+                        evidence_id,
+                        "concept",
+                        "Pinned Graph Concept",
+                        "deterministic",
+                    ),
+                ),
+                edges=(),
+            ),
+            capability_identity=None,
+            prompt_contract_digest=None,
+            extraction_method="deterministic",
+        )
+        pinned_result_id = str(
+            connection.execute(
+                "SELECT result_id FROM knowledge_graph_current WHERE document_id = ?",
+                (document.document_id,),
+            ).fetchone()[0]
+        )
+        assert persist_graph_payload_in(
+            connection,
+            document.document_id,
+            GraphPayload(
+                nodes=(
+                    GraphNode(
+                        "replacement",
+                        evidence_id,
+                        "concept",
+                        "Replacement Graph Concept",
+                        "deterministic",
+                    ),
+                ),
+                edges=(),
+            ),
+            capability_identity=None,
+            prompt_contract_digest=None,
+            extraction_method="deterministic",
+        )
+        pinned = local_graph_evidence_ids(
+            connection,
+            terms=("Pinned Graph Concept",),
+            anchor_evidence_ids=(),
+            generation_snapshot=PinnedGraphGenerations(None, (pinned_result_id,)),
+        )
+        current = local_graph_evidence_ids(
+            connection,
+            terms=("Pinned Graph Concept",),
+            anchor_evidence_ids=(),
+        )
+
+    assert pinned == (evidence_id,)
+    assert current == ()
 
 
 def test_graph_validator_cannot_anchor_a_quote_outside_provider_visible_evidence():
@@ -656,6 +737,77 @@ def test_graph_records_keep_same_named_nodes_separate_and_evidence_bound(tmp_pat
         for edge_evidence, source_evidence, target_evidence in bound_edges
     )
     assert set(evidence_ids).issuperset({row[1] for row in atlas_rows})
+
+
+def test_legacy_graph_fallback_excludes_documents_with_admitted_identities(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kw: None
+    )
+    kb_dir = tmp_path / "desktop-kb"
+    atlas_source = tmp_path / "atlas.txt"
+    borealis_source = tmp_path / "borealis.txt"
+    atlas_source.write_text("Atlas operates the gateway.", encoding="utf-8")
+    borealis_source.write_text("Borealis operates the archive.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    importer = DesktopTextImportService(kb_dir)
+    atlas_document = importer.import_text(atlas_source).document
+    borealis_document = importer.import_text(borealis_source).document
+
+    def graph_response(request, _timeout_seconds):
+        [evidence] = json.loads(request.content)["evidence"]
+        label = evidence["text"].split()[0]
+        return json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "entity-1",
+                        "evidence_id": evidence["evidence_id"],
+                        "type": "entity",
+                        "label": label,
+                        "support_quote": label,
+                    }
+                ],
+                "edges": [],
+            }
+        )
+
+    service = DesktopKnowledgeGraphService(
+        kb_dir, model_gateway=DesktopModelGateway(graph_response)
+    )
+    assert service.extract_document(atlas_document.document_id)
+    assert service.extract_document(borealis_document.document_id)
+
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        connection.execute("DELETE FROM knowledge_generation_state WHERE singleton = 1")
+        atlas_evidence = local_graph_evidence_ids(
+            connection, terms=("atlas",), anchor_evidence_ids=()
+        )
+        borealis_evidence = local_graph_evidence_ids(
+            connection, terms=("borealis",), anchor_evidence_ids=()
+        )
+        assert atlas_evidence
+        assert borealis_evidence
+        connection.execute(
+            """
+            INSERT INTO knowledge_document_candidates (
+                candidate_id, document_id, kind, title, normalized_title,
+                entity_subtype, aliases_json, tags_json, admission_state,
+                admission_reason, analysis_provenance_json, created_at
+            ) VALUES (?, ?, 'entity', 'Atlas', 'atlas', 'service', '[]', '[]',
+                'admitted', 'qualified', '{}', ?)
+            """,
+            (
+                "candidate-atlas",
+                atlas_document.document_id,
+                "2026-09-03T00:00:00+00:00",
+            ),
+        )
+
+        assert local_graph_evidence_ids(connection, terms=("atlas",), anchor_evidence_ids=()) == ()
+        assert (
+            local_graph_evidence_ids(connection, terms=("borealis",), anchor_evidence_ids=())
+            == borealis_evidence
+        )
 
 
 def test_graph_budget_preserves_baseline_minimum_candidates():
@@ -1378,10 +1530,10 @@ def test_graph_query_diagnostic_never_waits_for_an_active_kb_mutation(tmp_path, 
     lock_worker.start()
 
     @contextmanager
-    def no_catalog_lease(_kb_dir):
+    def no_catalog_lease(_kb_dir, _generation_id):
         yield None
 
-    monkeypatch.setattr(retrieval, "lease_current_catalog", no_catalog_lease)
+    monkeypatch.setattr(retrieval, "lease_catalog_generation", no_catalog_lease)
     monkeypatch.setattr(
         retrieval,
         "local_graph_evidence_ids",

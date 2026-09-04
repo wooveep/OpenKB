@@ -16,6 +16,7 @@ from openkb import desktop_import_logging as importlog
 from openkb import desktop_page_tree as page_tree_runtime
 from openkb import desktop_page_tree_store as page_tree_store
 from openkb.config import ensure_preferred_knowledge_language
+from openkb.desktop_candidate_registry import DesktopKnowledgeCandidateRegistry
 from openkb.desktop_document_parsers import parse_structured_document
 from openkb.desktop_document_usability import require_usable_document_ir
 from openkb.desktop_document_versions import DesktopDocumentVersionService
@@ -215,6 +216,9 @@ class DesktopTextImportService:
 
     def _start_graph_extraction(self, result: DesktopTextImportResult) -> None:
         """Make optional graph work independent from the completed Import Job result."""
+        DesktopKnowledgeCandidateRegistry(self._store.kb_dir).mark_explicit_legacy(
+            result.document.document_id
+        )
         try:
             from openkb.desktop_catalog_store import start_catalog_rebuilds
 
@@ -427,6 +431,7 @@ class DesktopTextImportService:
                         job_id=state.job_id,
                         stage_run_id=state.stage_ids[active_stage],
                         document_name=state.source.name,
+                        document_version_id=page_tree.document_version_id,
                         evidence=evidence,
                         page_tree=page_tree.generation,
                         provider=execution.provider,
@@ -513,6 +518,7 @@ class DesktopTextImportService:
                         analysis_provenance_json=analysis_provenance_json,
                         evidence=evidence,
                         reconciliation=self._knowledge_reconciliation,
+                        model_gateway=self._model_gateway,
                     )
                 except Exception:
                     logger.exception(
@@ -747,10 +753,22 @@ class DesktopTextImportService:
 
     def _record_existing_knowledge_reconciliation(self, document_id: str) -> None:
         """Replay canonical structured analysis, falling back only for legacy imports."""
+        staged_projection: Path | None = None
         try:
             existing = load_reusable_knowledge_analysis(self._store.database_path, document_id)
             if existing is None:
                 self._knowledge_reconciliation.record_existing_document_changes(document_id)
+                return
+            if existing.analysis.corpus_ready:
+                staged_projection = apply_import_knowledge_analysis(
+                    self._store.kb_dir,
+                    document_id=document_id,
+                    analysis=existing.analysis,
+                    analysis_provenance_json=existing.provenance_json,
+                    evidence=existing.evidence,
+                    reconciliation=self._knowledge_reconciliation,
+                )
+                activate_okf_projection(self._store.kb_dir, staged_projection)
                 return
             connection = sqlite3.connect(self._store.database_path)
             connection.execute("PRAGMA foreign_keys = ON")
@@ -763,6 +781,9 @@ class DesktopTextImportService:
             logger.warning(
                 "Could not reconcile reused imported knowledge for %s: %s", document_id, error
             )
+        finally:
+            if staged_projection is not None:
+                discard_okf_projection_staging(staged_projection)
 
     def _honor_control(self, state: ImportJobState, stage: str) -> None:
         action = self._control.action

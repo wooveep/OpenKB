@@ -22,29 +22,42 @@ Optional failure preserves all verified deterministic Evidence and records `mode
 
 Budgets are a session envelope, not fixed work quotas: at most three adaptive decisions, eight
 physical model attempts across retrieval planning, PageTree selection, navigation and repair,
-twenty-four logical reads, twenty-four thousand estimated source tokens, six navigation actions,
-and 120 seconds checked between operations. Independent
+twenty-four logical reads, six navigation actions, and 120 seconds checked between operations.
+Small or unknown Answer models retain the conservative sixty-four-reference/twenty-four-thousand-
+source-token envelope. A verified large-context Answer model expands those two evidence bounds
+proportionally, up to 256 references and 192,000 source tokens, without requiring that the extra
+capacity be filled. Independent
 knowledge and source reads remain batched. Later rounds exclude visited virtual routes, put new
 gap-specific terms ahead of generic seed terms, and stop on no progress. Source expansion reads
 small documents in full and otherwise preserves logical heading sections and whole blocks rather
 than slicing a permanent 3,000-character window. Automatic whole-section expansion is reserved for
-action-shaped questions or qualified procedure routes; a simple concept lookup stays on its exact
-evidence unless a later validated action explicitly requests more. This keeps deprecated or
-unrelated sibling facts in one physical source section from leaking into a simple lookup.
+an explicit generic how-to or troubleshooting answer shape, a qualified procedure route, or an
+exact source-section route; a simple concept lookup stays on its exact evidence unless a later
+validated action explicitly requests more. The answer shape is classified at the query boundary
+and passed into navigation rather than reconstructed from corpus vocabulary inside source ranking.
 
-For a broad procedure chapter, source ordering exposes no more than eight shallow phases before
-reserving role/scope, safety, validation, and safety-continuation checkpoints. It then returns the
-remaining phase outline and detail, while deferring unrequested expansion, recovery, maintenance,
-and upgrade branches. Source windows from different documents are round-robin fused. This retains
-the original agent's useful summary-to-source navigation behavior without creating a second Wiki
-store or raising the forty-EvidenceRef and source-token ceilings.
+For a broad source read, ordering exposes one substantive DocumentIR block per distinct section,
+ordered only by heading depth and source position, before source-ordered detail; structural headings
+and figures are deferred behind substantive blocks. Source windows from different documents are
+round-robin fused, and an explicitly targeted logical section is reserved as one source sequence.
+Production navigation does not rank product names, commands, lifecycle labels, topology names, or
+benchmark phases. Corpus-specific expectations remain evaluation data, and metamorphic tests require
+equivalent document structures to navigate identically after subject-matter vocabulary is renamed.
+This retains the original agent's useful summary-to-source navigation behavior without creating a
+second Wiki store or introducing corpus-specific ranking. The source-token envelope is the primary
+content bound; the model-aware EvidenceRef guard separately bounds citation and metadata overhead
+while allowing several explicitly targeted logical sections to remain intact.
 
 Evidence is merged by required answer aspect, with newly recovered aspect evidence ahead of
-repetitive seed fragments, then deduplicated by canonical Evidence ID. Knowledge Guidance and an
-ordered Answer Blueprint remain navigation-only; factual answer authority and citations remain
-original Available Evidence. Retrieval Trace records safe objective metadata, coverage, rounds,
-validated action kinds, budget usage, model calls, snapshot IDs, and the explicit stop reason,
-without source excerpts or raw model output.
+repetitive seed fragments, then deduplicated by canonical Evidence ID. Distinct source positions of
+identical canonical evidence remain attached as occurrence metadata. The answer prompt requires each
+relevant occurrence, and a deterministic final postcondition restores the exact cited Evidence text
+after any cited source step whose repeated occurrence the model omitted. It never invents a summary
+or treats occurrence metadata as factual authority. Knowledge Guidance and an ordered Answer
+Blueprint remain navigation-only; factual answer authority and citations remain original Available
+Evidence. Retrieval Trace records safe objective metadata, coverage, rounds, validated action kinds,
+budget usage, model calls, snapshot IDs, and the explicit stop reason, without source excerpts or raw
+model output.
 
 The virtual catalog persists typed `supported_by` and `references` relationships with both endpoint
 routes, lifecycle eligibility, and the Evidence bindings that justify each edge. Structured SQLite

@@ -367,7 +367,7 @@ def test_settings_export_selected_and_effective_deepseek_role_semantics() -> Non
 
     assert payload["provider_adapter"] == {
         "identity": "deepseek",
-        "version": "deepseek.v1",
+        "version": "deepseek.v2",
         "structured_output_mode": "json_object",
         "supports_structured_analysis": True,
         "supported_reasoning": ["high", "low", "medium", "off"],
@@ -393,6 +393,7 @@ def test_settings_export_selected_and_effective_deepseek_role_semantics() -> Non
             "reasoning_source": "provider_default",
         },
     }
+    assert settings.capability_for_role("answer").maximum_output_tokens == 384_000
 
 
 def test_unknown_model_capability_is_conservative_and_overridable():
@@ -410,6 +411,7 @@ def test_unknown_model_capability_is_conservative_and_overridable():
     assert unknown.document_input_capacity == 8_000
     assert unknown.supports_reasoning is False
     assert unknown.supports_streaming is False
+    assert unknown.maximum_output_tokens is None
     assert overridden.context_capacity == 48_000
     assert overridden.document_input_capacity == 24_000
     assert known_custom.supports_streaming is True

@@ -42,7 +42,7 @@ def fuse_candidates(
         existing_reference = references.get(evidence_id)
         if existing_reference is None or (
             candidate.channel == "knowledge_navigation_source_window"
-            and len(candidate.reference.excerpt) > len(existing_reference.excerpt)
+            and len(candidate.reference.excerpt) >= len(existing_reference.excerpt)
         ):
             references[evidence_id] = candidate.reference
         channel_first.setdefault(candidate.channel, evidence_id)

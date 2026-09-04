@@ -8,6 +8,7 @@ import posixpath
 import re
 import sqlite3
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urlsplit
@@ -509,7 +510,18 @@ def _knowledge_links(
             target_catalog_bindings = _selected_relationship_sources(
                 sources_by_node[target_node.node_id], relationship.target_evidence_ids
             )
-            if not source_catalog_bindings or not target_catalog_bindings:
+            assertion_catalog_bindings = _selected_relationship_sources(
+                (
+                    *sources_by_node[source_node.node_id],
+                    *sources_by_node[target_node.node_id],
+                ),
+                relationship.assertion_evidence_ids,
+            )
+            if (
+                not source_catalog_bindings
+                or not target_catalog_bindings
+                or not assertion_catalog_bindings
+            ):
                 continue
             relationship_sources = tuple(
                 sorted(
@@ -521,6 +533,10 @@ def _knowledge_links(
                         *(
                             _relationship_source("target", source)
                             for source in target_catalog_bindings
+                        ),
+                        *(
+                            _relationship_source("supporting", source)
+                            for source in assertion_catalog_bindings
                         ),
                     ),
                     key=lambda item: (
@@ -638,7 +654,7 @@ def _relationship_source(binding_role: str, source: CatalogSource) -> CatalogRel
 
 
 def _selected_relationship_sources(
-    candidates: list[CatalogSource], evidence_ids: tuple[str, ...]
+    candidates: Sequence[CatalogSource], evidence_ids: tuple[str, ...]
 ) -> tuple[CatalogSource, ...]:
     selected = {
         source.evidence_id: source

@@ -243,6 +243,34 @@ def knowledge_snapshot_digest_in(connection: sqlite3.Connection, kb_dir: Path) -
             ORDER BY state.current_generation_id, items.item_key
             """,
         ),
+        "semantic_relationships": _rows(
+            connection,
+            """
+            SELECT relationships.generation_id, relationships.source_item_key,
+                relationships.target_item_key, relationships.relation_kind,
+                relationships.applicability_json, relationships.provenance
+            FROM knowledge_generation_state AS state
+            JOIN knowledge_generation_relationships AS relationships
+              ON relationships.generation_id = state.current_generation_id
+            WHERE state.singleton = 1
+            ORDER BY relationships.source_item_key, relationships.target_item_key,
+                relationships.relation_kind
+            """,
+        ),
+        "semantic_relationship_sources": _rows(
+            connection,
+            """
+            SELECT sources.generation_id, sources.source_item_key,
+                sources.target_item_key, sources.relation_kind,
+                sources.binding_role, sources.evidence_id
+            FROM knowledge_generation_state AS state
+            JOIN knowledge_generation_relationship_sources AS sources
+              ON sources.generation_id = state.current_generation_id
+            WHERE state.singleton = 1
+            ORDER BY sources.source_item_key, sources.target_item_key,
+                sources.relation_kind, sources.binding_role, sources.evidence_id
+            """,
+        ),
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

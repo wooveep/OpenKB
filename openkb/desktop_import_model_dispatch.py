@@ -23,6 +23,9 @@ from openkb.desktop_model_result_failure import (
 
 _ANALYSIS_OPERATIONS = frozenset(
     {
+        "knowledge_fact_harvest",
+        "document_entity_inventory",
+        "entity_dossier_planning",
         "knowledge_analysis",
         "knowledge_analysis_batch",
         "knowledge_analysis_merge",

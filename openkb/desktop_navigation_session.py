@@ -9,9 +9,8 @@ from pathlib import Path
 from typing import Protocol
 
 from openkb.desktop_adaptive_navigation import (
-    NAVIGATION_MAX_BATCH_KNOWLEDGE_READS,
-    NAVIGATION_MAX_BATCH_SOURCE_READS,
     NAVIGATION_MAX_LOGICAL_READS,
+    NAVIGATION_MAX_LOGICAL_READS_PER_ROUND,
     NAVIGATION_MAX_MODEL_CALLS,
     NAVIGATION_MAX_ROUNDS,
     NAVIGATION_MAX_SEARCH_ACTIONS,
@@ -38,11 +37,30 @@ from openkb.desktop_answer_types import (
     DesktopRetrievalPlan,
 )
 from openkb.desktop_model_gateway import DesktopModelGateway
-from openkb.desktop_navigation_evidence import NAVIGATION_MAX_EVIDENCE_REFS
-from openkb.desktop_navigation_evidence import allocate_evidence as _allocate_evidence
-from openkb.desktop_navigation_evidence import (
-    section_diverse_evidence_ids as _section_diverse_evidence_ids,
+from openkb.desktop_navigation_budget import (
+    NavigationEvidenceEnvelope,
+    navigation_evidence_envelope,
 )
+from openkb.desktop_navigation_budget import (
+    group_read_budget as _group_read_budget,
+)
+from openkb.desktop_navigation_budget import (
+    group_read_limits as _group_read_limits,
+)
+from openkb.desktop_navigation_evidence import (
+    NAVIGATION_MAX_EVIDENCE_REFS,
+)
+from openkb.desktop_navigation_evidence import (
+    allocate_evidence as _allocate_evidence,
+)
+from openkb.desktop_navigation_evidence import (
+    new_action_evidence_ids as _new_action_evidence_ids,
+)
+from openkb.desktop_navigation_evidence import (
+    targeted_source_sequence_evidence_ids as _targeted_source_sequence_evidence_ids,
+)
+from openkb.desktop_navigation_references import unique_actions as _unique_actions
+from openkb.desktop_navigation_references import unresolved_reference_actions
 from openkb.desktop_navigation_validation import NavigationAction
 from openkb.desktop_retrieval_trace import (
     DesktopAnswerCoverageTrace,
@@ -60,6 +78,7 @@ class NavigationRoundRetriever(Protocol):
         retrieval_plan: DesktopRetrievalPlan,
         _navigation_max_reads: int,
         _navigation_max_source_windows: int,
+        _navigation_focus_terms: tuple[str, ...],
         _navigation_excluded_routes: frozenset[str],
         _navigation_prior_evidence: tuple[DesktopEvidenceRef, ...],
         _navigation_requested_routes: tuple[str, ...],
@@ -89,7 +108,11 @@ def run_navigation_session(
     deadline = (
         started_at + NAVIGATION_MAX_WALL_SECONDS if session_deadline is None else session_deadline
     )
-    pack, source_budget_reduced = _bounded_initial_pack(initial_pack)
+    evidence_envelope = navigation_evidence_envelope(model_gateway)
+    pack, source_budget_reduced = _bounded_initial_pack(
+        initial_pack,
+        evidence_envelope=evidence_envelope,
+    )
     objective = initial_navigation_objective(question, pack.retrieval_plan)
     coverage = deterministic_seed_coverage(objective, pack)
     rounds = 0
@@ -97,6 +120,8 @@ def run_navigation_session(
     logical_reads = _logical_reads(pack.retrieval_trace)
     source_tokens = estimated_source_tokens(pack)
     search_actions = 0
+    preferred_evidence_ids: tuple[str, ...] = ()
+    priority_evidence_ids: tuple[str, ...] = ()
     visited_action_ids: set[str] = set()
     action_kinds: list[str] = []
     degradations = list(initial_degradations)
@@ -185,6 +210,7 @@ def run_navigation_session(
             logical_reads=logical_reads,
             source_tokens=source_tokens,
             search_actions=search_actions,
+            source_token_limit=evidence_envelope.max_source_tokens,
         )
         if budget_stop is not None:
             stop_reason = budget_stop
@@ -214,8 +240,10 @@ def run_navigation_session(
                 logical_reads=logical_reads,
                 source_tokens=source_tokens,
                 search_actions=search_actions,
+                source_token_limit=evidence_envelope.max_source_tokens,
             ),
             round_number=rounds,
+            preferred_evidence_ids=preferred_evidence_ids,
             is_cancelled=is_cancelled,
             on_model_event=on_model_event,
             retry_scope=retry_scope,
@@ -233,15 +261,23 @@ def run_navigation_session(
 
         objective = step.decision.objective
         coverage = step.decision.coverage
+        action_limit = min(3, max(0, NAVIGATION_MAX_SEARCH_ACTIONS - search_actions))
+        reference_actions = unresolved_reference_actions(
+            pack.evidence,
+            coverage,
+            visited_action_ids=frozenset(visited_action_ids),
+            maximum=action_limit,
+        )
         if coverage_complete(coverage):
             stop_reason = "covered"
             break
-        if step.decision.decision == "stop":
+        actions = _unique_actions((*reference_actions, *step.decision.actions))[:action_limit]
+        if step.decision.decision == "stop" and not actions:
             stop_reason = "absent" if coverage_gate_state(coverage) == "uncovered" else "partial"
             break
 
-        actions = step.decision.actions
         action_groups = _actions_by_aspect(actions)
+        reference_action_ids = frozenset(action.identity for action in reference_actions)
         if not any(action.terms or action.routes or action.evidence_ids for action in actions):
             stop_reason = _incomplete_stop_reason(coverage)
             break
@@ -263,7 +299,13 @@ def run_navigation_session(
         prior_routes = frozenset(pack.retrieval_trace.navigation_routes)
         prior_options = frozenset(item.route for item in pack.route_options)
         aspect_evidence_ids: dict[str, tuple[str, ...]] = {}
+        earlier_priority_evidence_ids = priority_evidence_ids
+        round_priority_evidence_ids: tuple[str, ...] = ()
         round_stop_reason: str | None = None
+        round_logical_read_limit = min(
+            NAVIGATION_MAX_LOGICAL_READS,
+            logical_reads + NAVIGATION_MAX_LOGICAL_READS_PER_ROUND,
+        )
         for group_index, (aspect, group) in enumerate(action_groups):
             if is_cancelled is not None and is_cancelled():
                 degradations.append("knowledge_navigation_cancelled")
@@ -273,16 +315,20 @@ def run_navigation_session(
                 degradations.append("knowledge_navigation_snapshot_changed")
                 round_stop_reason = "snapshot_degraded"
                 break
-            remaining_reads = max(0, NAVIGATION_MAX_LOGICAL_READS - logical_reads)
+            remaining_reads = max(0, round_logical_read_limit - logical_reads)
             groups_left = len(action_groups) - group_index
-            group_read_budget = (remaining_reads + groups_left - 1) // groups_left
-            source_read_limit = min(
-                NAVIGATION_MAX_BATCH_SOURCE_READS,
-                group_read_budget // 3,
+            group_read_budget = _group_read_budget(
+                group,
+                remaining_reads=remaining_reads,
+                groups_left=groups_left,
+                reference_action_ids=reference_action_ids,
             )
-            knowledge_read_limit = min(
-                NAVIGATION_MAX_BATCH_KNOWLEDGE_READS,
-                group_read_budget - source_read_limit,
+            if group_read_budget <= 0:
+                continue
+            knowledge_read_limit, source_read_limit = _group_read_limits(
+                group,
+                read_budget=group_read_budget,
+                reference_action_ids=reference_action_ids,
             )
             group_prior_ids = frozenset(item.evidence_id for item in pack.evidence)
             new_terms = _new_action_terms(group, pack.retrieval_plan)
@@ -290,6 +336,7 @@ def run_navigation_session(
                 retrieval_plan=_expanded_plan(pack.retrieval_plan, new_terms),
                 _navigation_max_reads=knowledge_read_limit,
                 _navigation_max_source_windows=source_read_limit,
+                _navigation_focus_terms=new_terms,
                 _navigation_excluded_routes=frozenset(pack.retrieval_trace.navigation_routes),
                 _navigation_prior_evidence=pack.evidence,
                 _navigation_requested_routes=_unique(
@@ -305,22 +352,45 @@ def run_navigation_session(
                 break
             model_calls += supplement.retrieval_model_cost.model_calls
             logical_reads += _logical_reads(supplement.retrieval_trace)
-            aspect_evidence_ids[aspect] = tuple(
-                evidence_id
-                for evidence_id in _section_diverse_evidence_ids(supplement.evidence)
-                if evidence_id not in group_prior_ids
+            aspect_evidence_ids[aspect] = _new_action_evidence_ids(
+                supplement.evidence,
+                prior_ids=group_prior_ids,
             )
+            if any(
+                action.kind in {"read_routes", "read_source_sections"}
+                or action.identity in reference_action_ids
+                for action in group
+            ):
+                round_priority_evidence_ids = _unique(
+                    (
+                        *round_priority_evidence_ids,
+                        *_targeted_source_sequence_evidence_ids(
+                            supplement.evidence,
+                            prior_ids=group_prior_ids,
+                        ),
+                    )
+                )[: evidence_envelope.max_evidence_refs]
+                priority_evidence_ids = _unique(
+                    (*earlier_priority_evidence_ids, *round_priority_evidence_ids)
+                )
             pack = _merge_packs(
                 pack,
                 supplement,
                 coverage,
                 aspect_evidence_ids=aspect_evidence_ids,
+                priority_evidence_ids=priority_evidence_ids,
+                evidence_envelope=evidence_envelope,
             )
             source_tokens = estimated_source_tokens(pack)
         if round_stop_reason is not None:
             stop_reason = round_stop_reason
             break
         coverage = _bind_observed_aspect_evidence(coverage, aspect_evidence_ids)
+        preferred_evidence_ids = _unique(
+            evidence_id
+            for evidence_ids in aspect_evidence_ids.values()
+            for evidence_id in evidence_ids
+        )
         observation_progress = (
             frozenset(item.evidence_id for item in pack.evidence) - prior_ids
             or frozenset(pack.retrieval_trace.navigation_routes) - prior_routes
@@ -352,12 +422,13 @@ def _remaining_budget(
     logical_reads: int,
     source_tokens: int,
     search_actions: int,
+    source_token_limit: int = NAVIGATION_MAX_SOURCE_TOKENS,
 ) -> NavigationBudget:
     return NavigationBudget(
         rounds=NAVIGATION_MAX_ROUNDS - rounds + 1,
         model_calls=NAVIGATION_MAX_MODEL_CALLS - model_calls,
         logical_reads=NAVIGATION_MAX_LOGICAL_READS - logical_reads,
-        source_tokens=NAVIGATION_MAX_SOURCE_TOKENS - source_tokens,
+        source_tokens=source_token_limit - source_tokens,
         search_actions=NAVIGATION_MAX_SEARCH_ACTIONS - search_actions,
     )
 
@@ -370,12 +441,13 @@ def _budget_stop_reason(
     logical_reads: int,
     source_tokens: int,
     search_actions: int,
+    source_token_limit: int = NAVIGATION_MAX_SOURCE_TOKENS,
 ) -> str | None:
     if (
         rounds >= NAVIGATION_MAX_ROUNDS
         or model_calls >= NAVIGATION_MAX_MODEL_CALLS
         or logical_reads >= NAVIGATION_MAX_LOGICAL_READS
-        or source_tokens >= NAVIGATION_MAX_SOURCE_TOKENS
+        or source_tokens >= source_token_limit
         or search_actions >= NAVIGATION_MAX_SEARCH_ACTIONS
         or time.monotonic() >= deadline
     ):
@@ -448,13 +520,21 @@ def _merge_packs(
     coverage: tuple[DesktopAnswerCoverageTrace, ...],
     *,
     aspect_evidence_ids: dict[str, tuple[str, ...]] | None = None,
+    priority_evidence_ids: tuple[str, ...] = (),
+    evidence_envelope: NavigationEvidenceEnvelope | None = None,
 ) -> DesktopEvidencePack:
+    envelope = evidence_envelope or NavigationEvidenceEnvelope(
+        NAVIGATION_MAX_EVIDENCE_REFS,
+        NAVIGATION_MAX_SOURCE_TOKENS,
+    )
     evidence = _allocate_evidence(
         current.evidence,
         supplement.evidence,
         coverage,
         aspect_evidence_ids=aspect_evidence_ids,
-        terms=supplement.retrieval_plan.terms,
+        priority_evidence_ids=priority_evidence_ids,
+        max_evidence_refs=envelope.max_evidence_refs,
+        max_source_tokens=envelope.max_source_tokens,
     )
     evidence_ids = frozenset(item.evidence_id for item in evidence)
     guidance = _merge_guidance(current.guidance, supplement.guidance, evidence_ids)
@@ -474,14 +554,28 @@ def _merge_packs(
     )
 
 
-def _bounded_initial_pack(pack: DesktopEvidencePack) -> tuple[DesktopEvidencePack, bool]:
+def _bounded_initial_pack(
+    pack: DesktopEvidencePack,
+    *,
+    evidence_envelope: NavigationEvidenceEnvelope | None = None,
+) -> tuple[DesktopEvidencePack, bool]:
     """Apply the session source envelope before seed coverage can finish the request."""
+    envelope = evidence_envelope or NavigationEvidenceEnvelope(
+        NAVIGATION_MAX_EVIDENCE_REFS,
+        NAVIGATION_MAX_SOURCE_TOKENS,
+    )
     if (
-        len(pack.evidence) <= NAVIGATION_MAX_EVIDENCE_REFS
-        and estimated_source_tokens(pack) <= NAVIGATION_MAX_SOURCE_TOKENS
+        len(pack.evidence) <= envelope.max_evidence_refs
+        and estimated_source_tokens(pack) <= envelope.max_source_tokens
     ):
         return pack, False
-    evidence = _allocate_evidence((), pack.evidence, (), terms=pack.retrieval_plan.terms)
+    evidence = _allocate_evidence(
+        (),
+        pack.evidence,
+        (),
+        max_evidence_refs=envelope.max_evidence_refs,
+        max_source_tokens=envelope.max_source_tokens,
+    )
     source_budget_reduced = len(evidence) < len(pack.evidence)
     if not source_budget_reduced and tuple(item.evidence_id for item in evidence) == tuple(
         item.evidence_id for item in pack.evidence

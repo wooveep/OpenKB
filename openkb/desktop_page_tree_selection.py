@@ -91,10 +91,13 @@ def select_page_tree_evidence(
     retry_scope: str | None = None,
     bounded_model_attempts: bool = False,
     response_deadline: float | None = None,
+    allowed_document_ids: frozenset[str] | None = None,
 ) -> PageTreeSelectionResult:
     """Call PageTree Selection at most once, then return only bound Evidence identities."""
     try:
-        document_ids = _candidate_document_ids(kb_dir, plan.terms, baseline)
+        document_ids = _candidate_document_ids(
+            kb_dir, plan.terms, baseline, allowed_document_ids=allowed_document_ids
+        )
         if not document_ids:
             return PageTreeSelectionResult()
         with ExitStack() as stack:
@@ -275,8 +278,16 @@ def _candidate_document_ids(
     kb_dir: Path,
     terms: tuple[str, ...],
     baseline: tuple[DesktopEvidenceRef, ...],
+    *,
+    allowed_document_ids: frozenset[str] | None = None,
 ) -> tuple[str, ...]:
-    selected = list(dict.fromkeys(reference.document_id for reference in baseline))[:_MAX_TREES]
+    selected = list(
+        dict.fromkeys(
+            reference.document_id
+            for reference in baseline
+            if allowed_document_ids is None or reference.document_id in allowed_document_ids
+        )
+    )[:_MAX_TREES]
     if len(selected) == _MAX_TREES or not terms:
         return tuple(selected)
     connection = sqlite3.connect(desktop_state_database_path(kb_dir))
@@ -289,6 +300,15 @@ def _candidate_document_ids(
                 "COALESCE(nodes.summary, '')), ?) > 0 THEN 1 ELSE 0 END)"
             )
             parameters.append(term)
+        scope_clause = ""
+        scope_parameters: tuple[object, ...] = ()
+        if allowed_document_ids is not None:
+            if not allowed_document_ids:
+                return tuple(selected)
+            scope_clause = "AND current.document_id IN ({})".format(
+                ", ".join("?" for _ in allowed_document_ids)
+            )
+            scope_parameters = tuple(sorted(allowed_document_ids))
         rows = connection.execute(
             f"""
             SELECT current.document_id, ({" + ".join(score_parts)}) AS lexical_score
@@ -296,13 +316,13 @@ def _candidate_document_ids(
             JOIN document_page_tree_nodes AS nodes
                 ON nodes.generation_id = current.generation_id
             JOIN source_documents AS documents ON documents.document_id = current.document_id
-            WHERE documents.availability = 'available'
+            WHERE documents.availability = 'available' {scope_clause}
             GROUP BY current.document_id
             HAVING lexical_score > 0
             ORDER BY lexical_score DESC, current.document_id
             LIMIT ?
             """,
-            (*parameters, _MAX_TREES),
+            (*parameters, *scope_parameters, _MAX_TREES),
         ).fetchall()
     finally:
         connection.close()

@@ -18,7 +18,6 @@ from openkb.desktop_model_execution_profile import (
 )
 from openkb.desktop_prompt_contracts import DesktopPromptContract
 
-MAX_KNOWLEDGE_ANALYSIS_INPUT_TOKENS = 12_000
 estimate_model_tokens = _estimate_model_tokens
 
 
@@ -151,10 +150,9 @@ class KnowledgeAnalysisPlan:
 def knowledge_analysis_input_budget(
     capability: DesktopModelCapabilityProfile, contract: DesktopPromptContract
 ) -> int:
-    """Bound latency and repair cost even when a model exposes a huge context window."""
+    """Use verified operation capacity after reserving the contract's bounded output."""
     output_budget = knowledge_analysis_output_budget(capability, contract)
     return min(
-        MAX_KNOWLEDGE_ANALYSIS_INPUT_TOKENS,
         capability.document_input_capacity,
         max(1, capability.context_capacity - output_budget),
     )

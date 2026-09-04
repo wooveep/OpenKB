@@ -213,6 +213,9 @@ class DesktopDiagnosticBundleService:
                                     WHEN operation = 'page_tree_enrichment'
                                         THEN 'retry_page_tree_enrichment'
                                     WHEN operation IN (
+                                        'knowledge_fact_harvest',
+                                        'document_entity_inventory',
+                                        'entity_dossier_planning',
                                         'knowledge_analysis', 'knowledge_analysis_batch',
                                         'knowledge_analysis_merge'
                                     ) THEN 'recover_import_or_start_reanalysis'
@@ -252,6 +255,9 @@ class DesktopDiagnosticBundleService:
                                     WHEN operation = 'page_tree_enrichment'
                                         THEN 'retry_page_tree_enrichment'
                                     WHEN operation IN (
+                                        'knowledge_fact_harvest',
+                                        'document_entity_inventory',
+                                        'entity_dossier_planning',
                                         'knowledge_analysis', 'knowledge_analysis_batch',
                                         'knowledge_analysis_merge'
                                     ) THEN 'recover_import_or_start_reanalysis'

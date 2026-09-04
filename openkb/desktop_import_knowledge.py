@@ -6,10 +6,8 @@ import sqlite3
 from pathlib import Path
 
 from openkb.config import preferred_knowledge_language
-from openkb.desktop_corpus_knowledge import (
-    replace_document_corpus_analysis_in,
-    synthesize_qualified_corpus_in,
-)
+from openkb.desktop_candidate_registry import mark_candidate_registry_explicit_legacy_in
+from openkb.desktop_corpus_knowledge import synthesize_qualified_corpus_in
 from openkb.desktop_import_artifacts import DocumentIRBlock
 from openkb.desktop_import_clock import timestamp
 from openkb.desktop_knowledge_analysis import DesktopKnowledgeAnalysis
@@ -18,8 +16,10 @@ from openkb.desktop_knowledge_analysis_reuse import (
     canonical_analysis_document_id_in,
     canonical_analysis_evidence_map_in,
 )
+from openkb.desktop_knowledge_candidate_pipeline import materialize_candidate_registry_in
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
 from openkb.desktop_missing_sources import record_missing_source_candidates_in
+from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_okf_projection import (
     discard_okf_projection_staging,
     stage_okf_projection_in,
@@ -36,6 +36,7 @@ def apply_import_knowledge_analysis(
     analysis_provenance_json: str,
     evidence: tuple[tuple[str, DocumentIRBlock], ...],
     reconciliation: DesktopKnowledgeReconciliationService,
+    model_gateway: DesktopModelGateway | None = None,
 ) -> Path:
     """Publish derived Knowledge after document availability in its own transaction."""
     staged_projection: Path | None = None
@@ -91,7 +92,7 @@ def apply_import_knowledge_analysis_in(
         analysis_provenance_json=analysis_provenance_json,
     )
     if analysis.corpus_ready:
-        replace_document_corpus_analysis_in(
+        materialize_candidate_registry_in(
             connection,
             document_id=document_id,
             analysis=analysis,
@@ -107,6 +108,7 @@ def apply_import_knowledge_analysis_in(
             affected_document_ids=(document_id,),
         )
     else:
+        mark_candidate_registry_explicit_legacy_in(connection, document_id)
         reconciliation.record_analysis_changes_in(connection, document_id, changes)
     record_missing_source_candidates_in(
         connection,

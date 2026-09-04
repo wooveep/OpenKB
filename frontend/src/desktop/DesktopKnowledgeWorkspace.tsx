@@ -27,11 +27,13 @@ export function DesktopKnowledgeWorkspace({
   requestedPageId,
   requestKey = 0,
   onReviewChanged,
+  onOpenOriginal,
 }: {
   initialTab?: "pages" | "review"
   requestedPageId?: string | null
   requestKey?: number
   onReviewChanged?: () => void
+  onOpenOriginal: (documentId: string, locator: Record<string, unknown>) => void
 }) {
   const { t } = useTranslation("common")
   const bridge = useDesktopBridge()
@@ -209,7 +211,7 @@ export function DesktopKnowledgeWorkspace({
               <DesktopKnowledgeReconciliationPanel refreshKey={knowledgeReviewRevision} />
             </TabsContent>
             <TabsContent value="versions">
-              <DesktopDocumentVersionCandidatePanel />
+              <DesktopDocumentVersionCandidatePanel onOpenOriginal={onOpenOriginal} />
             </TabsContent>
           </Tabs>
         </TabsContent>

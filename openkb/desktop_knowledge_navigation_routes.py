@@ -131,7 +131,7 @@ def _inventory_descriptor(
         else 70
     )
     return _ReadDescriptor(
-        score=base_score + matches * 8 - _route_scope_penalty(item.title, terms),
+        score=base_score + matches * 8,
         hop=0,
         descriptor_kind=(item.kind if item.kind in {"summary", "source"} else "catalog"),
         authority=item.authority,
@@ -142,29 +142,6 @@ def _inventory_descriptor(
         route=item.route,
         snapshot_token=item.snapshot_token,
     )
-
-
-def _route_scope_penalty(title: str, terms: tuple[str, ...]) -> int:
-    """Keep unrequested lifecycle branches behind the requested base procedure."""
-    normalized = title.casefold()
-    markers = (
-        "扩容",
-        "缩容",
-        "运维",
-        "故障",
-        "恢复",
-        "升级",
-        "附录",
-        "faq",
-        "maintenance",
-        "recovery",
-        "upgrade",
-        "troubleshoot",
-    )
-    unmatched = sum(
-        marker in normalized and not any(marker in term for term in terms) for marker in markers
-    )
-    return min(24, unmatched * 12)
 
 
 def _select_read_descriptors(

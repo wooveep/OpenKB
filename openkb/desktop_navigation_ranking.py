@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 
+from openkb.desktop_scoped_evidence import ScopedEvidenceView
 from openkb.desktop_source_sections import (
     is_administrative_section,
     section_from_heading_path,
@@ -12,55 +14,67 @@ from openkb.desktop_source_sections import (
 )
 
 
+@dataclass(frozen=True)
+class _OutlineCandidate:
+    matches: int
+    depth: int
+    ordinal: int
+    evidence_id: str
+    section: str
+
+
 def broad_source_outline_anchor_in(
     connection: sqlite3.Connection,
     evidence_ids: tuple[str, ...],
     terms: tuple[str, ...],
+    *,
+    scoped_view: ScopedEvidenceView | None = None,
 ) -> str | None:
     """Choose a shallow relevant chapter so one whole-source read exposes its phases."""
-    candidates: list[tuple[int, int, int, int, str, str]] = []
+    candidates: list[_OutlineCandidate] = []
     for ordinal, evidence_id in enumerate(evidence_ids):
-        relevance = source_relevance_in(connection, evidence_id, terms)
+        relevance = source_relevance_in(connection, evidence_id, terms, scoped_view=scoped_view)
         if relevance is None:
             continue
         matches, administrative, section, _document_id = relevance
         if administrative or matches <= 0:
             continue
-        scope_score = matches - unrequested_scope_penalty(section, terms)
         candidates.append(
-            (
-                scope_score,
-                matches,
-                section.count(" / "),
-                ordinal,
-                evidence_id,
-                section,
+            _OutlineCandidate(
+                matches=matches,
+                depth=section.count(" / "),
+                ordinal=ordinal,
+                evidence_id=evidence_id,
+                section=section,
             )
         )
     if not candidates:
         return None
-    strongest = max(item[0] for item in candidates)
+    strongest = max(item.matches for item in candidates)
     best = min(
-        (item for item in candidates if item[0] == strongest),
-        key=lambda item: (-item[1], item[3]),
+        (item for item in candidates if item.matches == strongest),
+        key=lambda item: item.ordinal,
     )
     ancestors = tuple(
         item
         for item in candidates
-        if item[0] > 0 and (item[5] == best[5] or best[5].startswith(f"{item[5]} / "))
+        if item.matches > 0
+        and (item.section == best.section or best.section.startswith(f"{item.section} / "))
     )
     return min(
         ancestors or (best,),
-        key=lambda item: (item[2], -item[0], -item[1], item[3]),
-    )[4]
+        key=lambda item: (item.depth, -item.matches, item.ordinal),
+    ).evidence_id
 
 
 def source_relevance_in(
     connection: sqlite3.Connection,
     evidence_id: str,
     terms: tuple[str, ...],
+    *,
+    scoped_view: ScopedEvidenceView | None = None,
 ) -> tuple[int, bool, str, str] | None:
-    rows = source_occurrences_in(connection, evidence_id)
+    rows = source_occurrences_in(connection, evidence_id, scoped_view=scoped_view)
     if not rows:
         return None
     best = min(rows, key=lambda row: source_occurrence_sort_key(row, terms))
@@ -71,51 +85,3 @@ def source_relevance_in(
         section,
         str(best[0]),
     )
-
-
-def unrequested_scope_penalty(section: str, terms: tuple[str, ...]) -> int:
-    return min(
-        12,
-        unrequested_lifecycle_penalty(section, terms)
-        + _unrequested_marker_penalty(
-            section,
-            terms,
-            ("计算节点", "仅管理节点", "compute node", "management node"),
-        ),
-    )
-
-
-def unrequested_lifecycle_penalty(section: str, terms: tuple[str, ...]) -> int:
-    """Defer lifecycle branches without treating base node roles as optional."""
-    return _unrequested_marker_penalty(
-        section,
-        terms,
-        (
-            "扩容",
-            "缩容",
-            "运维",
-            "故障",
-            "恢复",
-            "升级",
-            "附录",
-            "faq",
-            "expansion",
-            "maintenance",
-            "recovery",
-            "scale-out",
-            "upgrade",
-            "troubleshoot",
-        ),
-    )
-
-
-def _unrequested_marker_penalty(
-    section: str,
-    terms: tuple[str, ...],
-    markers: tuple[str, ...],
-) -> int:
-    normalized = section.casefold()
-    unmatched = sum(
-        marker in normalized and not any(marker in term for term in terms) for marker in markers
-    )
-    return min(12, unmatched * 6)

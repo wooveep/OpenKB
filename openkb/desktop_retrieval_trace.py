@@ -73,6 +73,16 @@ class DesktopRetrievalTrace:
     grounding_input_budget_tokens: int = 0
     evidence_input_tokens: int = 0
     guidance_input_tokens: int = 0
+    version_navigation_snapshot_id: str = ""
+    version_catalog_revision_id: str = ""
+    version_catalog_digest: str = ""
+    version_scope_mode: str = ""
+    version_scope_status: str = ""
+    version_scope_lineage_ids: tuple[str, ...] = ()
+    version_scope_labels: tuple[str, ...] = ()
+    version_scope_document_ids: tuple[str, ...] = ()
+    version_scope_selection_reason: str = ""
+    version_scope_degradation_reason: str = ""
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -103,6 +113,16 @@ class DesktopRetrievalTrace:
             "grounding_input_budget_tokens": self.grounding_input_budget_tokens,
             "evidence_input_tokens": self.evidence_input_tokens,
             "guidance_input_tokens": self.guidance_input_tokens,
+            "version_navigation_snapshot_id": self.version_navigation_snapshot_id,
+            "version_catalog_revision_id": self.version_catalog_revision_id,
+            "version_catalog_digest": self.version_catalog_digest,
+            "version_scope_mode": self.version_scope_mode,
+            "version_scope_status": self.version_scope_status,
+            "version_scope_lineage_ids": list(self.version_scope_lineage_ids),
+            "version_scope_labels": list(self.version_scope_labels),
+            "version_scope_document_ids": list(self.version_scope_document_ids),
+            "version_scope_selection_reason": self.version_scope_selection_reason,
+            "version_scope_degradation_reason": self.version_scope_degradation_reason,
         }
 
     def with_canonical_evidence_ids(self, evidence_ids: tuple[str, ...]) -> DesktopRetrievalTrace:
@@ -155,6 +175,16 @@ def retrieval_trace_from_json(value: str) -> DesktopRetrievalTrace:
         ),
         evidence_input_tokens=_non_negative_int(payload.get("evidence_input_tokens")),
         guidance_input_tokens=_non_negative_int(payload.get("guidance_input_tokens")),
+        version_navigation_snapshot_id=_string(payload.get("version_navigation_snapshot_id")),
+        version_catalog_revision_id=_string(payload.get("version_catalog_revision_id")),
+        version_catalog_digest=_string(payload.get("version_catalog_digest")),
+        version_scope_mode=_string(payload.get("version_scope_mode")),
+        version_scope_status=_string(payload.get("version_scope_status")),
+        version_scope_lineage_ids=_strings(payload.get("version_scope_lineage_ids")),
+        version_scope_labels=_strings(payload.get("version_scope_labels")),
+        version_scope_document_ids=_strings(payload.get("version_scope_document_ids")),
+        version_scope_selection_reason=_string(payload.get("version_scope_selection_reason")),
+        version_scope_degradation_reason=_string(payload.get("version_scope_degradation_reason")),
     )
 
 

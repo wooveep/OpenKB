@@ -9,11 +9,15 @@ from openkb.desktop_prompt_contracts import prompt_contract_for
 
 _RENDERED_STRUCTURED_OPERATIONS = frozenset(
     {
+        "knowledge_fact_harvest",
+        "document_entity_inventory",
+        "entity_dossier_planning",
         "knowledge_analysis",
         "knowledge_analysis_batch",
         "knowledge_analysis_merge",
         "knowledge_navigation_step",
         "knowledge_graph_extraction",
+        "knowledge_relation_analysis",
         "page_tree_selection",
     }
 )

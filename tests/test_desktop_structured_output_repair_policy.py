@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from openkb.desktop_knowledge_analysis import parse_knowledge_analysis
 from openkb.desktop_model_gateway import (
     DesktopModelOutputObservations,
     DesktopModelRequest,
@@ -119,3 +120,48 @@ def test_operation_can_allow_the_single_repair_for_an_eligible_failure() -> None
     )
     repair = json.loads(requests[1].content)
     assert repair["validation_errors"] == ["missing_terms at $.terms"]
+
+
+def test_knowledge_analysis_repair_receives_all_independent_validation_errors() -> None:
+    requests: list[DesktopModelRequest] = []
+    valid = {
+        "schema_version": "openkb.knowledge-analysis.v1",
+        "analysis_scope": "batch",
+        "document_description": "Deployment manual table of contents.",
+        "document_summary": [],
+        "concepts": [],
+        "entities": [],
+        "procedures": [],
+    }
+    invalid = {
+        **valid,
+        "document_summary": [
+            {
+                "role": "key_topic",
+                "text": "The manual covers deployment topics.",
+                "source_evidence_ids": [f"evidence-{index}" for index in range(33)],
+            }
+        ],
+        "procedures": [{} for _index in range(33)],
+    }
+
+    def invoke(request: DesktopModelRequest) -> DesktopModelResult:
+        requests.append(request)
+        content = json.dumps(invalid if len(requests) == 1 else valid)
+        return DesktopModelResult(f"call-{len(requests)}", content, 1)
+
+    output = run_structured_output(
+        operation="knowledge_analysis_batch",
+        document_name="deployment-manual.docx",
+        source_material="table-of-contents evidence",
+        invoke=invoke,
+        validate=lambda content: parse_knowledge_analysis(content, expected_scope="batch"),
+    )
+
+    assert output.repaired
+    repair = json.loads(requests[1].content)
+    errors = repair["validation_errors"]
+    assert len(errors) == 2
+    assert any("procedure candidates" in error for error in errors)
+    assert any("at most 32 supplied Evidence IDs" in error for error in errors)
+    assert any("document_summary[0].source_evidence_ids has 33 items" in error for error in errors)

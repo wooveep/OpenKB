@@ -3,239 +3,37 @@
 from __future__ import annotations
 
 from openkb.desktop_answer_types import DesktopEvidenceRef
-from openkb.desktop_navigation_ranking import unrequested_lifecycle_penalty
-
-_PROCEDURE_CHECKPOINT_LIMITS = {"scope": 2, "safety": 2, "validation": 1}
-_SHALLOW_PHASES_BEFORE_CHECKPOINTS = 8
-_PROCEDURE_CONTINUATION_MARKERS = (
-    "add ",
-    "after ",
-    "complete",
-    "finish",
-    "then ",
-    "加到",
-    "增加",
-    "完成",
-    "将",
-    "然后",
-)
-_PROCEDURE_CHECKPOINT_MARKERS = (
-    (
-        "scope",
-        (
-            "both",
-            "两台",
-            "都",
-            "both nodes",
-            "both hosts",
-            "两台主机都",
-            "两台主机均",
-            "两台服务器都",
-            "两台服务器均",
-            "第1台、第2",
-            "都选择",
-            "均需",
-            "all nodes",
-            "all hosts",
-            "each node",
-            "each host",
-            "every node",
-            "every host",
-            "每个节点",
-            "每台主机",
-            "所有节点",
-        ),
-    ),
-    (
-        "safety",
-        (
-            "caution",
-            "do not",
-            "important",
-            "must not",
-            "warning",
-            "不可",
-            "不能",
-            "切记",
-            "勿",
-            "禁止",
-            "重要",
-        ),
-    ),
-    (
-        "validation",
-        (
-            "test ",
-            "测试",
-            "validate",
-            "验证",
-            "verify",
-            "检查",
-            "confirm",
-            "确认",
-            "successful",
-            "正常",
-        ),
-    ),
-)
+from openkb.desktop_source_sections import SOURCE_BLOCK_KIND_CONTEXT_KEY
 
 
 def phase_diverse_source_window(
     references: tuple[DesktopEvidenceRef, ...],
-    *,
-    terms: tuple[str, ...] = (),
 ) -> tuple[DesktopEvidenceRef, ...]:
-    """Keep shallow phases and procedural checkpoints ahead of deep detail."""
+    """Expose one block per structural section before source-ordered detail."""
     representatives: dict[tuple[str, str], tuple[int, DesktopEvidenceRef]] = {}
     for ordinal, reference in enumerate(references):
         key = (reference.document_id, " ".join(reference.section.split()).casefold())
         existing = representatives.get(key)
-        if existing is None or _prefer_phase_representative(reference, existing[1]):
+        if existing is None or _prefer_phase_representative(
+            reference,
+            existing[1],
+        ):
             representatives[key] = (existing[0] if existing is not None else ordinal, reference)
     outline = [item for _ordinal, item in representatives.values()]
     first_ordinals = {item.evidence_id: ordinal for ordinal, item in representatives.values()}
     outline.sort(
         key=lambda item: (
             item.section.count(" / "),
-            unrequested_lifecycle_penalty(item.section, terms),
             first_ordinals[item.evidence_id],
         )
     )
-    minimum_depth = _minimum_section_depth_by_document(outline)
-    shallow_outline = tuple(
-        item for item in outline if item.section.count(" / ") <= minimum_depth[item.document_id] + 1
-    )
-    shallow_ids = {item.evidence_id for item in shallow_outline}
-    has_deep_outline = any(item.evidence_id not in shallow_ids for item in outline)
-    shallow_head = (
-        shallow_outline[:_SHALLOW_PHASES_BEFORE_CHECKPOINTS]
-        if has_deep_outline
-        else shallow_outline
-    )
-    shallow_tail = shallow_outline[len(shallow_head) :]
-    checkpoint_outline = (
-        _procedure_checkpoint_outline(references, excluded=shallow_ids, terms=terms)
-        if has_deep_outline
-        else ()
-    )
-    reserved_ids = shallow_ids | {item.evidence_id for item in checkpoint_outline}
-    deep_outline = tuple(item for item in outline if item.evidence_id not in reserved_ids)
     outline_ids = {reference.evidence_id for reference in outline}
-    remaining = tuple(
-        item
-        for item in references
-        if item.evidence_id not in outline_ids and item.evidence_id not in reserved_ids
-    )
+    remaining = tuple(item for item in references if item.evidence_id not in outline_ids)
     return (
-        *shallow_head,
-        *checkpoint_outline,
-        *shallow_tail,
-        *deep_outline,
+        *outline,
         *(item for item in remaining if not _is_outline_only(item)),
         *(item for item in remaining if _is_outline_only(item)),
     )
-
-
-def _minimum_section_depth_by_document(
-    references: list[DesktopEvidenceRef],
-) -> dict[str, int]:
-    depths: dict[str, int] = {}
-    for reference in references:
-        depth = reference.section.count(" / ")
-        depths[reference.document_id] = min(depths.get(reference.document_id, depth), depth)
-    return depths
-
-
-def _procedure_checkpoint_outline(
-    references: tuple[DesktopEvidenceRef, ...],
-    *,
-    excluded: set[str],
-    terms: tuple[str, ...],
-) -> tuple[DesktopEvidenceRef, ...]:
-    selected: list[DesktopEvidenceRef] = []
-    selected_ids = set(excluded)
-    safety_checkpoints: list[DesktopEvidenceRef] = []
-    first_ordinals = {
-        reference.evidence_id: ordinal for ordinal, reference in enumerate(references)
-    }
-    for _kind, markers in _PROCEDURE_CHECKPOINT_MARKERS:
-        candidates = tuple(
-            reference
-            for reference in references
-            if reference.evidence_id not in selected_ids
-            and not _is_outline_only(reference)
-            and _checkpoint_score(reference, markers)
-        )
-        ranked = sorted(
-            candidates,
-            key=lambda item: (
-                unrequested_lifecycle_penalty(item.section, terms),
-                -_checkpoint_score(item, markers),
-                first_ordinals[item.evidence_id],
-            ),
-        )
-        selected_sections: set[tuple[str, str]] = set()
-        for reference in ranked:
-            section_key = (reference.document_id, " ".join(reference.section.split()).casefold())
-            if section_key in selected_sections:
-                continue
-            selected.append(reference)
-            selected_ids.add(reference.evidence_id)
-            selected_sections.add(section_key)
-            if _kind == "safety":
-                safety_checkpoints.append(reference)
-            if len(selected_sections) == _PROCEDURE_CHECKPOINT_LIMITS[_kind]:
-                break
-    continuation = _best_safety_continuation(
-        references,
-        safety_checkpoints=tuple(safety_checkpoints),
-        excluded=selected_ids,
-        first_ordinals=first_ordinals,
-    )
-    if continuation is not None:
-        selected.append(continuation)
-    return tuple(selected)
-
-
-def _checkpoint_score(reference: DesktopEvidenceRef, markers: tuple[str, ...]) -> int:
-    searchable = f"{reference.section} {reference.excerpt}".casefold()
-    return sum(
-        len(markers) - ordinal for ordinal, marker in enumerate(markers) if marker in searchable
-    )
-
-
-def _best_safety_continuation(
-    references: tuple[DesktopEvidenceRef, ...],
-    *,
-    safety_checkpoints: tuple[DesktopEvidenceRef, ...],
-    excluded: set[str],
-    first_ordinals: dict[str, int],
-) -> DesktopEvidenceRef | None:
-    checkpoint_sections = {
-        (item.document_id, " ".join(item.section.split()).casefold()) for item in safety_checkpoints
-    }
-    ranked = sorted(
-        (
-            (_continuation_score(reference), first_ordinals[reference.evidence_id], reference)
-            for reference in references
-            if reference.evidence_id not in excluded
-            and not _is_outline_only(reference)
-            and (
-                reference.document_id,
-                " ".join(reference.section.split()).casefold(),
-            )
-            in checkpoint_sections
-        ),
-        key=lambda item: (-item[0], item[1]),
-    )
-    if not ranked or ranked[0][0] < 2:
-        return None
-    return ranked[0][2]
-
-
-def _continuation_score(reference: DesktopEvidenceRef) -> int:
-    searchable = f"{reference.section} {reference.excerpt}".casefold()
-    return sum(marker in searchable for marker in _PROCEDURE_CONTINUATION_MARKERS)
 
 
 def round_robin_source_windows(
@@ -289,13 +87,17 @@ def _prefer_phase_representative(
     candidate: DesktopEvidenceRef,
     existing: DesktopEvidenceRef,
 ) -> bool:
-    if _is_outline_only(candidate):
-        return False
-    if _is_outline_only(existing):
-        return True
-    existing_characters = sum(character.isalnum() for character in existing.excerpt)
-    candidate_characters = sum(character.isalnum() for character in candidate.excerpt)
-    return existing_characters < 20 and candidate_characters > existing_characters
+    return _representative_priority(candidate) < _representative_priority(existing)
+
+
+def _representative_priority(reference: DesktopEvidenceRef) -> int:
+    """Prefer substantive DocumentIR blocks without interpreting their vocabulary."""
+    kind = reference.locator.get(SOURCE_BLOCK_KIND_CONTEXT_KEY)
+    if kind == "figure":
+        return 2
+    if kind == "heading" or _is_outline_only(reference):
+        return 1
+    return 0
 
 
 def _source_window_covers(

@@ -20,6 +20,9 @@ _MAX_ORIGINAL_COMPLETENESS_DELTA = 0.1
 _PORTABLE_DIGEST_EXCLUDED_PATHS = frozenset({"openkb.local.json", "release-manifest.json"})
 _PORTABLE_ATTESTATION_SUFFIX = "/openkb/benchmarks/real-corpus-attestation.json"
 _CONTRACT_OPERATIONS = (
+    "knowledge_fact_harvest",
+    "document_entity_inventory",
+    "entity_dossier_planning",
     "knowledge_analysis",
     "knowledge_analysis_batch",
     "knowledge_analysis_merge",

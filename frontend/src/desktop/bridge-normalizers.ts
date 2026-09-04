@@ -152,6 +152,8 @@ function answerVersion(item: unknown): DesktopConversation["messages"][number]["
         locator: record(citation.locator),
         excerpt: stringValue(citation, "excerpt"),
         channels: Array.isArray(citation.channels) ? citation.channels.filter((channel): channel is string => typeof channel === "string") : [],
+        versionLabel: nullableString(citation.version_label),
+        versionSide: nullableString(citation.version_side),
         sourceAvailable: Boolean(citation.source_available),
       }
     }),
@@ -224,6 +226,16 @@ function retrievalTrace(payload: unknown): DesktopConversation["messages"][numbe
     groundingInputBudgetTokens: numberValue(value.grounding_input_budget_tokens),
     evidenceInputTokens: numberValue(value.evidence_input_tokens),
     guidanceInputTokens: numberValue(value.guidance_input_tokens),
+    versionNavigationSnapshotId: stringValue(value, "version_navigation_snapshot_id"),
+    versionCatalogRevisionId: stringValue(value, "version_catalog_revision_id"),
+    versionCatalogDigest: stringValue(value, "version_catalog_digest"),
+    versionScopeMode: stringValue(value, "version_scope_mode"),
+    versionScopeStatus: stringValue(value, "version_scope_status"),
+    versionScopeLineageIds: strings(value.version_scope_lineage_ids),
+    versionScopeLabels: strings(value.version_scope_labels),
+    versionScopeDocumentIds: strings(value.version_scope_document_ids),
+    versionScopeSelectionReason: stringValue(value, "version_scope_selection_reason"),
+    versionScopeDegradationReason: stringValue(value, "version_scope_degradation_reason"),
   }
 }
 

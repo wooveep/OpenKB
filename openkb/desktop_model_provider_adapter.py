@@ -56,7 +56,7 @@ class DeepSeekModelProviderAdapter:
     """Own the complete DeepSeek JSON, thinking, stream, and terminal protocol."""
 
     identity: str = "deepseek"
-    version: str = "deepseek.v1"
+    version: str = "deepseek.v2"
     structured_output_mode: StructuredOutputMode | None = "json_object"
     supports_structured_analysis: bool = True
     supported_reasoning: frozenset[str] = frozenset({"off", "low", "medium", "high"})
@@ -88,7 +88,8 @@ class DeepSeekModelProviderAdapter:
         if reasoning == "off":
             parameters["extra_body"] = {"thinking": {"type": "disabled"}}
         elif reasoning in {"low", "medium", "high"}:
-            parameters["thinking"] = {"type": "enabled"}
+            parameters["extra_body"] = {"thinking": {"type": "enabled"}}
+            parameters["reasoning_effort"] = "low" if reasoning == "low" else "high"
         return parameters
 
     def stream_event(self, chunk: object) -> DesktopProviderStreamEvent:

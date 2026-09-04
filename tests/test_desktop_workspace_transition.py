@@ -61,7 +61,7 @@ def test_engine_admits_multiple_documents_to_analysis_concurrently(tmp_path) -> 
     started_lock = threading.Lock()
 
     def analyze(request, _timeout_seconds):
-        if request.operation == "knowledge_analysis":
+        if request.operation == "knowledge_fact_harvest":
             with started_lock:
                 started_documents.add(request.document_name)
                 if len(started_documents) == 2:
@@ -126,7 +126,7 @@ def test_switch_pauses_an_explicit_import_at_its_next_stage_checkpoint(
     pause_requested = _observe_pause_requests(monkeypatch)
 
     def analyze(request, _timeout_seconds):
-        if request.operation == "knowledge_analysis":
+        if request.operation == "knowledge_fact_harvest":
             analysis_started.set()
             assert release_analysis.wait(timeout=2)
         return _empty_knowledge_analysis()
@@ -229,7 +229,7 @@ def test_switch_pauses_an_explicit_recovery_import_before_activation(tmp_path, m
     pause_requested = _observe_pause_requests(monkeypatch)
 
     def analyze(request, _timeout_seconds):
-        if request.operation == "knowledge_analysis":
+        if request.operation == "knowledge_fact_harvest":
             analysis_started.set()
             assert release_analysis.wait(timeout=2)
         return _empty_knowledge_analysis()
@@ -310,7 +310,10 @@ def test_import_admission_rebinds_to_the_new_kb_after_transition(tmp_path, monke
 
     def factory(kb_dir, _override):
         def analyze(request, _timeout_seconds):
-            if kb_dir.resolve() == first_kb.resolve() and request.operation == "knowledge_analysis":
+            if (
+                kb_dir.resolve() == first_kb.resolve()
+                and request.operation == "knowledge_fact_harvest"
+            ):
                 analysis_started.set()
                 assert release_analysis.wait(timeout=2)
             return _empty_knowledge_analysis()
@@ -418,7 +421,7 @@ def test_failed_switch_reopens_import_admission_on_the_old_kb(tmp_path, monkeypa
 
     def analyze(request, _timeout_seconds):
         nonlocal analysis_calls
-        if request.operation == "knowledge_analysis":
+        if request.operation == "knowledge_fact_harvest":
             analysis_calls += 1
             if analysis_calls == 1:
                 analysis_started.set()
@@ -542,7 +545,7 @@ def test_user_cancel_wins_when_it_races_with_switch_pause(tmp_path, monkeypatch)
     pause_requested = _observe_pause_requests(monkeypatch)
 
     def analyze(request, _timeout_seconds):
-        if request.operation == "knowledge_analysis":
+        if request.operation == "knowledge_fact_harvest":
             analysis_started.set()
             assert release_analysis.wait(timeout=2)
         return _empty_knowledge_analysis()
@@ -600,7 +603,7 @@ def test_reopening_the_same_kb_does_not_pause_its_import(tmp_path, monkeypatch) 
     pause_requested = _observe_pause_requests(monkeypatch)
 
     def analyze(request, _timeout_seconds):
-        if request.operation == "knowledge_analysis":
+        if request.operation == "knowledge_fact_harvest":
             analysis_started.set()
             assert release_analysis.wait(timeout=2)
         return _empty_knowledge_analysis()

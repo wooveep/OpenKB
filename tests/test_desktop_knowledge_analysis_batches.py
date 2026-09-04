@@ -181,7 +181,7 @@ def test_one_document_dispatches_independent_analysis_batches_concurrently(
 
     def transport(request, _timeout_seconds):
         nonlocal active_batch_calls, peak_batch_calls, started_batch_calls
-        if request.operation == "knowledge_analysis_batch":
+        if request.operation == "knowledge_fact_harvest":
             assert request.generation_parameters is not None
             assert request.generation_parameters["max_tokens"] == 8_000
             with lock:
@@ -224,7 +224,7 @@ def test_output_limited_direct_analysis_is_split_instead_of_repaired(
         payload = json.loads(request.content)
         evidence = payload.get("evidence", [])
         calls.append((request.operation, request.batch_id, len(evidence)))
-        if request.operation in {"knowledge_analysis", "knowledge_analysis_batch"}:
+        if request.operation == "knowledge_fact_harvest":
             assert request.generation_parameters is not None
             assert request.generation_parameters["max_tokens"] == 16_384
             if not truncated and len(evidence) > 1:
@@ -255,7 +255,7 @@ def test_output_limited_direct_analysis_is_split_instead_of_repaired(
 
     assert imported.document.availability == "available"
     assert truncated
-    assert calls[0][0] == "knowledge_analysis"
+    assert calls[0][0] == "knowledge_fact_harvest"
     split_calls = [call for call in calls if call[1] and ":split:" in call[1]]
     assert split_calls
     assert all(evidence_count < calls[0][2] for _, _, evidence_count in split_calls)
@@ -271,12 +271,10 @@ def test_output_limited_direct_analysis_is_split_instead_of_repaired(
             (imported.job.job_id,),
         ).fetchone()[0]
     checkpoint = json.loads(str(checkpoint_json))
-    assert checkpoint["output_limit_recovery_from_operation"] == "knowledge_analysis"
+    assert checkpoint["output_limit_recovery_from_operation"] == "knowledge_fact_harvest"
     assert checkpoint["output_limit_split_leaf_count"] == 2
     assert checkpoint["output_limit_recovery_count"] == 1
-    assert checkpoint["prompt_contract_snapshot"]["version"].endswith(
-        ".knowledge_analysis_batch.v7"
-    )
+    assert checkpoint["prompt_contract_snapshot"]["version"].endswith(".knowledge_fact_harvest.v1")
 
 
 def test_output_limited_persisted_batch_records_split_checkpoint(tmp_path: Path) -> None:
@@ -291,7 +289,7 @@ def test_output_limited_persisted_batch_records_split_checkpoint(tmp_path: Path)
         nonlocal truncated
         payload = json.loads(request.content)
         operations.append(request.operation)
-        if request.operation == "knowledge_analysis_batch":
+        if request.operation == "knowledge_fact_harvest":
             evidence = payload["evidence"]
             if not truncated and int(payload["batch_ordinal"]) == 0 and len(evidence) > 1:
                 truncated = True
@@ -431,7 +429,7 @@ def test_failed_batch_recovery_reuses_completed_batch_and_runs_one_merge(tmp_pat
     def transport(request, _timeout_seconds):
         nonlocal failed_once
         payload = json.loads(request.content)
-        if request.operation == "knowledge_analysis_batch":
+        if request.operation == "knowledge_fact_harvest":
             ordinal = int(payload["batch_ordinal"])
             operations.append(f"batch:{ordinal}")
             if ordinal == 1 and not failed_once:
@@ -495,7 +493,7 @@ def test_merge_recovery_does_not_repeat_completed_batches(tmp_path: Path) -> Non
 
     def transport(request, _timeout_seconds):
         nonlocal failed_merge
-        if request.operation == "knowledge_analysis_batch":
+        if request.operation == "knowledge_fact_harvest":
             ordinal = json.loads(request.content)["batch_ordinal"]
             operations.append(f"batch:{ordinal}")
             return _analysis("batch")
@@ -532,7 +530,7 @@ def test_each_batch_model_call_uses_only_the_fixed_connect_bound(tmp_path: Path)
 
     def transport(request, timeout_seconds):
         key = request.operation
-        if key == "knowledge_analysis_batch":
+        if key == "knowledge_fact_harvest":
             key = f"batch:{json.loads(request.content)['batch_ordinal']}"
         timeouts.setdefault(key, []).append(timeout_seconds)
         attempts[key] = attempts.get(key, 0) + 1
@@ -567,7 +565,7 @@ def test_completed_merge_recovery_keeps_the_persisted_provider(
 
     def old_transport(request, _timeout_seconds):
         payload = json.loads(request.content)
-        if request.operation == "knowledge_analysis_batch":
+        if request.operation == "knowledge_fact_harvest":
             ordinal = int(payload["batch_ordinal"])
             evidence_id = str(payload["evidence"][0]["evidence_id"])
             return json.dumps(
@@ -645,14 +643,16 @@ def test_batch_cannot_bind_evidence_from_another_batch(tmp_path: Path) -> None:
     DesktopKnowledgeBaseRuntime().create(kb_dir)
     first_evidence_id = ""
     operations: list[str] = []
+    repair_validation_errors: list[str] = []
 
     def transport(request, _timeout_seconds):
         nonlocal first_evidence_id
         payload = json.loads(request.content)
         operations.append(request.operation)
         if request.operation == "structured_output_repair":
+            repair_validation_errors.extend(payload["validation_errors"])
             return str(payload["invalid_result"])
-        if request.operation == "knowledge_analysis_batch":
+        if request.operation == "knowledge_fact_harvest":
             ordinal = int(payload["batch_ordinal"])
             if ordinal == 0:
                 first_evidence_id = str(payload["evidence"][0]["evidence_id"])
@@ -670,11 +670,26 @@ def test_batch_cannot_bind_evidence_from_another_batch(tmp_path: Path) -> None:
                                 {
                                     "text": f"Claim {ordinal}.",
                                     "source_evidence_ids": [first_evidence_id],
+                                    "role": "detail",
+                                    "applicability": {
+                                        "product_version": "",
+                                        "platform": "",
+                                        "deployment_scenario": "",
+                                        "time_boundary": "",
+                                    },
                                 }
                             ],
                         }
                     ],
                     "entities": [],
+                    "procedures": [],
+                    "document_summary": [
+                        {
+                            "role": "key_topic",
+                            "text": f"Batch {ordinal} summary.",
+                            "source_evidence_ids": [first_evidence_id],
+                        }
+                    ],
                 }
             )
         raise AssertionError("Invalid batch must stop before merge.")
@@ -686,10 +701,14 @@ def test_batch_cannot_bind_evidence_from_another_batch(tmp_path: Path) -> None:
 
     assert captured.value.code == "model_response_invalid"
     assert operations == [
-        "knowledge_analysis_batch",
-        "knowledge_analysis_batch",
+        "knowledge_fact_harvest",
+        "knowledge_fact_harvest",
         "structured_output_repair",
     ]
+    assert len(repair_validation_errors) == 1
+    assert first_evidence_id in repair_validation_errors[0]
+    assert "concepts[0].claims[0].source_evidence_ids" in repair_validation_errors[0]
+    assert "document_summary[0].source_evidence_ids" in repair_validation_errors[0]
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM source_documents").fetchone() == (0,)
 
@@ -702,7 +721,7 @@ def test_merge_cannot_invent_a_claim_even_with_valid_document_evidence(tmp_path:
 
     def transport(request, _timeout_seconds):
         payload = json.loads(request.content)
-        if request.operation == "knowledge_analysis_batch":
+        if request.operation == "knowledge_fact_harvest":
             ordinal = int(payload["batch_ordinal"])
             evidence_id = str(payload["evidence"][0]["evidence_id"])
             return json.dumps(
@@ -769,7 +788,7 @@ def test_merge_cannot_drop_a_validated_claim_or_its_sources(
 
     def transport(request, _timeout_seconds):
         payload = json.loads(request.content)
-        if request.operation == "knowledge_analysis_batch":
+        if request.operation == "knowledge_fact_harvest":
             ordinal = int(payload["batch_ordinal"])
             evidence_id = str(payload["evidence"][0]["evidence_id"])
             return json.dumps(
@@ -920,7 +939,7 @@ def test_document_merge_scope_rejects_more_than_shared_claim_source_limit() -> N
                     "claims": [
                         {
                             "text": "One claim cannot absorb an unbounded source union.",
-                            "source_evidence_ids": [f"evidence-{ordinal}" for ordinal in range(17)],
+                            "source_evidence_ids": [f"evidence-{ordinal}" for ordinal in range(33)],
                         }
                     ],
                 }
@@ -929,5 +948,5 @@ def test_document_merge_scope_rejects_more_than_shared_claim_source_limit() -> N
         }
     )
 
-    with pytest.raises(DesktopImportError, match="at most 16"):
+    with pytest.raises(DesktopImportError, match="at most 32"):
         parse_knowledge_analysis(payload, aggregate=True)

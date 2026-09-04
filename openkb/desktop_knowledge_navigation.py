@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import sqlite3
-from collections import defaultdict
 from dataclasses import dataclass
 
 from openkb.desktop_answer_types import (
@@ -13,7 +11,18 @@ from openkb.desktop_answer_types import (
     DesktopKnowledgeGuidance,
     DesktopKnowledgeRouteOption,
 )
-from openkb.desktop_knowledge_inventory import eligible_knowledge_routes_in
+from openkb.desktop_knowledge_inventory import (
+    DesktopKnowledgeRoute,
+    eligible_knowledge_routes_in,
+)
+from openkb.desktop_knowledge_navigation_reads import (
+    _GuidanceUnit,
+    _NavigationRead,
+    _source_structure_units_in,
+)
+from openkb.desktop_knowledge_navigation_reads import (
+    resolve_read_in as _resolve_read_in,
+)
 from openkb.desktop_knowledge_navigation_routes import (
     _catalog_descriptors_in,
     _index_descriptors,
@@ -38,14 +47,9 @@ from openkb.desktop_navigation_ranking import (
     broad_source_outline_anchor_in as _broad_source_outline_anchor_in,
 )
 from openkb.desktop_navigation_ranking import source_relevance_in as _source_relevance_in
-from openkb.desktop_navigation_ranking import (
-    unrequested_scope_penalty as _unrequested_scope_penalty,
-)
+from openkb.desktop_scoped_evidence import ScopedEvidenceView
 from openkb.desktop_source_sections import (
     is_administrative_section as _is_administrative_section,
-)
-from openkb.desktop_source_sections import (
-    section_from_heading_path as _section,
 )
 from openkb.desktop_source_sections import (
     source_section_evidence_in,
@@ -60,43 +64,13 @@ NAVIGATION_REPEAT_ROUTE_PENALTY = 4
 NAVIGATION_MAX_STRUCTURAL_ANCHORS = 2
 
 _KNOWLEDGE_KINDS = ("concept", "entity", "procedure")
-_PROCEDURE_QUERY_MARKERS = (
-    "build",
-    "configure",
-    "deploy",
-    "how to",
-    "install",
-    "migrate",
-    "procedure",
-    "setup",
-    "step",
-    "安装",
-    "搭建",
-    "步骤",
-    "流程",
-    "迁移",
-    "配置",
-    "部署",
-    "如何",
+__all__ = (
+    "_GuidanceUnit",
+    "_NavigationRead",
+    "_source_structure_units_in",
+    "build_knowledge_navigation_in",
+    "DesktopKnowledgeNavigationResult",
 )
-
-
-@dataclass(frozen=True)
-class _GuidanceUnit:
-    text: str
-    evidence_ids: tuple[str, ...]
-    role: str | None = None
-
-
-@dataclass(frozen=True)
-class _NavigationRead:
-    route: str
-    kind: str
-    authority: str
-    title: str
-    units: tuple[_GuidanceUnit, ...]
-    hop: int
-    snapshot_token: str
 
 
 @dataclass(frozen=True)
@@ -176,12 +150,15 @@ def build_knowledge_navigation_in(
     *,
     catalog_generation_id: str | None,
     terms: tuple[str, ...],
+    focus_terms: tuple[str, ...] = (),
     baseline_evidence: tuple[DesktopEvidenceRef, ...],
     max_reads: int = NAVIGATION_MAX_READS,
     max_source_windows: int = NAVIGATION_MAX_SOURCE_WINDOWS,
     excluded_routes: frozenset[str] = frozenset(),
     requested_routes: tuple[str, ...] = (),
     requested_evidence_ids: tuple[str, ...] = (),
+    answer_kind: str | None = None,
+    scoped_view: ScopedEvidenceView | None = None,
 ) -> DesktopKnowledgeNavigationResult:
     """Spend the supplied slice of the session-wide logical-read budget."""
     if catalog_generation_id is None:
@@ -191,7 +168,17 @@ def build_knowledge_navigation_in(
     normalized_terms = tuple(
         dict.fromkeys(term.strip().casefold() for term in terms if term.strip())
     )
-    inventory = eligible_knowledge_routes_in(connection)
+    normalized_focus_terms = tuple(
+        dict.fromkeys(term.strip().casefold() for term in focus_terms if term.strip())
+    )
+    inventory = eligible_knowledge_routes_in(
+        connection,
+        allowed_document_ids=(
+            scoped_view.scope.allowed_document_ids if scoped_view is not None else None
+        ),
+    )
+    focused_routes = _focused_inventory_routes(inventory, normalized_focus_terms)
+    focused_route_set = frozenset(focused_routes)
     matching_inventory = _phase_diverse_route_descriptors(
         _unique_ranked_descriptors(
             tuple(
@@ -232,10 +219,16 @@ def build_knowledge_navigation_in(
         for item in inventory
         if item.route in requested_routes
     )
+    focused_inventory = tuple(
+        _inventory_descriptor(item, normalized_terms)
+        for item in inventory
+        if item.route in focused_route_set
+    )
     descriptors = _unique_ranked_descriptors(
         (
             *matched_descriptors,
             *requested_inventory,
+            *focused_inventory,
             *(item for item in index_descriptors if item.route in requested_routes),
         )
     )
@@ -268,23 +261,38 @@ def build_knowledge_navigation_in(
             index_descriptors=index_descriptors,
         )
     )
+    advertised = _unique_preserving_descriptors((*focused_inventory, *advertised))
     route_options = tuple(
         DesktopKnowledgeRouteOption(item.route, item.kind, item.title) for item in advertised
     )
+    prioritized_routes = tuple(dict.fromkeys((*requested_routes, *focused_routes)))
     selected = _select_read_descriptors(
         descriptors,
         max_reads=max(0, max_reads),
         excluded_routes=excluded_routes,
-        requested_routes=requested_routes,
+        requested_routes=prioritized_routes,
         requested_only=bool(requested_routes or requested_evidence_ids),
     )
     reads = tuple(
         read
         for descriptor in selected
-        if (read := _resolve_read_in(connection, descriptor)) is not None and read.units
+        if (read := _resolve_read_in(connection, descriptor, scoped_view=scoped_view)) is not None
+        and read.units
+    )
+    focused_source_ids = tuple(
+        dict.fromkeys(
+            evidence_id
+            for read in reads
+            if read.route in focused_route_set and read.authority == "source_section"
+            for unit in read.units
+            for evidence_id in unit.evidence_ids
+        )
     )
     baseline_ids = {reference.evidence_id for reference in baseline_evidence}
-    automatic_source_expansion = _automatic_source_expansion(normalized_terms, reads)
+    automatic_source_expansion = _automatic_source_expansion(
+        reads,
+        answer_kind=answer_kind,
+    )
     structural_anchors = (
         _structural_anchor_evidence_ids(baseline_evidence, terms=normalized_terms)
         if automatic_source_expansion
@@ -299,6 +307,7 @@ def build_knowledge_navigation_in(
             reads,
             terms=normalized_terms,
             baseline_ids=frozenset(baseline_ids),
+            scoped_view=scoped_view,
         )
         if automatic_source_expansion or requested_routes
         else ()
@@ -307,6 +316,7 @@ def build_knowledge_navigation_in(
         dict.fromkeys(
             (
                 *requested_evidence_ids,
+                *focused_source_ids,
                 *routed_source_ids,
                 *structural_anchors,
             )
@@ -321,12 +331,11 @@ def build_knowledge_navigation_in(
             connection,
             evidence_id,
             terms=normalized_terms,
+            scoped_view=scoped_view,
         )
         if section_evidence:
             source_read_count += 1
-            source_windows.append(
-                _phase_diverse_source_window(section_evidence, terms=normalized_terms)
-            )
+            source_windows.append(_phase_diverse_source_window(section_evidence))
     ordered_windows = tuple(source_windows)
     if not requested_routes and not requested_evidence_ids:
         ordered_windows = _consolidate_seed_source_windows(ordered_windows)
@@ -344,251 +353,36 @@ def build_knowledge_navigation_in(
     )
 
 
-def _automatic_source_expansion(
-    terms: tuple[str, ...],
-    reads: tuple[_NavigationRead, ...],
-) -> bool:
-    """Reserve broad source reads for procedural routes or action-shaped queries."""
-    return any(read.kind == "procedure" for read in reads) or any(
-        marker in term for term in terms for marker in _PROCEDURE_QUERY_MARKERS
-    )
-
-
-def _resolve_read_in(
-    connection: sqlite3.Connection, descriptor: _ReadDescriptor
-) -> _NavigationRead | None:
-    units: tuple[_GuidanceUnit, ...]
-    if descriptor.descriptor_kind == "index":
-        units = (
-            _GuidanceUnit(
-                f"Browse the current {descriptor.title.casefold()} routes.",
-                (),
-                "route_index",
-            ),
-        )
-    elif descriptor.descriptor_kind == "summary":
-        units = _summary_units_in(connection, descriptor.authority_id)
-        if not units:
-            units = _source_structure_units_in(connection, descriptor.authority_id)
-    elif descriptor.authority == "source_section":
-        units = _source_section_units_in(connection, descriptor)
-    elif descriptor.descriptor_kind == "source":
-        units = _source_structure_units_in(connection, descriptor.authority_id)
-    elif descriptor.authority == "published_generation":
-        units = _generated_units_in(connection, descriptor)
-    elif descriptor.authority == "user_revision":
-        units = _user_units_in(connection, descriptor)
-    else:
-        return None
-    if not units:
-        return None
-    return _NavigationRead(
-        route=descriptor.route,
-        kind=descriptor.kind,
-        authority=descriptor.authority,
-        title=descriptor.title,
-        units=units,
-        hop=descriptor.hop,
-        snapshot_token=descriptor.snapshot_token,
-    )
-
-
-def _summary_units_in(
-    connection: sqlite3.Connection, document_id: str
-) -> tuple[_GuidanceUnit, ...]:
-    rows = connection.execute(
-        """
-        SELECT units.unit_ordinal, units.unit_text, units.role, sources.evidence_id
-        FROM document_summary_units AS units
-        JOIN document_summary_unit_sources AS sources
-          ON sources.document_id = units.document_id
-         AND sources.unit_ordinal = units.unit_ordinal
-        WHERE units.document_id = ?
-        ORDER BY units.unit_ordinal, sources.evidence_id
-        """,
-        (document_id,),
-    ).fetchall()
-    return _group_units(
-        rows,
-        ordinal_index=0,
-        text_index=1,
-        evidence_index=3,
-        role_index=2,
-    )
-
-
-def _source_structure_units_in(
-    connection: sqlite3.Connection, document_id: str
-) -> tuple[_GuidanceUnit, ...]:
-    rows = connection.execute(
-        """
-        SELECT blocks.heading_path, occurrences.evidence_id
-        FROM document_ir_blocks AS blocks
-        LEFT JOIN evidence_occurrences AS occurrences
-          ON occurrences.document_id = blocks.document_id
-         AND occurrences.block_id = blocks.block_id
-        WHERE blocks.document_id = ?
-        ORDER BY blocks.ordinal, occurrences.ordinal
-        """,
-        (document_id,),
-    ).fetchall()
-    units: list[_GuidanceUnit] = []
-    seen: set[str] = set()
-    fallback_evidence_id: str | None = None
-    for heading_value, evidence_value in rows:
-        if evidence_value is not None and fallback_evidence_id is None:
-            fallback_evidence_id = str(evidence_value)
-        heading = _section(str(heading_value))
-        key = heading.casefold()
-        if not heading or key in seen or evidence_value is None:
+def _focused_inventory_routes(
+    inventory: tuple[DesktopKnowledgeRoute, ...],
+    focus_terms: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Resolve explicit search terms to the closest route titles without domain policy."""
+    candidates: list[tuple[bool, int, int, str]] = []
+    for ordinal, item in enumerate(inventory):
+        title = " ".join(item.title.split()).casefold()
+        leaf = title.rsplit(" / ", 1)[-1]
+        matching = tuple(term for term in focus_terms if term in title)
+        if not matching:
             continue
-        seen.add(key)
-        units.append(_GuidanceUnit(heading, (str(evidence_value),), "section"))
-    if units:
-        return tuple(units)
-    if fallback_evidence_id is None:
-        return ()
-    return (_GuidanceUnit("Document source", (fallback_evidence_id,), "source"),)
-
-
-def _source_section_units_in(
-    connection: sqlite3.Connection, descriptor: _ReadDescriptor
-) -> tuple[_GuidanceUnit, ...]:
-    metadata = _json_object(descriptor.metadata_json)
-    document_id = metadata.get("document_id")
-    heading_path_json = metadata.get("heading_path_json")
-    if not isinstance(document_id, str) or not isinstance(heading_path_json, str):
-        return ()
-    rows = connection.execute(
-        """
-        SELECT occurrences.evidence_id
-        FROM document_ir_blocks AS blocks
-        JOIN evidence_occurrences AS occurrences
-          ON occurrences.document_id = blocks.document_id
-         AND occurrences.block_id = blocks.block_id
-        JOIN source_documents AS documents ON documents.document_id = blocks.document_id
-        WHERE blocks.document_id = ? AND blocks.heading_path = ?
-          AND documents.availability = 'available'
-        ORDER BY blocks.ordinal, occurrences.ordinal, occurrences.evidence_id
-        """,
-        (document_id, heading_path_json),
-    ).fetchall()
-    evidence_ids = tuple(dict.fromkeys(str(row[0]) for row in rows))
-    if not evidence_ids:
-        return ()
-    return (_GuidanceUnit(descriptor.title, evidence_ids, "section"),)
-
-
-def _generated_units_in(
-    connection: sqlite3.Connection, descriptor: _ReadDescriptor
-) -> tuple[_GuidanceUnit, ...]:
-    metadata = _json_object(descriptor.metadata_json)
-    generation_id = metadata.get("generation_id")
-    if not isinstance(generation_id, int):
-        return ()
-    valid = connection.execute(
-        """
-        SELECT 1
-        FROM knowledge_generation_items AS items
-        JOIN knowledge_generations AS generations
-            ON generations.generation_id = items.generation_id
-        WHERE items.generation_id = ? AND items.item_key = ?
-            AND items.kind = ? AND generations.qualification_state = 'qualified'
-        """,
-        (generation_id, descriptor.authority_id, descriptor.kind),
-    ).fetchone()
-    if valid is None:
-        return ()
-    rows = connection.execute(
-        """
-        SELECT sources.claim_text, sources.evidence_id
-        FROM knowledge_generation_item_sources AS sources
-        WHERE sources.generation_id = ? AND sources.item_key = ?
-          AND EXISTS (
-              SELECT 1 FROM evidence_occurrences AS occurrences
-              JOIN source_documents AS documents
-                ON documents.document_id = occurrences.document_id
-              WHERE occurrences.evidence_id = sources.evidence_id
-                AND documents.availability = 'available'
-          )
-        ORDER BY sources.source_id, sources.evidence_id
-        """,
-        (generation_id, descriptor.authority_id),
-    ).fetchall()
-    return _claim_units(rows)
-
-
-def _user_units_in(
-    connection: sqlite3.Connection, descriptor: _ReadDescriptor
-) -> tuple[_GuidanceUnit, ...]:
-    metadata = _json_object(descriptor.metadata_json)
-    revision_id = metadata.get("revision_id")
-    if not isinstance(revision_id, str) or not revision_id:
-        return ()
-    valid = connection.execute(
-        """
-        SELECT 1 FROM knowledge_page_revisions
-        WHERE revision_id = ? AND page_id = ? AND provenance_state = 'source_backed'
-        """,
-        (revision_id, descriptor.authority_id),
-    ).fetchone()
-    if valid is None:
-        return ()
-    rows = connection.execute(
-        """
-        SELECT sources.claim_text, sources.evidence_id
-        FROM knowledge_page_revision_sources AS sources
-        WHERE sources.revision_id = ?
-          AND EXISTS (
-              SELECT 1 FROM evidence_occurrences AS occurrences
-              JOIN source_documents AS documents
-                ON documents.document_id = occurrences.document_id
-              WHERE occurrences.evidence_id = sources.evidence_id
-                AND documents.availability = 'available'
-          )
-        ORDER BY sources.source_id, sources.evidence_id
-        """,
-        (revision_id,),
-    ).fetchall()
-    return _claim_units(rows)
-
-
-def _claim_units(rows: list[tuple[object, ...]]) -> tuple[_GuidanceUnit, ...]:
-    evidence_by_claim: defaultdict[str, set[str]] = defaultdict(set)
-    display_by_claim: dict[str, str] = {}
-    for claim_value, evidence_value in rows:
-        for claim in str(claim_value).splitlines():
-            text = " ".join(claim.split())
-            if not text:
-                continue
-            key = text.casefold()
-            display_by_claim.setdefault(key, text)
-            evidence_by_claim[key].add(str(evidence_value))
-    return tuple(
-        _GuidanceUnit(display_by_claim[key], tuple(sorted(evidence_by_claim[key])))
-        for key in display_by_claim
-    )
-
-
-def _group_units(
-    rows: list[tuple[object, ...]],
-    *,
-    ordinal_index: int,
-    text_index: int,
-    evidence_index: int,
-    role_index: int | None = None,
-) -> tuple[_GuidanceUnit, ...]:
-    grouped: defaultdict[int, list[tuple[object, ...]]] = defaultdict(list)
-    for row in rows:
-        grouped[int(str(row[ordinal_index]))].append(row)
-    return tuple(
-        _GuidanceUnit(
-            str(values[0][text_index]),
-            tuple(dict.fromkeys(str(value[evidence_index]) for value in values)),
-            str(values[0][role_index]) if role_index is not None else None,
+        distance = min(
+            len(leaf) - len(term) if term in leaf else len(title) - len(term) for term in matching
         )
-        for _ordinal, values in sorted(grouped.items())
-    )
+        candidates.append(
+            (item.authority != "source_section", max(0, distance), ordinal, item.route)
+        )
+    return tuple(item[3] for item in sorted(candidates))
+
+
+def _automatic_source_expansion(
+    reads: tuple[_NavigationRead, ...],
+    *,
+    answer_kind: str | None,
+) -> bool:
+    """Expand source from explicit answer shape or resolved structural route metadata."""
+    return any(
+        read.kind == "procedure" or read.authority == "source_section" for read in reads
+    ) or answer_kind in {"how_to", "troubleshooting"}
 
 
 def _rank_source_evidence_ids_in(
@@ -597,6 +391,7 @@ def _rank_source_evidence_ids_in(
     *,
     terms: tuple[str, ...],
     baseline_ids: frozenset[str],
+    scoped_view: ScopedEvidenceView | None = None,
 ) -> tuple[str, ...]:
     """Prefer new routes over similarly relevant extra units without admitting noise."""
     ranked_candidates: list[tuple[tuple[int, int, int, int, str], str, tuple[str, ...]]] = []
@@ -606,7 +401,13 @@ def _rank_source_evidence_ids_in(
         for unit_ordinal, unit in enumerate(read.units):
             unit_matches = _term_match_count(unit.text, terms)
             for evidence_ordinal, evidence_id in enumerate(unit.evidence_ids):
-                relevance = _source_relevance_in(connection, evidence_id, terms)
+                relevance = (
+                    _source_relevance_in(connection, evidence_id, terms)
+                    if scoped_view is None
+                    else _source_relevance_in(
+                        connection, evidence_id, terms, scoped_view=scoped_view
+                    )
+                )
                 if relevance is None:
                     continue
                 section_matches, administrative, section, document_id = relevance
@@ -614,10 +415,6 @@ def _rank_source_evidence_ids_in(
                 # or multilingual, so it may refine but must not outweigh its own source.
                 effective_score = (
                     section_matches * 2 + unit_matches + _guidance_role_bonus(unit.role)
-                )
-                effective_score -= _unrequested_scope_penalty(
-                    section,
-                    terms,
                 )
                 if evidence_id in baseline_ids:
                     # The baseline pack is bounded again after routed fusion. Keep an
@@ -651,6 +448,7 @@ def _rank_source_evidence_ids_in(
                     connection,
                     tuple(item[1] for item in unique_candidates),
                     terms,
+                    scoped_view=scoped_view,
                 )
                 if outline_anchor is not None:
                     source_outline_anchors.append(outline_anchor)
@@ -761,11 +559,3 @@ def _structural_anchor_evidence_ids(
 
 def _guidance_role_bonus(role: str | None) -> int:
     return {"key_topic": 3, "purpose": 1}.get(role or "", 0)
-
-
-def _json_object(value: str) -> dict[str, object]:
-    try:
-        decoded = json.loads(value)
-    except json.JSONDecodeError:
-        return {}
-    return dict(decoded) if isinstance(decoded, dict) else {}

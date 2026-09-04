@@ -7,12 +7,13 @@ import re
 import sqlite3
 from dataclasses import asdict, dataclass
 
+from openkb.desktop_corpus_generation_quality import generation_content_quality_in
 from openkb.desktop_real_corpus_benchmark import (
     RealCorpusBenchmarkAttestation,
     load_real_corpus_benchmark,
 )
 
-CORPUS_BENCHMARK_SCHEMA_VERSION = "openkb.corpus-benchmark.v2"
+CORPUS_BENCHMARK_SCHEMA_VERSION = "openkb.corpus-benchmark.v3"
 MAX_NOISE_LEAKAGE_RATE = 0.02
 MAX_DUPLICATE_IDENTITY_RATE = 0.05
 MIN_MULTI_DOCUMENT_TOPIC_COVERAGE = 0.85
@@ -38,10 +39,15 @@ class CorpusBenchmarkReport:
     schema_version: str
     evidence_integrity_passed: bool
     noise_leakage_rate: float
+    entity_noise_leakage_rate: float
     duplicate_identity_rate: float
+    dossier_readability_rate: float
+    dossier_facet_coverage: float
+    dossier_readability_passed: bool
     multi_document_topic_coverage: float
     procedure_stage_coverage: float
     structural_gate_passed: bool
+    quality_issues: tuple[str, ...]
     real_corpus_benchmark: RealCorpusBenchmarkAttestation
     passed: bool
 
@@ -86,36 +92,18 @@ def corpus_benchmark_report_in(
         """,
         generation_id,
     )
-    noise_items = _count(
-        connection,
-        """
-        SELECT COUNT(*) FROM knowledge_generation_items
-        WHERE generation_id = ? AND (
-            provenance_state != 'source_backed' OR identity_id IS NULL
-        )
-        """,
-        generation_id,
-    )
-    duplicate_items = _count(
-        connection,
-        """
-        SELECT COALESCE(SUM(item_count - 1), 0) FROM (
-            SELECT COUNT(*) AS item_count FROM knowledge_generation_items
-            WHERE generation_id = ? GROUP BY identity_id HAVING item_count > 1
-        )
-        """,
-        generation_id,
-    )
+    content_quality = generation_content_quality_in(connection, generation_id)
     multi_document_coverage = _multi_document_topic_coverage(connection, generation_id)
     procedure_stage_coverage = _procedure_stage_coverage(connection, generation_id)
     real_corpus_benchmark = load_real_corpus_benchmark()
-    noise_rate = noise_items / total_items if total_items else 1.0
-    duplicate_rate = duplicate_items / total_items if total_items else 1.0
+    noise_rate = content_quality.entity_noise_leakage_rate
+    duplicate_rate = content_quality.duplicate_identity_rate
     evidence_passed = total_items > 0 and invalid_sources == 0 and missing_sources == 0
     structural_gate_passed = (
         evidence_passed
         and noise_rate <= MAX_NOISE_LEAKAGE_RATE
         and duplicate_rate <= MAX_DUPLICATE_IDENTITY_RATE
+        and content_quality.dossier_readability_passed
         and multi_document_coverage >= MIN_MULTI_DOCUMENT_TOPIC_COVERAGE
         and procedure_stage_coverage >= MIN_PROCEDURE_STAGE_COVERAGE
     )
@@ -123,10 +111,15 @@ def corpus_benchmark_report_in(
         schema_version=CORPUS_BENCHMARK_SCHEMA_VERSION,
         evidence_integrity_passed=evidence_passed,
         noise_leakage_rate=noise_rate,
+        entity_noise_leakage_rate=noise_rate,
         duplicate_identity_rate=duplicate_rate,
+        dossier_readability_rate=content_quality.dossier_readability_rate,
+        dossier_facet_coverage=content_quality.dossier_facet_coverage,
+        dossier_readability_passed=content_quality.dossier_readability_passed,
         multi_document_topic_coverage=multi_document_coverage,
         procedure_stage_coverage=procedure_stage_coverage,
         structural_gate_passed=structural_gate_passed,
+        quality_issues=content_quality.issues,
         real_corpus_benchmark=real_corpus_benchmark,
         passed=structural_gate_passed and real_corpus_benchmark.passed,
     )

@@ -12,11 +12,15 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from openkb.desktop_knowledge_graph_interpretation import GraphInterpretation
+    from openkb.desktop_semantic_graph import SemanticGraphInterpretation
 
 _MAX_NORMALIZED_LABEL_CHARS = 320
 CANONICAL_GRAPH_SCHEMA_VERSION = "openkb.graph-schema.v2"
 GRAPH_NORMALIZER_VERSION = "openkb.graph-normalizer.v1"
 GRAPH_VERIFICATION_POLICY_VERSION = "openkb.graph-verification.v1"
+SEMANTIC_GRAPH_SCHEMA_VERSION = "openkb.semantic-identity-graph.v1"
+SEMANTIC_GRAPH_NORMALIZER_VERSION = "openkb.semantic-identity-normalizer.v1"
+SEMANTIC_GRAPH_VERIFICATION_POLICY_VERSION = "openkb.semantic-relation-verification.v1"
 
 
 @dataclass(frozen=True)
@@ -106,6 +110,113 @@ def persist_graph_interpretation_in(
         ),
         failure_signature=interpretation.failure_signature,
     )
+
+
+def persist_semantic_graph_interpretation_in(
+    connection: sqlite3.Connection,
+    document_id: str,
+    interpretation: SemanticGraphInterpretation,
+    *,
+    node_count: int,
+    capability_identity: str | None,
+    prompt_contract_digest: str | None,
+    candidate_generation_id: str | None,
+    candidate_generation_digest: str | None,
+) -> str:
+    """Publish task/result metadata for a canonical identity graph assertion set."""
+    if interpretation.lifecycle not in {"completed", "completed_empty"}:
+        raise ValueError("Only completed semantic graph interpretations can be published.")
+    if interpretation.quality is None:
+        raise ValueError("Completed semantic graph interpretations require a quality.")
+    result_id = uuid.uuid4().hex
+    attempt_id = uuid.uuid4().hex
+    created_at = _timestamp()
+    compatibility = _compatibility_in(
+        connection,
+        document_id,
+        canonical_schema_version=SEMANTIC_GRAPH_SCHEMA_VERSION,
+        normalizer_version=SEMANTIC_GRAPH_NORMALIZER_VERSION,
+        verification_policy_version=SEMANTIC_GRAPH_VERIFICATION_POLICY_VERSION,
+    )
+    edge_count = len(interpretation.relations)
+    lifecycle = "completed" if node_count else "completed_empty"
+    connection.execute(
+        """
+        INSERT INTO knowledge_graph_results (
+            result_id, document_id, status, capability_identity,
+            prompt_contract_digest, extraction_method, node_count, edge_count, created_at,
+            quality, retained_count, weakened_count, rejected_count,
+            document_version, evidence_snapshot_digest, canonical_schema_version,
+            normalizer_version, verification_policy_version,
+            candidate_generation_id, candidate_generation_digest
+        ) VALUES (?, ?, ?, ?, ?, 'model', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            result_id,
+            document_id,
+            lifecycle,
+            capability_identity,
+            prompt_contract_digest,
+            node_count,
+            edge_count,
+            created_at,
+            interpretation.quality,
+            interpretation.counts.retained,
+            interpretation.counts.weakened,
+            interpretation.counts.rejected,
+            *compatibility,
+            candidate_generation_id,
+            candidate_generation_digest,
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO knowledge_graph_attempts (
+            attempt_id, document_id, result_id, lifecycle, quality,
+            capability_identity, prompt_contract_digest, extraction_method,
+            node_count, edge_count, retained_count, weakened_count, rejected_count,
+            failure_signature, document_version, evidence_snapshot_digest,
+            canonical_schema_version, normalizer_version, verification_policy_version, created_at,
+            candidate_generation_id, candidate_generation_digest
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'model', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            attempt_id,
+            document_id,
+            result_id,
+            lifecycle,
+            interpretation.quality,
+            capability_identity,
+            prompt_contract_digest,
+            node_count,
+            edge_count,
+            interpretation.counts.retained,
+            interpretation.counts.weakened,
+            interpretation.counts.rejected,
+            *compatibility,
+            created_at,
+            candidate_generation_id,
+            candidate_generation_digest,
+        ),
+    )
+    _insert_attempt_issues(
+        connection,
+        attempt_id,
+        tuple(
+            (issue.code, issue.path, issue.disposition, issue.failure_class)
+            for issue in interpretation.issues
+        ),
+    )
+    _select_current_result(
+        connection,
+        document_id,
+        result_id,
+        quality=interpretation.quality,
+        compatibility=compatibility,
+        candidate_generation_id=candidate_generation_id,
+        candidate_generation_digest=candidate_generation_digest,
+    )
+    return result_id
 
 
 def persist_failed_graph_interpretation_in(
@@ -275,6 +386,8 @@ def _select_current_result(
     *,
     quality: str,
     compatibility: tuple[str | None, str, str, str, str],
+    candidate_generation_id: str | None = None,
+    candidate_generation_digest: str | None = None,
 ) -> None:
     if quality == "degraded":
         compatible_full = connection.execute(
@@ -288,8 +401,15 @@ def _select_current_result(
                 AND results.canonical_schema_version = ?
                 AND results.normalizer_version = ?
                 AND results.verification_policy_version = ?
+                AND results.candidate_generation_id IS ?
+                AND results.candidate_generation_digest IS ?
             """,
-            (document_id, *compatibility),
+            (
+                document_id,
+                *compatibility,
+                candidate_generation_id,
+                candidate_generation_digest,
+            ),
         ).fetchone()
         if compatible_full is not None:
             return
@@ -395,6 +515,10 @@ def _timestamp() -> str:
 def _compatibility_in(
     connection: sqlite3.Connection,
     document_id: str,
+    *,
+    canonical_schema_version: str = CANONICAL_GRAPH_SCHEMA_VERSION,
+    normalizer_version: str = GRAPH_NORMALIZER_VERSION,
+    verification_policy_version: str = GRAPH_VERIFICATION_POLICY_VERSION,
 ) -> tuple[str | None, str, str, str, str]:
     document = connection.execute(
         "SELECT asset_sha256 FROM source_documents WHERE document_id = ?",
@@ -419,7 +543,7 @@ def _compatibility_in(
     return (
         str(document[0]),
         hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
-        CANONICAL_GRAPH_SCHEMA_VERSION,
-        GRAPH_NORMALIZER_VERSION,
-        GRAPH_VERIFICATION_POLICY_VERSION,
+        canonical_schema_version,
+        normalizer_version,
+        verification_policy_version,
     )

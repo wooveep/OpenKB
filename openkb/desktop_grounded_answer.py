@@ -9,6 +9,10 @@ from pathlib import Path
 from threading import Lock
 from typing import cast
 
+from openkb.desktop_answer_budget import (
+    answer_budget_for_gateway,
+    answer_output_reserve_for_context,
+)
 from openkb.desktop_answer_store import DesktopGroundedAnswerStore, new_answer
 from openkb.desktop_answer_types import (
     DesktopEvidencePack,
@@ -18,6 +22,12 @@ from openkb.desktop_answer_types import (
 )
 from openkb.desktop_grounded_answer_outline import (
     citation_guarded_answer as _citation_guarded_answer,
+)
+from openkb.desktop_grounded_answer_outline import (
+    complete_repeated_evidence_occurrences as _complete_repeated_evidence_occurrences,
+)
+from openkb.desktop_grounded_answer_outline import (
+    evidence_occurrence_index as _evidence_occurrence_index,
 )
 from openkb.desktop_grounded_answer_outline import (
     evidence_phase_index as _evidence_phase_index,
@@ -41,14 +51,11 @@ from openkb.desktop_retrieval_trace import (
     DesktopRetrievalTrace,
 )
 from openkb.desktop_structured_output import structured_output_repair_contract_digest
+from openkb.desktop_version_scope import RetrievalRequest
 
 AnswerDeltaCallback = Callable[[str, str, bool, int], None]
 AnswerCancellationCallback = Callable[[], bool]
 AnswerModelEventCallback = Callable[[object], None]
-_DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS = 4_096
-_DEFAULT_ANSWER_OUTPUT_TOKENS = 2_048
-_EXPANDED_ANSWER_OUTPUT_TOKENS = 4_096
-_EXPANDED_ANSWER_CONTEXT_THRESHOLD_TOKENS = 32_768
 _EVIDENCE_GROUNDING_SHARE = 0.75
 _STREAM_CHUNK_CHARS = 96
 
@@ -81,7 +88,7 @@ class DesktopGroundedAnswerService:
 
     def answer(
         self,
-        question: str,
+        question: str | RetrievalRequest,
         *,
         on_delta: AnswerDeltaCallback | None = None,
         is_cancelled: AnswerCancellationCallback | None = None,
@@ -124,7 +131,7 @@ class DesktopGroundedAnswerService:
 
     def generate(
         self,
-        question: str,
+        question: str | RetrievalRequest,
         *,
         conversation_context: tuple[tuple[str, str], ...] = (),
         on_delta: AnswerDeltaCallback | None = None,
@@ -145,7 +152,7 @@ class DesktopGroundedAnswerService:
 
     def _attempt(
         self,
-        question: str,
+        question: str | RetrievalRequest,
         *,
         answer_id: str,
         created_at: str | None = None,
@@ -155,6 +162,7 @@ class DesktopGroundedAnswerService:
         conversation_context: tuple[tuple[str, str], ...],
         retry_suspended_operations: bool = False,
     ) -> DesktopGroundedAnswer:
+        question_text = question.question if isinstance(question, RetrievalRequest) else question
         operation_retry_scopes: dict[str, str] = {}
         retry_scope: str | None = None
         if retry_suspended_operations and self._model_gateway is not None:
@@ -185,6 +193,7 @@ class DesktopGroundedAnswerService:
                 "knowledge_navigation_step": retry_scope,
             }
         try:
+            answer_budget = answer_budget_for_gateway(self._model_gateway)
             pack = prepare_grounded_evidence_pack(
                 self._retriever.retrieve(
                     question,
@@ -192,7 +201,8 @@ class DesktopGroundedAnswerService:
                     on_model_event=on_model_event,
                     operation_retry_scopes=operation_retry_scopes,
                 ),
-                context_capacity_tokens=_answer_context_capacity(self._model_gateway),
+                context_capacity_tokens=answer_budget.context_capacity_tokens,
+                output_reserve_tokens=answer_budget.provider_output_ceiling_tokens,
             )
         finally:
             if retry_scope is not None:
@@ -254,7 +264,7 @@ class DesktopGroundedAnswerService:
             )
 
         generation = generate_grounded_answer(
-            question,
+            question_text,
             pack,
             model_gateway=self._model_gateway,
             on_delta=lambda attempt, delta: emit(delta, attempt),
@@ -319,16 +329,24 @@ def prepare_grounded_evidence_pack(
     pack: DesktopEvidencePack,
     *,
     context_capacity_tokens: int | None = None,
+    output_reserve_tokens: int | None = None,
 ) -> DesktopEvidencePack:
     """Apply the model-aware Evidence/Guidance budget before generation and scoring."""
-    capacity = context_capacity_tokens or _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
+    conservative_budget = answer_budget_for_gateway(None)
+    capacity = context_capacity_tokens or conservative_budget.context_capacity_tokens
     policy = prompt_contract_for("grounded_answer").token_budget_policy
     reserve_value = policy.get("reserve_output_tokens")
     share_value = policy.get("document_input_share")
     configured_reserve = (
-        reserve_value if isinstance(reserve_value, int) else _DEFAULT_ANSWER_OUTPUT_TOKENS
+        reserve_value
+        if isinstance(reserve_value, int)
+        else conservative_budget.final_output_reserve_tokens
     )
-    reserve = max(configured_reserve, _answer_output_token_budget(capacity))
+    reserve = max(
+        configured_reserve,
+        answer_output_reserve_for_context(capacity),
+        output_reserve_tokens or 0,
+    )
     document_share = float(share_value) if isinstance(share_value, (int, float)) else 0.7
     grounding_budget = max(0, int(max(0, capacity - reserve) * document_share))
     evidence_budget = int(grounding_budget * _EVIDENCE_GROUNDING_SHARE)
@@ -426,17 +444,14 @@ def generate_grounded_answer(
         if on_model_event is not None:
             on_model_event(event)
 
+    answer_budget = answer_budget_for_gateway(model_gateway)
     try:
         result = model_gateway.stream(
             DesktopModelRequest(
                 "grounded_answer",
                 "Grounded answer",
                 prompt,
-                generation_parameters={
-                    "max_tokens": _answer_output_token_budget(
-                        _answer_context_capacity(model_gateway)
-                    )
-                },
+                generation_parameters={"max_tokens": answer_budget.provider_output_ceiling_tokens},
             ),
             on_event=observe,
             on_delta=on_delta or (lambda _attempt, _delta: None),
@@ -444,8 +459,9 @@ def generate_grounded_answer(
             is_cancelled=is_cancelled,
         )
         attempts = max(attempts, result.attempt_count)
-        answer_text = _citation_guarded_answer(
-            result.content.strip(), evidence_count=len(pack.evidence)
+        answer_text = _complete_repeated_evidence_occurrences(
+            _citation_guarded_answer(result.content.strip(), evidence_count=len(pack.evidence)),
+            pack.evidence,
         )
         if _is_cancelled(is_cancelled):
             return _cancelled_generation(model_calls=attempts, prompt=prompt)
@@ -549,9 +565,21 @@ def _answer_prompt(
         if phase_index
         else ""
     )
+    occurrence_index = (
+        _evidence_occurrence_index(evidence)
+        if retrieval_trace.navigation_answer_kind == "how_to"
+        else ""
+    )
+    occurrence_section = (
+        "Repeated Evidence Occurrence Index (mandatory how-to checklist; each row is a "
+        "distinct source position; inspect and cite Original Evidence):\n"
+        f"{occurrence_index}\n\n"
+        if occurrence_index
+        else ""
+    )
     return (
         f"{history}Current question: {question}\n\n{guidance_section}{blueprint_section}"
-        f"{phase_section}"
+        f"{phase_section}{occurrence_section}"
         "Original Evidence is the only factual authority; cite it by number.\n"
         f"Evidence:\n{context}"
     )
@@ -620,31 +648,6 @@ def _guidance_text(item: DesktopKnowledgeGuidance) -> str:
         f"Route: {item.route}\nTitle: {item.title}\nKind: {item.kind}\n"
         f"Authority: {item.authority}{outline}"
     )
-
-
-def _answer_context_capacity(gateway: DesktopModelGateway | None) -> int:
-    if gateway is None:
-        return _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
-    resolver = getattr(gateway, "capability_for_operation", None)
-    if not callable(resolver):
-        return _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
-    try:
-        capability = resolver("grounded_answer")
-    except Exception:
-        return _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
-    capacity = getattr(capability, "context_capacity", None)
-    return (
-        capacity
-        if isinstance(capacity, int) and capacity >= _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
-        else _DEFAULT_ANSWER_CONTEXT_CAPACITY_TOKENS
-    )
-
-
-def _answer_output_token_budget(context_capacity_tokens: int) -> int:
-    """Use a larger answer ceiling only when it cannot crowd out source evidence."""
-    if context_capacity_tokens >= _EXPANDED_ANSWER_CONTEXT_THRESHOLD_TOKENS:
-        return _EXPANDED_ANSWER_OUTPUT_TOKENS
-    return _DEFAULT_ANSWER_OUTPUT_TOKENS
 
 
 def _deterministic_answer(question: str, evidence) -> str:

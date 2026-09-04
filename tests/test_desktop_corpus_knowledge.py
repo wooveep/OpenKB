@@ -8,6 +8,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from openkb import desktop_catalog_store as catalog_store
 from openkb.desktop_catalog_store import rebuild_pending_catalog
 from openkb.desktop_corpus_benchmark import _multi_document_topic_coverage
@@ -17,7 +19,9 @@ from openkb.desktop_corpus_knowledge import (
     _candidate_clusters,
     _Claim,
     _claim_conflicts,
+    _cluster_aliases,
     _corpus_language,
+    _matching_identity_rows_in,
     synthesize_qualified_corpus_in,
 )
 from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
@@ -55,6 +59,51 @@ _APPLICABILITY = {
 }
 
 
+def test_inventory_target_must_still_belong_to_its_current_generation() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(
+        """
+        CREATE TABLE knowledge_generation_state (
+            singleton INTEGER PRIMARY KEY,
+            current_generation_id INTEGER
+        );
+        CREATE TABLE knowledge_identities (
+            identity_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            canonical_title TEXT NOT NULL,
+            normalized_title TEXT NOT NULL,
+            status TEXT NOT NULL
+        );
+        CREATE TABLE knowledge_generation_items (
+            generation_id INTEGER NOT NULL,
+            identity_id TEXT
+        );
+        INSERT INTO knowledge_generation_state VALUES (1, 2);
+        INSERT INTO knowledge_identities VALUES (
+            'identity-alpha', 'entity', 'Alpha', 'alpha', 'active'
+        );
+        INSERT INTO knowledge_generation_items VALUES (1, 'identity-alpha');
+        """
+    )
+    candidate = _Candidate(
+        candidate_id="candidate-alpha",
+        document_id="document-alpha",
+        kind="entity",
+        title="Alpha",
+        normalized_title="alpha",
+        entity_subtype="service",
+        aliases=(),
+        tags=(),
+        provenance_json="{}",
+        claims=(),
+        inventory_target_identity_id="identity-alpha",
+        inventory_target_generation_id=1,
+    )
+
+    with pytest.raises(ValueError, match="target generation"):
+        _matching_identity_rows_in(connection, "entity", (candidate,))
+
+
 def test_shipped_real_corpus_attestation_is_fixed_complete_and_tamper_evident() -> None:
     attestation = load_real_corpus_benchmark()
 
@@ -83,10 +132,24 @@ def test_shipped_real_corpus_attestation_is_fixed_complete_and_tamper_evident() 
         raise AssertionError("A modified real-corpus attestation must fail validation.")
 
 
-def test_real_corpus_attestation_rejects_a_manifest_digest_for_another_payload() -> None:
+def test_real_corpus_attestation_rejects_a_manifest_digest_for_another_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     path = Path(__file__).parents[1] / "openkb" / "benchmarks" / "real-corpus-attestation.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["windows_acceptance"]["package_manifest_digest"] = "0" * 64
+    monkeypatch.setattr(
+        "openkb.desktop_real_corpus_benchmark.current_real_corpus_implementation_digest",
+        lambda: payload["implementation_digest"],
+    )
+    monkeypatch.setattr(
+        "openkb.desktop_real_corpus_benchmark._declared_real_corpus_implementation_digest",
+        lambda: payload["implementation_digest"],
+    )
+    monkeypatch.setattr(
+        "openkb.desktop_real_corpus_benchmark.current_real_corpus_contract_digest",
+        lambda: payload["contract_digest"],
+    )
     unsigned = {key: value for key, value in payload.items() if key != "report_digest"}
     payload["report_digest"] = hashlib.sha256(
         json.dumps(
@@ -262,6 +325,87 @@ def test_one_generic_alias_cannot_merge_distinct_corpus_identities() -> None:
     clusters = _candidate_clusters((storage, network))
 
     assert clusters == ((storage,), (network,))
+
+
+def test_supported_latin_separator_aliases_form_one_identity_cluster() -> None:
+    spaced = _identity_candidate(
+        "spaced",
+        title="OCloud View",
+        aliases=("OCloudView",),
+        tags=("product",),
+        platform="V10",
+    )
+    compact = _identity_candidate(
+        "compact",
+        title="OCloudView",
+        aliases=("OCloud View",),
+        tags=("product",),
+        platform="V10",
+    )
+    spaced = _Candidate(
+        **{
+            **spaced.__dict__,
+            "claims": (
+                _Claim(
+                    role="definition",
+                    text="OCloud View 又称 OCloudView，是一款云平台产品。",
+                    applicability=(("platform", "V10"),),
+                    evidence_ids=("evidence-alias",),
+                ),
+            ),
+        }
+    )
+
+    clusters = _candidate_clusters((spaced, compact))
+
+    assert clusters == ((spaced, compact),)
+
+
+def test_separator_similarity_without_alias_evidence_does_not_merge_identities() -> None:
+    spaced = _identity_candidate(
+        "spaced",
+        title="OCloud View",
+        aliases=("OCloudView",),
+        tags=("product",),
+        platform="V10",
+    )
+    compact = _identity_candidate(
+        "compact",
+        title="OCloudView",
+        aliases=("OCloud View",),
+        tags=("product",),
+        platform="V10",
+    )
+
+    assert _candidate_clusters((spaced, compact)) == ((spaced,), (compact,))
+
+
+def test_only_evidence_supported_aliases_enter_the_identity_index() -> None:
+    unsupported = _identity_candidate(
+        "unsupported",
+        title="Alpha Service",
+        aliases=("Beta Service",),
+        tags=("service",),
+        platform="Linux",
+    )
+    supported = _Candidate(
+        **{
+            **unsupported.__dict__,
+            "candidate_id": "supported",
+            "claims": (
+                _Claim(
+                    role="definition",
+                    text="Alpha Service is also known as AlphaService.",
+                    applicability=(("platform", "Linux"),),
+                    evidence_ids=("evidence-alias",),
+                ),
+            ),
+            "aliases": ("AlphaService", "Beta Service"),
+        }
+    )
+
+    assert _cluster_aliases((unsupported,), "alpha service") == ()
+    assert _cluster_aliases((supported,), "alpha service") == ("AlphaService",)
 
 
 def test_same_identity_keeps_claims_from_distinct_applicability_scopes() -> None:
@@ -513,7 +657,7 @@ def test_one_generic_alias_cannot_reuse_an_existing_persistent_identity(
         io.BytesIO(),
         workspace=workspace,
         model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(
-            lambda request, _timeout: response(request.content)
+            lambda request, _timeout: _relation_or_analysis_response(request, response)
         ),
     )
     server._handshake_complete = True
@@ -583,7 +727,7 @@ def test_ambiguous_identity_cluster_carries_forward_its_prior_generated_item(
         io.BytesIO(),
         workspace=workspace,
         model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(
-            lambda request, _timeout: response(request.content)
+            lambda request, _timeout: _relation_or_analysis_response(request, response)
         ),
     )
     server._handshake_complete = True
@@ -653,7 +797,7 @@ def test_invalid_candidate_generation_fails_gate_and_keeps_prior_current(
         io.BytesIO(),
         workspace=workspace,
         model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(
-            lambda request, _timeout: _analysis_response(request.content)
+            lambda request, _timeout: _relation_or_analysis_response(request, _analysis_response)
         ),
     )
     server._handshake_complete = True
@@ -744,7 +888,7 @@ def _analysis_response(content: str) -> str:
         entities = [
             {
                 "title": r"C:\temp\install.log",
-                "subtype": "File",
+                "subtype": "software_component",
                 "aliases": [],
                 "tags": [],
                 "claims": [_claim("detail", "该日志记录安装过程信息。", evidence_id)],
@@ -772,6 +916,84 @@ def _analysis_response(content: str) -> str:
                     "claims": claims,
                 }
             ],
+        },
+        ensure_ascii=False,
+    )
+
+
+def _relation_or_analysis_response(request, analysis_response) -> str:
+    if request.operation == "knowledge_relation_analysis":
+        return '{"relations":[]}'
+    if request.operation == "document_entity_inventory":
+        return _inventory_response(request.content)
+    if request.operation == "entity_dossier_planning":
+        return _dossier_response(request.content)
+    return analysis_response(request.content)
+
+
+def _inventory_response(content: str) -> str:
+    snapshot = json.loads(content)
+    decisions: list[dict[str, object]] = []
+    for proposal in snapshot["proposals"]:
+        title = str(proposal["title"])
+        rejected = "\\" in title or "/" in title
+        decisions.append(
+            {
+                "proposal_id": proposal["proposal_id"],
+                "decision": "reject" if rejected else "create",
+                "canonical_title": title,
+                "entity_subtype": None if rejected else proposal["proposed_subtype"],
+                "claim_ids": (
+                    [] if rejected else [claim["claim_id"] for claim in proposal["claims"]]
+                ),
+                "target_identity_id": None,
+                "reason_codes": ["literal_or_metadata" if rejected else "durable_named_entity"],
+                "supporting_proposal_ids": [proposal["proposal_id"]],
+                "corpus_brief_ids": [],
+            }
+        )
+    return json.dumps(
+        {
+            "document_version_id": snapshot["document_version_id"],
+            "analysis_generation_id": snapshot["analysis_generation_id"],
+            "decisions": decisions,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _dossier_response(content: str) -> str:
+    snapshot = json.loads(content)
+    claims = list(snapshot["claims"])
+    summary = next(
+        (claim for claim in claims if claim["role"] in {"definition", "purpose"}),
+        None,
+    )
+    summary_ids = [summary["claim_id"]] if summary is not None else []
+    remaining_ids = [claim["claim_id"] for claim in claims if claim["claim_id"] not in summary_ids]
+    sections = (
+        [
+            {
+                "title": "Details",
+                "purpose": "details",
+                "units": [
+                    {
+                        "presentation": "list" if len(remaining_ids) > 1 else "paragraph",
+                        "claim_ids": remaining_ids,
+                    }
+                ],
+            }
+        ]
+        if remaining_ids
+        else []
+    )
+    return json.dumps(
+        {
+            "generation_id": snapshot["generation_id"],
+            "identity_id": snapshot["identity_id"],
+            "summary_claim_ids": summary_ids,
+            "sections": sections,
+            "related_identity_ids": [],
         },
         ensure_ascii=False,
     )
@@ -859,7 +1081,7 @@ def test_navigation_reads_only_the_routes_requested_by_an_adaptive_round() -> No
     assert selected == (requested,)
 
 
-def test_navigation_ranks_procedural_sources_before_revision_history() -> None:
+def test_navigation_ranks_substantive_sources_before_revision_history() -> None:
     connection = sqlite3.connect(":memory:")
     connection.executescript(
         """
@@ -949,7 +1171,12 @@ def test_navigation_ranks_procedural_sources_before_revision_history() -> None:
         baseline_ids=frozenset(),
     )
 
-    assert set(ranked[:2]) == {"partition-evidence", "bcache-evidence"}
+    assert set(ranked[:3]) == {
+        "partition-evidence",
+        "bcache-evidence",
+        "socks-evidence",
+    }
+    assert ranked[-1] == "revision-evidence"
     assert ranked[-1] == "revision-evidence"
 
 
@@ -967,7 +1194,7 @@ def test_extended_import_admits_procedure_and_rejects_raw_literal(tmp_path: Path
         io.BytesIO(),
         workspace=workspace,
         model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(
-            lambda request, _timeout: _analysis_response(request.content),
+            lambda request, _timeout: _relation_or_analysis_response(request, _analysis_response),
             provider_name="scripted",
             model_name="corpus-v1",
         ),
@@ -1011,11 +1238,15 @@ def test_extended_import_admits_procedure_and_rejects_raw_literal(tmp_path: Path
         assert "## 操作步骤" in str(generation[4])
         assert "## 验证" in str(generation[4])
         qualification = json.loads(str(generation[5]))
-        assert qualification["schema_version"] == "openkb.corpus-benchmark.v2"
+        assert qualification["schema_version"] == "openkb.corpus-benchmark.v3"
         assert qualification["passed"] is True
         assert qualification["structural_gate_passed"] is True
         assert qualification["noise_leakage_rate"] <= 0.02
+        assert qualification["entity_noise_leakage_rate"] <= 0.02
         assert qualification["duplicate_identity_rate"] <= 0.05
+        assert qualification["dossier_readability_passed"] is True
+        assert qualification["dossier_readability_rate"] == 1.0
+        assert qualification["dossier_facet_coverage"] == 1.0
         assert qualification["multi_document_topic_coverage"] >= 0.85
         assert qualification["procedure_stage_coverage"] >= 0.85
         real_corpus = qualification["real_corpus_benchmark"]
@@ -1065,7 +1296,7 @@ def test_cross_document_model_aliases_require_identity_review(tmp_path: Path) ->
         io.BytesIO(),
         workspace=workspace,
         model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(
-            lambda request, _timeout: _analysis_response(request.content),
+            lambda request, _timeout: _relation_or_analysis_response(request, _analysis_response),
             provider_name="scripted",
             model_name="corpus-v1",
         ),
@@ -1166,7 +1397,7 @@ def test_virtual_navigation_reads_qualified_procedure_and_supplements_source(
         io.BytesIO(),
         workspace=workspace,
         model_gateway_factory=lambda _kb_dir, _override: DesktopModelGateway(
-            lambda request, _timeout: navigation_response(request.content),
+            lambda request, _timeout: _relation_or_analysis_response(request, navigation_response),
             provider_name="scripted",
             model_name="corpus-v1",
         ),

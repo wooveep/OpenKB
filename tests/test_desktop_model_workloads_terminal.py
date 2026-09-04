@@ -57,7 +57,7 @@ class _SilentTerminalProvider:
         self.operations.append(request.operation)
         on_request_sent()
         self.clock.value += 180
-        if request.operation == "knowledge_analysis":
+        if request.operation == "knowledge_fact_harvest":
             return _analysis()
         if request.operation == "retrieval_plan":
             return json.dumps({"terms": ["OpenKB", "evidence"]})
@@ -87,7 +87,7 @@ def test_required_knowledge_analysis_succeeds_after_180_seconds_of_model_thinkin
     ).import_text(source)
 
     assert imported.document.availability == "available"
-    assert provider.operations == ["knowledge_analysis"]
+    assert provider.operations == ["knowledge_fact_harvest"]
     assert imported.model_calls[-1].status == "completed"
     assert imported.model_calls[-1].attempts[-1].elapsed_seconds == 180
     assert all(call.error_code != "model_deadline_exceeded" for call in imported.model_calls)

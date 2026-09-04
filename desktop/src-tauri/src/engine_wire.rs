@@ -12,7 +12,9 @@ pub use catalog::CatalogRebuildTask;
 #[path = "engine_wire_document_versions.rs"]
 mod document_versions;
 pub use document_versions::{
-    DocumentVersionCandidate, DocumentVersionCandidateDecision, DocumentVersionCandidatesResult,
+    DocumentLineageDecision, DocumentVersionCandidate, DocumentVersionCandidateDecision,
+    DocumentVersionCandidatesResult, DocumentVersionCatalogSnapshot, DocumentVersionDiffsResult,
+    VersionFilter,
 };
 #[path = "engine_wire_knowledge_reconciliation.rs"]
 mod knowledge_reconciliation;

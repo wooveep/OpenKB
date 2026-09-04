@@ -30,6 +30,23 @@ truncate JSON. A nonempty truncated result may consume the one permitted
 Structured Output Repair; OpenKB does not silently enlarge the budget or change
 the pinned mode.
 
+DeepSeek adapter `deepseek.v2` pins the documented V4 protocol as of 2026-08-28:
+the named V4 models have a 1,000,000-token context and a 384,000-token maximum
+output. That maximum is a hard provider ceiling, not the requested size of every
+operation. Structured Analysis retains its schema-derived final reserve (32K
+for the largest current relation contract);
+long-form Answer requests use a bounded final-text plus reasoning allowance.
+This keeps the remaining context available for evidence and prevents a small
+JSON repair from becoming an open-ended 384K generation.
+The small Answer Capability Check remains bounded and is not a near-limit
+benchmark. An absent Answer reasoning choice leaves DeepSeek's enabled/high
+provider default intact; explicit enabled choices send
+`extra_body.thinking.type=enabled` and map OpenKB `low` to provider `low`, and
+OpenKB `medium`/`high` to provider `high`. Structured Analysis retains its
+explicit `disabled` thinking control. Prices remain user-supplied because the
+provider's cache and time-of-day rates cannot be represented by one bundled
+input price.
+
 DeepSeek documents that JSON Output can occasionally return an empty `content`.
 OpenKB classifies the non-retryable Model Result Failure from safe stream
 evidence: observing neither reasoning nor final content is

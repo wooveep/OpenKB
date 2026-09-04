@@ -11,6 +11,13 @@ from openkb.desktop_knowledge_analysis_plan import (
     prompt_snapshot_for_operation,
 )
 from openkb.desktop_model_gateway import DesktopModelRequest
+from openkb.desktop_prompt_contracts import prompt_contract_for
+
+CURRENT_KNOWLEDGE_ANALYSIS_PIPELINE_OPERATIONS = (
+    "knowledge_fact_harvest",
+    "knowledge_analysis_merge",
+    "document_entity_inventory",
+)
 
 
 def request_pinned_to_plan(
@@ -21,7 +28,7 @@ def request_pinned_to_plan(
 ) -> DesktopModelRequest:
     """Apply every provider-control field captured by an immutable plan."""
     generation_parameters = dict(request.generation_parameters or {})
-    generation_parameters["max_tokens"] = plan.output_budget_tokens
+    generation_parameters["max_tokens"] = operation_output_budget(plan, request.operation)
     profile = plan.execution_profile
     return replace(
         request,
@@ -55,6 +62,25 @@ def request_pinned_to_plan(
     )
 
 
+def operation_output_budget(plan: KnowledgeAnalysisPlan, operation: str) -> int:
+    """Derive this operation's bounded final-plus-reasoning output ceiling."""
+    try:
+        snapshot = prompt_snapshot_for_operation(plan, operation)
+    except ValueError:
+        return plan.output_budget_tokens
+    policy = snapshot.get("token_budget_policy")
+    requested = policy.get("reserve_output_tokens") if isinstance(policy, dict) else None
+    if isinstance(requested, bool) or not isinstance(requested, int) or requested <= 0:
+        return plan.output_budget_tokens
+    final_reserve = min(requested, plan.final_output_reserve_tokens)
+    reasoning_allowance = (
+        plan.reasoning_allowance_tokens * final_reserve // plan.final_output_reserve_tokens
+        if plan.final_output_reserve_tokens > 0
+        else 0
+    )
+    return max(1, min(plan.output_budget_tokens, final_reserve + reasoning_allowance))
+
+
 def prompt_snapshot_digest(snapshot: dict[str, object]) -> str:
     canonical = json.dumps(
         snapshot,
@@ -70,6 +96,20 @@ def plan_prompt_digest(plan: KnowledgeAnalysisPlan, operation: str) -> str:
 
 
 def analysis_pipeline_digest(plan: KnowledgeAnalysisPlan) -> str:
-    batch = plan_prompt_digest(plan, "knowledge_analysis_batch")
-    merge = plan_prompt_digest(plan, "knowledge_analysis_merge")
-    return hashlib.sha256(f"{batch}:{merge}".encode("utf-8")).hexdigest()
+    contracts = plan.prompt_contract_snapshot.get("contracts")
+    operations = (
+        CURRENT_KNOWLEDGE_ANALYSIS_PIPELINE_OPERATIONS
+        if isinstance(contracts, dict) and "knowledge_fact_harvest" in contracts
+        else ("knowledge_analysis_batch", "knowledge_analysis_merge")
+    )
+    digests = tuple(plan_prompt_digest(plan, operation) for operation in operations)
+    return hashlib.sha256(":".join(digests).encode("utf-8")).hexdigest()
+
+
+def current_analysis_pipeline_digest() -> str:
+    """Return the digest of the live three-stage Knowledge Analysis contract."""
+    digests = (
+        prompt_contract_for(operation).digest
+        for operation in CURRENT_KNOWLEDGE_ANALYSIS_PIPELINE_OPERATIONS
+    )
+    return hashlib.sha256(":".join(digests).encode("utf-8")).hexdigest()

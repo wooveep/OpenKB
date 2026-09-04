@@ -37,7 +37,7 @@ def test_deepseek_resolves_role_reasoning_and_structured_protocol_explicitly() -
     adapter = named_provider_adapter_for(settings.provider)
 
     assert adapter.identity == "deepseek"
-    assert adapter.version == "deepseek.v1"
+    assert adapter.version == "deepseek.v2"
     assert adapter.structured_output_mode == "json_object"
     assert settings.reasoning_for_role("analysis") == "off"
     assert settings.reasoning_for_role("answer") is None
@@ -84,14 +84,45 @@ def test_role_gateway_pins_deepseek_adapter_mode_and_effective_analysis_reasonin
 
     assert requests[0].model_role == "analysis"
     assert requests[0].provider_adapter == "deepseek"
-    assert requests[0].provider_adapter_version == "deepseek.v1"
+    assert requests[0].provider_adapter_version == "deepseek.v2"
     assert requests[0].structured_output_mode == "json_object"
     assert requests[0].reasoning_effort == "off"
     assert requests[0].generation_parameters == {
         "temperature": 0,
         "max_tokens": analysis_execution_profile_for_settings(
-            settings
+            settings, operation="retrieval_plan"
         ).provider_output_ceiling_tokens,
+    }
+
+    relation_contract = prompt_contract_for("knowledge_relation_analysis")
+    gateway.analyze(
+        DesktopModelRequest(
+            "knowledge_relation_analysis",
+            "guide",
+            "Analyze relations.",
+        ),
+        on_event=lambda _event: None,
+    )
+    gateway.analyze(
+        DesktopModelRequest(
+            "structured_output_repair",
+            "guide",
+            "Repair relations.",
+            parent_operation="knowledge_relation_analysis",
+            response_schema=relation_contract.output_schema,
+        ),
+        on_event=lambda _event: None,
+    )
+    relation_budget = analysis_execution_profile_for_settings(
+        settings, operation="knowledge_relation_analysis"
+    ).provider_output_ceiling_tokens
+    assert requests[1].generation_parameters == {
+        "temperature": 0,
+        "max_tokens": relation_budget,
+    }
+    assert requests[2].generation_parameters == {
+        "temperature": 0,
+        "max_tokens": relation_budget,
     }
 
 
@@ -118,7 +149,7 @@ def test_deepseek_structured_request_uses_json_object_and_disables_thinking(monk
             "Build a retrieval plan.",
             reasoning_effort="off",
             provider_adapter="deepseek",
-            provider_adapter_version="deepseek.v1",
+            provider_adapter_version="deepseek.v2",
             structured_output_mode="json_object",
             response_schema={"type": "object"},
         ),
@@ -134,6 +165,46 @@ def test_deepseek_structured_request_uses_json_object_and_disables_thinking(monk
         custom_llm_provider="deepseek",
         extra_body=captured[0]["extra_body"],
     )["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "provider_effort"),
+    (("low", "low"), ("medium", "high"), ("high", "high")),
+)
+def test_deepseek_enabled_thinking_uses_official_openai_parameters(
+    monkeypatch, reasoning, provider_effort
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    def completion(**kwargs):
+        captured.append(kwargs)
+        return {"choices": [{"message": {"content": "A cited answer [1]."}}]}
+
+    monkeypatch.setattr("litellm.completion", completion)
+    transport = desktop_model_transport.DesktopLiteLLMTransport(
+        model="deepseek/deepseek-v4-flash",
+        bundle=LlmCredentialBundle(
+            api_key="test-key",
+            base_url="https://api.deepseek.com",
+        ),
+    )
+
+    transport(
+        DesktopModelRequest(
+            "grounded_answer",
+            "question",
+            "Evidence",
+            model_role="answer",
+            reasoning_effort=reasoning,
+            provider_adapter="deepseek",
+            provider_adapter_version="deepseek.v2",
+        ),
+        30,
+    )
+
+    assert captured[0]["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert captured[0]["reasoning_effort"] == provider_effort
+    assert "thinking" not in captured[0]
 
 
 def test_deepseek_initial_graph_request_renders_its_complete_output_contract(
@@ -171,7 +242,7 @@ def test_deepseek_initial_graph_request_renders_its_complete_output_contract(
             ),
             reasoning_effort="off",
             provider_adapter="deepseek",
-            provider_adapter_version="deepseek.v1",
+            provider_adapter_version="deepseek.v2",
             structured_output_mode="json_object",
             response_schema=contract.output_schema,
             response_example=contract.output_example,
@@ -219,7 +290,7 @@ def test_deepseek_page_tree_selection_renders_its_complete_output_contract(
             '{"question":"Compare Alpha and Beta","trees":[]}',
             reasoning_effort="off",
             provider_adapter="deepseek",
-            provider_adapter_version="deepseek.v1",
+            provider_adapter_version="deepseek.v2",
             structured_output_mode="json_object",
             response_schema=contract.output_schema,
             response_example=contract.output_example,
@@ -269,7 +340,7 @@ def test_deepseek_graph_repair_request_keeps_the_parent_contract_visible(
             "content-free repair input",
             reasoning_effort="off",
             provider_adapter="deepseek",
-            provider_adapter_version="deepseek.v1",
+            provider_adapter_version="deepseek.v2",
             structured_output_mode="json_object",
             response_schema=graph_contract.output_schema,
             response_example=graph_contract.output_example,
@@ -322,7 +393,7 @@ def test_deepseek_knowledge_analysis_renders_its_complete_output_contract(
             "content-free evidence batch",
             reasoning_effort="off",
             provider_adapter="deepseek",
-            provider_adapter_version="deepseek.v1",
+            provider_adapter_version="deepseek.v2",
             structured_output_mode="json_object",
             response_schema=contract.output_schema,
             response_example=contract.output_example,
@@ -367,7 +438,7 @@ def test_deepseek_grounded_answer_omits_structured_format_and_provider_default_t
             "Evidence",
             model_role="answer",
             provider_adapter="deepseek",
-            provider_adapter_version="deepseek.v1",
+            provider_adapter_version="deepseek.v2",
         ),
         30,
     )
@@ -440,7 +511,7 @@ def test_deepseek_stream_separates_private_reasoning_from_final_output(monkeypat
             "question",
             "Build a plan.",
             provider_adapter="deepseek",
-            provider_adapter_version="deepseek.v1",
+            provider_adapter_version="deepseek.v2",
             structured_output_mode="json_object",
             response_schema={"type": "object"},
         ),
@@ -535,7 +606,7 @@ def test_deepseek_empty_final_results_are_specific_and_never_retried(
                 "question",
                 "Build a plan.",
                 provider_adapter="deepseek",
-                provider_adapter_version="deepseek.v1",
+                provider_adapter_version="deepseek.v2",
                 structured_output_mode="json_object",
                 response_schema={"type": "object"},
             ),

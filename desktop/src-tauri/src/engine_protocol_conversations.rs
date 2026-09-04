@@ -1,6 +1,6 @@
 //! Conversation request methods for the private Engine transport.
 
-use super::{validated_response, BridgeResult, EngineSupervisor};
+use super::{validated_response, BridgeResult, EngineSupervisor, VersionFilter};
 use crate::engine_wire::RetrievalTrace;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -99,6 +99,10 @@ struct EvidenceRef {
     locator: Value,
     excerpt: String,
     channels: Vec<String>,
+    #[serde(default)]
+    version_label: Option<String>,
+    #[serde(default)]
+    version_side: Option<String>,
     source_available: bool,
 }
 
@@ -207,12 +211,17 @@ impl EngineSupervisor {
         &self,
         conversation_id: String,
         question: String,
+        version_filter: Option<VersionFilter>,
         request_id: String,
     ) -> BridgeResult<Value> {
         self.ensure_started()?;
         conversation(self.request_started_with_wait(
             "workbench.ask_conversation",
-            json!({ "conversation_id": conversation_id, "question": question }),
+            json!({
+                "conversation_id": conversation_id,
+                "question": question,
+                "version_filter": version_filter,
+            }),
             Some(request_id),
             None,
         )?)

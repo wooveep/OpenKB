@@ -7,9 +7,14 @@ from dataclasses import replace
 from openkb.desktop_adaptive_navigation import NAVIGATION_MAX_SOURCE_TOKENS
 from openkb.desktop_answer_types import DesktopEvidenceRef
 from openkb.desktop_retrieval_trace import DesktopAnswerCoverageTrace
+from openkb.desktop_source_sections import SOURCE_OCCURRENCE_CONTEXT_KEY
 
-NAVIGATION_MAX_EVIDENCE_REFS = 40
+# Keep the reference-count guard above the size of several ordinary, explicitly
+# targeted source sections. The source-token envelope remains the primary bound.
+NAVIGATION_MAX_EVIDENCE_REFS = 64
 NAVIGATION_PRIOR_EVIDENCE_RESERVE = 35
+NAVIGATION_PRIOR_EVIDENCE_MINIMUM = 4
+NAVIGATION_MAX_PRIORITY_EVIDENCE_PER_ROUND = NAVIGATION_MAX_EVIDENCE_REFS
 
 
 def allocate_evidence(
@@ -18,8 +23,12 @@ def allocate_evidence(
     coverage: tuple[DesktopAnswerCoverageTrace, ...],
     *,
     aspect_evidence_ids: dict[str, tuple[str, ...]] | None = None,
-    terms: tuple[str, ...] = (),
+    priority_evidence_ids: tuple[str, ...] = (),
+    max_evidence_refs: int = NAVIGATION_MAX_EVIDENCE_REFS,
+    max_source_tokens: int = NAVIGATION_MAX_SOURCE_TOKENS,
 ) -> tuple[DesktopEvidenceRef, ...]:
+    if max_evidence_refs <= 0 or max_source_tokens <= 0:
+        return ()
     by_id: dict[str, DesktopEvidenceRef] = {}
     for reference in (*current, *supplement):
         existing = by_id.get(reference.evidence_id)
@@ -30,40 +39,99 @@ def allocate_evidence(
     ordered_ids = _unique(
         (
             *_primary_coverage_evidence_ids(coverage),
-            *_preserved_current_evidence_ids(current, terms),
-            *_aspect_reserved_evidence_ids(aspect_evidence_ids or {}, coverage, frozenset(by_id)),
+            *(evidence_id for evidence_id in priority_evidence_ids if evidence_id in by_id),
+            *_preserved_current_evidence_ids(current)[:NAVIGATION_PRIOR_EVIDENCE_MINIMUM],
+            *_aspect_reserved_evidence_ids(aspect_evidence_ids or {}, coverage, by_id),
+            *_preserved_current_evidence_ids(current),
             *section_diverse_evidence_ids(supplement),
             *_remaining_coverage_evidence_ids(coverage),
-            *section_diverse_evidence_ids(
-                tuple(item for item in current if not _weak_seed(item, terms))
-            ),
-            *(item.evidence_id for item in current if not _weak_seed(item, terms)),
+            *section_diverse_evidence_ids(tuple(item for item in current if not _weak_seed(item))),
+            *(item.evidence_id for item in current if not _weak_seed(item)),
             *(item.evidence_id for item in supplement),
-            *section_diverse_evidence_ids(
-                tuple(item for item in current if _weak_seed(item, terms))
-            ),
-            *(item.evidence_id for item in current if _weak_seed(item, terms)),
+            *section_diverse_evidence_ids(tuple(item for item in current if _weak_seed(item))),
+            *(item.evidence_id for item in current if _weak_seed(item)),
         )
     )
     selected: list[DesktopEvidenceRef] = []
     used_tokens = 0
     for evidence_id in ordered_ids:
-        reference = by_id[evidence_id]
-        tokens = max(1, (len(reference.excerpt) + 3) // 4)
-        if used_tokens + tokens > NAVIGATION_MAX_SOURCE_TOKENS:
+        selected_reference = by_id.get(evidence_id)
+        if selected_reference is None:
             continue
-        selected.append(reference)
+        tokens = max(1, (len(selected_reference.excerpt) + 3) // 4)
+        if used_tokens + tokens > max_source_tokens:
+            continue
+        selected.append(selected_reference)
         used_tokens += tokens
-        if len(selected) == NAVIGATION_MAX_EVIDENCE_REFS:
+        if len(selected) == max_evidence_refs:
             break
     return tuple(selected)
 
 
+def new_action_evidence_ids(
+    references: tuple[DesktopEvidenceRef, ...],
+    *,
+    prior_ids: frozenset[str],
+) -> tuple[str, ...]:
+    """Keep every new targeted source block before diverse fallback evidence."""
+    new_references = tuple(
+        reference for reference in references if reference.evidence_id not in prior_ids
+    )
+    targeted_source_ids = targeted_source_evidence_ids(
+        new_references,
+        prior_ids=frozenset(),
+    )
+    return _unique(
+        (
+            *targeted_source_ids,
+            *section_diverse_evidence_ids(new_references),
+        )
+    )
+
+
+def targeted_source_evidence_ids(
+    references: tuple[DesktopEvidenceRef, ...],
+    *,
+    prior_ids: frozenset[str],
+) -> tuple[str, ...]:
+    """Return newly read Original Evidence in its source-window priority order."""
+    return tuple(
+        reference.evidence_id
+        for reference in references
+        if reference.evidence_id not in prior_ids
+        and "knowledge_navigation_source_window" in reference.channels
+    )
+
+
+def targeted_source_sequence_evidence_ids(
+    references: tuple[DesktopEvidenceRef, ...],
+    *,
+    prior_ids: frozenset[str],
+) -> tuple[str, ...]:
+    """Promote the whole logical section when a direct read adds any block from it."""
+    new_targeted_ids = frozenset(targeted_source_evidence_ids(references, prior_ids=prior_ids))
+    target_sections = {
+        (reference.document_id, " ".join(reference.section.split()).casefold())
+        for reference in references
+        if reference.evidence_id in new_targeted_ids
+    }
+    return _unique(
+        reference.evidence_id
+        for reference in references
+        if "knowledge_navigation_source_window" in reference.channels
+        and (
+            reference.document_id,
+            " ".join(reference.section.split()).casefold(),
+        )
+        in target_sections
+    )
+
+
 def _preserved_current_evidence_ids(
-    current: tuple[DesktopEvidenceRef, ...], terms: tuple[str, ...]
+    current: tuple[DesktopEvidenceRef, ...],
 ) -> tuple[str, ...]:
     """Keep bounded recovery from erasing a previously selected source outline."""
-    return tuple(item.evidence_id for item in current if not _weak_seed(item, terms))[
+    return tuple(item.evidence_id for item in current if not _weak_seed(item))[
         :NAVIGATION_PRIOR_EVIDENCE_RESERVE
     ]
 
@@ -85,63 +153,15 @@ def section_diverse_evidence_ids(
     return tuple(selected)
 
 
-def _fts_only(reference: DesktopEvidenceRef) -> bool:
-    """Let an explicit routed read displace a weak lexical-only seed at the hard cap."""
-    return frozenset(reference.channels) == frozenset(("fts",))
-
-
-def _weak_seed(reference: DesktopEvidenceRef, terms: tuple[str, ...]) -> bool:
-    """Defer lexical/catalog seeds that do not share the query's distinctive scope."""
-    if _fts_only(reference):
-        return True
-    trusted_channels = {
+def _weak_seed(reference: DesktopEvidenceRef) -> bool:
+    """Classify seed confidence from retrieval provenance, never corpus vocabulary."""
+    source_grounded_channels = {
         "document_page_tree",
         "knowledge_navigation_source_window",
         "structure_lexical",
         "wiki",
     }
-    if trusted_channels & set(reference.channels):
-        return False
-    distinctive = _distinctive_scope_terms(terms)
-    if not distinctive:
-        return False
-    search_text = " ".join(
-        (reference.document_name, reference.section, reference.excerpt)
-    ).casefold()
-    return not any(term in search_text for term in distinctive)
-
-
-def _distinctive_scope_terms(terms: tuple[str, ...]) -> tuple[str, ...]:
-    generic = {
-        "build",
-        "configure",
-        "configuration",
-        "deploy",
-        "deployment",
-        "how",
-        "install",
-        "installation",
-        "migrate",
-        "setup",
-        "steps",
-        "to",
-        "安装",
-        "安装部署",
-        "怎么",
-        "怎样",
-        "搭建",
-        "步骤",
-        "流程",
-        "迁移",
-        "配置",
-        "部署",
-        "如何",
-    }
-    return _unique(
-        " ".join(term.split()).casefold()
-        for term in terms
-        if len(" ".join(term.split())) >= 2 and " ".join(term.split()).casefold() not in generic
-    )
+    return not bool(source_grounded_channels & set(reference.channels))
 
 
 def _primary_coverage_evidence_ids(
@@ -166,9 +186,9 @@ def _remaining_coverage_evidence_ids(
 def _aspect_reserved_evidence_ids(
     evidence_ids_by_aspect: dict[str, tuple[str, ...]],
     coverage: tuple[DesktopAnswerCoverageTrace, ...],
-    available_ids: frozenset[str],
+    evidence_by_id: dict[str, DesktopEvidenceRef],
 ) -> tuple[str, ...]:
-    """Round-robin evidence from each explicitly targeted open aspect."""
+    """Keep explicit source sequences whole before round-robin fallback evidence."""
     open_aspects = tuple(
         item.aspect
         for item in coverage
@@ -178,15 +198,22 @@ def _aspect_reserved_evidence_ids(
         aspect: tuple(
             evidence_id
             for evidence_id in evidence_ids_by_aspect[aspect]
-            if evidence_id in available_ids
+            if evidence_id in evidence_by_id
         )
         for aspect in open_aspects
     }
-    selected: list[str] = []
+    targeted_source_ids = _unique(
+        evidence_id
+        for aspect in open_aspects
+        for evidence_id in ranked[aspect]
+        if "knowledge_navigation_source_window" in evidence_by_id[evidence_id].channels
+    )
+    targeted_source_id_set = frozenset(targeted_source_ids)
+    selected = list(targeted_source_ids)
     depth = 0
     while any(depth < len(ranked[aspect]) for aspect in open_aspects):
         for aspect in open_aspects:
-            if depth < len(ranked[aspect]):
+            if depth < len(ranked[aspect]) and ranked[aspect][depth] not in targeted_source_id_set:
                 selected.append(ranked[aspect][depth])
         depth += 1
     return _unique(selected)
@@ -194,7 +221,23 @@ def _aspect_reserved_evidence_ids(
 
 def _merge_reference(first: DesktopEvidenceRef, second: DesktopEvidenceRef) -> DesktopEvidenceRef:
     preferred = second if len(second.excerpt) > len(first.excerpt) else first
-    return replace(preferred, channels=_unique((*first.channels, *second.channels)))
+    locator = dict(preferred.locator)
+    occurrence_contexts = max(
+        (
+            value
+            for reference in (first, second)
+            if isinstance((value := reference.locator.get(SOURCE_OCCURRENCE_CONTEXT_KEY)), list)
+        ),
+        key=len,
+        default=None,
+    )
+    if occurrence_contexts:
+        locator[SOURCE_OCCURRENCE_CONTEXT_KEY] = occurrence_contexts
+    return replace(
+        preferred,
+        locator=locator,
+        channels=_unique((*first.channels, *second.channels)),
+    )
 
 
 def _unique(values) -> tuple:

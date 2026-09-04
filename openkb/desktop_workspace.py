@@ -26,7 +26,10 @@ from openkb.desktop_workspace_feature_migrations import (
     DESKTOP_FEATURE_MIGRATIONS,
     MODEL_OPERATION_STATE_MIGRATION_VERSION,
 )
-from openkb.desktop_workspace_migration_execution import pending_migration_statements
+from openkb.desktop_workspace_migration_execution import (
+    apply_feature_migration_backfill_in,
+    pending_migration_statements,
+)
 from openkb.locks import kb_import_runtime_lock, kb_ingest_lock
 
 _STATE_DIRNAME = ".openkb"
@@ -578,6 +581,7 @@ def _apply_migrations(
         if in_transaction:
             for statement in statements_to_apply:
                 connection.execute(statement)
+            apply_feature_migration_backfill_in(connection, version, now=now)
             connection.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                 (version, now),
@@ -587,6 +591,7 @@ def _apply_migrations(
             try:
                 for statement in statements_to_apply:
                     connection.execute(statement)
+                apply_feature_migration_backfill_in(connection, version, now=now)
                 connection.execute(
                     "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                     (version, now),
@@ -730,6 +735,14 @@ def _load_desktop_knowledge_base(kb_dir: Path) -> DesktopKnowledgeBase:
                     )
                 with connection:
                     discard_model_operation_retry_permits_in(connection)
+                    from openkb.desktop_corpus_synthesis_generation import (
+                        recover_interrupted_corpus_generations_in,
+                    )
+
+                    recover_interrupted_corpus_generations_in(
+                        connection,
+                        now=_timestamp(),
+                    )
                 _recover_interrupted_import_jobs(connection)
                 row = connection.execute(
                     "SELECT created_at FROM runtime_checkpoints ORDER BY checkpoint_id DESC LIMIT 1"

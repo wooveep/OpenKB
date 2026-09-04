@@ -9,14 +9,27 @@ import sqlite3
 import uuid
 from collections import Counter, defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass
 
-from openkb.desktop_import_artifacts import DocumentIRBlock
-from openkb.desktop_knowledge_analysis import (
-    DesktopKnowledgeAnalysis,
-    KnowledgeAnalysisCandidate,
+from openkb.desktop_corpus_candidate_persistence import insert_document_candidate_in
+from openkb.desktop_corpus_candidates import (
+    CorpusCandidate as _Candidate,
 )
-from openkb.desktop_knowledge_candidate_admission import assess_knowledge_candidate
+from openkb.desktop_corpus_candidates import (
+    CorpusClaim as _Claim,
+)
+from openkb.desktop_corpus_candidates import (
+    applicability_pairs,
+)
+from openkb.desktop_corpus_candidates import (
+    load_admitted_candidates_in as _load_admitted_candidates_in,
+)
+from openkb.desktop_corpus_synthesis_generation import (
+    CorpusCandidateInput,
+    CorpusGenerationDependencyError,
+    capture_corpus_candidate_inputs_in,
+)
+from openkb.desktop_import_artifacts import DocumentIRBlock
+from openkb.desktop_knowledge_analysis import DesktopKnowledgeAnalysis
 from openkb.desktop_knowledge_generations import (
     KnowledgeGenerationChange,
     KnowledgeGenerationSource,
@@ -25,23 +38,20 @@ from openkb.desktop_knowledge_generations import (
     publish_corpus_generation_in,
     publish_incremental_corpus_generation_in,
 )
-from openkb.desktop_knowledge_metadata import decode_knowledge_labels, encode_knowledge_labels
 from openkb.desktop_knowledge_rendering import (
     UNSPECIFIED_APPLICABILITY,
     RenderedKnowledgeClaim,
     render_generated_knowledge,
 )
 from openkb.desktop_knowledge_sources import stable_source_id
-from openkb.desktop_knowledge_titles import normalize_knowledge_title
+from openkb.desktop_knowledge_titles import (
+    claim_explicitly_supports_alias,
+    controlled_latin_title_key,
+    normalize_knowledge_title,
+)
 
 CORPUS_SYNTHESIS_SCHEMA_VERSION = "openkb.corpus-knowledge.v1"
 _IDENTITY_NAMESPACE = uuid.UUID("fd4bc9f7-4c24-5e43-9a93-a4e235318586")
-_APPLICABILITY_DIMENSIONS = (
-    "product_version",
-    "platform",
-    "deployment_scenario",
-    "time_boundary",
-)
 _CONFLICT_VALUE = re.compile(
     r"(?<![0-9a-z_])(?:v?\d+(?:\.\d+){0,3}|true|false|enabled?|disabled?|on|off)"
     r"(?![0-9a-z_])",
@@ -52,28 +62,6 @@ _CONFLICT_VALUE_CONTEXT = re.compile(
     r"地址|网关|掩码|副本|数值|取值",
     re.IGNORECASE,
 )
-
-
-@dataclass(frozen=True)
-class _Claim:
-    role: str
-    text: str
-    applicability: tuple[tuple[str, str], ...]
-    evidence_ids: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class _Candidate:
-    candidate_id: str
-    document_id: str
-    kind: str
-    title: str
-    normalized_title: str
-    entity_subtype: str | None
-    aliases: tuple[str, ...]
-    tags: tuple[str, ...]
-    provenance_json: str
-    claims: tuple[_Claim, ...]
 
 
 def replace_document_corpus_analysis_in(
@@ -102,7 +90,7 @@ def replace_document_corpus_analysis_in(
         "DELETE FROM knowledge_document_candidates WHERE document_id = ?", (document_id,)
     )
     for candidate in analysis.candidates:
-        _insert_document_candidate_in(
+        insert_document_candidate_in(
             connection,
             document_id=document_id,
             candidate=candidate,
@@ -118,9 +106,18 @@ def synthesize_qualified_corpus_in(
     now: str,
     preferred_language: str | None = None,
     affected_document_ids: tuple[str, ...] = (),
+    candidate_inputs: tuple[CorpusCandidateInput, ...] | None = None,
+    force_generation: bool = False,
+    dossier_planner=None,
+    defer_completion: bool = False,
 ) -> int | None:
     """Consolidate the full corpus or only identities affected by new documents."""
-    all_candidates = _load_admitted_candidates_in(connection)
+    if candidate_inputs is None:
+        try:
+            candidate_inputs = capture_corpus_candidate_inputs_in(connection)
+        except CorpusGenerationDependencyError:
+            return current_generation_id_in(connection)
+    all_candidates = _load_admitted_candidates_in(connection, candidate_inputs)
     if not all_candidates:
         return current_generation_id_in(connection)
     blocked_candidate_ids = _record_uncertain_identity_reviews_in(
@@ -145,7 +142,7 @@ def synthesize_qualified_corpus_in(
     if not affected_document_ids:
         connection.execute("DELETE FROM knowledge_identity_candidates")
     changes: list[KnowledgeGenerationChange] = []
-    included_documents = {candidate.document_id for candidate in candidates}
+    included_documents = {item.document_id for item in candidate_inputs}
     carry_forward_identity_ids: set[str] = set()
     language = _corpus_language(candidates, preferred_language=preferred_language)
     for cluster in clusters:
@@ -166,7 +163,21 @@ def synthesize_qualified_corpus_in(
             continue
         changes.append(change)
     if not changes:
-        return current_generation_id_in(connection)
+        current_generation_id = current_generation_id_in(connection)
+        if not force_generation or current_generation_id is None:
+            return current_generation_id
+        return publish_incremental_corpus_generation_in(
+            connection,
+            current_generation_id=current_generation_id,
+            changes=(),
+            document_ids=tuple(sorted(included_documents)),
+            synthesis_schema_version=CORPUS_SYNTHESIS_SCHEMA_VERSION,
+            now=now,
+            candidate_inputs=candidate_inputs,
+            language=language,
+            dossier_planner=dossier_planner,
+            defer_completion=defer_completion,
+        )
     if affected_document_ids:
         return publish_incremental_corpus_generation_in(
             connection,
@@ -175,6 +186,10 @@ def synthesize_qualified_corpus_in(
             document_ids=tuple(sorted(included_documents)),
             synthesis_schema_version=CORPUS_SYNTHESIS_SCHEMA_VERSION,
             now=now,
+            candidate_inputs=candidate_inputs,
+            language=language,
+            dossier_planner=dossier_planner,
+            defer_completion=defer_completion,
         )
     return publish_corpus_generation_in(
         connection,
@@ -184,6 +199,10 @@ def synthesize_qualified_corpus_in(
         carry_forward_identity_ids=tuple(sorted(carry_forward_identity_ids)),
         synthesis_schema_version=CORPUS_SYNTHESIS_SCHEMA_VERSION,
         now=now,
+        candidate_inputs=candidate_inputs,
+        language=language,
+        dossier_planner=dossier_planner,
+        defer_completion=defer_completion,
     )
 
 
@@ -255,140 +274,6 @@ def _replace_document_summary_in(
         )
 
 
-def _insert_document_candidate_in(
-    connection: sqlite3.Connection,
-    *,
-    document_id: str,
-    candidate: KnowledgeAnalysisCandidate,
-    evidence_id_map: Mapping[str, str],
-    analysis_provenance_json: str,
-    now: str,
-) -> None:
-    title, normalized_title = normalize_knowledge_title(candidate.title)
-    resolved = tuple(
-        (
-            claim,
-            tuple(dict.fromkeys(evidence_id_map[value] for value in claim.source_evidence_ids)),
-        )
-        for claim in candidate.claims
-        if claim.source_evidence_ids
-        and all(value in evidence_id_map for value in claim.source_evidence_ids)
-    )
-    admission = assess_knowledge_candidate(
-        kind=candidate.kind,
-        title=title,
-        subtype=candidate.subtype,
-        claims=tuple((claim.role, claim.text) for claim, _sources in resolved),
-    )
-    candidate_id = hashlib.sha256(
-        f"{document_id}\x1f{candidate.kind}\x1f{normalized_title}".encode("utf-8")
-    ).hexdigest()
-    connection.execute(
-        """
-        INSERT INTO knowledge_document_candidates (
-            candidate_id, document_id, kind, title, normalized_title,
-            entity_subtype, aliases_json, tags_json, admission_state,
-            admission_reason, analysis_provenance_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            candidate_id,
-            document_id,
-            candidate.kind,
-            title,
-            normalized_title,
-            candidate.subtype,
-            encode_knowledge_labels(candidate.aliases),
-            encode_knowledge_labels(candidate.tags),
-            "admitted" if admission.admitted else "rejected",
-            admission.reason,
-            analysis_provenance_json,
-            now,
-        ),
-    )
-    for ordinal, (claim, source_ids) in enumerate(resolved):
-        connection.execute(
-            """
-            INSERT INTO knowledge_document_candidate_claims (
-                candidate_id, claim_ordinal, role, claim_text, applicability_json
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                candidate_id,
-                ordinal,
-                claim.role,
-                claim.text,
-                _json(claim.applicability.as_dict()),
-            ),
-        )
-        connection.executemany(
-            """
-            INSERT INTO knowledge_document_candidate_claim_sources (
-                candidate_id, claim_ordinal, evidence_id
-            ) VALUES (?, ?, ?)
-            """,
-            ((candidate_id, ordinal, evidence_id) for evidence_id in source_ids),
-        )
-
-
-def _load_admitted_candidates_in(connection: sqlite3.Connection) -> tuple[_Candidate, ...]:
-    rows = connection.execute(
-        """
-        SELECT candidates.candidate_id, candidates.document_id, candidates.kind,
-            candidates.title, candidates.normalized_title, candidates.entity_subtype,
-            candidates.aliases_json, candidates.tags_json,
-            candidates.analysis_provenance_json
-        FROM knowledge_document_candidates AS candidates
-        JOIN source_documents AS documents ON documents.document_id = candidates.document_id
-        WHERE candidates.admission_state = 'admitted'
-            AND documents.availability = 'available'
-        ORDER BY candidates.kind, candidates.normalized_title, candidates.candidate_id
-        """
-    ).fetchall()
-    return tuple(_candidate_from_row(connection, row) for row in rows)
-
-
-def _candidate_from_row(connection: sqlite3.Connection, row: tuple[object, ...]) -> _Candidate:
-    candidate_id = str(row[0])
-    claim_rows = connection.execute(
-        """
-        SELECT claims.claim_ordinal, claims.role, claims.claim_text,
-            claims.applicability_json, sources.evidence_id
-        FROM knowledge_document_candidate_claims AS claims
-        JOIN knowledge_document_candidate_claim_sources AS sources
-          ON sources.candidate_id = claims.candidate_id
-         AND sources.claim_ordinal = claims.claim_ordinal
-        WHERE claims.candidate_id = ?
-        ORDER BY claims.claim_ordinal, sources.evidence_id
-        """,
-        (candidate_id,),
-    ).fetchall()
-    grouped: dict[int, list[tuple[object, ...]]] = defaultdict(list)
-    for claim_row in claim_rows:
-        grouped[int(claim_row[0])].append(claim_row)
-    claims = tuple(
-        _Claim(
-            role=str(values[0][1]),
-            text=str(values[0][2]),
-            applicability=_applicability_pairs(str(values[0][3])),
-            evidence_ids=tuple(str(value[4]) for value in values),
-        )
-        for _ordinal, values in sorted(grouped.items())
-    )
-    return _Candidate(
-        candidate_id=candidate_id,
-        document_id=str(row[1]),
-        kind=str(row[2]),
-        title=str(row[3]),
-        normalized_title=str(row[4]),
-        entity_subtype=str(row[5]) if row[5] is not None else None,
-        aliases=decode_knowledge_labels(row[6]),
-        tags=decode_knowledge_labels(row[7]),
-        provenance_json=str(row[8]),
-        claims=claims,
-    )
-
-
 def _candidate_clusters(candidates: tuple[_Candidate, ...]) -> tuple[tuple[_Candidate, ...], ...]:
     clusters: list[list[_Candidate]] = []
     for candidate in candidates:
@@ -409,10 +294,15 @@ def _candidate_clusters(candidates: tuple[_Candidate, ...]) -> tuple[tuple[_Cand
 def _same_identity(left: _Candidate, right: _Candidate) -> bool:
     if left.kind != right.kind or _identity_contradiction(left, right):
         return False
-    # Knowledge Analysis aliases and tags are model proposals, not independent
-    # identity proof. Only the exact canonical title is safe to auto-consolidate;
-    # plausible semantic matches are retained for explicit review below.
-    return left.normalized_title == right.normalized_title
+    if left.normalized_title == right.normalized_title:
+        return True
+    if controlled_latin_title_key(left.title) != controlled_latin_title_key(right.title):
+        return False
+    return any(
+        claim_explicitly_supports_alias(left.title, right.title, claim.text)
+        for candidate in (left, right)
+        for claim in candidate.claims
+    )
 
 
 def _identity_contradiction(left: _Candidate, right: _Candidate) -> bool:
@@ -525,12 +415,24 @@ def _synthesize_cluster_in(
         """
         INSERT INTO knowledge_identity_candidates (
             identity_id, candidate_id, match_basis, created_at
-        ) VALUES (?, ?, 'exact_title', ?)
+        ) VALUES (?, ?, ?, ?)
         ON CONFLICT(identity_id, candidate_id) DO UPDATE SET
             match_basis = excluded.match_basis,
             created_at = excluded.created_at
         """,
-        ((identity_id, candidate.candidate_id, now) for candidate in cluster),
+        (
+            (
+                identity_id,
+                candidate.candidate_id,
+                (
+                    "inventory_target"
+                    if candidate.inventory_target_identity_id is not None
+                    else "exact_title"
+                ),
+                now,
+            )
+            for candidate in cluster
+        ),
     )
     rendered_claims, sources = _merge_cluster_claims(cluster)
     content = render_generated_knowledge(kind, rendered_claims, language=language)
@@ -562,20 +464,77 @@ def _matching_identity_rows_in(
     kind: str,
     cluster: tuple[_Candidate, ...],
 ) -> list[tuple[object, ...]]:
-    titles = frozenset(candidate.normalized_title for candidate in cluster)
+    targeted_candidates = tuple(
+        candidate
+        for candidate in cluster
+        if candidate.inventory_target_identity_id is not None
+        or candidate.inventory_target_generation_id is not None
+    )
+    target_identity_ids = {
+        candidate.inventory_target_identity_id
+        for candidate in targeted_candidates
+        if candidate.inventory_target_identity_id is not None
+    }
+    if target_identity_ids:
+        if any(
+            candidate.inventory_target_identity_id is None
+            or candidate.inventory_target_generation_id is None
+            for candidate in targeted_candidates
+        ):
+            raise ValueError("Inventory target identity and generation must remain paired.")
+        target_generation_ids = {
+            candidate.inventory_target_generation_id for candidate in targeted_candidates
+        }
+        current_row = connection.execute(
+            "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1"
+        ).fetchone()
+        current_generation_id = (
+            int(current_row[0])
+            if current_row is not None
+            and current_row[0] is not None
+            and type(current_row[0]) is int
+            else None
+        )
+        if len(target_generation_ids) != 1 or current_generation_id not in target_generation_ids:
+            raise ValueError("Inventory target generation is no longer current.")
+        placeholders = ", ".join("?" for _identity_id in target_identity_ids)
+        rows = connection.execute(
+            "SELECT DISTINCT identities.identity_id, identities.canonical_title, "
+            "identities.normalized_title FROM knowledge_identities AS identities "
+            "JOIN knowledge_generation_items AS items "
+            "ON items.identity_id = identities.identity_id "
+            "WHERE identities.kind = ? AND identities.identity_id IN "
+            f"({placeholders}) AND identities.status = 'active' "
+            "AND items.generation_id = ? ORDER BY identities.identity_id",
+            (kind, *sorted(target_identity_ids), current_generation_id),
+        ).fetchall()
+        if len(rows) != len(target_identity_ids):
+            raise ValueError("Inventory target identity is no longer available.")
+        return rows
+    titles = {candidate.normalized_title for candidate in cluster if candidate.normalized_title}
+    canonical_normalized = _canonical_title(cluster)[1]
+    titles.update(
+        normalize_knowledge_title(alias)[1]
+        for alias in _cluster_aliases(cluster, canonical_normalized)
+    )
     title_placeholders = ", ".join("?" for _ in titles)
     return connection.execute(
         """
-        SELECT identities.identity_id, identities.canonical_title,
+        SELECT DISTINCT identities.identity_id, identities.canonical_title,
             identities.normalized_title
         FROM knowledge_identities AS identities
+        LEFT JOIN knowledge_identity_aliases AS aliases
+          ON aliases.identity_id = identities.identity_id
         WHERE identities.kind = ?
-          AND identities.normalized_title IN ({title_placeholders})
+          AND (
+            identities.normalized_title IN ({title_placeholders})
+            OR aliases.normalized_alias IN ({title_placeholders})
+          )
         ORDER BY identities.identity_id
         """.format(
             title_placeholders=title_placeholders,
         ),
-        (kind, *titles),
+        (kind, *titles, *titles),
     ).fetchall()
 
 
@@ -728,10 +687,36 @@ def _cluster_aliases(
     cluster: tuple[_Candidate, ...], canonical_normalized_title: str
 ) -> tuple[str, ...]:
     aliases: dict[str, str] = {}
+    canonical_title = next(
+        (
+            candidate.title
+            for candidate in cluster
+            if candidate.normalized_title == canonical_normalized_title
+        ),
+        canonical_normalized_title,
+    )
+
+    def supported(left: str, right: str) -> bool:
+        return any(
+            claim_explicitly_supports_alias(left, right, claim.text)
+            for candidate in cluster
+            for claim in candidate.claims
+        )
+
     for candidate in cluster:
-        for value in (candidate.title, *candidate.aliases):
+        values = (
+            (candidate.title, supported(canonical_title, candidate.title)),
+            *(
+                (
+                    value,
+                    supported(candidate.title, value) or supported(canonical_title, value),
+                )
+                for value in candidate.aliases
+            ),
+        )
+        for value, evidence_supported in values:
             alias, normalized = normalize_knowledge_title(value)
-            if normalized and normalized != canonical_normalized_title:
+            if evidence_supported and normalized and normalized != canonical_normalized_title:
                 aliases.setdefault(normalized, alias)
     return tuple(aliases.values())
 
@@ -759,24 +744,12 @@ def _record_identity_review_in(
     )
 
 
-def _applicability_pairs(value: str) -> tuple[tuple[str, str], ...]:
-    try:
-        payload = json.loads(value)
-    except json.JSONDecodeError:
-        return ()
-    if not isinstance(payload, dict):
-        return ()
-    return tuple(
-        (
-            dimension,
-            str(payload.get(dimension) or UNSPECIFIED_APPLICABILITY),
-        )
-        for dimension in _APPLICABILITY_DIMENSIONS
-    )
-
-
 def _normalized_text(value: str) -> str:
     return " ".join(value.split()).casefold()
+
+
+def _applicability_pairs(value: str) -> tuple[tuple[str, str], ...]:
+    return applicability_pairs(value)
 
 
 def _json(value: object) -> str:

@@ -14,6 +14,7 @@ class DesktopModelCapabilityProfile:
     supports_native_json_schema: bool
     supports_streaming: bool
     supports_reasoning: bool
+    maximum_output_tokens: int | None = None
 
 
 def model_capability_profile(
@@ -45,6 +46,7 @@ def model_capability_profile(
             else normalized.startswith(("gpt-", "o1", "o3", "o4", "deepseek-"))
         ),
         supports_reasoning=supports_reasoning,
+        maximum_output_tokens=_known_maximum_output_tokens(normalized),
     )
 
 
@@ -55,4 +57,14 @@ def _known_context_capacity(model: str) -> int | None:
         return 128_000
     if model.startswith("deepseek-"):
         return 1_000_000
+    return None
+
+
+def _known_maximum_output_tokens(model: str) -> int | None:
+    if model in {
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash-vision-exp",
+    }:
+        return 384_000
     return None

@@ -988,6 +988,35 @@ def test_current_tree_can_be_leased_while_provider_build_is_blocked(tmp_path, mo
     assert not worker.is_alive()
 
 
+def test_snapshot_lease_reads_the_pinned_superseded_page_tree(tmp_path) -> None:
+    kb_dir = tmp_path / "knowledge"
+    source = tmp_path / "snapshot.txt"
+    source.write_text("# Snapshot\n\nPinned tree evidence.", encoding="utf-8")
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    imported = DesktopTextImportService(kb_dir).import_text(source)
+    document_id = imported.document.document_id
+    database_path = kb_dir / ".openkb" / "state.sqlite3"
+
+    with page_tree_store.lease_current_page_tree(kb_dir, document_id) as first:
+        assert first is not None
+        with sqlite3.connect(database_path) as connection:
+            page_tree_store.queue_page_tree_rebuild_in(
+                connection,
+                document_id,
+                reason="provider_update",
+                error_code="deterministic_page_tree_failed",
+                provider_version="snapshot-next",
+            )
+        page_tree_store.rebuild_pending_page_trees(kb_dir)
+
+        with page_tree_store.lease_page_tree_generation(
+            kb_dir, document_id, first.generation_id
+        ) as pinned:
+            assert pinned is not None
+            assert pinned.generation_id == first.generation_id
+            assert pinned.nodes == first.nodes
+
+
 def test_start_queues_and_rebuilds_a_provider_version_update(tmp_path, monkeypatch) -> None:
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "provider-update.txt"

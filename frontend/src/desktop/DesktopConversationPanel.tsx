@@ -38,6 +38,10 @@ import type {
   DesktopAnswerVersion,
   DesktopConversation,
   DesktopConversationSummary,
+  DesktopDocumentLineage,
+  DesktopDocumentVersionCatalog,
+  DesktopRetrievalTrace,
+  DesktopVersionFilter,
 } from "./contracts"
 import { nextDesktopRequestId } from "./request-id"
 import { formatSourceLocator } from "./source-locator"
@@ -79,6 +83,8 @@ export function DesktopConversationPanel({
   const [evidence, setEvidence] = useState<DesktopAnswerVersion | null>(null)
   const [evidenceTab, setEvidenceTab] = useState<"sources" | "images">("sources")
   const [evidenceFocusIndex, setEvidenceFocusIndex] = useState<number | null>(null)
+  const [versionCatalog, setVersionCatalog] = useState<DesktopDocumentVersionCatalog | null>(null)
+  const [versionSelection, setVersionSelection] = useState("")
   const selectedConversationId = useRef<string | null>(null)
   const selectionRead = useRef(0)
   const conversationRef = useRef<DesktopConversation | null>(null)
@@ -172,6 +178,18 @@ export function DesktopConversationPanel({
       }).finally(() => setLoading(false))
     }
   }, [bridge, refreshList])
+
+  useEffect(() => {
+    let disposed = false
+    void bridge.documentVersionCatalog()
+      .then((catalog) => {
+        if (!disposed) setVersionCatalog(catalog)
+      })
+      .catch(() => {
+        if (!disposed) setVersionCatalog(null)
+      })
+    return () => { disposed = true }
+  }, [bridge])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -334,7 +352,12 @@ export function DesktopConversationPanel({
     setError(null)
     setNotice(null)
     try {
-      const updated = await bridge.askConversation(conversationId, question, requestId)
+      const updated = await bridge.askConversation(
+        conversationId,
+        question,
+        requestId,
+        versionFilterFromSelection(versionSelection, versionCatalog),
+      )
       if (selectedConversationId.current === conversationId) {
         conversationRef.current = updated
         setConversation(updated)
@@ -476,6 +499,9 @@ export function DesktopConversationPanel({
             <Composer
               value={conversation.draftText}
               generating={Boolean(currentStream)}
+              versionCatalog={versionCatalog}
+              versionSelection={versionSelection}
+              onVersionSelectionChange={setVersionSelection}
               onChange={updateDraft}
               onSend={() => void ask()}
               onStop={() => void stopCurrentStream()}
@@ -509,7 +535,8 @@ function AssistantMessage({ message, stream, onRegenerate, onOpenModelSettings, 
       console.warn("answer_evidence_marker_invalid", { messageId: message.messageId, ordinal, evidenceCount: selected.citations.length })
     }
   }, [message.messageId, selected, stream, text])
-  return <article className="w-full"><div className="text-sm leading-7"><MarkdownView source={text} finalized={!stream} evidenceCount={evidenceCount} onEvidenceRef={stream ? undefined : (ordinal) => { if (selected) onOpenEvidence(selected, "sources", ordinal - 1) }} /></div>{selected && !stream ? <DesktopCapabilityDegradationNotice codes={selected.degradations} onOpenModelSettings={onOpenModelSettings} onRetry={onRegenerate} /> : null}{stream?.activity ? <div className="mt-3 text-xs"><DesktopLiveModelActivityDetails activity={stream.activity} /></div> : null}{message.status === "interrupted" ? <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">{selected?.interruptionReason ?? t("desktop.conversations.interrupted")}</p> : null}{inlineImages.length ? <div className="mt-4 grid grid-cols-3 gap-2">{inlineImages.map((image) => <button key={image.sourceImageId} type="button" onClick={() => onOpenEvidence(selected!, "images")} className="overflow-hidden rounded-lg border border-border/70 bg-muted/20"><img src={convertFileSrc(image.filePath)} alt={image.altText ?? image.name} className="h-28 w-full object-contain" /></button>)}</div> : null}<div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">{selected && !stream ? <Button size="sm" variant="outline" className="h-7" onClick={() => onOpenEvidence(selected, "sources")}>{t("desktop.conversations.evidence", { citations: selected.citations.length, images: selected.sourceImages.length })}</Button> : null}<Button size="icon" variant="ghost" className="size-7" disabled={Boolean(stream)} onClick={onRegenerate} aria-label={t("desktop.conversations.regenerate")}>{stream ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}</Button>{message.answerVersions.length > 1 && selected && !stream ? <div className="flex items-center gap-1"><Button size="icon" variant="ghost" className="size-7" disabled={selected.versionNumber <= 1} onClick={() => onSelectVersion(message.answerVersions[selected.versionNumber - 2].answerVersionId)}><ChevronLeft className="size-3.5" /></Button><span>{selected.versionNumber}/{message.answerVersions.length}</span><Button size="icon" variant="ghost" className="size-7" disabled={selected.versionNumber >= message.answerVersions.length} onClick={() => onSelectVersion(message.answerVersions[selected.versionNumber].answerVersionId)}><ChevronRight className="size-3.5" /></Button></div> : null}</div></article>
+  const scopeLabel = selected && !stream ? versionScopeLabel(selected.retrievalTrace, t) : null
+  return <article className="w-full">{scopeLabel ? <p className="mb-2 inline-flex rounded-full border border-primary/20 bg-primary/5 px-2.5 py-1 text-[11px] font-medium text-primary">{scopeLabel}</p> : null}<div className="text-sm leading-7"><MarkdownView source={text} finalized={!stream} evidenceCount={evidenceCount} onEvidenceRef={stream ? undefined : (ordinal) => { if (selected) onOpenEvidence(selected, "sources", ordinal - 1) }} /></div>{selected && !stream ? <DesktopCapabilityDegradationNotice codes={selected.degradations} onOpenModelSettings={onOpenModelSettings} onRetry={onRegenerate} /> : null}{stream?.activity ? <div className="mt-3 text-xs"><DesktopLiveModelActivityDetails activity={stream.activity} /></div> : null}{message.status === "interrupted" ? <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">{selected?.interruptionReason ?? t("desktop.conversations.interrupted")}</p> : null}{inlineImages.length ? <div className="mt-4 grid grid-cols-3 gap-2">{inlineImages.map((image) => <button key={image.sourceImageId} type="button" onClick={() => onOpenEvidence(selected!, "images")} className="overflow-hidden rounded-lg border border-border/70 bg-muted/20"><img src={convertFileSrc(image.filePath)} alt={image.altText ?? image.name} className="h-28 w-full object-contain" /></button>)}</div> : null}<div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">{selected && !stream ? <Button size="sm" variant="outline" className="h-7" onClick={() => onOpenEvidence(selected, "sources")}>{t("desktop.conversations.evidence", { citations: selected.citations.length, images: selected.sourceImages.length })}</Button> : null}<Button size="icon" variant="ghost" className="size-7" disabled={Boolean(stream)} onClick={onRegenerate} aria-label={t("desktop.conversations.regenerate")}>{stream ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}</Button>{message.answerVersions.length > 1 && selected && !stream ? <div className="flex items-center gap-1"><Button size="icon" variant="ghost" className="size-7" disabled={selected.versionNumber <= 1} onClick={() => onSelectVersion(message.answerVersions[selected.versionNumber - 2].answerVersionId)}><ChevronLeft className="size-3.5" /></Button><span>{selected.versionNumber}/{message.answerVersions.length}</span><Button size="icon" variant="ghost" className="size-7" disabled={selected.versionNumber >= message.answerVersions.length} onClick={() => onSelectVersion(message.answerVersions[selected.versionNumber].answerVersionId)}><ChevronRight className="size-3.5" /></Button></div> : null}</div></article>
 }
 
 function PendingTurn({ stream }: { stream: StreamState }) {
@@ -517,10 +544,84 @@ function PendingTurn({ stream }: { stream: StreamState }) {
   return <><div className="flex justify-end"><div className="max-w-[78%] rounded-2xl rounded-br-md bg-muted px-4 py-2.5 text-sm leading-6">{stream.question}</div></div><article><p className="mb-2 flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="size-3 animate-spin" />{t("desktop.conversations.generating")}</p>{stream.activity ? <div className="mb-3 text-xs"><DesktopLiveModelActivityDetails activity={stream.activity} /></div> : null}<MarkdownView source={stream.content} finalized={false} /></article></>
 }
 
-function Composer({ value, generating, onChange, onSend, onStop }: { value: string; generating: boolean; onChange: (value: string) => void; onSend: () => void; onStop: () => void }) {
+function Composer({ value, generating, versionCatalog, versionSelection, onVersionSelectionChange, onChange, onSend, onStop }: { value: string; generating: boolean; versionCatalog: DesktopDocumentVersionCatalog | null; versionSelection: string; onVersionSelectionChange: (value: string) => void; onChange: (value: string) => void; onSend: () => void; onStop: () => void }) {
   const { t } = useTranslation("common")
   const composing = useRef(false)
-  return <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-background via-background to-transparent px-4 pb-4 pt-8"><div className="mx-auto flex max-w-[840px] items-end gap-2 rounded-2xl border border-border bg-background p-2 shadow-lg"><textarea value={value} rows={2} onChange={(event) => onChange(event.target.value)} onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }} onKeyDown={(event) => { if (event.key !== "Enter" || composing.current) return; if (event.shiftKey) return; event.preventDefault(); onSend() }} placeholder={t("desktop.conversations.placeholder")} className="max-h-36 min-h-12 flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none" />{generating ? <Button size="icon" variant="outline" onClick={onStop} aria-label={t("desktop.knowledgeBases.stopAnswer")}><Square className="size-4" /></Button> : <Button size="icon" disabled={!value.trim()} onClick={onSend} aria-label={t("desktop.knowledgeBases.askQuestion")}><SendHorizontal className="size-4" /></Button>}</div></div>
+  const lineages = versionCatalog?.lineages.filter((lineage) => lineage.lineageState === "confirmed") ?? []
+  return <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-background via-background to-transparent px-4 pb-4 pt-8"><div className="mx-auto flex max-w-[840px] items-end gap-2 rounded-2xl border border-border bg-background p-2 shadow-lg"><div className="min-w-0 flex-1">{lineages.length ? <label className="flex items-center gap-2 px-2 pt-1 text-[11px] text-muted-foreground"><span className="shrink-0">{t("desktop.conversations.versionFilter.label")}</span><select value={versionSelection} disabled={generating} onChange={(event) => onVersionSelectionChange(event.target.value)} className="h-7 min-w-0 max-w-full rounded-md border border-input bg-background px-2 text-xs text-foreground"><option value="">{t("desktop.conversations.versionFilter.automatic")}</option>{lineages.map((lineage) => <VersionFilterOptions key={lineage.lineageId} lineage={lineage} />)}</select></label> : null}<textarea value={value} rows={2} onChange={(event) => onChange(event.target.value)} onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }} onKeyDown={(event) => { if (event.key !== "Enter" || composing.current) return; if (event.shiftKey) return; event.preventDefault(); onSend() }} placeholder={t("desktop.conversations.placeholder")} className="max-h-36 min-h-12 w-full resize-none bg-transparent px-2 py-2 text-sm outline-none" /></div>{generating ? <Button size="icon" variant="outline" onClick={onStop} aria-label={t("desktop.knowledgeBases.stopAnswer")}><Square className="size-4" /></Button> : <Button size="icon" disabled={!value.trim()} onClick={onSend} aria-label={t("desktop.knowledgeBases.askQuestion")}><SendHorizontal className="size-4" /></Button>}</div></div>
+}
+
+function VersionFilterOptions({ lineage }: { lineage: DesktopDocumentLineage }) {
+  const { t } = useTranslation("common")
+  return (
+    <optgroup label={lineage.displayName}>
+      <option value={`latest|${lineage.lineageId}`}>
+        {t("desktop.conversations.versionFilter.latest", { lineage: lineage.displayName })}
+      </option>
+      {lineage.members.map((member) => (
+        <option key={`exact-${member.documentId}`} value={`exact|${lineage.lineageId}|${member.documentId}`}>
+          {lineage.displayName} · {member.versionLabel ?? member.documentName}
+        </option>
+      ))}
+      {lineage.members.filter((member) => member.predecessorDocumentId).map((member) => {
+        const predecessor = lineage.members.find((candidate) => (
+          candidate.documentId === member.predecessorDocumentId
+        ))
+        return predecessor ? (
+          <option key={`compare-${member.documentId}`} value={`compare|${lineage.lineageId}|${predecessor.documentId}|${member.documentId}`}>
+            {t("desktop.conversations.versionFilter.compare", {
+              from: predecessor.versionLabel ?? predecessor.documentName,
+              to: member.versionLabel ?? member.documentName,
+            })}
+          </option>
+        ) : null
+      })}
+      <option value={`all|${lineage.lineageId}`}>
+        {t("desktop.conversations.versionFilter.all", { lineage: lineage.displayName })}
+      </option>
+    </optgroup>
+  )
+}
+
+function versionFilterFromSelection(
+  selection: string,
+  catalog: DesktopDocumentVersionCatalog | null,
+): DesktopVersionFilter | undefined {
+  if (!selection || !catalog) return undefined
+  const [mode, lineageId, ...documentIds] = selection.split("|")
+  const lineage = catalog.lineages.find((item) => item.lineageId === lineageId)
+  if (!lineage || !["latest", "exact", "compare", "all"].includes(mode)) return undefined
+  const selectedMembers = documentIds.map((documentId) => (
+    lineage.members.find((member) => member.documentId === documentId)
+  )).filter((member) => member !== undefined)
+  return {
+    mode: mode as DesktopVersionFilter["mode"],
+    lineageIds: [lineage.lineageId],
+    versionLabels: selectedMembers.flatMap((member) => (
+      member.versionLabel ? [member.versionLabel] : []
+    )),
+    documentIds: selectedMembers.map((member) => member.documentId),
+  }
+}
+
+function versionScopeLabel(
+  trace: DesktopRetrievalTrace,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string | null {
+  if (!trace.versionScopeMode || trace.versionScopeStatus === "unavailable") return null
+  const labels = trace.versionScopeLabels.join(" ↔ ")
+  if (trace.versionScopeStatus === "degraded") {
+    return t("desktop.conversations.versionFilter.degraded", { labels })
+  }
+  if (labels) {
+    return t("desktop.conversations.versionFilter.resolved", {
+      mode: trace.versionScopeMode,
+      labels,
+    })
+  }
+  return trace.versionScopeMode === "latest"
+    ? t("desktop.conversations.versionFilter.latestResolved")
+    : null
 }
 
 function EvidenceDrawer({ version, tab, focusIndex, onTabChange, onClose, onOpenOriginal }: { version: DesktopAnswerVersion | null; tab: "sources" | "images"; focusIndex: number | null; onTabChange: (tab: "sources" | "images") => void; onClose: () => void; onOpenOriginal: (documentId: string, locator: Record<string, unknown>) => void }) {
@@ -530,7 +631,7 @@ function EvidenceDrawer({ version, tab, focusIndex, onTabChange, onClose, onOpen
     const frame = window.requestAnimationFrame(() => document.getElementById(`evidence-${version.answerVersionId}-${focusIndex}`)?.focus())
     return () => window.cancelAnimationFrame(frame)
   }, [focusIndex, tab, version])
-  return <Sheet open={version !== null} onOpenChange={(open) => { if (!open) onClose() }}><SheetContent className="w-full overflow-y-auto sm:max-w-[420px]"><SheetHeader><SheetTitle>{t("desktop.conversations.evidenceTitle")}</SheetTitle><SheetDescription>{t("desktop.conversations.evidenceDescription")}</SheetDescription></SheetHeader>{version ? <><Tabs value={tab} onValueChange={(value) => onTabChange(value as "sources" | "images")} className="mt-5"><TabsList className="w-full"><TabsTrigger value="sources" className="flex-1">{t("desktop.conversations.sources", { count: version.citations.length })}</TabsTrigger><TabsTrigger value="images" className="flex-1">{t("desktop.conversations.images", { count: version.sourceImages.length })}</TabsTrigger></TabsList><TabsContent value="sources" className="space-y-2">{version.citations.map((citation, index) => <button id={`evidence-${version.answerVersionId}-${index}`} key={citation.evidenceId} type="button" disabled={!citation.sourceAvailable} onClick={() => onOpenOriginal(citation.documentId, citation.locator)} className="w-full rounded-lg border border-border/70 p-3 text-left text-sm outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"><strong>[{index + 1}] {citation.documentName} · {citation.section}</strong><span className="mt-1 block text-xs text-muted-foreground">{formatSourceLocator(citation.locator)}</span><span className="mt-2 line-clamp-4 block text-xs leading-5 text-muted-foreground">{citation.excerpt}</span>{!citation.sourceAvailable ? <span className="mt-2 block text-xs text-amber-700">{t("desktop.conversations.sourceUnavailable")}</span> : null}</button>)}</TabsContent><TabsContent value="images" className="grid gap-3 sm:grid-cols-2">{version.sourceImages.map((image) => image.sourceAvailable && image.filePath ? <button key={image.sourceImageId} type="button" onClick={() => onOpenOriginal(image.documentId, image.locator)} className="overflow-hidden rounded-lg border border-border/70 text-left"><img src={convertFileSrc(image.filePath)} alt={image.altText ?? image.name} className="h-40 w-full object-contain" /><span className="block truncate border-t px-2 py-1.5 text-xs">{image.altText ?? image.name}</span></button> : <div key={image.sourceImageId} className="rounded-lg border border-border/70 p-3 text-xs text-muted-foreground"><Images className="mb-2 size-5" />{t("desktop.conversations.sourceUnavailable")}</div>)}</TabsContent></Tabs><NavigationTraceDetails trace={version.retrievalTrace} /></> : null}</SheetContent></Sheet>
+  return <Sheet open={version !== null} onOpenChange={(open) => { if (!open) onClose() }}><SheetContent className="w-full overflow-y-auto sm:max-w-[420px]"><SheetHeader><SheetTitle>{t("desktop.conversations.evidenceTitle")}</SheetTitle><SheetDescription>{t("desktop.conversations.evidenceDescription")}</SheetDescription></SheetHeader>{version ? <><Tabs value={tab} onValueChange={(value) => onTabChange(value as "sources" | "images")} className="mt-5"><TabsList className="w-full"><TabsTrigger value="sources" className="flex-1">{t("desktop.conversations.sources", { count: version.citations.length })}</TabsTrigger><TabsTrigger value="images" className="flex-1">{t("desktop.conversations.images", { count: version.sourceImages.length })}</TabsTrigger></TabsList><TabsContent value="sources" className="space-y-2">{version.citations.map((citation, index) => <button id={`evidence-${version.answerVersionId}-${index}`} key={citation.evidenceId} type="button" disabled={!citation.sourceAvailable} onClick={() => onOpenOriginal(citation.documentId, citation.locator)} className="w-full rounded-lg border border-border/70 p-3 text-left text-sm outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"><strong>[{index + 1}] {citation.documentName}{citation.versionLabel ? ` · ${citation.versionLabel}${citation.versionSide ? ` (${citation.versionSide})` : ""}` : ""} · {citation.section}</strong><span className="mt-1 block text-xs text-muted-foreground">{formatSourceLocator(citation.locator)}</span><span className="mt-2 line-clamp-4 block text-xs leading-5 text-muted-foreground">{citation.excerpt}</span>{!citation.sourceAvailable ? <span className="mt-2 block text-xs text-amber-700">{t("desktop.conversations.sourceUnavailable")}</span> : null}</button>)}</TabsContent><TabsContent value="images" className="grid gap-3 sm:grid-cols-2">{version.sourceImages.map((image) => image.sourceAvailable && image.filePath ? <button key={image.sourceImageId} type="button" onClick={() => onOpenOriginal(image.documentId, image.locator)} className="overflow-hidden rounded-lg border border-border/70 text-left"><img src={convertFileSrc(image.filePath)} alt={image.altText ?? image.name} className="h-40 w-full object-contain" /><span className="block truncate border-t px-2 py-1.5 text-xs">{image.altText ?? image.name}</span></button> : <div key={image.sourceImageId} className="rounded-lg border border-border/70 p-3 text-xs text-muted-foreground"><Images className="mb-2 size-5" />{t("desktop.conversations.sourceUnavailable")}</div>)}</TabsContent></Tabs><NavigationTraceDetails trace={version.retrievalTrace} /></> : null}</SheetContent></Sheet>
 }
 
 function NavigationTraceDetails({ trace }: { trace: DesktopAnswerVersion["retrievalTrace"] }) {

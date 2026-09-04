@@ -5,12 +5,24 @@ from openkb import desktop_knowledge_page_migrations as knowledge_page_migration
 from openkb import desktop_knowledge_reanalysis_migrations as reanalysis_migrations
 from openkb import desktop_knowledge_verification_migrations as verification_migrations
 from openkb import desktop_page_tree_migrations as page_tree_migrations
+from openkb.desktop_candidate_registry_migrations import (
+    CANDIDATE_REGISTRY_MIGRATION_STATEMENTS,
+)
 from openkb.desktop_catalog_migrations import (
     CATALOG_ELIGIBILITY_MIGRATION_STATEMENTS,
     CATALOG_MIGRATION_STATEMENTS,
 )
 from openkb.desktop_corpus_benchmark_migrations import CORPUS_BENCHMARK_MIGRATION_STATEMENTS
 from openkb.desktop_corpus_knowledge_migrations import CORPUS_KNOWLEDGE_MIGRATION_STATEMENTS
+from openkb.desktop_corpus_synthesis_task_migrations import (
+    CORPUS_SYNTHESIS_TASK_MIGRATION_STATEMENTS,
+)
+from openkb.desktop_document_version_catalog_migrations import (
+    DOCUMENT_VERSION_CATALOG_MIGRATION_STATEMENTS,
+)
+from openkb.desktop_inventory_identity_binding_migrations import (
+    INVENTORY_IDENTITY_BINDING_MIGRATION_STATEMENTS,
+)
 from openkb.desktop_knowledge_adoption_migrations import (
     KNOWLEDGE_ADOPTION_MIGRATION_STATEMENTS,
     KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_STATEMENTS,
@@ -72,6 +84,10 @@ from openkb.desktop_page_tree_enrichment_migrations import (
     PAGE_TREE_ENRICHMENT_RETRY_SCOPE_MIGRATION_STATEMENTS,
 )
 from openkb.desktop_retrieval_trace_migrations import RETRIEVAL_TRACE_MIGRATION_STATEMENTS
+from openkb.desktop_semantic_graph_binding_migrations import (
+    SEMANTIC_GRAPH_RESULT_BINDING_MIGRATION_STATEMENTS,
+)
+from openkb.desktop_semantic_graph_migrations import SEMANTIC_GRAPH_MIGRATION_STATEMENTS
 from openkb.desktop_workspace_migrations import (
     CONVERSATION_MIGRATION_STATEMENTS,
     DEDUPLICATION_MIGRATION_STATEMENTS,
@@ -111,6 +127,12 @@ CORPUS_BENCHMARK_MIGRATION_VERSION = 54
 CATALOG_RELATIONSHIP_MIGRATION_VERSION = 55
 KNOWLEDGE_RELATIONSHIP_MIGRATION_VERSION = 56
 CATALOG_ELIGIBILITY_MIGRATION_VERSION = 57
+SEMANTIC_GRAPH_MIGRATION_VERSION = 58
+CANDIDATE_REGISTRY_MIGRATION_VERSION = 59
+DOCUMENT_VERSION_CATALOG_MIGRATION_VERSION = 60
+SEMANTIC_GRAPH_RESULT_BINDING_MIGRATION_VERSION = 61
+CORPUS_SYNTHESIS_TASK_MIGRATION_VERSION = 62
+INVENTORY_IDENTITY_BINDING_MIGRATION_VERSION = 63
 
 
 DESKTOP_FEATURE_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
@@ -183,4 +205,22 @@ DESKTOP_FEATURE_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (CATALOG_RELATIONSHIP_MIGRATION_VERSION, CATALOG_RELATIONSHIP_MIGRATION_STATEMENTS),
     (KNOWLEDGE_RELATIONSHIP_MIGRATION_VERSION, KNOWLEDGE_RELATIONSHIP_MIGRATION_STATEMENTS),
     (CATALOG_ELIGIBILITY_MIGRATION_VERSION, CATALOG_ELIGIBILITY_MIGRATION_STATEMENTS),
+    (SEMANTIC_GRAPH_MIGRATION_VERSION, SEMANTIC_GRAPH_MIGRATION_STATEMENTS),
+    (CANDIDATE_REGISTRY_MIGRATION_VERSION, CANDIDATE_REGISTRY_MIGRATION_STATEMENTS),
+    (
+        DOCUMENT_VERSION_CATALOG_MIGRATION_VERSION,
+        DOCUMENT_VERSION_CATALOG_MIGRATION_STATEMENTS,
+    ),
+    (
+        SEMANTIC_GRAPH_RESULT_BINDING_MIGRATION_VERSION,
+        SEMANTIC_GRAPH_RESULT_BINDING_MIGRATION_STATEMENTS,
+    ),
+    (
+        CORPUS_SYNTHESIS_TASK_MIGRATION_VERSION,
+        CORPUS_SYNTHESIS_TASK_MIGRATION_STATEMENTS,
+    ),
+    (
+        INVENTORY_IDENTITY_BINDING_MIGRATION_VERSION,
+        INVENTORY_IDENTITY_BINDING_MIGRATION_STATEMENTS,
+    ),
 )

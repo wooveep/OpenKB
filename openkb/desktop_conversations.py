@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 
 from openkb.desktop_answer_types import DesktopGroundedAnswer
 from openkb.desktop_conversation_snapshots import (
@@ -17,12 +18,21 @@ from openkb.desktop_conversation_snapshots import (
     version_images,
     version_retrieval_trace,
 )
+from openkb.desktop_document_version_catalog import current_document_version_catalog_in
 from openkb.desktop_grounded_answer import (
     AnswerCancellationCallback,
     AnswerDeltaCallback,
     DesktopGroundedAnswerService,
 )
 from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_retrieval_trace import retrieval_trace_from_json
+from openkb.desktop_version_scope import (
+    RetrievalRequest,
+    VersionFilter,
+    VersionMode,
+    VersionScope,
+    VersionScopeStatus,
+)
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -172,11 +182,12 @@ class DesktopConversationService:
         on_delta: AnswerDeltaCallback | None = None,
         is_cancelled: AnswerCancellationCallback | None = None,
         on_model_event: Callable[[object], None] | None = None,
+        version_filter: VersionFilter | None = None,
     ) -> dict[str, object]:
         normalized = question.strip()
         if not normalized:
             raise DesktopConversationError("conversation_question_required", "Enter a question.")
-        user_message_id, assistant_message_id, context = self._begin_turn(
+        user_message_id, assistant_message_id, context, conversation_scope = self._begin_turn(
             conversation_id, normalized
         )
 
@@ -186,7 +197,11 @@ class DesktopConversationService:
 
         try:
             answer = self._answers.generate(
-                normalized,
+                RetrievalRequest(
+                    question=normalized,
+                    conversation_scope=conversation_scope,
+                    version_filter=version_filter,
+                ),
                 conversation_context=context,
                 on_delta=emit,
                 is_cancelled=is_cancelled,
@@ -207,7 +222,9 @@ class DesktopConversationService:
         is_cancelled: AnswerCancellationCallback | None = None,
         on_model_event: Callable[[object], None] | None = None,
     ) -> dict[str, object]:
-        question, context = self._begin_regeneration(conversation_id, assistant_message_id)
+        question, context, conversation_scope = self._begin_regeneration(
+            conversation_id, assistant_message_id
+        )
 
         def emit(_answer_id: str, delta: str, replace: bool, attempt: int) -> None:
             if on_delta is not None:
@@ -215,7 +232,7 @@ class DesktopConversationService:
 
         try:
             answer = self._answers.generate(
-                question,
+                RetrievalRequest(question=question, conversation_scope=conversation_scope),
                 conversation_context=context,
                 on_delta=emit,
                 is_cancelled=is_cancelled,
@@ -292,7 +309,7 @@ class DesktopConversationService:
 
     def _begin_turn(
         self, conversation_id: str, question: str
-    ) -> tuple[str, str, tuple[tuple[str, str], ...]]:
+    ) -> tuple[str, str, tuple[tuple[str, str], ...], VersionScope | None]:
         with kb_ingest_lock(self._state_dir):
             connection = _connect(self._database_path)
             try:
@@ -304,6 +321,9 @@ class DesktopConversationService:
                             "This conversation is already generating an answer.",
                         )
                     context = _conversation_context(
+                        connection, conversation_id, before_ordinal=None
+                    )
+                    conversation_scope = _latest_version_scope_in(
                         connection, conversation_id, before_ordinal=None
                     )
                     ordinal = int(
@@ -354,13 +374,13 @@ class DesktopConversationService:
                         (next_title, now, conversation_id),
                     )
                     _select_conversation_in(connection, conversation_id)
-                    return user_message_id, assistant_message_id, context
+                    return user_message_id, assistant_message_id, context, conversation_scope
             finally:
                 connection.close()
 
     def _begin_regeneration(
         self, conversation_id: str, assistant_message_id: str
-    ) -> tuple[str, tuple[tuple[str, str], ...]]:
+    ) -> tuple[str, tuple[tuple[str, str], ...], VersionScope | None]:
         with kb_ingest_lock(self._state_dir):
             connection = _connect(self._database_path)
             try:
@@ -393,8 +413,12 @@ class DesktopConversationService:
                         """,
                         (_timestamp(), assistant_message_id),
                     )
-                    return str(row[1]), _conversation_context(
-                        connection, conversation_id, before_ordinal=int(row[0])
+                    return (
+                        str(row[1]),
+                        _conversation_context(
+                            connection, conversation_id, before_ordinal=int(row[0])
+                        ),
+                        _selected_answer_version_scope_in(connection, assistant_message_id),
                     )
             finally:
                 connection.close()
@@ -593,6 +617,90 @@ def _conversation_context(
         params,
     ).fetchall()
     return tuple((str(row[0]), str(row[1])) for row in reversed(rows))
+
+
+def _latest_version_scope_in(
+    connection: sqlite3.Connection,
+    conversation_id: str,
+    *,
+    before_ordinal: int | None,
+) -> VersionScope | None:
+    before_clause = "AND messages.ordinal < ?" if before_ordinal is not None else ""
+    parameters: tuple[object, ...] = (
+        (conversation_id, before_ordinal) if before_ordinal is not None else (conversation_id,)
+    )
+    row = connection.execute(
+        f"""
+        SELECT traces.trace_json
+        FROM conversation_messages AS messages
+        JOIN conversation_answer_retrieval_traces AS traces
+          ON traces.answer_version_id = messages.selected_answer_version_id
+        WHERE messages.conversation_id = ? AND messages.role = 'assistant'
+          AND messages.status = 'completed' {before_clause}
+        ORDER BY messages.ordinal DESC LIMIT 1
+        """,  # noqa: S608 - only the fixed optional predicate is interpolated
+        parameters,
+    ).fetchone()
+    return _version_scope_from_trace(connection, row)
+
+
+def _selected_answer_version_scope_in(
+    connection: sqlite3.Connection, assistant_message_id: str
+) -> VersionScope | None:
+    row = connection.execute(
+        """
+        SELECT traces.trace_json
+        FROM conversation_messages AS messages
+        JOIN conversation_answer_retrieval_traces AS traces
+          ON traces.answer_version_id = messages.selected_answer_version_id
+        WHERE messages.message_id = ? AND messages.role = 'assistant'
+        """,
+        (assistant_message_id,),
+    ).fetchone()
+    return _version_scope_from_trace(connection, row)
+
+
+def _version_scope_from_trace(
+    connection: sqlite3.Connection, row: tuple[object, ...] | None
+) -> VersionScope | None:
+    if row is None:
+        return None
+    trace = retrieval_trace_from_json(str(row[0]))
+    if trace.version_scope_mode not in {"latest", "exact", "compare", "all", "unscoped"}:
+        return None
+    if trace.version_scope_status not in {"resolved", "ambiguous", "unavailable", "degraded"}:
+        return None
+    catalog = current_document_version_catalog_in(connection)
+    if catalog is None:
+        return None
+    allowed = frozenset(trace.version_scope_document_ids)
+    preferred = tuple(
+        member.document_id
+        for lineage in catalog.lineages
+        if lineage.lineage_id in trace.version_scope_lineage_ids
+        for member in lineage.members
+        if member.document_id in allowed
+    )
+    if trace.version_scope_lineage_ids and not preferred:
+        return None
+    mode = cast(VersionMode, trace.version_scope_mode)
+    return VersionScope(
+        mode=mode,
+        status=cast(VersionScopeStatus, trace.version_scope_status),
+        lineage_ids=trace.version_scope_lineage_ids,
+        requested_labels=trace.version_scope_labels,
+        allowed_document_ids=allowed,
+        preferred_occurrence_document_ids=preferred,
+        supporting_document_policy=(
+            "selected_versions_plus_independent"
+            if mode in {"latest", "unscoped"}
+            else "selected_versions_only"
+        ),
+        selection_reason=trace.version_scope_selection_reason,
+        catalog_source_revision=catalog.source_revision,
+        catalog_generation_id=catalog.revision_id,
+        degradation_reason=trace.version_scope_degradation_reason or None,
+    )
 
 
 def recover_stale_conversation_generations(kb_dir: Path) -> None:
