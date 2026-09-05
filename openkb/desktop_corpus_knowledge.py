@@ -28,6 +28,7 @@ from openkb.desktop_corpus_synthesis_generation import (
     CorpusGenerationDependencyError,
     capture_corpus_candidate_inputs_in,
 )
+from openkb.desktop_identity_candidate_store import bind_identity_candidates_in
 from openkb.desktop_import_artifacts import DocumentIRBlock
 from openkb.desktop_knowledge_analysis import DesktopKnowledgeAnalysis
 from openkb.desktop_knowledge_generations import (
@@ -411,28 +412,19 @@ def _synthesize_cluster_in(
         """,
         ((identity_id, alias, normalize_knowledge_title(alias)[1], now) for alias in aliases),
     )
-    connection.executemany(
-        """
-        INSERT INTO knowledge_identity_candidates (
-            identity_id, candidate_id, match_basis, created_at
-        ) VALUES (?, ?, ?, ?)
-        ON CONFLICT(identity_id, candidate_id) DO UPDATE SET
-            match_basis = excluded.match_basis,
-            created_at = excluded.created_at
-        """,
+    bind_identity_candidates_in(
+        connection,
         (
             (
                 identity_id,
                 candidate.candidate_id,
-                (
-                    "inventory_target"
-                    if candidate.inventory_target_identity_id is not None
-                    else "exact_title"
-                ),
-                now,
+                "inventory_target"
+                if candidate.inventory_target_identity_id is not None
+                else "exact_title",
             )
             for candidate in cluster
         ),
+        now=now,
     )
     rendered_claims, sources = _merge_cluster_claims(cluster)
     content = render_generated_knowledge(kind, rendered_claims, language=language)

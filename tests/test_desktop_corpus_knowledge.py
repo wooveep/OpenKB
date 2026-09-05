@@ -163,20 +163,31 @@ def test_carry_forward_keeps_only_identities_bound_to_the_new_candidate_inputs()
              '[]', '[]', '{}', 'identity-current'),
             (1, 'item-stale', 'entity', 'Stale', 'stale', 'Stale[^s2]',
              'digest-stale', 'document-stale', 'before', 'source_backed', 'service',
-             '[]', '[]', '{}', 'identity-stale');
+             '[]', '[]', '{}', 'identity-stale'),
+            (1, 'item-partial', 'entity', 'Partial', 'partial', 'Partial[^s3][^s4]',
+             'digest-partial', 'document-current', 'before', 'source_backed', 'service',
+             '[]', '[]', '{}', 'identity-partial');
         INSERT INTO knowledge_generation_item_sources VALUES
             (1, 'item-current', 's1', 'evidence-current', 'Current claim'),
-            (1, 'item-stale', 's2', 'evidence-stale', 'Stale claim');
+            (1, 'item-stale', 's2', 'evidence-stale', 'Stale claim'),
+            (1, 'item-partial', 's3', 'evidence-partial-current', 'Current partial claim'),
+            (1, 'item-partial', 's4', 'evidence-partial-stale', 'Stale partial claim');
         INSERT INTO knowledge_generation_identity_mappings VALUES
             (1, 'identity-current', 'candidate-generation-current', 'candidate-current',
              'exact_title'),
             (1, 'identity-stale', 'candidate-generation-stale', 'candidate-stale',
-             'exact_title');
+             'exact_title'),
+            (1, 'identity-partial', 'candidate-generation-current',
+             'candidate-partial-current', 'exact_title'),
+            (1, 'identity-partial', 'candidate-generation-stale',
+             'candidate-partial-stale', 'exact_title');
         INSERT INTO knowledge_generation_candidate_inputs VALUES
             (2, 'candidate-generation-current');
         INSERT INTO knowledge_candidate_generation_candidates VALUES
             ('candidate-generation-current', 'candidate-current', 'admitted'),
-            ('candidate-generation-stale', 'candidate-stale', 'admitted');
+            ('candidate-generation-stale', 'candidate-stale', 'admitted'),
+            ('candidate-generation-current', 'candidate-partial-current', 'admitted'),
+            ('candidate-generation-stale', 'candidate-partial-stale', 'admitted');
         """
     )
 
@@ -184,7 +195,7 @@ def test_carry_forward_keeps_only_identities_bound_to_the_new_candidate_inputs()
         connection,
         current_generation_id=1,
         generation_id=2,
-        identity_ids=("identity-current", "identity-stale"),
+        identity_ids=("identity-current", "identity-partial", "identity-stale"),
         now="2026-09-06T00:00:00Z",
     )
 

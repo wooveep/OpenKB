@@ -25,6 +25,7 @@ from openkb.desktop_corpus_synthesis_generation import (
     refresh_corpus_manifest_digest_in,
 )
 from openkb.desktop_entity_dossier_store import build_generation_entity_dossiers_in
+from openkb.desktop_identity_candidate_store import bind_identity_candidates_in
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels, encode_knowledge_labels
 from openkb.desktop_knowledge_relationships import (
     generation_relationship_issues_in,
@@ -540,9 +541,19 @@ def _carry_forward_generation_identities_in(
     now: str,
 ) -> None:
     requested_placeholders = ", ".join("?" for _ in identity_ids)
+    prior_rows = connection.execute(
+        f"""
+        SELECT identity_id, candidate_generation_id, candidate_id
+        FROM knowledge_generation_identity_mappings
+        WHERE generation_id = ? AND identity_id IN ({requested_placeholders})
+        ORDER BY identity_id, candidate_generation_id, candidate_id
+        """,
+        (current_generation_id, *identity_ids),
+    ).fetchall()
     binding_rows = connection.execute(
         f"""
-        SELECT mappings.identity_id, mappings.candidate_id, mappings.match_basis
+        SELECT mappings.identity_id, mappings.candidate_generation_id,
+            mappings.candidate_id, mappings.match_basis
         FROM knowledge_generation_identity_mappings AS mappings
         JOIN knowledge_generation_candidate_inputs AS inputs
           ON inputs.generation_id = ?
@@ -553,23 +564,34 @@ def _carry_forward_generation_identities_in(
          AND candidates.admission_state = 'admitted'
         WHERE mappings.generation_id = ?
           AND mappings.identity_id IN ({requested_placeholders})
-        ORDER BY mappings.identity_id, mappings.candidate_id
+        ORDER BY mappings.identity_id, mappings.candidate_generation_id,
+            mappings.candidate_id
         """,
         (generation_id, current_generation_id, *identity_ids),
     ).fetchall()
-    mappable_identity_ids = tuple(dict.fromkeys(str(row[0]) for row in binding_rows))
+    prior_mappings: dict[str, set[tuple[str, str]]] = {}
+    for row in prior_rows:
+        prior_mappings.setdefault(str(row[0]), set()).add((str(row[1]), str(row[2])))
+    compatible_mappings: dict[str, set[tuple[str, str]]] = {}
+    for row in binding_rows:
+        compatible_mappings.setdefault(str(row[0]), set()).add((str(row[1]), str(row[2])))
+    mappable_identity_ids = tuple(
+        identity_id
+        for identity_id in identity_ids
+        if prior_mappings.get(identity_id)
+        and compatible_mappings.get(identity_id) == prior_mappings[identity_id]
+    )
     if not mappable_identity_ids:
         return
-    connection.executemany(
-        """
-        INSERT INTO knowledge_identity_candidates (
-            identity_id, candidate_id, match_basis, created_at
-        ) VALUES (?, ?, ?, ?)
-        ON CONFLICT(identity_id, candidate_id) DO UPDATE SET
-            match_basis = excluded.match_basis,
-            created_at = excluded.created_at
-        """,
-        ((str(row[0]), str(row[1]), str(row[2]), now) for row in binding_rows),
+    eligible_identity_ids = frozenset(mappable_identity_ids)
+    bind_identity_candidates_in(
+        connection,
+        (
+            (str(row[0]), str(row[2]), str(row[3]))
+            for row in binding_rows
+            if str(row[0]) in eligible_identity_ids
+        ),
+        now=now,
     )
     placeholders = ", ".join("?" for _ in mappable_identity_ids)
     parameters = (generation_id, current_generation_id, *mappable_identity_ids)
