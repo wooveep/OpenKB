@@ -36,6 +36,7 @@ from openkb.desktop_knowledge_analysis_reuse import (
     persisted_analysis_prompt_digest_in,
 )
 from openkb.desktop_knowledge_generations import current_generation_id_in
+from openkb.desktop_knowledge_graph_tasks import DesktopKnowledgeGraphExtractionTasks
 from openkb.desktop_knowledge_reanalysis_models import (
     DesktopDocumentAnalysisStatus,
     DesktopKnowledgeReanalysisRun,
@@ -322,8 +323,9 @@ class DesktopKnowledgeReanalysisService:
         *,
         should_stop: Callable[[], bool] = lambda: False,
         authorize_retry: Callable[[DesktopModelRequest], str | None] = lambda _request: None,
-    ) -> None:
+    ) -> tuple[str, ...]:
         execution_token: str | None = None
+        graph_requeued: tuple[str, ...] = ()
         analysis_gate = DesktopAnalysisCapabilityGate(self._kb_dir, None, False)
         try:
             persisted_plan = DesktopKnowledgeAnalysisBatchStore(
@@ -337,7 +339,7 @@ class DesktopKnowledgeReanalysisService:
             )
             analysis_gate = analysis_execution.gate
             if not analysis_gate.verified:
-                return
+                return ()
             document_id, document_name, expected_digest, execution_token = self._begin_job(
                 job_id, gateway
             )
@@ -432,7 +434,7 @@ class DesktopKnowledgeReanalysisService:
                     ),
                 )
                 honor_control()
-                self._apply_result(
+                graph_requeued = self._apply_result(
                     job_id,
                     document_id,
                     evidence,
@@ -454,6 +456,7 @@ class DesktopKnowledgeReanalysisService:
             logger.exception("Knowledge Reanalysis failed for job %s", job_id)
             if execution_token is not None:
                 self._fail_job(job_id, execution_token, "knowledge_reanalysis_failed", str(error))
+        return graph_requeued
 
     def _begin_job(self, job_id: str, gateway: DesktopModelGateway) -> tuple[str, str, str, str]:
         with kb_ingest_lock(self._state_dir):
@@ -597,9 +600,10 @@ class DesktopKnowledgeReanalysisService:
         checkpoint: dict[str, object],
         execution_token: str,
         gateway: DesktopModelGateway,
-    ) -> None:
+    ) -> tuple[str, ...]:
         staged_projection: Path | None = None
         refine_corpus = False
+        graph_document_ids: tuple[str, ...] = ()
         with kb_ingest_lock(self._state_dir):
             connection = _connect(self._database_path)
             try:
@@ -665,6 +669,15 @@ class DesktopKnowledgeReanalysisService:
                         now=now,
                     )
                     refine_corpus = refined_generation is not None
+                    if refine_corpus:
+                        graph_document_ids = tuple(
+                            str(row[0])
+                            for row in connection.execute(
+                                "SELECT document_id FROM knowledge_reanalysis_jobs "
+                                "WHERE run_id = ? ORDER BY created_at, rowid",
+                                (run_id,),
+                            )
+                        )
                 if current_generation_id_in(connection) != initial_generation:
                     queue_catalog_rebuild_in(connection, "successful_reanalysis")
                     staged_projection = stage_okf_projection_in(connection, self._kb_dir)
@@ -691,7 +704,19 @@ class DesktopKnowledgeReanalysisService:
                 )
             except Exception:
                 logger.exception("Could not refine Reanalysis Entity Dossiers.")
+        graph_requeued: list[str] = []
+        graph_tasks = DesktopKnowledgeGraphExtractionTasks(self._kb_dir)
+        for graph_document_id in graph_document_ids:
+            try:
+                if graph_tasks.queue(graph_document_id, gateway):
+                    graph_requeued.append(graph_document_id)
+            except Exception:
+                logger.exception(
+                    "Could not requeue Knowledge Graph extraction after Reanalysis for %s.",
+                    graph_document_id,
+                )
         start_catalog_rebuilds(self._kb_dir)
+        return tuple(graph_requeued)
 
     def _fail_job(self, job_id: str, execution_token: str, error_code: str, reason: str) -> None:
         with kb_ingest_lock(self._state_dir):

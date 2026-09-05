@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from openkb.desktop_catalog_snapshot import CatalogSnapshot, build_catalog_snapshot_in
+from openkb.desktop_catalog_snapshot import CatalogLink, CatalogSnapshot, build_catalog_snapshot_in
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -384,6 +384,7 @@ def _persist_snapshot_in(
     connection: sqlite3.Connection, kb_dir: Path, snapshot: CatalogSnapshot
 ) -> None:
     generation_id = snapshot.generation_id
+    legacy_links = _legacy_endpoint_links(snapshot.links)
     existing = connection.execute(
         "SELECT snapshot_digest FROM knowledge_catalog_generations WHERE generation_id = ?",
         (generation_id,),
@@ -461,7 +462,7 @@ def _persist_snapshot_in(
             """,
             (
                 (generation_id, link.from_node_id, link.to_node_id, link.weight)
-                for link in snapshot.links
+                for link in legacy_links
             ),
         )
         connection.executemany(
@@ -542,6 +543,17 @@ def _persist_snapshot_in(
         (now, now),
     )
     _delete_old_generations_in(connection, kb_dir)
+
+
+def _legacy_endpoint_links(links: tuple[CatalogLink, ...]) -> tuple[CatalogLink, ...]:
+    """Project typed relationships onto the legacy endpoint-only link table."""
+    selected: dict[tuple[str, str], CatalogLink] = {}
+    for link in links:
+        key = (link.from_node_id, link.to_node_id)
+        current = selected.get(key)
+        if current is None or link.weight > current.weight:
+            selected[key] = link
+    return tuple(selected[key] for key in sorted(selected))
 
 
 def _delete_old_generations_in(connection: sqlite3.Connection, kb_dir: Path) -> None:

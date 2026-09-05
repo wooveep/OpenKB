@@ -66,6 +66,36 @@ def _output_limit_error(call_id: str) -> DesktopStructuredOutputInvalidError:
     )
 
 
+def _repair_output_limit_error(call_id: str) -> DesktopStructuredOutputInvalidError:
+    initial = DesktopModelResult(
+        f"{call_id}-initial",
+        "{}",
+        1,
+        observations=DesktopModelOutputObservations(
+            finish_reason="stop",
+            final_content_observed=True,
+            final_chunk_count=1,
+            final_character_count=2,
+        ),
+    )
+    repaired = DesktopModelResult(
+        f"{call_id}-repair",
+        '{"schema_version":"incomplete',
+        1,
+        observations=DesktopModelOutputObservations(
+            finish_reason="length",
+            final_content_observed=True,
+            final_chunk_count=1,
+            final_character_count=29,
+            output_limit_reached=True,
+        ),
+    )
+    return DesktopStructuredOutputInvalidError(
+        initial_result=initial,
+        final_result=repaired,
+    )
+
+
 def test_recovery_recurses_to_single_evidence_and_stays_finite() -> None:
     calls: list[int] = []
 
@@ -94,6 +124,34 @@ def test_recovery_recurses_to_single_evidence_and_stays_finite() -> None:
     assert recovered.output_limit_recovery_count == 3
     assert recovered.result.attempt_count == 7
     assert recovered.analysis.analysis_scope == KNOWLEDGE_ANALYSIS_BATCH_SCOPE
+
+
+def test_recovery_splits_when_the_bounded_repair_reaches_its_output_limit() -> None:
+    calls: list[int] = []
+
+    def analyze(batch: KnowledgeAnalysisBatch):
+        calls.append(len(batch.evidence))
+        if len(batch.evidence) > 1:
+            raise _repair_output_limit_error(f"limited-{len(calls)}")
+        return (
+            DesktopModelResult(f"leaf-{len(calls)}", "{}", 1),
+            DesktopKnowledgeAnalysis(
+                f"Leaf {batch.evidence[0][0]}",
+                (),
+                (),
+                KNOWLEDGE_ANALYSIS_BATCH_SCOPE,
+            ),
+        )
+
+    recovered = analyze_batch_with_output_limit_recovery(
+        _batch(2),
+        analyze=analyze,
+        merge=merge_split_batch_analyses,
+    )
+
+    assert calls == [2, 1, 1]
+    assert recovered.split_leaf_count == 2
+    assert recovered.output_limit_recovery_count == 1
 
 
 def test_single_evidence_output_limit_is_terminal_without_recursion() -> None:

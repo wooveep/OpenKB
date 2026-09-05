@@ -512,6 +512,14 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
                     (procedure_sources[0].evidence_id,),
                     "[]",
                 ),
+                SemanticRelation(
+                    "procedure-candidate",
+                    "entity-candidate",
+                    "DEPENDS_ON",
+                    (SemanticClaimReference("procedure-candidate", 0),),
+                    (procedure_sources[0].evidence_id,),
+                    "[]",
+                ),
             ),
             lifecycle="completed",
             quality="full",
@@ -592,27 +600,32 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
         )
         connection.commit()
 
-        relation = connection.execute(
+        relations = connection.execute(
             """
             SELECT source_item_key, target_item_key, relation_kind, provenance
             FROM knowledge_generation_relationships
             WHERE generation_id = ? AND source_item_key = 'procedure-identity'
                 AND target_item_key = 'entity-identity'
+            ORDER BY relation_kind
             """,
             (generation_id,),
-        ).fetchone()
-        assert relation == (
-            "procedure-identity",
-            "entity-identity",
-            "USES",
-            "semantic_relation_analysis",
-        )
+        ).fetchall()
+        assert relations == [
+            (
+                "procedure-identity",
+                "entity-identity",
+                relation_kind,
+                "semantic_relation_analysis",
+            )
+            for relation_kind in ("DEPENDS_ON", "USES")
+        ]
         relationship_sources = connection.execute(
             """
             SELECT binding_role, evidence_id
             FROM knowledge_generation_relationship_sources
             WHERE generation_id = ? AND source_item_key = 'procedure-identity'
                 AND target_item_key = 'entity-identity'
+                AND relation_kind = 'USES'
             ORDER BY binding_role, evidence_id
             """,
             (generation_id,),
@@ -657,9 +670,21 @@ def test_generated_relations_are_structured_authority_and_markdown_projection(
             FROM knowledge_catalog_relationships
             WHERE generation_id = ? AND source_node_id = 'generated:procedure-identity'
                 AND target_node_id = 'generated:entity-identity'
+            ORDER BY relation_kind
             """,
             (catalog_generation,),
-        ).fetchone() == ("USES", "semantic_relation_analysis", 1)
+        ).fetchall() == [
+            ("DEPENDS_ON", "semantic_relation_analysis", 1),
+            ("USES", "semantic_relation_analysis", 1),
+        ]
+        assert connection.execute(
+            """
+            SELECT COUNT(*) FROM knowledge_catalog_links
+            WHERE generation_id = ? AND from_node_id = 'generated:procedure-identity'
+                AND to_node_id = 'generated:entity-identity'
+            """,
+            (catalog_generation,),
+        ).fetchone() == (1,)
 
     materialize_okf_projection(kb_dir)
     projected = (

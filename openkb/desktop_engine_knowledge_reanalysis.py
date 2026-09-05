@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Event
 from typing import TYPE_CHECKING
 
+from openkb import desktop_engine_knowledge_graph as knowledge_graph_engine
 from openkb.desktop_knowledge_reanalysis import DesktopKnowledgeReanalysisService
 from openkb.desktop_model_result_failure import (
     authorize_model_operation_retry,
@@ -137,12 +138,17 @@ def _run_jobs(
         for job_id in service.pending_job_ids(run_id):
             if should_stop():
                 break
-            service.run_job(
+            graph_document_ids = service.run_job(
                 job_id,
                 gateway,
                 should_stop=should_stop,
                 authorize_retry=authorize_retry,
             )
+            if graph_document_ids:
+                with server._workers_lock:
+                    for document_id in graph_document_ids:
+                        server._knowledge_graph_extraction_cancelled.discard((kb_dir, document_id))
+                knowledge_graph_engine.start_knowledge_graph_extractions(server, kb_dir, gateway)
             server._emit_event("knowledge_reanalysis.updated", {"run_id": run_id, "job_id": job_id})
     except Exception:
         logger.exception("Knowledge Reanalysis worker failed for run %s", run_id)

@@ -55,9 +55,16 @@ class DesktopStructuredOutputInvalidError(ValueError):
 
 
 def structured_output_reached_limit(error: DesktopStructuredOutputInvalidError) -> bool:
-    """Return whether the provider explicitly stopped the initial result at its output bound."""
-    observations = error.initial_result.observations
-    return observations is not None and observations.output_limit_reached
+    """Return whether the provider stopped an attempted result at its output bound."""
+    results = (
+        (error.initial_result, error.final_result)
+        if error.repair_attempted
+        else (error.initial_result,)
+    )
+    return any(
+        result.observations is not None and result.observations.output_limit_reached
+        for result in results
+    )
 
 
 @dataclass(frozen=True)

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from openkb import desktop_engine_knowledge_reanalysis as reanalysis_engine
 from openkb.desktop_import import DesktopImportError, DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_knowledge_analysis_batch_store import DesktopKnowledgeAnalysisBatchStore
@@ -218,10 +219,10 @@ def test_corpus_reanalysis_publishes_candidates_then_plans_dossiers_outside_writ
 
     service = DesktopKnowledgeReanalysisService(kb_dir)
     run = service.create_run((document_id,), provider="provider", model="model")
-    service.run_job(
+    assert service.run_job(
         run.jobs[0].job_id,
         DesktopModelGateway(transport, provider_name="provider", model_name="model"),
-    )
+    ) == (document_id,)
 
     assert service.overview()["runs"][0]["status"] == "completed"
     assert operations == [
@@ -249,6 +250,20 @@ def test_corpus_reanalysis_publishes_candidates_then_plans_dossiers_outside_writ
             "ON manifests.generation_id = tasks.generation_id "
             "ORDER BY tasks.generation_id DESC LIMIT 1"
         ).fetchone() == ("completed", "ready")
+        assert connection.execute(
+            """
+            SELECT tasks.status,
+                tasks.candidate_generation_id = registry.current_candidate_generation_id,
+                tasks.candidate_generation_digest = generations.registry_digest
+            FROM knowledge_graph_extraction_tasks AS tasks
+            JOIN knowledge_candidate_registry_state AS registry
+              ON registry.document_id = tasks.document_id
+            JOIN knowledge_candidate_generations AS generations
+              ON generations.candidate_generation_id = registry.current_candidate_generation_id
+            WHERE tasks.document_id = ?
+            """,
+            (document_id,),
+        ).fetchone() == ("pending", 1, 1)
 
 
 def test_historical_schema_is_outdated_without_blocking_reanalysis_overview(
@@ -651,3 +666,58 @@ def test_reanalysis_resume_gates_the_profile_pinned_by_the_persisted_plan(
 
     assert resumed_calls == 0
     assert service.overview()["runs"][0]["jobs"][0]["status"] == "pending"
+
+
+def test_engine_starts_graph_worker_after_reanalysis_requeues_candidate_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = object()
+    graph_starts: list[tuple[Path, object]] = []
+    events: list[tuple[str, dict[str, str]]] = []
+
+    class ReanalysisService:
+        def __init__(self, kb_dir: Path) -> None:
+            assert kb_dir == tmp_path
+
+        def pending_job_ids(self, run_id: str) -> tuple[str, ...]:
+            assert run_id == "run-id"
+            return ("job-id",)
+
+        def run_job(
+            self, job_id: str, selected_gateway: object, **controls: object
+        ) -> tuple[str, ...]:
+            assert job_id == "job-id"
+            assert selected_gateway is gateway
+            assert callable(controls["should_stop"])
+            assert callable(controls["authorize_retry"])
+            return ("document-id",)
+
+    class Server:
+        _shutdown = threading.Event()
+        _knowledge_reanalysis_lease = 7
+        _workers_lock = threading.Lock()
+        _workers = {threading.current_thread()}
+        _knowledge_graph_extraction_cancelled = {(tmp_path, "document-id")}
+
+        @staticmethod
+        def _emit_event(kind: str, data: dict[str, str]) -> None:
+            events.append((kind, data))
+
+    monkeypatch.setattr(reanalysis_engine, "DesktopKnowledgeReanalysisService", ReanalysisService)
+    monkeypatch.setattr(
+        reanalysis_engine,
+        "revoke_model_operation_retry_scope",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        reanalysis_engine.knowledge_graph_engine,
+        "start_knowledge_graph_extractions",
+        lambda _server, kb_dir, selected_gateway: graph_starts.append((kb_dir, selected_gateway)),
+    )
+
+    reanalysis_engine._run_jobs(Server(), tmp_path, "run-id", gateway, 7)  # type: ignore[arg-type]
+
+    assert graph_starts == [(tmp_path, gateway)]
+    assert Server._knowledge_graph_extraction_cancelled == set()
+    assert events == [("knowledge_reanalysis.updated", {"run_id": "run-id", "job_id": "job-id"})]
