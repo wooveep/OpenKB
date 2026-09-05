@@ -55,8 +55,8 @@ Use only supplied proposal IDs, claim IDs, brief IDs, identity IDs, candidate ti
 subtypes, and reason-code enums. create/update/alias decisions require evidence-bound claims;
 review/reject retain no generated fact. Do not add prose, facts, URLs, wiki links, source markers,
 or unknown identifiers. Prefer an existing identity when the supplied deterministic signals and
-brief support it. A quantity range is never a quota: schema-valid all-reject or empty decisions
-are valid."""
+brief support it. A quantity range is never a quota: schema-valid all-reject decisions are valid,
+and empty decisions are valid only when the supplied proposal list is empty."""
 
 DOSSIER_INSTRUCTIONS = """Plan one readable Entity dossier from the supplied immutable identity
 claim snapshot. Return an ID-only outline: select summary claim IDs, short section titles,

@@ -282,6 +282,7 @@ _CONTRACTS: dict[str, DesktopPromptContract] = {
     "document_entity_inventory": _contract(
         "document_entity_inventory",
         _INVENTORY_INSTRUCTIONS,
+        version=2,
         output_schema=document_entity_inventory_output_schema(),
         output_example={
             "document_version_id": "document",

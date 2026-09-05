@@ -232,7 +232,7 @@ def test_changed_knowledge_analysis_prompt_versions_are_pinned() -> None:
         "knowledge_analysis_batch": 9,
         "knowledge_analysis_merge": 6,
         "knowledge_fact_harvest": 1,
-        "document_entity_inventory": 1,
+        "document_entity_inventory": 2,
         "entity_dossier_planning": 1,
     }
     for operation, version in expected_versions.items():
@@ -249,6 +249,9 @@ def test_inventory_and_dossier_contracts_are_id_only_and_operation_specific() ->
     assert dossier.token_budget_policy["reserve_output_tokens"] == 4_096
     assert inventory.output_schema is not None
     assert dossier.output_schema is not None
+    assert "empty decisions are valid only when the supplied proposal list is empty" in (
+        inventory.instructions
+    )
     serialized_inventory = json.dumps(inventory.output_schema, sort_keys=True)
     serialized_dossier = json.dumps(dossier.output_schema, sort_keys=True)
     assert '"body"' not in serialized_inventory
