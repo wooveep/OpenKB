@@ -1065,6 +1065,64 @@ def test_migration_backfills_independent_version_sources_for_existing_documents(
         ).fetchone() == (imported.document.document_id,)
 
 
+def test_open_migrates_v58_candidate_registry_without_inventory_bindings(
+    tmp_path, monkeypatch
+):
+    """A KB created before candidate provenance can upgrade through identity bindings."""
+    kb_dir = tmp_path / "pre-identity-bindings"
+    v58_migrations = tuple(
+        migration for migration in desktop_workspace._MIGRATIONS if migration[0] <= 58
+    )
+    with monkeypatch.context() as v58_context:
+        v58_context.setattr(desktop_workspace, "_MIGRATIONS", v58_migrations)
+        created = DesktopKnowledgeBaseRuntime().create(kb_dir)
+        assert created.knowledge_base.schema_version == 58
+        with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+            connection.execute(
+                "INSERT INTO raw_assets VALUES "
+                "('asset-v58', 1, 'text/plain', 'raw/asset-v58.txt', 'v58.txt', '2026-01-01')"
+            )
+            connection.execute(
+                "INSERT INTO source_documents VALUES "
+                "('document-v58', 'asset-v58', 'v58.txt', 'text', 'available', "
+                "'2026-01-01', '2026-01-01')"
+            )
+            connection.execute(
+                """
+                INSERT INTO knowledge_document_candidates (
+                    candidate_id, document_id, kind, title, normalized_title,
+                    entity_subtype, aliases_json, tags_json, admission_state,
+                    admission_reason, analysis_provenance_json, created_at
+                ) VALUES (
+                    'candidate-v58', 'document-v58', 'entity', 'Legacy Entity',
+                    'legacy entity', 'service', '[]', '[]', 'admitted',
+                    'legacy', '{}', '2026-01-01'
+                )
+                """
+            )
+
+    migrated = DesktopKnowledgeBaseRuntime().open(kb_dir)
+
+    assert migrated.knowledge_base.schema_version == LATEST_SCHEMA_VERSION
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(knowledge_document_candidates)")
+        }
+        registry = connection.execute(
+            "SELECT provenance_state, current_candidate_generation_id "
+            "FROM knowledge_candidate_registry_state WHERE document_id = 'document-v58'"
+        ).fetchone()
+        snapshot_count = connection.execute(
+            "SELECT COUNT(*) FROM knowledge_candidate_generation_candidates "
+            "WHERE candidate_id = 'candidate-v58'"
+        ).fetchone()
+    assert "inventory_target_identity_id" in columns
+    assert "inventory_target_generation_id" in columns
+    assert registry is not None and registry[0] == "semantic" and registry[1]
+    assert snapshot_count == (1,)
+
+
 def test_opening_a_legacy_knowledge_base_is_rejected_without_creating_desktop_state(kb_dir):
     """Desktop does not migrate or change an existing CLI/Web knowledge base."""
     with pytest.raises(LegacyKnowledgeBaseUnsupportedError) as error:

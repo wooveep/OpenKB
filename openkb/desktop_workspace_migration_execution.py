@@ -100,7 +100,7 @@ def apply_feature_migration_backfill_in(
     now: str,
 ) -> None:
     """Run deterministic data backfills owned by an additive schema migration."""
-    if version == CANDIDATE_REGISTRY_MIGRATION_VERSION:
+    if version == INVENTORY_IDENTITY_BINDING_MIGRATION_VERSION:
         from openkb.desktop_candidate_registry import (
             backfill_candidate_registry_generations_in,
         )
