@@ -715,7 +715,9 @@ def _parse_decision(
         if not admission.admitted:
             raise InventoryValidationError((f"local_admission:{admission.reason}:{proposal_id}",))
     elif entity_subtype is not None:
-        raise InventoryValidationError((f"unexpected_entity_subtype:{proposal_id}",))
+        if not is_supported_entity_subtype(entity_subtype):
+            raise InventoryValidationError((f"invalid_entity_subtype:{proposal_id}",))
+        entity_subtype = None
     return EntityInventoryDecision(
         proposal_id=proposal_id,
         decision=decision,

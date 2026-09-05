@@ -420,7 +420,7 @@ def test_inventory_preserves_rejected_proposals_for_candidate_audit() -> None:
                 (),
                 decision="reject",
                 title="Teacher.deb",
-                subtype=None,
+                subtype="software_component",
                 reason_codes=("literal_or_metadata",),
             ),
         ],
@@ -433,8 +433,14 @@ def test_inventory_preserves_rejected_proposals_for_candidate_audit() -> None:
     assert result.entities[0].claims == analysis.entities[0].claims
     assert result.entities[0].admission_reason_codes == ("durable_named_entity",)
     assert result.entities[0].inventory_decision == "create"
+    assert inventory.decisions[1].entity_subtype is None
     assert result.entities[1].claims == analysis.entities[1].claims
+    assert result.entities[1].subtype == "software_component"
     assert result.entities[1].admission_reason_codes == ("literal_or_metadata",)
+
+    payload["decisions"][1]["entity_subtype"] = "invented_subtype"  # type: ignore[index]
+    with pytest.raises(InventoryValidationError, match="invalid_entity_subtype"):
+        parse_document_entity_inventory(json.dumps(payload), snapshot=snapshot)
     assert result.entities[1].inventory_decision == "reject"
     assert result.concepts == analysis.concepts
     assert result.corpus_ready
