@@ -277,7 +277,10 @@ def test_inventory_cannot_target_an_unknown_identity_or_invent_a_title() -> None
         parse_document_entity_inventory(json.dumps(payload), snapshot=snapshot)
 
 
-def test_inventory_update_inherits_its_generation_bound_identity_profile() -> None:
+@pytest.mark.parametrize("target_subtype", ["service", None])
+def test_inventory_update_inherits_its_generation_bound_identity_profile(
+    target_subtype: str | None,
+) -> None:
     analysis = _analysis()
     snapshot = build_document_entity_inventory_snapshot(
         document_version_id="document-v1",
@@ -290,7 +293,7 @@ def test_inventory_update_inherits_its_generation_bound_identity_profile() -> No
                 identity_id="identity-existing",
                 canonical_title="Alpha Service",
                 aliases=("Alpha",),
-                entity_subtype="service",
+                entity_subtype=target_subtype,
                 description="An evidence-backed service.",
                 source_document_count=2,
                 current_claim_count=3,

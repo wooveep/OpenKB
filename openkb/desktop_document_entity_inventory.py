@@ -645,6 +645,12 @@ def _parse_decision(
             entity_subtype = target_subtype
     elif target_identity_id is not None:
         raise InventoryValidationError((f"unexpected_target_identity:{proposal_id}",))
+    if (
+        decision in {"create", "update", "alias"}
+        and entity_subtype is None
+        and is_supported_entity_subtype(proposal.proposed_subtype)
+    ):
+        entity_subtype = cast(str, proposal.proposed_subtype)
     allowed_titles = {
         normalize_knowledge_title(title)[1]
         for supporting_id in supporting_ids
