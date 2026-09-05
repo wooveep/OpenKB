@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from openkb.desktop_corpus_generation_quality import (
     GenerationDossierSnapshot,
     GenerationIdentitySnapshot,
@@ -61,13 +63,16 @@ def _identity(
 def _dossier(
     claims: tuple[DossierClaimSnapshot, ...],
     plan: EntityDossierPlan,
+    *,
+    language: Literal["en", "zh"] = "en",
 ) -> GenerationDossierSnapshot:
-    rendered = render_entity_dossier(plan, claims, language="en")
+    rendered = render_entity_dossier(plan, claims, language=language)
     return GenerationDossierSnapshot(
         identity_id=plan.identity_id,
         plan=plan,
         claims=claims,
         rendered_markdown=rendered.markdown,
+        language=language,
     )
 
 
@@ -167,6 +172,24 @@ def test_dossier_hard_paragraph_limit_is_enforced() -> None:
 
     assert quality.dossier_readability_passed is False
     assert "dossier_paragraph_too_long" in quality.issues
+
+
+def test_chinese_dossier_quality_uses_the_persisted_render_language() -> None:
+    claims = _claims(("definition",), text="Alpha 是具有来源依据的服务。")
+    plan = EntityDossierPlan(
+        generation_id=7,
+        identity_id="entity-alpha",
+        summary_claim_ids=("claim-0",),
+        sections=(),
+    )
+
+    quality = measure_generation_content_quality(
+        (_identity("Alpha", claims=claims),),
+        (_dossier(claims, plan, language="zh"),),
+    )
+
+    assert quality.dossier_readability_passed is True
+    assert "dossier_render_mismatch" not in quality.issues
 
 
 def test_evidence_shaped_complex_dossier_passes_readability_and_facet_coverage() -> None:

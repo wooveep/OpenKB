@@ -30,6 +30,7 @@ from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_knowledge_generations import (
     KnowledgeGenerationChange,
     KnowledgeGenerationSource,
+    _carry_forward_generation_identities_in,
     publish_corpus_generation_in,
 )
 from openkb.desktop_knowledge_navigation import (
@@ -102,6 +103,100 @@ def test_inventory_target_must_still_belong_to_its_current_generation() -> None:
 
     with pytest.raises(ValueError, match="target generation"):
         _matching_identity_rows_in(connection, "entity", (candidate,))
+
+
+def test_carry_forward_keeps_only_identities_bound_to_the_new_candidate_inputs() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(
+        """
+        CREATE TABLE knowledge_generation_items (
+            generation_id INTEGER NOT NULL,
+            item_key TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            normalized_title TEXT NOT NULL,
+            content_markdown TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            source_document_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            provenance_state TEXT NOT NULL,
+            entity_subtype TEXT,
+            aliases_json TEXT NOT NULL,
+            tags_json TEXT NOT NULL,
+            analysis_provenance_json TEXT,
+            identity_id TEXT
+        );
+        CREATE TABLE knowledge_generation_item_sources (
+            generation_id INTEGER NOT NULL,
+            item_key TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            evidence_id TEXT NOT NULL,
+            claim_text TEXT NOT NULL
+        );
+        CREATE TABLE knowledge_generation_identity_mappings (
+            generation_id INTEGER NOT NULL,
+            identity_id TEXT NOT NULL,
+            candidate_generation_id TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            match_basis TEXT NOT NULL
+        );
+        CREATE TABLE knowledge_generation_candidate_inputs (
+            generation_id INTEGER NOT NULL,
+            candidate_generation_id TEXT NOT NULL
+        );
+        CREATE TABLE knowledge_candidate_generation_candidates (
+            candidate_generation_id TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            admission_state TEXT NOT NULL
+        );
+        CREATE TABLE knowledge_identity_candidates (
+            identity_id TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            match_basis TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (identity_id, candidate_id)
+        );
+
+        INSERT INTO knowledge_generation_items VALUES
+            (1, 'item-current', 'entity', 'Current', 'current', 'Current[^s1]',
+             'digest-current', 'document-current', 'before', 'source_backed', 'service',
+             '[]', '[]', '{}', 'identity-current'),
+            (1, 'item-stale', 'entity', 'Stale', 'stale', 'Stale[^s2]',
+             'digest-stale', 'document-stale', 'before', 'source_backed', 'service',
+             '[]', '[]', '{}', 'identity-stale');
+        INSERT INTO knowledge_generation_item_sources VALUES
+            (1, 'item-current', 's1', 'evidence-current', 'Current claim'),
+            (1, 'item-stale', 's2', 'evidence-stale', 'Stale claim');
+        INSERT INTO knowledge_generation_identity_mappings VALUES
+            (1, 'identity-current', 'candidate-generation-current', 'candidate-current',
+             'exact_title'),
+            (1, 'identity-stale', 'candidate-generation-stale', 'candidate-stale',
+             'exact_title');
+        INSERT INTO knowledge_generation_candidate_inputs VALUES
+            (2, 'candidate-generation-current');
+        INSERT INTO knowledge_candidate_generation_candidates VALUES
+            ('candidate-generation-current', 'candidate-current', 'admitted'),
+            ('candidate-generation-stale', 'candidate-stale', 'admitted');
+        """
+    )
+
+    _carry_forward_generation_identities_in(
+        connection,
+        current_generation_id=1,
+        generation_id=2,
+        identity_ids=("identity-current", "identity-stale"),
+        now="2026-09-06T00:00:00Z",
+    )
+
+    assert connection.execute(
+        "SELECT identity_id FROM knowledge_generation_items WHERE generation_id = 2"
+    ).fetchall() == [("identity-current",)]
+    assert connection.execute(
+        "SELECT evidence_id FROM knowledge_generation_item_sources WHERE generation_id = 2"
+    ).fetchall() == [("evidence-current",)]
+    assert connection.execute(
+        "SELECT identity_id, candidate_id, match_basis FROM knowledge_identity_candidates"
+    ).fetchall() == [("identity-current", "candidate-current", "exact_title")]
 
 
 def test_shipped_real_corpus_attestation_is_fixed_complete_and_tamper_evident() -> None:

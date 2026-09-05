@@ -274,6 +274,7 @@ def publish_corpus_generation_in(
             current_generation_id=current_generation_id,
             generation_id=generation_id,
             identity_ids=carry_forward_identity_ids,
+            now=now,
         )
     for change in changes:
         _upsert_generation_change_in(connection, generation_id, change, now)
@@ -536,9 +537,42 @@ def _carry_forward_generation_identities_in(
     current_generation_id: int,
     generation_id: int,
     identity_ids: tuple[str, ...],
+    now: str,
 ) -> None:
-    placeholders = ", ".join("?" for _ in identity_ids)
-    parameters = (generation_id, current_generation_id, *identity_ids)
+    requested_placeholders = ", ".join("?" for _ in identity_ids)
+    binding_rows = connection.execute(
+        f"""
+        SELECT mappings.identity_id, mappings.candidate_id, mappings.match_basis
+        FROM knowledge_generation_identity_mappings AS mappings
+        JOIN knowledge_generation_candidate_inputs AS inputs
+          ON inputs.generation_id = ?
+         AND inputs.candidate_generation_id = mappings.candidate_generation_id
+        JOIN knowledge_candidate_generation_candidates AS candidates
+          ON candidates.candidate_generation_id = mappings.candidate_generation_id
+         AND candidates.candidate_id = mappings.candidate_id
+         AND candidates.admission_state = 'admitted'
+        WHERE mappings.generation_id = ?
+          AND mappings.identity_id IN ({requested_placeholders})
+        ORDER BY mappings.identity_id, mappings.candidate_id
+        """,
+        (generation_id, current_generation_id, *identity_ids),
+    ).fetchall()
+    mappable_identity_ids = tuple(dict.fromkeys(str(row[0]) for row in binding_rows))
+    if not mappable_identity_ids:
+        return
+    connection.executemany(
+        """
+        INSERT INTO knowledge_identity_candidates (
+            identity_id, candidate_id, match_basis, created_at
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(identity_id, candidate_id) DO UPDATE SET
+            match_basis = excluded.match_basis,
+            created_at = excluded.created_at
+        """,
+        ((str(row[0]), str(row[1]), str(row[2]), now) for row in binding_rows),
+    )
+    placeholders = ", ".join("?" for _ in mappable_identity_ids)
+    parameters = (generation_id, current_generation_id, *mappable_identity_ids)
     connection.execute(
         f"""
         INSERT INTO knowledge_generation_items (

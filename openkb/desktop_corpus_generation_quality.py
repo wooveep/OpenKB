@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from typing import Literal
 
 from openkb.desktop_entity_dossier import (
     DossierClaimSnapshot,
@@ -90,6 +91,7 @@ class GenerationDossierSnapshot:
     plan: EntityDossierPlan
     claims: tuple[DossierClaimSnapshot, ...]
     rendered_markdown: str
+    language: Literal["en", "zh"]
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,7 @@ def generation_content_quality_in(
             plan=dossier.plan,
             claims=dossier_claims_for_identity_in(connection, generation_id, dossier.identity_id),
             rendered_markdown=item_markdown.get(dossier.identity_id, ""),
+            language=dossier.language,
         )
         for dossier in generation_entity_dossiers_in(connection, generation_id)
     )
@@ -284,7 +287,7 @@ def _dossier_issues(dossier: GenerationDossierSnapshot) -> tuple[tuple[str, ...]
     issues: list[str] = []
     try:
         validate_entity_dossier_plan(dossier.plan, dossier.claims)
-        rendered = render_entity_dossier(dossier.plan, dossier.claims, language="en")
+        rendered = render_entity_dossier(dossier.plan, dossier.claims, language=dossier.language)
     except DossierPlanValidationError:
         return ("dossier_invalid_plan",), 0, len({_purpose(claim.role) for claim in dossier.claims})
     if rendered.markdown != dossier.rendered_markdown:
