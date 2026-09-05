@@ -36,7 +36,7 @@ from openkb.desktop_knowledge_analysis_reuse import (
     persisted_analysis_prompt_digest_in,
 )
 from openkb.desktop_knowledge_generations import current_generation_id_in
-from openkb.desktop_knowledge_graph_tasks import DesktopKnowledgeGraphExtractionTasks
+from openkb.desktop_knowledge_reanalysis_graph import requeue_reanalysis_graphs
 from openkb.desktop_knowledge_reanalysis_models import (
     DesktopDocumentAnalysisStatus,
     DesktopKnowledgeReanalysisRun,
@@ -704,19 +704,9 @@ class DesktopKnowledgeReanalysisService:
                 )
             except Exception:
                 logger.exception("Could not refine Reanalysis Entity Dossiers.")
-        graph_requeued: list[str] = []
-        graph_tasks = DesktopKnowledgeGraphExtractionTasks(self._kb_dir)
-        for graph_document_id in graph_document_ids:
-            try:
-                if graph_tasks.queue(graph_document_id, gateway):
-                    graph_requeued.append(graph_document_id)
-            except Exception:
-                logger.exception(
-                    "Could not requeue Knowledge Graph extraction after Reanalysis for %s.",
-                    graph_document_id,
-                )
+        graph_requeued = requeue_reanalysis_graphs(self._kb_dir, graph_document_ids, gateway)
         start_catalog_rebuilds(self._kb_dir)
-        return tuple(graph_requeued)
+        return graph_requeued
 
     def _fail_job(self, job_id: str, execution_token: str, error_code: str, reason: str) -> None:
         with kb_ingest_lock(self._state_dir):
