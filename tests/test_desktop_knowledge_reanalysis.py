@@ -10,9 +10,13 @@ from pathlib import Path
 import pytest
 
 from openkb import desktop_engine_knowledge_reanalysis as reanalysis_engine
+from openkb import desktop_knowledge_reanalysis as reanalysis_service
 from openkb.desktop_import import DesktopImportError, DesktopTextImportService
 from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_knowledge_analysis_batch_store import DesktopKnowledgeAnalysisBatchStore
+from openkb.desktop_knowledge_analysis_requests import (
+    CURRENT_KNOWLEDGE_ANALYSIS_PIPELINE_OPERATIONS,
+)
 from openkb.desktop_knowledge_reanalysis import (
     DesktopKnowledgeReanalysisService,
     recover_interrupted_knowledge_reanalysis,
@@ -23,6 +27,12 @@ from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelTransp
 from openkb.desktop_model_roles import DesktopRoleModelGateway
 from openkb.desktop_model_settings import DesktopModelSettings
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+
+
+def test_reanalysis_gates_every_current_analysis_pipeline_operation() -> None:
+    assert set(CURRENT_KNOWLEDGE_ANALYSIS_PIPELINE_OPERATIONS) <= set(
+        reanalysis_service._ANALYSIS_OPERATIONS
+    )
 
 
 def _analysis_response(evidence_id: str, claim: str) -> str:

@@ -23,8 +23,17 @@ from openkb.desktop_knowledge_entity_types import (
     is_supported_entity_subtype,
 )
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
-from openkb.desktop_model_gateway import DesktopModelRequest, DesktopModelResult
-from openkb.desktop_structured_output import run_structured_output
+from openkb.desktop_model_gateway import (
+    DesktopModelRequest,
+    DesktopModelResult,
+    DesktopProviderTokenUsage,
+)
+from openkb.desktop_structured_output import (
+    DesktopStructuredOutputInvalidError,
+    DesktopValidatedStructuredOutput,
+    run_structured_output,
+    structured_output_reached_limit,
+)
 
 InventoryDecisionKind = Literal["create", "update", "alias", "review", "reject"]
 
@@ -75,8 +84,12 @@ class DocumentEntityInventorySnapshot:
     document_summary: tuple[dict[str, object], ...]
     proposals: tuple[DocumentEntityProposal, ...]
     corpus_briefs: tuple[CorpusEntityBrief, ...]
+    decision_proposal_ids: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
+        decision_ids = set(
+            self.decision_proposal_ids or (proposal.proposal_id for proposal in self.proposals)
+        )
         return {
             "schema_version": DOCUMENT_ENTITY_INVENTORY_SCHEMA_VERSION,
             "document_version_id": self.document_version_id,
@@ -85,25 +98,22 @@ class DocumentEntityInventorySnapshot:
             "entity_subtype_ontology_version": ENTITY_SUBTYPE_ONTOLOGY_VERSION,
             "section_outline": [list(path) for path in self.section_outline],
             "document_summary": list(self.document_summary),
+            "decision_rule": (
+                "Return exactly one decision for each decision_proposal_id; "
+                "supporting_proposals are document-global context only."
+            ),
+            "decision_proposal_ids": list(
+                self.decision_proposal_ids or (proposal.proposal_id for proposal in self.proposals)
+            ),
             "proposals": [
-                {
-                    "proposal_id": proposal.proposal_id,
-                    "title": proposal.title,
-                    "aliases": list(proposal.aliases),
-                    "proposed_subtype": proposal.proposed_subtype,
-                    "tags": list(proposal.tags),
-                    "claims": [
-                        {
-                            "claim_id": claim.claim_id,
-                            "text": claim.text,
-                            "role": claim.role,
-                            "source_evidence_ids": list(claim.source_evidence_ids),
-                            "applicability": dict(claim.applicability),
-                        }
-                        for claim in proposal.claims
-                    ],
-                }
+                _proposal_as_dict(proposal)
                 for proposal in self.proposals
+                if proposal.proposal_id in decision_ids
+            ],
+            "supporting_proposals": [
+                _proposal_as_dict(proposal)
+                for proposal in self.proposals
+                if proposal.proposal_id not in decision_ids
             ],
             "corpus_entity_briefs": [
                 {
@@ -145,6 +155,26 @@ class DocumentEntityInventory:
     analysis_generation_id: str
     decisions: tuple[EntityInventoryDecision, ...]
 
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "document_version_id": self.document_version_id,
+            "analysis_generation_id": self.analysis_generation_id,
+            "decisions": [
+                {
+                    "proposal_id": decision.proposal_id,
+                    "decision": decision.decision,
+                    "canonical_title": decision.canonical_title,
+                    "entity_subtype": decision.entity_subtype,
+                    "claim_ids": list(decision.claim_ids),
+                    "target_identity_id": decision.target_identity_id,
+                    "reason_codes": list(decision.reason_codes),
+                    "supporting_proposal_ids": list(decision.supporting_proposal_ids),
+                    "corpus_brief_ids": list(decision.corpus_brief_ids),
+                }
+                for decision in self.decisions
+            ],
+        }
+
 
 @dataclass(frozen=True)
 class DocumentEntityInventoryRun:
@@ -152,6 +182,17 @@ class DocumentEntityInventoryRun:
     inventory: DocumentEntityInventory
     result: DesktopModelResult | None
     repaired: bool
+    split_leaf_count: int = 1
+    output_limit_recovery_count: int = 0
+
+
+@dataclass(frozen=True)
+class _RecoveredInventoryBranch:
+    inventory: DocumentEntityInventory
+    results: tuple[DesktopModelResult, ...]
+    repaired: bool
+    split_leaf_count: int
+    output_limit_recovery_count: int
 
 
 class InventoryValidationError(ValueError):
@@ -232,7 +273,8 @@ def parse_document_entity_inventory(
     if payload.get("analysis_generation_id") != snapshot.analysis_generation_id:
         raise InventoryValidationError(("analysis_generation_mismatch",))
     raw_decisions = payload.get("decisions")
-    if not isinstance(raw_decisions, list) or len(raw_decisions) > len(snapshot.proposals):
+    target_ids = _decision_target_ids(snapshot)
+    if not isinstance(raw_decisions, list) or len(raw_decisions) > len(target_ids):
         raise InventoryValidationError(("invalid_decisions",))
     proposals = {item.proposal_id: item for item in snapshot.proposals}
     briefs = {item.brief_id: item for item in snapshot.corpus_briefs}
@@ -242,7 +284,7 @@ def parse_document_entity_inventory(
         for index, value in enumerate(raw_decisions)
     )
     returned = tuple(item.proposal_id for item in decisions)
-    expected = tuple(item.proposal_id for item in snapshot.proposals)
+    expected = target_ids
     if len(returned) != len(set(returned)) or set(returned) != set(expected):
         raise InventoryValidationError(("proposal_decisions_incomplete_or_duplicate",))
     return DocumentEntityInventory(
@@ -334,21 +376,164 @@ def run_document_entity_inventory(
             (),
         )
         return DocumentEntityInventoryRun(analysis, inventory, None, False)
-    output = run_structured_output(
-        operation="document_entity_inventory",
+    complete_snapshot = replace(
+        snapshot,
+        decision_proposal_ids=tuple(proposal.proposal_id for proposal in snapshot.proposals),
+    )
+    recovered = _recover_inventory_branch(
         document_name=document_name,
-        source_material=document_entity_inventory_prompt(snapshot),
+        snapshot=complete_snapshot,
         invoke=invoke,
-        validate=lambda content: parse_document_entity_inventory(content, snapshot=snapshot),
         contract_snapshot=contract_snapshot,
         repair_contract_snapshot=repair_contract_snapshot,
     )
-    return DocumentEntityInventoryRun(
-        apply_document_entity_inventory(analysis, snapshot=snapshot, inventory=output.value),
-        output.value,
-        output.result,
-        output.repaired,
+    result = (
+        recovered.results[-1]
+        if recovered.output_limit_recovery_count == 0
+        else _aggregate_inventory_result(recovered)
     )
+    return DocumentEntityInventoryRun(
+        apply_document_entity_inventory(
+            analysis,
+            snapshot=complete_snapshot,
+            inventory=recovered.inventory,
+        ),
+        recovered.inventory,
+        result,
+        recovered.repaired,
+        recovered.split_leaf_count,
+        recovered.output_limit_recovery_count,
+    )
+
+
+def _recover_inventory_branch(
+    *,
+    document_name: str,
+    snapshot: DocumentEntityInventorySnapshot,
+    invoke: Callable[[DesktopModelRequest], DesktopModelResult],
+    contract_snapshot: dict[str, object] | None,
+    repair_contract_snapshot: dict[str, object] | None,
+) -> _RecoveredInventoryBranch:
+    try:
+        output = run_structured_output(
+            operation="document_entity_inventory",
+            document_name=document_name,
+            source_material=document_entity_inventory_prompt(snapshot),
+            invoke=invoke,
+            validate=lambda content: parse_document_entity_inventory(content, snapshot=snapshot),
+            contract_snapshot=contract_snapshot,
+            repair_contract_snapshot=repair_contract_snapshot,
+        )
+    except DesktopStructuredOutputInvalidError as error:
+        target_ids = _decision_target_ids(snapshot)
+        if not structured_output_reached_limit(error) or len(target_ids) <= 1:
+            raise
+        split_at = len(target_ids) // 2
+        branches = tuple(
+            _recover_inventory_branch(
+                document_name=document_name,
+                snapshot=replace(snapshot, decision_proposal_ids=child_ids),
+                invoke=invoke,
+                contract_snapshot=contract_snapshot,
+                repair_contract_snapshot=repair_contract_snapshot,
+            )
+            for child_ids in (target_ids[:split_at], target_ids[split_at:])
+        )
+        inventory = DocumentEntityInventory(
+            snapshot.document_version_id,
+            snapshot.analysis_generation_id,
+            tuple(decision for branch in branches for decision in branch.inventory.decisions),
+        )
+        return _RecoveredInventoryBranch(
+            inventory=inventory,
+            results=(
+                error.initial_result,
+                *(result for branch in branches for result in branch.results),
+            ),
+            repaired=any(branch.repaired for branch in branches),
+            split_leaf_count=sum(branch.split_leaf_count for branch in branches),
+            output_limit_recovery_count=(
+                1 + sum(branch.output_limit_recovery_count for branch in branches)
+            ),
+        )
+    return _RecoveredInventoryBranch(
+        inventory=output.value,
+        results=_structured_results(output),
+        repaired=output.repaired,
+        split_leaf_count=1,
+        output_limit_recovery_count=0,
+    )
+
+
+def _decision_target_ids(snapshot: DocumentEntityInventorySnapshot) -> tuple[str, ...]:
+    proposal_ids = tuple(proposal.proposal_id for proposal in snapshot.proposals)
+    targets = snapshot.decision_proposal_ids or proposal_ids
+    if len(targets) != len(set(targets)) or any(target not in proposal_ids for target in targets):
+        raise InventoryValidationError(("invalid_decision_proposal_ids",))
+    return targets
+
+
+def _structured_results(
+    output: DesktopValidatedStructuredOutput[DocumentEntityInventory],
+) -> tuple[DesktopModelResult, ...]:
+    return (
+        (output.initial_result, output.result)
+        if output.initial_result is not None
+        else (output.result,)
+    )
+
+
+def _aggregate_inventory_result(recovered: _RecoveredInventoryBranch) -> DesktopModelResult:
+    call_identity = ":".join(result.call_id for result in recovered.results)
+    return DesktopModelResult(
+        call_id="inventory-split-" + hashlib.sha256(call_identity.encode("utf-8")).hexdigest()[:24],
+        content=json.dumps(
+            recovered.inventory.as_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        attempt_count=sum(result.attempt_count for result in recovered.results),
+        usage=_aggregate_usage(recovered.results),
+        diagnostic_context={
+            "output_limit_split_leaf_count": recovered.split_leaf_count,
+            "output_limit_recovery_count": recovered.output_limit_recovery_count,
+        },
+    )
+
+
+def _aggregate_usage(
+    results: tuple[DesktopModelResult, ...],
+) -> DesktopProviderTokenUsage | None:
+    usages = tuple(result.usage for result in results)
+    if any(usage is None for usage in usages):
+        return None
+    complete = tuple(usage for usage in usages if usage is not None)
+    return DesktopProviderTokenUsage(
+        input_tokens=sum(usage.input_tokens for usage in complete),
+        output_tokens=sum(usage.output_tokens for usage in complete),
+        total_tokens=sum(usage.total_tokens for usage in complete),
+    )
+
+
+def _proposal_as_dict(proposal: DocumentEntityProposal) -> dict[str, object]:
+    return {
+        "proposal_id": proposal.proposal_id,
+        "title": proposal.title,
+        "aliases": list(proposal.aliases),
+        "proposed_subtype": proposal.proposed_subtype,
+        "tags": list(proposal.tags),
+        "claims": [
+            {
+                "claim_id": claim.claim_id,
+                "text": claim.text,
+                "role": claim.role,
+                "source_evidence_ids": list(claim.source_evidence_ids),
+                "applicability": dict(claim.applicability),
+            }
+            for claim in proposal.claims
+        ],
+    }
 
 
 def _parse_decision(

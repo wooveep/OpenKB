@@ -132,6 +132,8 @@ def apply_document_inventory_stage(
                 run.result.content.encode("utf-8")
             ).hexdigest(),
             "inventory_repaired": run.repaired,
+            "inventory_output_limit_split_leaf_count": run.split_leaf_count,
+            "inventory_output_limit_recovery_count": run.output_limit_recovery_count,
             "inventory_entity_reason_codes": [
                 list(candidate.admission_reason_codes) for candidate in run.analysis.entities
             ],

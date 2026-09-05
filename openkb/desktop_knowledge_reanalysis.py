@@ -27,6 +27,9 @@ from openkb.desktop_knowledge_analysis_batches import (
     KNOWLEDGE_ANALYSIS_BATCH_PIPELINE_DIGEST,
     run_knowledge_analysis,
 )
+from openkb.desktop_knowledge_analysis_requests import (
+    CURRENT_KNOWLEDGE_ANALYSIS_PIPELINE_OPERATIONS,
+)
 from openkb.desktop_knowledge_analysis_reuse import (
     ReusableKnowledgeAnalysis,
     analysis_evidence_for_document_in,
@@ -93,9 +96,9 @@ __all__ = ["DesktopKnowledgeReanalysisService", "recover_interrupted_knowledge_r
 logger = logging.getLogger(__name__)
 _MAX_DOCUMENTS_PER_RUN = 200
 _ANALYSIS_OPERATIONS = (
+    *CURRENT_KNOWLEDGE_ANALYSIS_PIPELINE_OPERATIONS,
     "knowledge_analysis",
     "knowledge_analysis_batch",
-    "knowledge_analysis_merge",
     "structured_output_repair",
 )
 
