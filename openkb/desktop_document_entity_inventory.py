@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Literal, cast
 
+from openkb.desktop_document_entity_consolidation import consolidate_inventory_entities
 from openkb.desktop_document_entity_inventory_contract import (
     DOCUMENT_ENTITY_INVENTORY_SCHEMA_VERSION,
     INVENTORY_DECISIONS,
@@ -349,7 +350,7 @@ def apply_document_entity_inventory(
     return DesktopKnowledgeAnalysis(
         document_description=analysis.document_description,
         concepts=analysis.concepts,
-        entities=tuple(entities),
+        entities=consolidate_inventory_entities(tuple(entities)),
         analysis_scope=analysis.analysis_scope,
         procedures=analysis.procedures,
         document_summary=analysis.document_summary,
