@@ -19,7 +19,11 @@ from openkb.desktop_entity_dossier import (
 )
 from openkb.desktop_entity_dossier_planner import run_entity_dossier_planning
 from openkb.desktop_knowledge_sources import stable_source_id
-from openkb.desktop_model_gateway import DesktopModelRequest, DesktopModelResult
+from openkb.desktop_model_gateway import (
+    DesktopModelOutputObservations,
+    DesktopModelRequest,
+    DesktopModelResult,
+)
 
 
 def _claim(
@@ -271,3 +275,65 @@ def test_dossier_planning_runs_as_an_id_only_operation() -> None:
     assert [request.operation for request in requests] == ["entity_dossier_planning"]
     assert run.plan.sections[0].units[0].claim_ids == ("claim-alpha",)
     assert run.result.call_id == "dossier-call"
+
+
+def test_dossier_planning_repairs_one_output_limited_result() -> None:
+    claims = (_claim("claim-alpha"),)
+    requests: list[DesktopModelRequest] = []
+
+    def invoke(request: DesktopModelRequest) -> DesktopModelResult:
+        requests.append(request)
+        if len(requests) == 1:
+            return DesktopModelResult(
+                "truncated-dossier-call",
+                '{"generation_id":7,"identity_id":"entity-alpha","sections":',
+                1,
+                observations=DesktopModelOutputObservations(
+                    finish_reason="length",
+                    final_content_observed=True,
+                    final_chunk_count=1,
+                    final_character_count=64,
+                    output_limit_reached=True,
+                ),
+            )
+        return DesktopModelResult(
+            "repaired-dossier-call",
+            json.dumps(
+                {
+                    "generation_id": 7,
+                    "identity_id": "entity-alpha",
+                    "summary_claim_ids": [],
+                    "sections": [
+                        {
+                            "title": "Identity",
+                            "purpose": "identity_and_role",
+                            "units": [
+                                {
+                                    "presentation": "paragraph",
+                                    "claim_ids": ["claim-alpha"],
+                                }
+                            ],
+                        }
+                    ],
+                    "related_identity_ids": [],
+                }
+            ),
+            1,
+        )
+
+    run = run_entity_dossier_planning(
+        document_name="Alpha",
+        generation_id=7,
+        identity_id="entity-alpha",
+        claims=claims,
+        language="en",
+        known_related_identity_ids=frozenset(),
+        invoke=invoke,
+    )
+
+    assert [request.operation for request in requests] == [
+        "entity_dossier_planning",
+        "structured_output_repair",
+    ]
+    assert run.repaired is True
+    assert run.result.call_id == "repaired-dossier-call"

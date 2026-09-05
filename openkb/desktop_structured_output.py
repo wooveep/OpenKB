@@ -85,6 +85,7 @@ def run_structured_output(
     contract_snapshot: dict[str, object] | None = None,
     repair_contract_snapshot: dict[str, object] | None = None,
     should_repair: StructuredRepairDecision | None = None,
+    repair_output_limit: bool = False,
 ) -> DesktopValidatedStructuredOutput[ValidatedValue]:
     """Validate the original result, then make exactly one separately tracked repair call."""
     contract = prompt_contract_for(operation)
@@ -118,7 +119,11 @@ def run_structured_output(
         prompt_contract_snapshot=active_snapshot,
     )
     initial = invoke(initial_request)
-    if initial.observations is not None and initial.observations.output_limit_reached:
+    if (
+        initial.observations is not None
+        and initial.observations.output_limit_reached
+        and not repair_output_limit
+    ):
         limit_error = ValueError(
             "The provider stopped at the output limit before structured output completed."
         )

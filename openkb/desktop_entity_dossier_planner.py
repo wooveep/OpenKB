@@ -88,5 +88,6 @@ def run_entity_dossier_planning(
             claims=claims,
             known_related_identity_ids=known_related_identity_ids,
         ),
+        repair_output_limit=True,
     )
     return EntityDossierPlanningRun(output.value, output.result, output.repaired, output)
