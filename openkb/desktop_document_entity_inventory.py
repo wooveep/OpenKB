@@ -664,8 +664,10 @@ def _parse_decision(
             for brief in target_briefs
             for title in (brief.canonical_title, *brief.aliases)
         )
-    if normalize_knowledge_title(canonical_title)[1] not in allowed_titles:
-        raise InventoryValidationError((f"invented_canonical_title:{proposal_id}",))
+    canonical_title_is_known = normalize_knowledge_title(canonical_title)[1] in allowed_titles
+    local_title_review = decision in {"create", "update", "alias"} and not canonical_title_is_known
+    if not canonical_title_is_known:
+        canonical_title = proposal.title
     claim_ids = _identifier_list(value.get("claim_ids"), f"claim_ids:{proposal_id}")
     claim_lookup = {
         claim.claim_id: claim
@@ -674,7 +676,14 @@ def _parse_decision(
     }
     if any(claim_id not in claim_lookup for claim_id in claim_ids):
         raise InventoryValidationError((f"unknown_claim_id:{proposal_id}",))
-    if decision in {"create", "update", "alias"}:
+    if local_title_review:
+        decision = "review"
+        reason_codes = ("ambiguous_identity",)
+        claim_ids = ()
+        target_identity_id = None
+        target_identity_generation_id = None
+        entity_subtype = None
+    elif decision in {"create", "update", "alias"}:
         local_rejection_reason: str | None = None
         if not claim_ids:
             local_rejection_reason = "no_substantive_claim"

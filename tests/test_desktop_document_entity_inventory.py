@@ -440,6 +440,50 @@ def test_local_admission_overrides_invalid_model_creates() -> None:
     assert all(decision.entity_subtype is None for decision in inventory.decisions)
 
 
+def test_local_admission_routes_an_invented_title_to_review() -> None:
+    snapshot = build_document_entity_inventory_snapshot(
+        document_version_id="document-v1",
+        analysis_generation_id="analysis-v1",
+        language="en",
+        analysis=_analysis(),
+    )
+    first, second = snapshot.proposals
+
+    inventory = parse_document_entity_inventory(
+        json.dumps(
+            {
+                "document_version_id": snapshot.document_version_id,
+                "analysis_generation_id": snapshot.analysis_generation_id,
+                "decisions": [
+                    _decision(
+                        first.proposal_id,
+                        (first.claims[0].claim_id,),
+                        decision="create",
+                        title="Invented Product",
+                        subtype="service",
+                    ),
+                    _decision(
+                        second.proposal_id,
+                        (),
+                        decision="reject",
+                        title="Teacher.deb",
+                        subtype=None,
+                        reason_codes=("literal_or_metadata",),
+                    ),
+                ],
+            }
+        ),
+        snapshot=snapshot,
+    )
+
+    decision = inventory.decisions[0]
+    assert decision.decision == "review"
+    assert decision.canonical_title == first.title
+    assert decision.reason_codes == ("ambiguous_identity",)
+    assert decision.claim_ids == ()
+    assert decision.entity_subtype is None
+
+
 def test_inventory_preserves_rejected_proposals_for_candidate_audit() -> None:
     analysis = _analysis()
     snapshot = build_document_entity_inventory_snapshot(
