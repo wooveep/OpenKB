@@ -184,6 +184,7 @@ class DocumentEntityInventoryRun:
     repaired: bool
     split_leaf_count: int = 1
     output_limit_recovery_count: int = 0
+    decision_coverage_recovery_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -193,6 +194,7 @@ class _RecoveredInventoryBranch:
     repaired: bool
     split_leaf_count: int
     output_limit_recovery_count: int
+    decision_coverage_recovery_count: int
 
 
 class InventoryValidationError(ValueError):
@@ -389,7 +391,10 @@ def run_document_entity_inventory(
     )
     result = (
         recovered.results[-1]
-        if recovered.output_limit_recovery_count == 0
+        if (
+            recovered.output_limit_recovery_count == 0
+            and recovered.decision_coverage_recovery_count == 0
+        )
         else _aggregate_inventory_result(recovered)
     )
     return DocumentEntityInventoryRun(
@@ -403,6 +408,7 @@ def run_document_entity_inventory(
         recovered.repaired,
         recovered.split_leaf_count,
         recovered.output_limit_recovery_count,
+        recovered.decision_coverage_recovery_count,
     )
 
 
@@ -426,7 +432,9 @@ def _recover_inventory_branch(
         )
     except DesktopStructuredOutputInvalidError as error:
         target_ids = _decision_target_ids(snapshot)
-        if not structured_output_reached_limit(error) or len(target_ids) <= 1:
+        output_limit_recovery = structured_output_reached_limit(error)
+        decision_coverage_recovery = _decision_coverage_failure(error)
+        if not (output_limit_recovery or decision_coverage_recovery) or len(target_ids) <= 1:
             raise
         split_at = len(target_ids) // 2
         branches = tuple(
@@ -447,13 +455,18 @@ def _recover_inventory_branch(
         return _RecoveredInventoryBranch(
             inventory=inventory,
             results=(
-                error.initial_result,
+                *_failed_structured_results(error),
                 *(result for branch in branches for result in branch.results),
             ),
             repaired=any(branch.repaired for branch in branches),
             split_leaf_count=sum(branch.split_leaf_count for branch in branches),
             output_limit_recovery_count=(
-                1 + sum(branch.output_limit_recovery_count for branch in branches)
+                int(output_limit_recovery)
+                + sum(branch.output_limit_recovery_count for branch in branches)
+            ),
+            decision_coverage_recovery_count=(
+                int(decision_coverage_recovery)
+                + sum(branch.decision_coverage_recovery_count for branch in branches)
             ),
         )
     return _RecoveredInventoryBranch(
@@ -462,6 +475,14 @@ def _recover_inventory_branch(
         repaired=output.repaired,
         split_leaf_count=1,
         output_limit_recovery_count=0,
+        decision_coverage_recovery_count=0,
+    )
+
+
+def _decision_coverage_failure(error: DesktopStructuredOutputInvalidError) -> bool:
+    cause = error.__cause__
+    return isinstance(cause, InventoryValidationError) and cause.issues == (
+        "proposal_decisions_incomplete_or_duplicate",
     )
 
 
@@ -483,6 +504,16 @@ def _structured_results(
     )
 
 
+def _failed_structured_results(
+    error: DesktopStructuredOutputInvalidError,
+) -> tuple[DesktopModelResult, ...]:
+    return (
+        (error.initial_result, error.final_result)
+        if error.repair_attempted
+        else (error.initial_result,)
+    )
+
+
 def _aggregate_inventory_result(recovered: _RecoveredInventoryBranch) -> DesktopModelResult:
     call_identity = ":".join(result.call_id for result in recovered.results)
     return DesktopModelResult(
@@ -497,7 +528,9 @@ def _aggregate_inventory_result(recovered: _RecoveredInventoryBranch) -> Desktop
         usage=_aggregate_usage(recovered.results),
         diagnostic_context={
             "output_limit_split_leaf_count": recovered.split_leaf_count,
+            "decision_split_leaf_count": recovered.split_leaf_count,
             "output_limit_recovery_count": recovered.output_limit_recovery_count,
+            "decision_coverage_recovery_count": recovered.decision_coverage_recovery_count,
         },
     )
 

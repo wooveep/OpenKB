@@ -434,3 +434,71 @@ def test_inventory_output_limit_recovers_by_splitting_decisions_without_losing_c
         proposal.proposal_id for proposal in snapshot.proposals
     )
     assert tuple(item.title for item in run.analysis.entities) == ("Alpha", "Teacher.deb")
+
+
+def test_inventory_incomplete_decisions_recover_by_splitting_the_decision_scope() -> None:
+    analysis = _analysis()
+    snapshot = build_document_entity_inventory_snapshot(
+        document_version_id="document-v1",
+        analysis_generation_id="analysis-v1",
+        language="en",
+        analysis=analysis,
+    )
+    proposals = {proposal.proposal_id: proposal for proposal in snapshot.proposals}
+    requests: list[DesktopModelRequest] = []
+
+    def invoke(request: DesktopModelRequest) -> DesktopModelResult:
+        requests.append(request)
+        if len(requests) <= 2:
+            payload = {
+                "document_version_id": snapshot.document_version_id,
+                "analysis_generation_id": snapshot.analysis_generation_id,
+                "decisions": [],
+            }
+        else:
+            source = json.loads(request.content)
+            proposal_id = source["decision_proposal_ids"][0]
+            proposal = proposals[proposal_id]
+            admitted = proposal.title == "Alpha"
+            payload = {
+                "document_version_id": snapshot.document_version_id,
+                "analysis_generation_id": snapshot.analysis_generation_id,
+                "decisions": [
+                    _decision(
+                        proposal_id,
+                        (proposal.claims[0].claim_id,) if admitted else (),
+                        decision="create" if admitted else "reject",
+                        title=proposal.title,
+                        subtype=proposal.proposed_subtype if admitted else None,
+                        reason_codes=("durable_named_entity",)
+                        if admitted
+                        else ("literal_or_metadata",),
+                    )
+                ],
+            }
+        return DesktopModelResult(
+            f"inventory-coverage-{len(requests)}",
+            json.dumps(payload),
+            1,
+        )
+
+    run = run_document_entity_inventory(
+        document_name="alpha.md",
+        analysis=analysis,
+        snapshot=snapshot,
+        invoke=invoke,
+    )
+
+    assert [request.operation for request in requests] == [
+        "document_entity_inventory",
+        "structured_output_repair",
+        "document_entity_inventory",
+        "document_entity_inventory",
+    ]
+    assert run.output_limit_recovery_count == 0
+    assert run.decision_coverage_recovery_count == 1
+    assert run.split_leaf_count == 2
+    assert run.result is not None and run.result.attempt_count == 4
+    assert tuple(decision.proposal_id for decision in run.inventory.decisions) == tuple(
+        proposal.proposal_id for proposal in snapshot.proposals
+    )
