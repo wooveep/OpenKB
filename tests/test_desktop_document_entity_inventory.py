@@ -277,7 +277,7 @@ def test_inventory_cannot_target_an_unknown_identity_or_invent_a_title() -> None
         parse_document_entity_inventory(json.dumps(payload), snapshot=snapshot)
 
 
-def test_inventory_update_preserves_its_generation_bound_identity_target() -> None:
+def test_inventory_update_inherits_its_generation_bound_identity_profile() -> None:
     analysis = _analysis()
     snapshot = build_document_entity_inventory_snapshot(
         document_version_id="document-v1",
@@ -309,8 +309,8 @@ def test_inventory_update_preserves_its_generation_bound_identity_target() -> No
                         first.proposal_id,
                         (first.claims[0].claim_id,),
                         decision="update",
-                        title="Alpha",
-                        subtype="service",
+                        title="Alpha Service",
+                        subtype=None,
                         target_identity_id="identity-existing",
                         reason_codes=("existing_identity_match",),
                         corpus_brief_ids=("brief-existing",),
@@ -335,8 +335,64 @@ def test_inventory_update_preserves_its_generation_bound_identity_target() -> No
         inventory=inventory,
     )
 
+    assert applied.entities[0].title == "Alpha Service"
+    assert applied.entities[0].subtype == "service"
     assert applied.entities[0].inventory_target_identity_id == "identity-existing"
     assert applied.entities[0].inventory_target_generation_id == 7
+
+
+def test_inventory_update_cannot_retype_its_existing_identity() -> None:
+    snapshot = build_document_entity_inventory_snapshot(
+        document_version_id="document-v1",
+        analysis_generation_id="analysis-v1",
+        language="en",
+        analysis=_analysis(),
+        corpus_briefs=(
+            CorpusEntityBrief(
+                brief_id="brief-existing",
+                identity_id="identity-existing",
+                canonical_title="Alpha Service",
+                aliases=("Alpha",),
+                entity_subtype="service",
+                description="An evidence-backed service.",
+                source_document_count=2,
+                current_claim_count=3,
+                generation_id=7,
+            ),
+        ),
+    )
+    first, second = snapshot.proposals
+
+    with pytest.raises(InventoryValidationError, match="target_subtype_mismatch"):
+        parse_document_entity_inventory(
+            json.dumps(
+                {
+                    "document_version_id": snapshot.document_version_id,
+                    "analysis_generation_id": snapshot.analysis_generation_id,
+                    "decisions": [
+                        _decision(
+                            first.proposal_id,
+                            (first.claims[0].claim_id,),
+                            decision="update",
+                            title="Alpha Service",
+                            subtype="product",
+                            target_identity_id="identity-existing",
+                            reason_codes=("existing_identity_match",),
+                            corpus_brief_ids=("brief-existing",),
+                        ),
+                        _decision(
+                            second.proposal_id,
+                            (),
+                            decision="reject",
+                            title="Teacher.deb",
+                            subtype=None,
+                            reason_codes=("literal_or_metadata",),
+                        ),
+                    ],
+                }
+            ),
+            snapshot=snapshot,
+        )
 
 
 def test_inventory_preserves_rejected_proposals_for_candidate_audit() -> None:

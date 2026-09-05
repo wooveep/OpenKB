@@ -611,24 +611,38 @@ def _parse_decision(
     brief_ids = _identifier_list(value.get("corpus_brief_ids"), f"corpus_brief_ids:{proposal_id}")
     if any(item not in briefs for item in brief_ids):
         raise InventoryValidationError((f"unknown_corpus_brief:{proposal_id}",))
+    subtype_value = value.get("entity_subtype")
+    entity_subtype = subtype_value if isinstance(subtype_value, str) else None
     target_value = value.get("target_identity_id")
     if target_value is not None and not isinstance(target_value, str):
         raise InventoryValidationError((f"invalid_target_identity:{proposal_id}",))
     target_identity_id = target_value if isinstance(target_value, str) else None
     target_identity_generation_id: int | None = None
+    target_briefs: tuple[CorpusEntityBrief, ...] = ()
     if decision in {"update", "alias"}:
-        if target_identity_id not in identities or not any(
-            briefs[brief_id].identity_id == target_identity_id for brief_id in brief_ids
-        ):
-            raise InventoryValidationError((f"unknown_target_identity:{proposal_id}",))
-        target_generations = {
-            briefs[brief_id].generation_id
+        target_briefs = tuple(
+            briefs[brief_id]
             for brief_id in brief_ids
             if briefs[brief_id].identity_id == target_identity_id
-        }
+        )
+        if target_identity_id not in identities or not target_briefs:
+            raise InventoryValidationError((f"unknown_target_identity:{proposal_id}",))
+        target_generations = {brief.generation_id for brief in target_briefs}
         if len(target_generations) != 1 or None in target_generations:
             raise InventoryValidationError((f"unknown_target_generation:{proposal_id}",))
         target_identity_generation_id = cast(int, next(iter(target_generations)))
+        target_subtypes = {
+            brief.entity_subtype
+            for brief in target_briefs
+            if is_supported_entity_subtype(brief.entity_subtype)
+        }
+        if len(target_subtypes) > 1:
+            raise InventoryValidationError((f"conflicting_target_subtypes:{proposal_id}",))
+        if target_subtypes:
+            target_subtype = cast(str, next(iter(target_subtypes)))
+            if entity_subtype is not None and entity_subtype != target_subtype:
+                raise InventoryValidationError((f"target_subtype_mismatch:{proposal_id}",))
+            entity_subtype = target_subtype
     elif target_identity_id is not None:
         raise InventoryValidationError((f"unexpected_target_identity:{proposal_id}",))
     allowed_titles = {
@@ -636,40 +650,68 @@ def _parse_decision(
         for supporting_id in supporting_ids
         for title in (proposals[supporting_id].title, *proposals[supporting_id].aliases)
     }
-    if target_identity_id is not None:
+    if target_briefs:
         allowed_titles.update(
             normalize_knowledge_title(title)[1]
-            for brief_id in brief_ids
-            if briefs[brief_id].identity_id == target_identity_id
-            for title in (briefs[brief_id].canonical_title, *briefs[brief_id].aliases)
+            for brief in target_briefs
+            for title in (brief.canonical_title, *brief.aliases)
         )
     if normalize_knowledge_title(canonical_title)[1] not in allowed_titles:
         raise InventoryValidationError((f"invented_canonical_title:{proposal_id}",))
-    subtype_value = value.get("entity_subtype")
-    entity_subtype = subtype_value if isinstance(subtype_value, str) else None
     claim_ids = _identifier_list(value.get("claim_ids"), f"claim_ids:{proposal_id}")
-    allowed_claims = {
-        claim.claim_id
+    claim_lookup = {
+        claim.claim_id: claim
         for supporting_id in supporting_ids
         for claim in proposals[supporting_id].claims
     }
-    if any(claim_id not in allowed_claims for claim_id in claim_ids):
+    if any(claim_id not in claim_lookup for claim_id in claim_ids):
         raise InventoryValidationError((f"unknown_claim_id:{proposal_id}",))
     if decision in {"create", "update", "alias"}:
         if not claim_ids or not is_supported_entity_subtype(entity_subtype):
             raise InventoryValidationError((f"invalid_admitted_entity:{proposal_id}",))
-        claim_lookup = {
-            claim.claim_id: claim
-            for supporting_id in supporting_ids
-            for claim in proposals[supporting_id].claims
-        }
+        admission_claims = tuple(
+            (claim_lookup[item].role, claim_lookup[item].text) for item in claim_ids
+        )
         admission = assess_knowledge_candidate(
             kind="entity",
             title=canonical_title,
             subtype=entity_subtype,
-            claims=tuple((claim_lookup[item].role, claim_lookup[item].text) for item in claim_ids),
+            claims=admission_claims,
             decision_reasons=reason_codes,
         )
+        if not admission.admitted and admission.reason == "entity_not_independently_described":
+            identity_names = tuple(
+                dict.fromkeys(
+                    title
+                    for supporting_id in supporting_ids
+                    for title in (
+                        proposals[supporting_id].title,
+                        *proposals[supporting_id].aliases,
+                    )
+                )
+            ) + tuple(
+                dict.fromkeys(
+                    title
+                    for brief in target_briefs
+                    for title in (brief.canonical_title, *brief.aliases)
+                )
+            )
+            for identity_name in identity_names:
+                folded_name = " ".join(identity_name.split()).casefold()
+                if not folded_name or not any(
+                    folded_name in text.casefold() for _role, text in admission_claims
+                ):
+                    continue
+                retry = assess_knowledge_candidate(
+                    kind="entity",
+                    title=identity_name,
+                    subtype=entity_subtype,
+                    claims=admission_claims,
+                    decision_reasons=reason_codes,
+                )
+                if retry.admitted:
+                    admission = retry
+                    break
         if not admission.admitted:
             raise InventoryValidationError((f"local_admission:{admission.reason}:{proposal_id}",))
     elif entity_subtype is not None:
