@@ -613,6 +613,8 @@ def _parse_decision(
         raise InventoryValidationError((f"unknown_corpus_brief:{proposal_id}",))
     subtype_value = value.get("entity_subtype")
     entity_subtype = subtype_value if isinstance(subtype_value, str) else None
+    if entity_subtype is not None and not is_supported_entity_subtype(entity_subtype):
+        raise InventoryValidationError((f"invalid_entity_subtype:{proposal_id}",))
     target_value = value.get("target_identity_id")
     if target_value is not None and not isinstance(target_value, str):
         raise InventoryValidationError((f"invalid_target_identity:{proposal_id}",))
@@ -673,56 +675,64 @@ def _parse_decision(
     if any(claim_id not in claim_lookup for claim_id in claim_ids):
         raise InventoryValidationError((f"unknown_claim_id:{proposal_id}",))
     if decision in {"create", "update", "alias"}:
-        if not claim_ids or not is_supported_entity_subtype(entity_subtype):
-            raise InventoryValidationError((f"invalid_admitted_entity:{proposal_id}",))
-        admission_claims = tuple(
-            (claim_lookup[item].role, claim_lookup[item].text) for item in claim_ids
-        )
-        admission = assess_knowledge_candidate(
-            kind="entity",
-            title=canonical_title,
-            subtype=entity_subtype,
-            claims=admission_claims,
-            decision_reasons=reason_codes,
-        )
-        if not admission.admitted and admission.reason == "entity_not_independently_described":
-            identity_names = tuple(
-                dict.fromkeys(
-                    title
-                    for supporting_id in supporting_ids
-                    for title in (
-                        proposals[supporting_id].title,
-                        *proposals[supporting_id].aliases,
+        local_rejection_reason: str | None = None
+        if not claim_ids:
+            local_rejection_reason = "no_substantive_claim"
+        elif not is_supported_entity_subtype(entity_subtype):
+            local_rejection_reason = "unsupported_entity_subtype"
+        else:
+            admission_claims = tuple(
+                (claim_lookup[item].role, claim_lookup[item].text) for item in claim_ids
+            )
+            admission = assess_knowledge_candidate(
+                kind="entity",
+                title=canonical_title,
+                subtype=entity_subtype,
+                claims=admission_claims,
+                decision_reasons=reason_codes,
+            )
+            if not admission.admitted and admission.reason == "entity_not_independently_described":
+                identity_names = tuple(
+                    dict.fromkeys(
+                        title
+                        for supporting_id in supporting_ids
+                        for title in (
+                            proposals[supporting_id].title,
+                            *proposals[supporting_id].aliases,
+                        )
+                    )
+                ) + tuple(
+                    dict.fromkeys(
+                        title
+                        for brief in target_briefs
+                        for title in (brief.canonical_title, *brief.aliases)
                     )
                 )
-            ) + tuple(
-                dict.fromkeys(
-                    title
-                    for brief in target_briefs
-                    for title in (brief.canonical_title, *brief.aliases)
-                )
-            )
-            for identity_name in identity_names:
-                folded_name = " ".join(identity_name.split()).casefold()
-                if not folded_name or not any(
-                    folded_name in text.casefold() for _role, text in admission_claims
-                ):
-                    continue
-                retry = assess_knowledge_candidate(
-                    kind="entity",
-                    title=identity_name,
-                    subtype=entity_subtype,
-                    claims=admission_claims,
-                    decision_reasons=reason_codes,
-                )
-                if retry.admitted:
-                    admission = retry
-                    break
-        if not admission.admitted:
-            raise InventoryValidationError((f"local_admission:{admission.reason}:{proposal_id}",))
+                for identity_name in identity_names:
+                    folded_name = " ".join(identity_name.split()).casefold()
+                    if not folded_name or not any(
+                        folded_name in text.casefold() for _role, text in admission_claims
+                    ):
+                        continue
+                    retry = assess_knowledge_candidate(
+                        kind="entity",
+                        title=identity_name,
+                        subtype=entity_subtype,
+                        claims=admission_claims,
+                        decision_reasons=reason_codes,
+                    )
+                    if retry.admitted:
+                        admission = retry
+                        break
+            if not admission.admitted:
+                local_rejection_reason = admission.reason
+        if local_rejection_reason is not None:
+            decision, reason_codes = _local_inventory_disposition(local_rejection_reason)
+            claim_ids = ()
+            target_identity_id = None
+            target_identity_generation_id = None
+            entity_subtype = None
     elif entity_subtype is not None:
-        if not is_supported_entity_subtype(entity_subtype):
-            raise InventoryValidationError((f"invalid_entity_subtype:{proposal_id}",))
         entity_subtype = None
     return EntityInventoryDecision(
         proposal_id=proposal_id,
@@ -736,6 +746,18 @@ def _parse_decision(
         supporting_proposal_ids=supporting_ids,
         corpus_brief_ids=brief_ids,
     )
+
+
+def _local_inventory_disposition(
+    admission_reason: str,
+) -> tuple[InventoryDecisionKind, tuple[str, ...]]:
+    if admission_reason in {"raw_literal", "document_scaffolding"}:
+        return "reject", ("literal_or_metadata",)
+    if admission_reason == "relation_phrase":
+        return "reject", ("incidental_mention",)
+    if admission_reason in {"no_substantive_claim", "entity_not_independently_described"}:
+        return "reject", ("insufficient_description",)
+    return "review", ("ambiguous_identity",)
 
 
 def _identifier_list(value: object, label: str) -> tuple[str, ...]:

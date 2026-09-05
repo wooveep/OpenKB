@@ -398,6 +398,48 @@ def test_inventory_update_cannot_retype_its_existing_identity() -> None:
         )
 
 
+def test_local_admission_overrides_invalid_model_creates() -> None:
+    snapshot = build_document_entity_inventory_snapshot(
+        document_version_id="document-v1",
+        analysis_generation_id="analysis-v1",
+        language="en",
+        analysis=_analysis(),
+    )
+    first, second = snapshot.proposals
+
+    inventory = parse_document_entity_inventory(
+        json.dumps(
+            {
+                "document_version_id": snapshot.document_version_id,
+                "analysis_generation_id": snapshot.analysis_generation_id,
+                "decisions": [
+                    _decision(
+                        first.proposal_id,
+                        (),
+                        decision="create",
+                        title="Alpha",
+                        subtype="service",
+                    ),
+                    _decision(
+                        second.proposal_id,
+                        (second.claims[0].claim_id,),
+                        decision="create",
+                        title="Teacher.deb",
+                        subtype="software_component",
+                    ),
+                ],
+            }
+        ),
+        snapshot=snapshot,
+    )
+
+    assert tuple(decision.decision for decision in inventory.decisions) == ("reject", "reject")
+    assert inventory.decisions[0].reason_codes == ("insufficient_description",)
+    assert inventory.decisions[1].reason_codes == ("literal_or_metadata",)
+    assert all(not decision.claim_ids for decision in inventory.decisions)
+    assert all(decision.entity_subtype is None for decision in inventory.decisions)
+
+
 def test_inventory_preserves_rejected_proposals_for_candidate_audit() -> None:
     analysis = _analysis()
     snapshot = build_document_entity_inventory_snapshot(
