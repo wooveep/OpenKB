@@ -36,6 +36,7 @@ def test_opaque_versions_are_equal_or_incomparable() -> None:
         "Connect to 10.2.3.4 on port 8443.",
         "The threshold is 10.3 and the appliance is XG-10.2.",
         "Use build date fragment 2026-09 without a version signal.",
+        "V2V migration keeps the source and destination virtual machines distinct.",
     ),
 )
 def test_false_positive_numbers_are_not_version_labels(text: str) -> None:

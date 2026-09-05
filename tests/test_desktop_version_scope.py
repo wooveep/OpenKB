@@ -144,6 +144,24 @@ def test_short_explicit_version_follow_up_inherits_the_previous_lineage(
     assert follow_up.allowed_document_ids == frozenset((old.document_id,))
 
 
+def test_domain_acronym_starting_with_v_does_not_request_an_exact_version(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _kb_dir, _old, current, catalog, lineage = _confirmed_pair(tmp_path, monkeypatch)
+
+    scope = resolve_version_scope(
+        "How does V2V migration work in Product Guide?",
+        conversation_scope=None,
+        ui_filter=None,
+        catalog=catalog,
+    )
+
+    assert scope.status == "resolved"
+    assert scope.mode == "latest"
+    assert scope.lineage_ids == (lineage.lineage_id,)
+    assert scope.allowed_document_ids == frozenset((current.document_id,))
+
+
 def test_latest_degrades_only_along_a_confirmed_predecessor(tmp_path: Path, monkeypatch) -> None:
     _kb_dir, old, new, catalog, lineage = _confirmed_pair(tmp_path, monkeypatch)
     unavailable_members = tuple(

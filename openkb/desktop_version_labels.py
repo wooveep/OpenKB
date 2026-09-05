@@ -21,7 +21,7 @@ _SEMVER = re.compile(
 _CALENDAR = re.compile(r"^(\d{4})[-._](\d{1,2})[-._](\d{1,2})$")
 _EXPLICIT_IN_TEXT = re.compile(
     r"(?i)(?:\bversion\s*|\bver\.?\s*|\bv\s*|版本\s*)"
-    r"([0-9]+(?:\.[0-9A-Za-z-]+){0,3}(?:-[0-9A-Za-z.-]+)?)"
+    r"([0-9]+(?:\.[0-9A-Za-z-]+){0,3}(?:-[0-9A-Za-z.-]+)?)(?![0-9A-Za-z])"
 )
 
 
