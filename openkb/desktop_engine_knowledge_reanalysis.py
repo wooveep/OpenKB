@@ -135,6 +135,12 @@ def _run_jobs(
         return server._shutdown.is_set() or server._knowledge_reanalysis_lease != lease
 
     try:
+        authorize_model_operation_retry(
+            kb_dir,
+            gateway,
+            operation="entity_dossier_planning",
+            retry_scope=run_id,
+        )
         for job_id in service.pending_job_ids(run_id):
             if should_stop():
                 break
@@ -143,6 +149,7 @@ def _run_jobs(
                 gateway,
                 should_stop=should_stop,
                 authorize_retry=authorize_retry,
+                retry_scope=run_id,
             )
             if graph_document_ids:
                 with server._workers_lock:

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from openkb import __version__
+from openkb import desktop_knowledge_reanalysis_store as reanalysis_store
 from openkb.config import ensure_preferred_knowledge_language
 from openkb.desktop_catalog_store import queue_catalog_rebuild_in, start_catalog_rebuilds
 from openkb.desktop_corpus_knowledge_pipeline import CorpusKnowledgeSynthesisPipeline
@@ -48,21 +49,6 @@ from openkb.desktop_knowledge_reanalysis_models import (
 )
 from openkb.desktop_knowledge_reanalysis_recovery import (
     recover_interrupted_knowledge_reanalysis,
-)
-from openkb.desktop_knowledge_reanalysis_store import (
-    active_canonical_documents_in as _active_canonical_documents_in,
-)
-from openkb.desktop_knowledge_reanalysis_store import (
-    available_documents_in as _available_documents_in,
-)
-from openkb.desktop_knowledge_reanalysis_store import (
-    refresh_run_in as _refresh_run_in,
-)
-from openkb.desktop_knowledge_reanalysis_store import (
-    require_execution_update as _require_execution_update,
-)
-from openkb.desktop_knowledge_reanalysis_store import (
-    run_id_for_job_in as _run_id_for_job_in,
 )
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
 from openkb.desktop_missing_sources import record_missing_source_candidates_in
@@ -146,7 +132,7 @@ class DesktopKnowledgeReanalysisService:
             connection = _connect(self._database_path)
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                documents = _available_documents_in(connection, selected)
+                documents = reanalysis_store.available_documents_in(connection, selected)
                 if set(documents) != set(selected):
                     raise DesktopImportError(
                         "knowledge_reanalysis_document_unavailable",
@@ -157,7 +143,7 @@ class DesktopKnowledgeReanalysisService:
                     canonical_selection.setdefault(
                         canonical_analysis_document_id_in(connection, document_id), document_id
                     )
-                active_documents = _active_canonical_documents_in(
+                active_documents = reanalysis_store.active_canonical_documents_in(
                     connection, tuple(canonical_selection)
                 )
                 canonical_selection = {
@@ -254,7 +240,7 @@ class DesktopKnowledgeReanalysisService:
                         "Start a new Reanalysis because its model or analysis behavior changed.",
                     )
                 canonical_document_id = canonical_analysis_document_id_in(connection, str(row[1]))
-                if _active_canonical_documents_in(
+                if reanalysis_store.active_canonical_documents_in(
                     connection, (canonical_document_id,), excluding_job_id=job_id
                 ):
                     raise DesktopImportError(
@@ -326,6 +312,7 @@ class DesktopKnowledgeReanalysisService:
         *,
         should_stop: Callable[[], bool] = lambda: False,
         authorize_retry: Callable[[DesktopModelRequest], str | None] = lambda _request: None,
+        retry_scope: str | None = None,
     ) -> tuple[str, ...]:
         execution_token: str | None = None
         graph_requeued: tuple[str, ...] = ()
@@ -446,6 +433,7 @@ class DesktopKnowledgeReanalysisService:
                     run.checkpoint,
                     execution_token,
                     gateway,
+                    retry_scope,
                 )
         except DesktopModelCallError as error:
             analysis_gate.suspend_result_failure(gateway, error)
@@ -536,7 +524,7 @@ class DesktopKnowledgeReanalysisService:
                         """,
                         (phase, progress, operation, job_id, execution_token),
                     )
-                    _require_execution_update(cursor)
+                    reanalysis_store.require_execution_update(cursor)
             finally:
                 connection.close()
 
@@ -570,7 +558,7 @@ class DesktopKnowledgeReanalysisService:
                             execution_token,
                         ),
                     )
-                    _require_execution_update(cursor)
+                    reanalysis_store.require_execution_update(cursor)
             finally:
                 connection.close()
 
@@ -589,7 +577,7 @@ class DesktopKnowledgeReanalysisService:
                         """,
                         (progress, job_id, execution_token),
                     )
-                    _require_execution_update(cursor)
+                    reanalysis_store.require_execution_update(cursor)
             finally:
                 connection.close()
 
@@ -603,6 +591,7 @@ class DesktopKnowledgeReanalysisService:
         checkpoint: dict[str, object],
         execution_token: str,
         gateway: DesktopModelGateway,
+        retry_scope: str | None,
     ) -> tuple[str, ...]:
         staged_projection: Path | None = None
         refine_corpus = False
@@ -619,7 +608,7 @@ class DesktopKnowledgeReanalysisService:
                     """,
                     (job_id, execution_token),
                 )
-                _require_execution_update(cursor)
+                reanalysis_store.require_execution_update(cursor)
                 available = connection.execute(
                     """
                     SELECT 1 FROM source_documents
@@ -662,9 +651,9 @@ class DesktopKnowledgeReanalysisService:
                     """,
                     (_json(checkpoint), now, job_id, execution_token),
                 )
-                _require_execution_update(cursor)
-                run_id = _run_id_for_job_in(connection, job_id)
-                _refresh_run_in(connection, run_id, now)
+                reanalysis_store.require_execution_update(cursor)
+                run_id = reanalysis_store.run_id_for_job_in(connection, job_id)
+                reanalysis_store.refresh_run_in(connection, run_id, now)
                 if analysis.corpus_ready:
                     refined_generation = activate_completed_corpus_reanalysis_in(
                         connection,
@@ -704,6 +693,7 @@ class DesktopKnowledgeReanalysisService:
                 CorpusKnowledgeSynthesisPipeline(self._kb_dir).run_generation(
                     force_generation=True,
                     gateway=gateway,
+                    retry_scope=retry_scope,
                 )
             except Exception:
                 logger.exception("Could not refine Reanalysis Entity Dossiers.")
@@ -717,7 +707,7 @@ class DesktopKnowledgeReanalysisService:
             try:
                 with connection:
                     now = timestamp()
-                    run_id = _run_id_for_job_in(connection, job_id)
+                    run_id = reanalysis_store.run_id_for_job_in(connection, job_id)
                     cursor = connection.execute(
                         """
                         UPDATE knowledge_reanalysis_jobs
@@ -728,7 +718,7 @@ class DesktopKnowledgeReanalysisService:
                         (error_code, reason[:1000], now, job_id, execution_token),
                     )
                     if cursor.rowcount == 1:
-                        _refresh_run_in(connection, run_id, now)
+                        reanalysis_store.refresh_run_in(connection, run_id, now)
             finally:
                 connection.close()
 

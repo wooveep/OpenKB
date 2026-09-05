@@ -232,6 +232,7 @@ def test_corpus_reanalysis_publishes_candidates_then_plans_dossiers_outside_writ
     assert service.run_job(
         run.jobs[0].job_id,
         DesktopModelGateway(transport, provider_name="provider", model_name="model"),
+        retry_scope="reanalysis-dossier-retry",
     ) == (document_id,)
 
     assert service.overview()["runs"][0]["status"] == "completed"
@@ -254,12 +255,12 @@ def test_corpus_reanalysis_publishes_candidates_then_plans_dossiers_outside_writ
             (document_id,),
         ).fetchone() == (1,)
         assert connection.execute(
-            "SELECT tasks.status, manifests.dossier_state "
+            "SELECT tasks.status, manifests.dossier_state, tasks.retry_scope "
             "FROM knowledge_corpus_synthesis_tasks AS tasks "
             "JOIN knowledge_generation_manifests AS manifests "
             "ON manifests.generation_id = tasks.generation_id "
             "ORDER BY tasks.generation_id DESC LIMIT 1"
-        ).fetchone() == ("completed", "ready")
+        ).fetchone() == ("completed", "ready", "reanalysis-dossier-retry")
         assert connection.execute(
             """
             SELECT tasks.status,
@@ -684,6 +685,7 @@ def test_engine_starts_graph_worker_after_reanalysis_requeues_candidate_graph(
 ) -> None:
     gateway = object()
     graph_starts: list[tuple[Path, object]] = []
+    retry_authorizations: list[tuple[str, str]] = []
     events: list[tuple[str, dict[str, str]]] = []
 
     class ReanalysisService:
@@ -701,6 +703,7 @@ def test_engine_starts_graph_worker_after_reanalysis_requeues_candidate_graph(
             assert selected_gateway is gateway
             assert callable(controls["should_stop"])
             assert callable(controls["authorize_retry"])
+            assert controls["retry_scope"] == "run-id"
             return ("document-id",)
 
     class Server:
@@ -717,6 +720,13 @@ def test_engine_starts_graph_worker_after_reanalysis_requeues_candidate_graph(
     monkeypatch.setattr(reanalysis_engine, "DesktopKnowledgeReanalysisService", ReanalysisService)
     monkeypatch.setattr(
         reanalysis_engine,
+        "authorize_model_operation_retry",
+        lambda _kb_dir, _gateway, *, operation, retry_scope: retry_authorizations.append(
+            (operation, retry_scope)
+        ),
+    )
+    monkeypatch.setattr(
+        reanalysis_engine,
         "revoke_model_operation_retry_scope",
         lambda *_args: None,
     )
@@ -729,5 +739,6 @@ def test_engine_starts_graph_worker_after_reanalysis_requeues_candidate_graph(
     reanalysis_engine._run_jobs(Server(), tmp_path, "run-id", gateway, 7)  # type: ignore[arg-type]
 
     assert graph_starts == [(tmp_path, gateway)]
+    assert retry_authorizations == [("entity_dossier_planning", "run-id")]
     assert Server._knowledge_graph_extraction_cancelled == set()
     assert events == [("knowledge_reanalysis.updated", {"run_id": "run-id", "job_id": "job-id"})]
