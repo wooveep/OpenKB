@@ -110,6 +110,87 @@ def test_inventory_snapshot_has_stable_proposal_and_claim_ids() -> None:
     assert first.as_dict()["entity_subtype_ontology_version"]
 
 
+def test_inventory_canonicalizes_omitted_self_support() -> None:
+    snapshot = build_document_entity_inventory_snapshot(
+        document_version_id="document-v1",
+        analysis_generation_id="analysis-v1",
+        language="en",
+        analysis=_analysis(),
+    )
+    first, second = snapshot.proposals
+    first_decision = _decision(
+        first.proposal_id,
+        (first.claims[0].claim_id,),
+        decision="create",
+        title="Alpha",
+        subtype="service",
+    )
+    first_decision["supporting_proposal_ids"] = []
+
+    inventory = parse_document_entity_inventory(
+        json.dumps(
+            {
+                "document_version_id": snapshot.document_version_id,
+                "analysis_generation_id": snapshot.analysis_generation_id,
+                "decisions": [
+                    first_decision,
+                    _decision(
+                        second.proposal_id,
+                        (),
+                        decision="reject",
+                        title="Teacher.deb",
+                        subtype=None,
+                        reason_codes=("literal_or_metadata",),
+                    ),
+                ],
+            }
+        ),
+        snapshot=snapshot,
+    )
+
+    assert inventory.decisions[0].supporting_proposal_ids == (first.proposal_id,)
+
+
+def test_inventory_rejects_unknown_supporting_proposal() -> None:
+    snapshot = build_document_entity_inventory_snapshot(
+        document_version_id="document-v1",
+        analysis_generation_id="analysis-v1",
+        language="en",
+        analysis=_analysis(),
+    )
+    first, second = snapshot.proposals
+    first_decision = _decision(
+        first.proposal_id,
+        (first.claims[0].claim_id,),
+        decision="create",
+        title="Alpha",
+        subtype="service",
+    )
+    first_decision["supporting_proposal_ids"] = ["proposal-unknown"]
+
+    with pytest.raises(InventoryValidationError, match="invalid_supporting_proposals"):
+        parse_document_entity_inventory(
+            json.dumps(
+                {
+                    "document_version_id": snapshot.document_version_id,
+                    "analysis_generation_id": snapshot.analysis_generation_id,
+                    "decisions": [
+                        first_decision,
+                        _decision(
+                            second.proposal_id,
+                            (),
+                            decision="reject",
+                            title="Teacher.deb",
+                            subtype=None,
+                            reason_codes=("literal_or_metadata",),
+                        ),
+                    ],
+                }
+            ),
+            snapshot=snapshot,
+        )
+
+
 def test_inventory_rejects_a_free_text_fact_and_unknown_claim_id() -> None:
     snapshot = build_document_entity_inventory_snapshot(
         document_version_id="document-v1",

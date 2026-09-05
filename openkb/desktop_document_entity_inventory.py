@@ -602,11 +602,12 @@ def _parse_decision(
     reason_codes = _identifier_list(value.get("reason_codes"), f"reason_codes:{proposal_id}")
     if not reason_codes or any(reason not in INVENTORY_REASON_CODES for reason in reason_codes):
         raise InventoryValidationError((f"invalid_reason_codes:{proposal_id}",))
-    supporting_ids = _identifier_list(
+    provided_supporting_ids = _identifier_list(
         value.get("supporting_proposal_ids"), f"supporting_proposal_ids:{proposal_id}"
     )
-    if proposal_id not in supporting_ids or any(item not in proposals for item in supporting_ids):
+    if any(item not in proposals for item in provided_supporting_ids):
         raise InventoryValidationError((f"invalid_supporting_proposals:{proposal_id}",))
+    supporting_ids = tuple(dict.fromkeys((proposal_id, *provided_supporting_ids)))
     brief_ids = _identifier_list(value.get("corpus_brief_ids"), f"corpus_brief_ids:{proposal_id}")
     if any(item not in briefs for item in brief_ids):
         raise InventoryValidationError((f"unknown_corpus_brief:{proposal_id}",))
