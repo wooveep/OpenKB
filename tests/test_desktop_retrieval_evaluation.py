@@ -24,13 +24,11 @@ from openkb.desktop_knowledge_generations import (
     knowledge_content_sha256,
     publish_generation_changes_in,
 )
-from openkb.desktop_knowledge_graph import DesktopKnowledgeGraphService
 from openkb.desktop_model_gateway import DesktopModelCancelledError, DesktopModelGateway
 from openkb.desktop_navigator_evaluation_gate import navigator_evaluation_gate
 from openkb.desktop_page_tree_selection import PageTreeSelectionResult
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_retrieval_evaluation import (
-    DesktopRetrievalEvaluationReport,
     DesktopRetrievalEvaluationSuite,
     DesktopRetrievalEvaluator,
     _case_result,
@@ -468,8 +466,10 @@ def test_corpus_identity_includes_original_only_critical_evidence(tmp_path, monk
     assert names == ("expected.txt", "original-only.txt")
 
 
-def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_path, monkeypatch):
-    """A snapshot suite covers every required question type and reports all metrics."""
+def test_fixed_suite_compares_all_vectorless_variants_with_unknown_graph_semantics(
+    tmp_path, monkeypatch
+):
+    """A snapshot suite reports every metric without inventing unavailable graph meaning."""
     monkeypatch.setattr(
         "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
@@ -500,40 +500,38 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
         source.write_text(content, encoding="utf-8")
         documents.append(importer.import_text(source).document)
 
-    def graph_response(request, _timeout_seconds):
-        evidence = json.loads(request.content)["evidence"]
-        nodes = []
-        for ordinal, item in enumerate(evidence):
-            text = item["text"]
-            if text.startswith("The Relay") or text.startswith("The Gate"):
-                label = "controlplane raptor"
-            elif "policy" in text:
-                label = "policyconflict zeta"
-            elif "Archive" in text or "Ledger" in text:
-                label = "retentiontheme omega"
-            else:
-                label = f"other-{ordinal}"
-            nodes.append(
-                {
-                    "id": f"node-{ordinal}",
-                    "evidence_id": item["evidence_id"],
-                    "type": "entity",
-                    "label": label,
-                    "support_quote": text.strip(),
-                }
-            )
-        return json.dumps({"nodes": nodes, "edges": []})
-
-    graph = DesktopKnowledgeGraphService(kb_dir, model_gateway=DesktopModelGateway(graph_response))
-    for document in documents:
-        assert graph.extract_document(document.document_id)
     assert rebuild_pending_catalog(kb_dir)
 
     answer_requests = []
 
     def answer_response(request, _timeout_seconds):
-        if request.operation == "retrieval_plan":
-            return json.dumps({"terms": request.content.casefold().split()})
+        if request.operation == "query_planning":
+            payload = json.loads(request.content)
+            evidence_ids = [item["evidence_id"] for item in payload["seed_observations"]]
+            return json.dumps(
+                {
+                    "retrieval_plan": {"terms": payload["question"].casefold().split()},
+                    "question_facet_plan": {
+                        "goal": "Answer the question from available Evidence.",
+                        "facets": [
+                            {
+                                "label": "Evidence for the question",
+                                "description": (
+                                    "The available source facts relevant to the question."
+                                ),
+                                "importance": "required",
+                            }
+                        ],
+                    },
+                    "initial_answer_coverage": [
+                        {
+                            "facet_ordinal": 0,
+                            "state": "covered" if evidence_ids else "missing",
+                            "evidence_ids": evidence_ids[:1],
+                        }
+                    ],
+                }
+            )
         if request.operation == "page_tree_selection":
             payload = json.loads(request.content)
             question = payload["question"].casefold()
@@ -556,16 +554,15 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
             evidence_ids = [item["evidence_id"] for item in payload["evidence"]]
             return json.dumps(
                 {
-                    "schema_version": "openkb.knowledge-navigation-step.v1",
+                    "schema_version": "openkb.knowledge-navigation-step.v2",
                     "snapshot_id": payload["snapshot_id"],
-                    "objective": payload["objective"],
                     "coverage": [
                         {
-                            "aspect": aspect,
-                            "status": "covered" if evidence_ids else "missing",
+                            "facet_id": facet["facet_id"],
+                            "state": "covered" if evidence_ids else "missing",
                             "evidence_ids": evidence_ids[:1],
                         }
-                        for aspect in payload["objective"]["required_aspects"]
+                        for facet in payload["objective"]["facets"]
                     ],
                     "actions": [],
                     "decision": "stop",
@@ -775,7 +772,7 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     }
     assert (
         report.metrics["local_graph"].evidence_recall_at_k
-        > report.metrics["baseline"].evidence_recall_at_k
+        == report.metrics["baseline"].evidence_recall_at_k
     )
     assert (
         report.metrics["local_graph"].citation_precision
@@ -815,7 +812,7 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     assert report.gate.passed
     assert report.gate.page_tree_selection_exercised
     assert report.gate.derived_identity_bound
-    assert report.local_graph_gate.passed
+    assert not report.local_graph_gate.passed
     assert report.source_integrity_healthy
     assert not report.navigator_gate.passed
     assert report.navigator_gate.frozen_reference_complete
@@ -880,7 +877,7 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
             now="2026-08-15T00:00:00+00:00",
         )
         connection.commit()
-    with pytest.raises(ValueError, match="changed after this retrieval evaluation"):
+    with pytest.raises(ValueError, match="non-passing retrieval evaluation"):
         evaluator.promote_local_graph(report)
     with pytest.raises(ValueError, match="changed after this retrieval evaluation"):
         evaluator.require_page_tree_promotion_eligible(report, suite)
@@ -889,20 +886,15 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     assert rebuild_pending_catalog(kb_dir)
     report = evaluator.evaluate(suite)
     assert report.gate.passed
-    assert report.local_graph_gate.passed
-    evaluator.promote_local_graph(report)
-    assert local_graph_default_enabled(kb_dir)
-    assert "knowledge_graph" in {
-        channel
-        for reference in DesktopEvidenceRetriever(kb_dir).retrieve("policyconflict zeta").evidence
-        for channel in reference.channels
-    }
+    assert not report.local_graph_gate.passed
+    with pytest.raises(ValueError, match="non-passing retrieval evaluation"):
+        evaluator.promote_local_graph(report)
+    assert not local_graph_default_enabled(kb_dir)
     report = evaluator.evaluate(suite)
-    assert report.navigator_gate.passed, {
-        field: value for field, value in report.navigator_gate.as_dict().items() if not value
-    }
+    assert not report.navigator_gate.passed
     assert report.navigator_gate.frozen_reference_complete
-    evaluator.require_navigator_promotion_eligible(report, suite)
+    with pytest.raises(ValueError, match="cannot promote the Navigator"):
+        evaluator.require_navigator_promotion_eligible(report, suite)
     tainted_results = [
         replace(result, unsupported_claim_count=1)
         if result.variant == "navigator" and result.category != "absent_answer"
@@ -930,31 +922,17 @@ def test_fixed_suite_compares_all_vectorless_variants_and_gates_graph_gain(tmp_p
     assert "latency_stddev_ms" in payload["stability"]["navigator"]
     assert len(payload["stability"]["navigator"]["cases"]) == len(suite_payload["cases"])
     assert payload["gate"]["passed"] is True
-    assert payload["local_graph_gate"]["passed"] is True
-    assert payload["navigator_gate"]["passed"] is True
+    assert payload["local_graph_gate"]["passed"] is False
+    assert payload["navigator_gate"]["passed"] is False
     assert payload["catalog_generation_ids"] == list(report.catalog_generation_ids)
     assert payload["page_tree_providers"]
     assert payload["page_tree_generations"] == [
         generation.as_dict() for generation in report.page_tree_generations
     ]
 
-    legacy_payload = report.as_dict()
-    legacy_payload["metrics"]["page_tree"] = legacy_payload["metrics"].pop("structure_lexical")
-    for result in legacy_payload["results"]:
-        if result["variant"] == "structure_lexical":
-            result["variant"] = "page_tree"
-    legacy_report_path = tmp_path / "legacy-report.json"
-    legacy_report_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
-
-    restored = DesktopRetrievalEvaluationReport.read(legacy_report_path)
-
-    assert "structure_lexical" in restored.metrics
-    assert "page_tree" not in restored.metrics
-    assert {result.variant for result in restored.results} == set(restored.metrics)
-
     other_kb_dir = tmp_path / "other-desktop-kb"
     DesktopKnowledgeBaseRuntime().create(other_kb_dir)
-    with pytest.raises(ValueError, match="changed after this retrieval evaluation"):
+    with pytest.raises(ValueError, match="non-passing retrieval evaluation"):
         DesktopRetrievalEvaluator(other_kb_dir).promote_local_graph(report)
     assert not local_graph_default_enabled(other_kb_dir)
 
@@ -1039,7 +1017,7 @@ def test_evaluator_read_only_open_does_not_create_a_state_database(tmp_path) -> 
     assert not desktop_state_database_path(kb_dir).exists()
 
 
-def test_retrieval_planning_cost_counts_physical_retries(tmp_path) -> None:
+def test_query_planning_cost_counts_the_single_physical_attempt(tmp_path) -> None:
     attempts = 0
 
     def transport(request, _timeout_seconds):
@@ -1054,9 +1032,11 @@ def test_retrieval_planning_cost_counts_physical_retries(tmp_path) -> None:
         model_gateway=DesktopModelGateway(transport, sleep=lambda _seconds: None),
     ).build_plan_with_cost("alpha question")
 
-    assert result.model_cost.model_calls == 2
-    assert result.model_cost.input_characters == len("alpha question") * 2
-    assert result.model_cost.output_characters == len('{"terms":["alpha"]}')
+    assert attempts == 1
+    assert result.degradations == ("query_planning_failed",)
+    assert result.model_cost.model_calls == 1
+    assert result.model_cost.input_characters > len("alpha question")
+    assert result.model_cost.output_characters == 0
 
 
 def test_retrieval_planning_does_not_charge_an_attempt_that_never_started(tmp_path) -> None:
@@ -1076,7 +1056,7 @@ def test_retrieval_planning_does_not_charge_an_attempt_that_never_started(tmp_pa
     ).build_plan_with_cost("alpha question")
 
     assert transport.calls == 0
-    assert result.degradations == ("retrieval_plan_cancelled",)
+    assert result.degradations == ("query_planning_cancelled",)
     assert result.model_cost.model_calls == 0
     assert result.model_cost.input_characters == 0
 

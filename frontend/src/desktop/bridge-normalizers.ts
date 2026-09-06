@@ -203,23 +203,37 @@ function retrievalTrace(payload: unknown): DesktopConversation["messages"][numbe
     sourceWindowCount: numberValue(value.source_window_count),
     linkHopCount: numberValue(value.link_hop_count),
     pageTreeSupplementCount: numberValue(value.page_tree_supplement_count),
+    semanticStructureState: value.semantic_structure_state === "known" ? "known" : "unknown",
+    questionGoal: stringValue(value, "question_goal"),
+    questionFacets: (Array.isArray(value.question_facets) ? value.question_facets : []).flatMap((item) => {
+      const facet = record(item)
+      const importance = stringValue(facet, "importance")
+      if (!facet.facet_id || !facet.label || !facet.description || !["required", "supporting"].includes(importance)) return []
+      return [{
+        facetId: stringValue(facet, "facet_id"),
+        label: stringValue(facet, "label"),
+        description: stringValue(facet, "description"),
+        importance: importance as "required" | "supporting",
+      }]
+    }),
+    questionFacetPlanDigest: stringValue(value, "question_facet_plan_digest"),
+    queryPlanningPromptContractDigest: stringValue(value, "query_planning_prompt_contract_digest"),
+    queryPlanningExecutionProfileJson: stringValue(value, "query_planning_execution_profile_json"),
+    queryPlanningExecutionProfileDigest: stringValue(value, "query_planning_execution_profile_digest"),
+    facetCoverage: (Array.isArray(value.facet_coverage) ? value.facet_coverage : []).flatMap((item) => {
+      const coverage = record(item)
+      const state = stringValue(coverage, "state")
+      if (!coverage.facet_id || !["covered", "partial", "missing"].includes(state)) return []
+      return [{
+        facetId: stringValue(coverage, "facet_id"),
+        state: state as "covered" | "partial" | "missing",
+        evidenceIds: strings(coverage.evidence_ids),
+      }]
+    }),
     coverageGateState: stringValue(value, "coverage_gate_state"),
-    navigationAnswerKind: stringValue(value, "navigation_answer_kind"),
-    navigationSubject: stringValue(value, "navigation_subject"),
     navigationRoundCount: numberValue(value.navigation_round_count),
     navigationActionKinds: strings(value.navigation_action_kinds),
     navigationStopReason: stringValue(value, "navigation_stop_reason"),
-    coverageAspects: (Array.isArray(value.coverage_aspects) ? value.coverage_aspects : []).map((item) => {
-      const aspect = record(item)
-      const status = stringValue(aspect, "status")
-      return {
-        aspect: stringValue(aspect, "aspect"),
-        status: (["covered", "partial", "missing", "not_applicable"].includes(status)
-          ? status
-          : "missing") as "covered" | "partial" | "missing" | "not_applicable",
-        evidenceIds: strings(aspect.evidence_ids),
-      }
-    }),
     navigationModelCalls: numberValue(value.navigation_model_calls),
     navigationLogicalReadCount: numberValue(value.navigation_logical_read_count),
     navigationSourceTokens: numberValue(value.navigation_source_tokens),

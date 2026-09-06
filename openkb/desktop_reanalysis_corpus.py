@@ -47,7 +47,7 @@ def activate_completed_corpus_reanalysis_in(
     for row in rows:
         checkpoint = _checkpoint(str(row[2]))
         analysis = knowledge_analysis_from_checkpoint(checkpoint)
-        if analysis is None or not analysis.corpus_ready:
+        if analysis is None:
             return None
         document_id = str(row[0])
         evidence = analysis_evidence_for_document_in(connection, document_id)

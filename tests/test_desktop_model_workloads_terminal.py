@@ -32,8 +32,8 @@ def _analysis() -> str:
             "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
             "analysis_scope": "document",
             "document_description": "A usable document.",
-            "concepts": [],
-            "entities": [],
+            "document_summary": [],
+            "candidates": [],
         }
     )
 
@@ -59,8 +59,31 @@ class _SilentTerminalProvider:
         self.clock.value += 180
         if request.operation == "knowledge_fact_harvest":
             return _analysis()
-        if request.operation == "retrieval_plan":
-            return json.dumps({"terms": ["OpenKB", "evidence"]})
+        if request.operation == "query_planning":
+            seed_observations = json.loads(request.content)["seed_observations"]
+            evidence_ids = [seed_observations[0]["evidence_id"]] if seed_observations else []
+            return json.dumps(
+                {
+                    "retrieval_plan": {"terms": ["OpenKB", "evidence"]},
+                    "question_facet_plan": {
+                        "goal": "Identify what OpenKB keeps.",
+                        "facets": [
+                            {
+                                "label": "Retained material",
+                                "description": "What OpenKB keeps available.",
+                                "importance": "required",
+                            }
+                        ],
+                    },
+                    "initial_answer_coverage": [
+                        {
+                            "facet_ordinal": 0,
+                            "state": "covered" if evidence_ids else "missing",
+                            "evidence_ids": evidence_ids,
+                        }
+                    ],
+                }
+            )
         if request.operation == "grounded_answer":
             return "OpenKB keeps cited evidence available."
         raise AssertionError(request.operation)
@@ -116,7 +139,7 @@ def test_grounded_answer_succeeds_after_terminal_model_calls_each_wait_180_secon
 
     assert answer.status == "completed"
     assert answer.answer_text == "OpenKB keeps cited evidence available."
-    assert provider.operations[:2] == ["retrieval_plan", "grounded_answer"]
+    assert provider.operations[:2] == ["query_planning", "grounded_answer"]
     assert clock.value >= 360
 
 

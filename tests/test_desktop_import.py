@@ -35,8 +35,8 @@ def _empty_analysis() -> str:
             "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
             "analysis_scope": "document",
             "document_description": "No durable knowledge candidates.",
-            "concepts": [],
-            "entities": [],
+            "document_summary": [],
+            "candidates": [],
         }
     )
 

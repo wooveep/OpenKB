@@ -66,10 +66,33 @@ def _analysis(scope: str) -> str:
             "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
             "analysis_scope": scope,
             "document_description": f"Validated {scope} result.",
-            "concepts": [],
-            "entities": [],
+            "document_summary": [],
+            "candidates": [],
         }
     )
+
+
+def _candidate(
+    title: str,
+    claim_text: str,
+    evidence_ids: list[str],
+    *,
+    kind: str = "concept",
+) -> dict[str, object]:
+    return {
+        "kind": kind,
+        "title": title,
+        "aliases": [],
+        "identity_labels": [],
+        "admission": "admit",
+        "claims": [
+            {
+                "text": claim_text,
+                "source_evidence_ids": evidence_ids,
+                "applicability": [],
+            }
+        ],
+    }
 
 
 def test_merge_description_is_deterministically_bounded_at_a_readable_boundary() -> None:
@@ -114,7 +137,7 @@ def test_all_analysis_prompts_carry_the_pinned_knowledge_language() -> None:
 def test_aggregate_summary_is_bounded_while_covering_the_document_edges() -> None:
     summary = [
         {
-            "role": "key_topic",
+            "label": "Key topic",
             "text": f"Topic {ordinal}",
             "source_evidence_ids": [f"evidence-{ordinal}"],
         }
@@ -125,9 +148,7 @@ def test_aggregate_summary_is_bounded_while_covering_the_document_edges() -> Non
         "analysis_scope": "document",
         "document_description": "Long document.",
         "document_summary": summary,
-        "concepts": [],
-        "entities": [],
-        "procedures": [],
+        "candidates": [],
     }
 
     analysis = parse_knowledge_analysis(json.dumps(payload), aggregate=True)
@@ -197,7 +218,7 @@ def test_one_document_dispatches_independent_analysis_batches_concurrently(
         if request.operation == "knowledge_analysis_merge":
             assert request.generation_parameters is not None
             assert request.generation_parameters["max_tokens"] > 0
-            return _analysis("document")
+            return json.dumps({"document_description": "Merged document."})
         raise AssertionError(request.operation)
 
     gateway = DesktopModelGateway(transport)
@@ -438,7 +459,7 @@ def test_failed_batch_recovery_reuses_completed_batch_and_runs_one_merge(tmp_pat
             return _analysis("batch")
         if request.operation == "knowledge_analysis_merge":
             operations.append("merge")
-            return _analysis("document")
+            return json.dumps({"document_description": "Merged document."})
         raise AssertionError(request.operation)
 
     gateway = DesktopModelGateway(transport, provider_name="scripted", model_name="batch-v1")
@@ -502,7 +523,7 @@ def test_merge_recovery_does_not_repeat_completed_batches(tmp_path: Path) -> Non
             if not failed_merge:
                 failed_merge = True
                 raise DesktopModelTransportError("input")
-            return _analysis("document")
+            return json.dumps({"document_description": "Merged document."})
         raise AssertionError(request.operation)
 
     gateway = DesktopModelGateway(transport)
@@ -536,7 +557,9 @@ def test_each_batch_model_call_uses_only_the_fixed_connect_bound(tmp_path: Path)
         attempts[key] = attempts.get(key, 0) + 1
         if key.startswith("batch:") and attempts[key] == 1:
             raise TimeoutError()
-        return _analysis("batch" if key.startswith("batch:") else "document")
+        if key.startswith("batch:"):
+            return _analysis("batch")
+        return json.dumps({"document_description": "Merged document."})
 
     imported = DesktopTextImportService(
         kb_dir,
@@ -573,20 +596,14 @@ def test_completed_merge_recovery_keeps_the_persisted_provider(
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                     "analysis_scope": "batch",
                     "document_description": "Old provider batch.",
-                    "concepts": [
-                        {
-                            "title": f"Batch {ordinal}",
-                            "aliases": [],
-                            "tags": [],
-                            "claims": [
-                                {
-                                    "text": f"Fact from batch {ordinal}.",
-                                    "source_evidence_ids": [evidence_id],
-                                }
-                            ],
-                        }
+                    "document_summary": [],
+                    "candidates": [
+                        _candidate(
+                            f"Batch {ordinal}",
+                            f"Fact from batch {ordinal}.",
+                            [evidence_id],
+                        )
                     ],
-                    "entities": [],
                 }
             )
         assert "batch_results" not in payload
@@ -627,7 +644,7 @@ def test_completed_merge_recovery_keeps_the_persisted_provider(
     with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
         provenance = json.loads(
             connection.execute(
-                "SELECT analysis_provenance_json FROM knowledge_generation_items"
+                "SELECT analysis_provenance_json FROM knowledge_document_candidates"
             ).fetchone()[0]
         )
     assert (provenance["provider"], provenance["model"]) == (
@@ -661,34 +678,19 @@ def test_batch_cannot_bind_evidence_from_another_batch(tmp_path: Path) -> None:
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                     "analysis_scope": "batch",
                     "document_description": "Scoped batch.",
-                    "concepts": [
-                        {
-                            "title": f"Batch {ordinal}",
-                            "aliases": [],
-                            "tags": [],
-                            "claims": [
-                                {
-                                    "text": f"Claim {ordinal}.",
-                                    "source_evidence_ids": [first_evidence_id],
-                                    "role": "detail",
-                                    "applicability": {
-                                        "product_version": "",
-                                        "platform": "",
-                                        "deployment_scenario": "",
-                                        "time_boundary": "",
-                                    },
-                                }
-                            ],
-                        }
-                    ],
-                    "entities": [],
-                    "procedures": [],
                     "document_summary": [
                         {
-                            "role": "key_topic",
+                            "label": "Batch summary",
                             "text": f"Batch {ordinal} summary.",
                             "source_evidence_ids": [first_evidence_id],
                         }
+                    ],
+                    "candidates": [
+                        _candidate(
+                            f"Batch {ordinal}",
+                            f"Claim {ordinal}.",
+                            [first_evidence_id],
+                        )
                     ],
                 }
             )
@@ -729,20 +731,14 @@ def test_merge_cannot_invent_a_claim_even_with_valid_document_evidence(tmp_path:
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                     "analysis_scope": "batch",
                     "document_description": "Scoped batch.",
-                    "concepts": [
-                        {
-                            "title": f"Batch {ordinal}",
-                            "aliases": [],
-                            "tags": [],
-                            "claims": [
-                                {
-                                    "text": f"Original claim {ordinal}.",
-                                    "source_evidence_ids": [evidence_id],
-                                }
-                            ],
-                        }
+                    "document_summary": [],
+                    "candidates": [
+                        _candidate(
+                            f"Batch {ordinal}",
+                            f"Original claim {ordinal}.",
+                            [evidence_id],
+                        )
                     ],
-                    "entities": [],
                 }
             )
         if request.operation == "structured_output_repair":
@@ -753,20 +749,10 @@ def test_merge_cannot_invent_a_claim_even_with_valid_document_evidence(tmp_path:
                 "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                 "analysis_scope": "document",
                 "document_description": "Invalid merge.",
-                "concepts": [
-                    {
-                        "title": "Invented",
-                        "aliases": [],
-                        "tags": [],
-                        "claims": [
-                            {
-                                "text": "Invented during merge.",
-                                "source_evidence_ids": ["invented-evidence"],
-                            }
-                        ],
-                    }
+                "document_summary": [],
+                "candidates": [
+                    _candidate("Invented", "Invented during merge.", ["invented-evidence"])
                 ],
-                "entities": [],
             }
         )
 
@@ -796,32 +782,24 @@ def test_merge_cannot_drop_a_validated_claim_or_its_sources(
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                     "analysis_scope": "batch",
                     "document_description": "Validated batch.",
-                    "concepts": [
-                        {
-                            "title": f"Batch {ordinal}",
-                            "aliases": [],
-                            "tags": [],
-                            "claims": [
-                                {
-                                    "text": f"Validated claim {ordinal}.",
-                                    "source_evidence_ids": [evidence_id],
-                                }
-                            ],
-                        }
+                    "document_summary": [],
+                    "candidates": [
+                        _candidate(
+                            f"Batch {ordinal}",
+                            f"Validated claim {ordinal}.",
+                            [evidence_id],
+                        )
                     ],
-                    "entities": [],
                 }
             )
         if request.operation == "structured_output_repair":
             return str(payload["invalid_result"])
-        concepts = [] if drop_claim else [{"unexpected": "model-owned knowledge"}]
+        if drop_claim:
+            return json.dumps({"document_description": "Description-only merge."})
         return json.dumps(
             {
-                "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
-                "analysis_scope": "document",
-                "document_description": "Lossy merge.",
-                "concepts": concepts,
-                "entities": [],
+                "document_description": "Invalid model-owned merge.",
+                "candidates": [{"unexpected": "model-owned knowledge"}],
             }
         )
 
@@ -830,10 +808,10 @@ def test_merge_cannot_drop_a_validated_claim_or_its_sources(
         imported = importer.import_text(source)
         assert imported.document.availability == "available"
         with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
-            generated_content = [
+            retained_claims = [
                 str(row[0])
                 for row in connection.execute(
-                    "SELECT content_markdown FROM knowledge_generation_items"
+                    "SELECT claim_text FROM knowledge_document_candidate_claims"
                 ).fetchall()
             ]
             batch_count = connection.execute(
@@ -841,8 +819,7 @@ def test_merge_cannot_drop_a_validated_claim_or_its_sources(
             ).fetchone()[0]
         assert batch_count > 0
         assert all(
-            any(f"Validated claim {ordinal}." in content for content in generated_content)
-            for ordinal in range(batch_count)
+            f"Validated claim {ordinal}." in retained_claims for ordinal in range(batch_count)
         )
     else:
         with pytest.raises(DesktopImportError) as captured:
@@ -853,13 +830,16 @@ def test_merge_cannot_drop_a_validated_claim_or_its_sources(
 def test_merge_prompt_stays_bounded_without_sending_validated_claims() -> None:
     candidates = [
         {
+            "kind": "concept",
             "title": f"Concept {ordinal}",
             "aliases": [],
-            "tags": [],
+            "identity_labels": [],
+            "admission": "admit",
             "claims": [
                 {
                     "text": f"Claim {ordinal}: " + ("x" * 3_800),
-                    "source_evidence_ids": [],
+                    "source_evidence_ids": [f"evidence-{ordinal}"],
+                    "applicability": [],
                 }
             ],
         }
@@ -871,8 +851,8 @@ def test_merge_prompt_stays_bounded_without_sending_validated_claims() -> None:
                 "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                 "analysis_scope": "batch",
                 "document_description": "Large but individually valid batch result.",
-                "concepts": candidates,
-                "entities": [],
+                "document_summary": [],
+                "candidates": candidates,
             }
         ),
         expected_scope="batch",
@@ -882,23 +862,26 @@ def test_merge_prompt_stays_bounded_without_sending_validated_claims() -> None:
 
     assert payload["descriptions"] == ["Large but individually valid batch result."]
     assert "batch_results" not in payload
-    assert "concepts" not in payload
+    assert "candidates" not in payload
 
 
 def test_document_merge_scope_can_represent_the_full_batch_union_with_bounded_claims() -> None:
     candidates = [
         {
+            "kind": "concept",
             "title": f"Concept {candidate_ordinal}",
             "aliases": [],
-            "tags": [],
+            "identity_labels": [],
+            "admission": "admit",
             "claims": [
                 {
                     "text": f"Claim {candidate_ordinal}-{claim_ordinal}.",
                     "source_evidence_ids": (
                         [f"evidence-{source_ordinal}" for source_ordinal in range(16)]
                         if candidate_ordinal == 0 and claim_ordinal == 0
-                        else []
+                        else [f"evidence-{candidate_ordinal}-{claim_ordinal}"]
                     ),
+                    "applicability": [],
                 }
                 for claim_ordinal in range(65 if candidate_ordinal == 0 else 1)
             ],
@@ -911,8 +894,8 @@ def test_document_merge_scope_can_represent_the_full_batch_union_with_bounded_cl
             "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
             "analysis_scope": "document",
             "document_description": "Complete aggregate result.",
-            "concepts": candidates,
-            "entities": [],
+            "document_summary": [],
+            "candidates": candidates,
         }
     )
     with pytest.raises(DesktopImportError):
@@ -931,20 +914,23 @@ def test_document_merge_scope_rejects_more_than_shared_claim_source_limit() -> N
             "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
             "analysis_scope": "document",
             "document_description": "Aggregate result.",
-            "concepts": [
+            "document_summary": [],
+            "candidates": [
                 {
+                    "kind": "concept",
                     "title": "Bounded concept",
                     "aliases": [],
-                    "tags": [],
+                    "identity_labels": [],
+                    "admission": "admit",
                     "claims": [
                         {
                             "text": "One claim cannot absorb an unbounded source union.",
                             "source_evidence_ids": [f"evidence-{ordinal}" for ordinal in range(33)],
+                            "applicability": [],
                         }
                     ],
                 }
             ],
-            "entities": [],
         }
     )
 

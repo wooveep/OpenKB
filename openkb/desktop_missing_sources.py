@@ -139,18 +139,17 @@ def record_missing_source_candidates_in(
             """
             INSERT INTO knowledge_missing_source_candidates (
                 candidate_id, document_id, kind, title, normalized_title,
-                entity_subtype, aliases_json, tags_json, claim_text, reason,
+                aliases_json, identity_labels_json, claim_text, reason,
                 section, locator_json, analysis_provenance_json, created_at
             )
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE NOT EXISTS (
                 SELECT 1 FROM knowledge_missing_source_resolution_records
                 WHERE candidate_id = ?
             )
             ON CONFLICT(candidate_id) DO UPDATE SET
-                entity_subtype = excluded.entity_subtype,
                 aliases_json = excluded.aliases_json,
-                tags_json = excluded.tags_json,
+                identity_labels_json = excluded.identity_labels_json,
                 reason = excluded.reason,
                 section = excluded.section,
                 locator_json = excluded.locator_json,
@@ -162,9 +161,8 @@ def record_missing_source_candidates_in(
                 claim.kind,
                 claim.title,
                 claim.normalized_title,
-                claim.entity_subtype,
                 encode_knowledge_labels(claim.aliases),
-                encode_knowledge_labels(claim.tags),
+                encode_knowledge_labels(claim.identity_labels),
                 claim.claim_text,
                 claim.reason,
                 section,
@@ -214,7 +212,7 @@ class DesktopMissingSourceService:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 candidate = _candidate_payload_in(connection, candidate_id)
-                _require_bindable_claim(str(candidate[8]))
+                _require_bindable_claim(str(candidate[7]))
                 try:
                     source = available_source_in(connection, evidence_id)
                 except ValueError as error:
@@ -508,8 +506,8 @@ def _redacted_analysis_checkpoint(
 def _candidate_payload_in(connection: sqlite3.Connection, candidate_id: str) -> tuple[object, ...]:
     row = connection.execute(
         """
-        SELECT candidate_id, document_id, kind, title, normalized_title, entity_subtype,
-            aliases_json, tags_json, claim_text, analysis_provenance_json
+        SELECT candidate_id, document_id, kind, title, normalized_title,
+            aliases_json, identity_labels_json, claim_text, analysis_provenance_json
         FROM knowledge_missing_source_candidates WHERE candidate_id = ?
         """,
         (candidate_id,),
@@ -525,7 +523,7 @@ def _candidate_payload_in(connection: sqlite3.Connection, candidate_id: str) -> 
 def _bound_change(candidate: tuple[object, ...], evidence_id: str) -> IncomingKnowledgeChange:
     from openkb.desktop_knowledge_metadata import decode_knowledge_labels
 
-    claim_text = str(candidate[8])
+    claim_text = str(candidate[7])
     source_id = stable_source_id(evidence_id)
     content_markdown = f"{claim_text}[^{source_id}]"
     return IncomingKnowledgeChange(
@@ -536,11 +534,10 @@ def _bound_change(candidate: tuple[object, ...], evidence_id: str) -> IncomingKn
         normalized_title=str(candidate[4]),
         content_markdown=content_markdown,
         content_sha256=knowledge_content_sha256(content_markdown),
-        entity_subtype=str(candidate[5]) if candidate[5] is not None else None,
-        aliases=decode_knowledge_labels(candidate[6]),
-        tags=decode_knowledge_labels(candidate[7]),
+        aliases=decode_knowledge_labels(candidate[5]),
+        identity_labels=decode_knowledge_labels(candidate[6]),
         sources=(KnowledgeGenerationSource(source_id, evidence_id, claim_text),),
-        analysis_provenance_json=str(candidate[9]),
+        analysis_provenance_json=str(candidate[8]),
     )
 
 
@@ -575,7 +572,7 @@ def _bind_to_matching_draft_in(
         bind_source_in(
             connection,
             page_id=str(row[0]),
-            claim_text=str(candidate[8]),
+            claim_text=str(candidate[7]),
             evidence_id=evidence_id,
             updated_at=updated_at,
         )
@@ -614,7 +611,7 @@ def _bind_to_matching_revision_draft_in(
     ).fetchone()
     if row is None:
         return None
-    claim_text = str(candidate[8])
+    claim_text = str(candidate[7])
     try:
         validate_source_claim_selection(str(row[4]), claim_text)
     except ValueError as error:

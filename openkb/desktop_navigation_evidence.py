@@ -6,7 +6,7 @@ from dataclasses import replace
 
 from openkb.desktop_adaptive_navigation import NAVIGATION_MAX_SOURCE_TOKENS
 from openkb.desktop_answer_types import DesktopEvidenceRef
-from openkb.desktop_retrieval_trace import DesktopAnswerCoverageTrace
+from openkb.desktop_retrieval_trace import DesktopFacetCoverageTrace
 from openkb.desktop_source_sections import SOURCE_OCCURRENCE_CONTEXT_KEY
 
 # Keep the reference-count guard above the size of several ordinary, explicitly
@@ -20,9 +20,9 @@ NAVIGATION_MAX_PRIORITY_EVIDENCE_PER_ROUND = NAVIGATION_MAX_EVIDENCE_REFS
 def allocate_evidence(
     current: tuple[DesktopEvidenceRef, ...],
     supplement: tuple[DesktopEvidenceRef, ...],
-    coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
     *,
-    aspect_evidence_ids: dict[str, tuple[str, ...]] | None = None,
+    facet_evidence_ids: dict[str, tuple[str, ...]] | None = None,
     priority_evidence_ids: tuple[str, ...] = (),
     max_evidence_refs: int = NAVIGATION_MAX_EVIDENCE_REFS,
     max_source_tokens: int = NAVIGATION_MAX_SOURCE_TOKENS,
@@ -41,7 +41,7 @@ def allocate_evidence(
             *_primary_coverage_evidence_ids(coverage),
             *(evidence_id for evidence_id in priority_evidence_ids if evidence_id in by_id),
             *_preserved_current_evidence_ids(current)[:NAVIGATION_PRIOR_EVIDENCE_MINIMUM],
-            *_aspect_reserved_evidence_ids(aspect_evidence_ids or {}, coverage, by_id),
+            *_facet_reserved_evidence_ids(facet_evidence_ids or {}, coverage, by_id),
             *_preserved_current_evidence_ids(current),
             *section_diverse_evidence_ids(supplement),
             *_remaining_coverage_evidence_ids(coverage),
@@ -165,16 +165,16 @@ def _weak_seed(reference: DesktopEvidenceRef) -> bool:
 
 
 def _primary_coverage_evidence_ids(
-    coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
 ) -> tuple[str, ...]:
-    """Reserve one already-validated EvidenceRef for every supported aspect."""
+    """Reserve one already-validated EvidenceRef for every supported facet."""
     return _unique(item.evidence_ids[0] for item in coverage if item.evidence_ids)
 
 
 def _remaining_coverage_evidence_ids(
-    coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
 ) -> tuple[str, ...]:
-    """Round-robin additional bindings so one aspect cannot occupy every slot."""
+    """Round-robin additional bindings so one facet cannot occupy every slot."""
     selected: list[str] = []
     for ordinal in range(max((len(item.evidence_ids) for item in coverage), default=0)):
         selected.extend(
@@ -183,38 +183,41 @@ def _remaining_coverage_evidence_ids(
     return _unique(selected)
 
 
-def _aspect_reserved_evidence_ids(
-    evidence_ids_by_aspect: dict[str, tuple[str, ...]],
-    coverage: tuple[DesktopAnswerCoverageTrace, ...],
+def _facet_reserved_evidence_ids(
+    evidence_ids_by_facet: dict[str, tuple[str, ...]],
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
     evidence_by_id: dict[str, DesktopEvidenceRef],
 ) -> tuple[str, ...]:
     """Keep explicit source sequences whole before round-robin fallback evidence."""
-    open_aspects = tuple(
-        item.aspect
+    open_facets = tuple(
+        item.facet_id
         for item in coverage
-        if item.status in {"missing", "partial"} and item.aspect in evidence_ids_by_aspect
+        if item.state in {"missing", "partial"} and item.facet_id in evidence_ids_by_facet
     )
     ranked = {
-        aspect: tuple(
+        facet_id: tuple(
             evidence_id
-            for evidence_id in evidence_ids_by_aspect[aspect]
+            for evidence_id in evidence_ids_by_facet[facet_id]
             if evidence_id in evidence_by_id
         )
-        for aspect in open_aspects
+        for facet_id in open_facets
     }
     targeted_source_ids = _unique(
         evidence_id
-        for aspect in open_aspects
-        for evidence_id in ranked[aspect]
+        for facet_id in open_facets
+        for evidence_id in ranked[facet_id]
         if "knowledge_navigation_source_window" in evidence_by_id[evidence_id].channels
     )
     targeted_source_id_set = frozenset(targeted_source_ids)
     selected = list(targeted_source_ids)
     depth = 0
-    while any(depth < len(ranked[aspect]) for aspect in open_aspects):
-        for aspect in open_aspects:
-            if depth < len(ranked[aspect]) and ranked[aspect][depth] not in targeted_source_id_set:
-                selected.append(ranked[aspect][depth])
+    while any(depth < len(ranked[facet_id]) for facet_id in open_facets):
+        for facet_id in open_facets:
+            if (
+                depth < len(ranked[facet_id])
+                and ranked[facet_id][depth] not in targeted_source_id_set
+            ):
+                selected.append(ranked[facet_id][depth])
         depth += 1
     return _unique(selected)
 

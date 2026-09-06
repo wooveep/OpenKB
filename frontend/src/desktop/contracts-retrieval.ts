@@ -37,9 +37,16 @@ export interface DesktopRetrievalChannelTrace {
   degradationReasons: string[]
 }
 
-export interface DesktopAnswerCoverageTrace {
-  aspect: string
-  status: "covered" | "partial" | "missing" | "not_applicable"
+export interface DesktopQuestionFacetTrace {
+  facetId: string
+  label: string
+  description: string
+  importance: "required" | "supporting"
+}
+
+export interface DesktopFacetCoverageTrace {
+  facetId: string
+  state: "covered" | "partial" | "missing"
   evidenceIds: string[]
 }
 
@@ -58,13 +65,18 @@ export interface DesktopRetrievalTrace {
   sourceWindowCount: number
   linkHopCount: number
   pageTreeSupplementCount: number
+  semanticStructureState: "known" | "unknown"
+  questionGoal: string
+  questionFacets: DesktopQuestionFacetTrace[]
+  questionFacetPlanDigest: string
+  queryPlanningPromptContractDigest: string
+  queryPlanningExecutionProfileJson: string
+  queryPlanningExecutionProfileDigest: string
+  facetCoverage: DesktopFacetCoverageTrace[]
   coverageGateState: string
-  navigationAnswerKind: string
-  navigationSubject: string
   navigationRoundCount: number
   navigationActionKinds: string[]
   navigationStopReason: string
-  coverageAspects: DesktopAnswerCoverageTrace[]
   navigationModelCalls: number
   navigationLogicalReadCount: number
   navigationSourceTokens: number

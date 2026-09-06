@@ -11,6 +11,7 @@ from openkb.desktop_knowledge_analysis import (
     KnowledgeAnalysisCandidate,
     KnowledgeAnalysisClaim,
     KnowledgeAnalysisSummaryUnit,
+    KnowledgeClaimApplicability,
 )
 from openkb.desktop_knowledge_titles import normalize_knowledge_title
 
@@ -35,18 +36,21 @@ def deterministic_merge_knowledge(
                 {
                     "candidate": candidate,
                     "aliases": [],
-                    "tags": [],
+                    "identity_labels": [],
+                    "admissions": [],
                     "claims": {},
                 },
             )
             _extend_unique(current["aliases"], candidate.aliases)
-            _extend_unique(current["tags"], candidate.tags)
+            _extend_unique(current["identity_labels"], candidate.identity_labels)
+            admissions = current["admissions"]
+            assert isinstance(admissions, list)
+            admissions.append(candidate.admission)
             claims = current["claims"]
             assert isinstance(claims, dict)
             for claim in candidate.claims:
                 claim_key = (
-                    claim.role,
-                    tuple(claim.applicability.as_dict().values()),
+                    _applicability_identity(claim.applicability),
                     _normalized_text(claim.text),
                 )
                 existing = claims.get(claim_key)
@@ -59,8 +63,7 @@ def deterministic_merge_knowledge(
                     tuple(
                         dict.fromkeys((*existing.source_evidence_ids, *claim.source_evidence_ids))
                     ),
-                    existing.role,
-                    existing.applicability,
+                    _merge_applicability(existing.applicability, claim.applicability),
                 )
     concepts: list[KnowledgeAnalysisCandidate] = []
     entities: list[KnowledgeAnalysisCandidate] = []
@@ -68,18 +71,20 @@ def deterministic_merge_knowledge(
     for (kind, _title), current in accumulators.items():
         original = current["candidate"]
         assert isinstance(original, KnowledgeAnalysisCandidate)
-        subtype = _normalized_text(original.subtype) if original.subtype else None
         claims = current["claims"]
         assert isinstance(claims, dict)
+        admissions = current["admissions"]
+        assert isinstance(admissions, list)
+        admission = admissions[0] if len(set(admissions)) == 1 else "review"
         merged = KnowledgeAnalysisCandidate(
             kind=kind,  # type: ignore[arg-type]
             title=original.title.strip(),
             aliases=tuple(current["aliases"]),  # type: ignore[arg-type]
-            tags=tuple(current["tags"]),  # type: ignore[arg-type]
+            identity_labels=tuple(current["identity_labels"]),  # type: ignore[arg-type]
             claims=tuple(
                 claim for claim in claims.values() if isinstance(claim, KnowledgeAnalysisClaim)
             ),
-            subtype=subtype,
+            admission=admission,  # type: ignore[arg-type]
         )
         {"concept": concepts, "entity": entities, "procedure": procedures}[kind].append(merged)
     return DesktopKnowledgeAnalysis(
@@ -88,7 +93,6 @@ def deterministic_merge_knowledge(
         tuple(entities),
         procedures=tuple(procedures),
         document_summary=_merge_summary_units(analyses),
-        corpus_ready=all(analysis.corpus_ready for analysis in analyses),
     )
 
 
@@ -104,7 +108,6 @@ def merge_split_batch_analyses(
         KNOWLEDGE_ANALYSIS_BATCH_SCOPE,
         merged.procedures,
         merged.document_summary,
-        merged.corpus_ready,
     )
 
 
@@ -121,13 +124,13 @@ def _merge_summary_units(
     merged: dict[tuple[str, str], KnowledgeAnalysisSummaryUnit] = {}
     for analysis in analyses:
         for unit in analysis.document_summary:
-            key = unit.role, _normalized_text(unit.text)
+            key = _normalized_text(unit.label), _normalized_text(unit.text)
             existing = merged.get(key)
             if existing is None:
                 merged[key] = unit
                 continue
             merged[key] = KnowledgeAnalysisSummaryUnit(
-                existing.role,
+                existing.label,
                 existing.text,
                 tuple(dict.fromkeys((*existing.source_evidence_ids, *unit.source_evidence_ids))),
             )
@@ -192,3 +195,32 @@ def _extend_unique(target: object, values: object) -> None:
 
 def _normalized_text(value: str) -> str:
     return " ".join(value.split()).casefold()
+
+
+def _applicability_identity(
+    entries: tuple[KnowledgeClaimApplicability, ...],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        sorted(
+            (_normalized_text(entry.dimension), _normalized_text(entry.value)) for entry in entries
+        )
+    )
+
+
+def _merge_applicability(
+    left: tuple[KnowledgeClaimApplicability, ...],
+    right: tuple[KnowledgeClaimApplicability, ...],
+) -> tuple[KnowledgeClaimApplicability, ...]:
+    merged: dict[tuple[str, str], KnowledgeClaimApplicability] = {}
+    for entry in (*left, *right):
+        key = (_normalized_text(entry.dimension), _normalized_text(entry.value))
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = entry
+            continue
+        merged[key] = KnowledgeClaimApplicability(
+            existing.dimension,
+            existing.value,
+            tuple(dict.fromkeys((*existing.source_evidence_ids, *entry.source_evidence_ids))),
+        )
+    return tuple(merged[key] for key in sorted(merged))

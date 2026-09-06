@@ -246,29 +246,26 @@ def knowledge_snapshot_digest_in(connection: sqlite3.Connection, kb_dir: Path) -
         "semantic_relationships": _rows(
             connection,
             """
-            SELECT relationships.generation_id, relationships.source_item_key,
-                relationships.target_item_key, relationships.relation_kind,
-                relationships.applicability_json, relationships.provenance
+            SELECT relationships.generation_id, relationships.assertion_id,
+                relationships.source_identity_id, relationships.target_identity_id,
+                relationships.label, relationships.applicability_json
             FROM knowledge_generation_state AS state
-            JOIN knowledge_generation_relationships AS relationships
+            JOIN knowledge_generation_relation_assertions AS relationships
               ON relationships.generation_id = state.current_generation_id
             WHERE state.singleton = 1
-            ORDER BY relationships.source_item_key, relationships.target_item_key,
-                relationships.relation_kind
+            ORDER BY relationships.source_identity_id, relationships.target_identity_id,
+                relationships.normalized_label
             """,
         ),
         "semantic_relationship_sources": _rows(
             connection,
             """
-            SELECT sources.generation_id, sources.source_item_key,
-                sources.target_item_key, sources.relation_kind,
-                sources.binding_role, sources.evidence_id
+            SELECT sources.generation_id, sources.assertion_id, sources.evidence_id
             FROM knowledge_generation_state AS state
-            JOIN knowledge_generation_relationship_sources AS sources
+            JOIN knowledge_generation_relation_sources AS sources
               ON sources.generation_id = state.current_generation_id
             WHERE state.singleton = 1
-            ORDER BY sources.source_item_key, sources.target_item_key,
-                sources.relation_kind, sources.binding_role, sources.evidence_id
+            ORDER BY sources.assertion_id, sources.evidence_id
             """,
         ),
     }

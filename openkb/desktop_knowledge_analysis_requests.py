@@ -16,7 +16,6 @@ from openkb.desktop_prompt_contracts import prompt_contract_for
 CURRENT_KNOWLEDGE_ANALYSIS_PIPELINE_OPERATIONS = (
     "knowledge_fact_harvest",
     "knowledge_analysis_merge",
-    "document_entity_inventory",
 )
 
 

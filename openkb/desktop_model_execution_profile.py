@@ -20,18 +20,16 @@ if TYPE_CHECKING:
 MINIMUM_USEFUL_ANALYSIS_BATCH_TOKENS = 512
 MINIMUM_ANALYSIS_FINAL_OUTPUT_TOKENS = 4_096
 _ANALYSIS_PLAN_OPERATIONS = (
+    "query_planning",
+    "knowledge_page_planning",
     "knowledge_fact_harvest",
-    "document_entity_inventory",
-    "entity_dossier_planning",
     "knowledge_analysis",
     "knowledge_analysis_batch",
     "knowledge_analysis_merge",
     "page_tree_enrichment",
     "page_tree_selection",
     "knowledge_navigation_step",
-    "knowledge_graph_extraction",
     "knowledge_relation_analysis",
-    "retrieval_plan",
     "structured_output_repair",
 )
 _REASONING_ALLOWANCE_NUMERATORS = {"off": 0, "low": 1, "medium": 2, "high": 4}

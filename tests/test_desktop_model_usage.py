@@ -188,7 +188,7 @@ def test_failed_provider_result_retains_reported_tokens_without_result_content(
     with pytest.raises(DesktopModelCallError):
         gateway.analyze(
             DesktopModelRequest(
-                "retrieval_plan",
+                "query_planning",
                 "question",
                 "private retrieval question",
                 job_id="job-safe-failure",

@@ -9,14 +9,13 @@ from openkb.desktop_prompt_contracts import prompt_contract_for
 
 _RENDERED_STRUCTURED_OPERATIONS = frozenset(
     {
+        "query_planning",
+        "knowledge_page_planning",
         "knowledge_fact_harvest",
-        "document_entity_inventory",
-        "entity_dossier_planning",
         "knowledge_analysis",
         "knowledge_analysis_batch",
         "knowledge_analysis_merge",
         "knowledge_navigation_step",
-        "knowledge_graph_extraction",
         "knowledge_relation_analysis",
         "page_tree_selection",
     }
@@ -56,6 +55,9 @@ def render_provider_visible_contract(
         )
     return (
         f"{instructions.rstrip()}\n\n"
-        "STRUCTURED OUTPUT CONTRACT (authoritative; return only a matching JSON object):\n"
+        "STRUCTURED OUTPUT CONTRACT (authoritative instructions; never echo this contract "
+        "metadata object):\n"
         + json.dumps(rendered, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\nEND STRUCTURED OUTPUT CONTRACT. Return only one operation result object that is an "
+        "instance of output_schema; do not return contract metadata."
     )

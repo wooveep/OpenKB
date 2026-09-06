@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import hashlib
 import json
 import sqlite3
@@ -11,15 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
-from openkb.locks import kb_ingest_lock
+from openkb.desktop_workspace import desktop_state_database_path
 
-CandidateRegistryStatus = Literal["ready", "empty", "dependency_unavailable", "explicit_legacy"]
+CandidateRegistryStatus = Literal["ready", "empty", "dependency_unavailable"]
 
-CANDIDATE_REGISTRY_SCHEMA_VERSION = "openkb.candidate-registry.v1"
-CANDIDATE_ONTOLOGY_VERSION = "openkb.knowledge-ontology.v1"
+CANDIDATE_REGISTRY_SCHEMA_VERSION = "openkb.candidate-registry.v2"
 CANDIDATE_NORMALIZER_VERSION = "openkb.knowledge-normalizer.v1"
-CANDIDATE_ADMISSION_POLICY_VERSION = "openkb.knowledge-admission.v1"
 
 
 @dataclass(frozen=True)
@@ -44,9 +40,7 @@ class CandidateRegistryGeneration:
     claim_count: int
     completion_state: str
     schema_version: str
-    ontology_version: str
     normalizer_version: str
-    admission_policy_version: str
     created_at: str
 
 
@@ -64,7 +58,6 @@ class DesktopKnowledgeCandidateRegistry:
     def __init__(self, kb_dir: Path) -> None:
         self._kb_dir = kb_dir.expanduser().resolve()
         self._database_path = desktop_state_database_path(self._kb_dir)
-        self._state_dir = desktop_state_dir(self._kb_dir)
 
     def inspect(self, document_id: str) -> CandidateRegistryOutcome:
         connection = self._connect()
@@ -80,35 +73,10 @@ class DesktopKnowledgeCandidateRegistry:
         finally:
             connection.close()
 
-    def mark_explicit_legacy(self, document_id: str) -> CandidateRegistryOutcome:
-        with kb_ingest_lock(self._state_dir):
-            connection = self._connect()
-            try:
-                if not _candidate_registry_schema_available_in(connection):
-                    # A pre-Candidate-Registry database may still be imported into
-                    # before its explicit upgrade.  The additive migration will
-                    # persist this marker when that database is next opened.
-                    return CandidateRegistryOutcome("dependency_unavailable")
-                with connection:
-                    mark_candidate_registry_explicit_legacy_in(connection, document_id)
-                return candidate_registry_outcome_in(connection, document_id)
-            finally:
-                connection.close()
-
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path)
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
-
-
-def _candidate_registry_schema_available_in(connection: sqlite3.Connection) -> bool:
-    return (
-        connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-            "AND name = 'knowledge_candidate_registry_state'"
-        ).fetchone()
-        is not None
-    )
 
 
 def publish_candidate_registry_generation_in(
@@ -139,7 +107,7 @@ def publish_candidate_registry_generation_in(
         }
     )
     generation_id = uuid.uuid4().hex
-    admitted_count = sum(str(row[8]) == "admitted" for row in candidates)
+    admitted_count = sum(str(row[7]) == "admit" for row in candidates)
     claim_count = sum(
         int(
             connection.execute(
@@ -159,9 +127,8 @@ def publish_candidate_registry_generation_in(
             page_tree_digest, analysis_operation, analysis_contract_digest,
             analysis_prompt_digest, model_capability_provenance_json,
             candidate_count, admitted_count, claim_count, completion_state,
-            schema_version, ontology_version, normalizer_version,
-            admission_policy_version, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            schema_version, normalizer_version, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             generation_id,
@@ -183,9 +150,7 @@ def publish_candidate_registry_generation_in(
             claim_count,
             completion_state,
             CANDIDATE_REGISTRY_SCHEMA_VERSION,
-            CANDIDATE_ONTOLOGY_VERSION,
             CANDIDATE_NORMALIZER_VERSION,
-            CANDIDATE_ADMISSION_POLICY_VERSION,
             now,
         ),
     )
@@ -194,17 +159,16 @@ def publish_candidate_registry_generation_in(
             """
             INSERT INTO knowledge_candidate_generation_candidates (
                 candidate_generation_id, candidate_id, kind, title,
-                normalized_title, entity_subtype, aliases_json, tags_json,
-                admission_state, admission_reason, inventory_target_identity_id,
-                inventory_target_generation_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                normalized_title, aliases_json, identity_labels_json,
+                admission_state, admission_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (generation_id, *row[:7], row[8], row[9], row[10], row[11]),
+            (generation_id, *row[:6], row[7], row[8]),
         )
         candidate_id = str(row[0])
         claim_rows = connection.execute(
             """
-            SELECT claim_ordinal, role, claim_text, applicability_json
+            SELECT claim_ordinal, claim_text, applicability_json
             FROM knowledge_document_candidate_claims
             WHERE candidate_id = ? ORDER BY claim_ordinal
             """,
@@ -215,8 +179,8 @@ def publish_candidate_registry_generation_in(
                 """
                 INSERT INTO knowledge_candidate_generation_claims (
                     candidate_generation_id, candidate_id, claim_ordinal,
-                    role, claim_text, applicability_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    claim_text, applicability_json
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
                 (generation_id, candidate_id, *claim),
             )
@@ -241,10 +205,9 @@ def publish_candidate_registry_generation_in(
     connection.execute(
         """
         INSERT INTO knowledge_candidate_registry_state (
-            document_id, provenance_state, current_candidate_generation_id, updated_at
-        ) VALUES (?, 'semantic', ?, ?)
+            document_id, current_candidate_generation_id, updated_at
+        ) VALUES (?, ?, ?)
         ON CONFLICT(document_id) DO UPDATE SET
-            provenance_state = excluded.provenance_state,
             current_candidate_generation_id = excluded.current_candidate_generation_id,
             updated_at = excluded.updated_at
         """,
@@ -261,16 +224,14 @@ def candidate_registry_outcome_in(
 ) -> CandidateRegistryOutcome:
     row = connection.execute(
         """
-        SELECT provenance_state, current_candidate_generation_id
+        SELECT current_candidate_generation_id
         FROM knowledge_candidate_registry_state WHERE document_id = ?
         """,
         (document_id,),
     ).fetchone()
-    if row is None or str(row[0]) == "dependency_unavailable":
+    if row is None or row[0] is None:
         return CandidateRegistryOutcome("dependency_unavailable")
-    if str(row[0]) == "explicit_legacy":
-        return CandidateRegistryOutcome("explicit_legacy")
-    generation_id = str(row[1]) if row[1] is not None else ""
+    generation_id = str(row[0])
     generation = candidate_registry_generation_in(connection, generation_id)
     if generation is None or generation.document_id != document_id:
         return CandidateRegistryOutcome("dependency_unavailable")
@@ -289,8 +250,7 @@ def candidate_registry_generation_in(
             evidence_digest, page_tree_generation_id, page_tree_digest,
             analysis_operation, analysis_contract_digest, analysis_prompt_digest,
             model_capability_provenance_json, candidate_count, admitted_count,
-            claim_count, completion_state, schema_version, ontology_version,
-            normalizer_version, admission_policy_version, created_at
+            claim_count, completion_state, schema_version, normalizer_version, created_at
         FROM knowledge_candidate_generations WHERE candidate_generation_id = ?
         """,
         (generation_id,),
@@ -316,126 +276,8 @@ def candidate_registry_generation_in(
         claim_count=int(row[15]),
         completion_state=str(row[16]),
         schema_version=str(row[17]),
-        ontology_version=str(row[18]),
-        normalizer_version=str(row[19]),
-        admission_policy_version=str(row[20]),
-        created_at=str(row[21]),
-    )
-
-
-def mark_candidate_registry_explicit_legacy_in(
-    connection: sqlite3.Connection, document_id: str, *, now: str | None = None
-) -> None:
-    """Declare legacy routing only when no semantic generation has been published."""
-    stamp = now or _timestamp()
-    connection.execute(
-        """
-        INSERT INTO knowledge_candidate_registry_state (
-            document_id, provenance_state, current_candidate_generation_id, updated_at
-        )
-        SELECT document_id, 'explicit_legacy', NULL, ?
-        FROM source_documents WHERE document_id = ?
-        ON CONFLICT(document_id) DO UPDATE SET
-            provenance_state = 'explicit_legacy',
-            current_candidate_generation_id = NULL,
-            updated_at = excluded.updated_at
-        WHERE knowledge_candidate_registry_state.current_candidate_generation_id IS NULL
-        """,
-        (stamp, document_id),
-    )
-
-
-def backfill_candidate_registry_generations_in(connection: sqlite3.Connection, *, now: str) -> None:
-    """Model-free migration: snapshot semantic rows and explicitly mark older documents."""
-    rows = connection.execute(
-        "SELECT document_id FROM source_documents ORDER BY document_id"
-    ).fetchall()
-    for row in rows:
-        document_id = str(row[0])
-        semantic = connection.execute(
-            """
-            SELECT 1 FROM knowledge_document_candidates WHERE document_id = ?
-            UNION ALL
-            SELECT 1 FROM document_summaries WHERE document_id = ?
-            LIMIT 1
-            """,
-            (document_id, document_id),
-        ).fetchone()
-        if semantic is None:
-            mark_candidate_registry_explicit_legacy_in(connection, document_id, now=now)
-            continue
-        provenance = connection.execute(
-            """
-            SELECT analysis_provenance_json FROM knowledge_document_candidates
-            WHERE document_id = ? ORDER BY candidate_id LIMIT 1
-            """,
-            (document_id,),
-        ).fetchone()
-        if provenance is None:
-            provenance = connection.execute(
-                "SELECT analysis_provenance_json FROM document_summaries WHERE document_id = ?",
-                (document_id,),
-            ).fetchone()
-        publish_candidate_registry_generation_in(
-            connection,
-            document_id=document_id,
-            analysis_provenance_json=(
-                str(provenance[0])
-                if provenance is not None and provenance[0] is not None
-                else '{"migration":"semantic-backfill"}'
-            ),
-            now=now,
-        )
-    connection.execute(
-        """
-        UPDATE knowledge_graph_extraction_tasks
-        SET input_provenance = COALESCE((
-                SELECT provenance_state FROM knowledge_candidate_registry_state AS state
-                WHERE state.document_id = knowledge_graph_extraction_tasks.document_id
-            ), 'dependency_unavailable'),
-            candidate_generation_id = (
-                SELECT current_candidate_generation_id
-                FROM knowledge_candidate_registry_state AS state
-                WHERE state.document_id = knowledge_graph_extraction_tasks.document_id
-            ),
-            candidate_generation_digest = (
-                SELECT generations.registry_digest
-                FROM knowledge_candidate_registry_state AS state
-                JOIN knowledge_candidate_generations AS generations
-                  ON generations.candidate_generation_id = state.current_candidate_generation_id
-                WHERE state.document_id = knowledge_graph_extraction_tasks.document_id
-            )
-        """
-    )
-    for table in ("knowledge_graph_results", "knowledge_graph_attempts"):
-        connection.execute(
-            f"""
-            UPDATE {table}
-            SET candidate_generation_id = (
-                    SELECT current_candidate_generation_id
-                    FROM knowledge_candidate_registry_state AS state
-                    WHERE state.document_id = {table}.document_id
-                      AND state.provenance_state = 'semantic'
-                ),
-                candidate_generation_digest = (
-                    SELECT generations.registry_digest
-                    FROM knowledge_candidate_registry_state AS state
-                    JOIN knowledge_candidate_generations AS generations
-                      ON generations.candidate_generation_id = state.current_candidate_generation_id
-                    WHERE state.document_id = {table}.document_id
-                )
-            """
-        )
-    connection.execute(
-        """
-        UPDATE knowledge_document_relationships
-        SET candidate_generation_id = (
-            SELECT current_candidate_generation_id
-            FROM knowledge_candidate_registry_state AS state
-            WHERE state.document_id = knowledge_document_relationships.document_id
-              AND state.provenance_state = 'semantic'
-        )
-        """
+        normalizer_version=str(row[18]),
+        created_at=str(row[19]),
     )
 
 
@@ -444,10 +286,9 @@ def _live_candidate_rows_in(
 ) -> list[tuple[object, ...]]:
     return connection.execute(
         """
-        SELECT candidate_id, kind, title, normalized_title, entity_subtype,
-            aliases_json, tags_json, analysis_provenance_json,
-            admission_state, admission_reason,
-            inventory_target_identity_id, inventory_target_generation_id
+        SELECT candidate_id, kind, title, normalized_title, aliases_json,
+            identity_labels_json, analysis_provenance_json,
+            admission_state, admission_reason
         FROM knowledge_document_candidates
         WHERE document_id = ? ORDER BY kind, normalized_title, candidate_id
         """,
@@ -464,7 +305,7 @@ def _registry_payload_in(
         claims = []
         for claim in connection.execute(
             """
-            SELECT claim_ordinal, role, claim_text, applicability_json
+            SELECT claim_ordinal, claim_text, applicability_json
             FROM knowledge_document_candidate_claims
             WHERE candidate_id = ? ORDER BY claim_ordinal
             """,
@@ -473,9 +314,8 @@ def _registry_payload_in(
             claims.append(
                 {
                     "ordinal": int(claim[0]),
-                    "role": str(claim[1]),
-                    "text": str(claim[2]),
-                    "applicability": _json_value(str(claim[3])),
+                    "text": str(claim[1]),
+                    "applicability": _json_value(str(claim[2])),
                     "evidence_ids": [
                         str(source[0])
                         for source in connection.execute(
@@ -496,23 +336,16 @@ def _registry_payload_in(
                 "kind": str(row[1]),
                 "title": str(row[2]),
                 "normalized_title": str(row[3]),
-                "entity_subtype": str(row[4]) if row[4] is not None else None,
-                "aliases": _json_value(str(row[5])),
-                "tags": _json_value(str(row[6])),
-                "admission_state": str(row[8]),
-                "admission_reason": str(row[9]),
-                "inventory_target_identity_id": (str(row[10]) if row[10] is not None else None),
-                "inventory_target_generation_id": (
-                    int(str(row[11])) if row[11] is not None else None
-                ),
+                "aliases": _json_value(str(row[4])),
+                "identity_labels": _json_value(str(row[5])),
+                "admission_state": str(row[7]),
+                "admission_reason": str(row[8]),
                 "claims": claims,
             }
         )
     return {
         "schema_version": CANDIDATE_REGISTRY_SCHEMA_VERSION,
-        "ontology_version": CANDIDATE_ONTOLOGY_VERSION,
         "normalizer_version": CANDIDATE_NORMALIZER_VERSION,
-        "admission_policy_version": CANDIDATE_ADMISSION_POLICY_VERSION,
         "candidates": values,
     }
 
@@ -520,9 +353,8 @@ def _registry_payload_in(
 def _snapshot_registry_digest_in(connection: sqlite3.Connection, generation_id: str) -> str:
     candidates = connection.execute(
         """
-        SELECT candidate_id, kind, title, normalized_title, entity_subtype,
-            aliases_json, tags_json, '', admission_state, admission_reason,
-            inventory_target_identity_id, inventory_target_generation_id
+        SELECT candidate_id, kind, title, normalized_title, aliases_json,
+            identity_labels_json, admission_state, admission_reason
         FROM knowledge_candidate_generation_candidates
         WHERE candidate_generation_id = ?
         ORDER BY kind, normalized_title, candidate_id
@@ -535,7 +367,7 @@ def _snapshot_registry_digest_in(connection: sqlite3.Connection, generation_id: 
         claims = []
         for claim in connection.execute(
             """
-            SELECT claim_ordinal, role, claim_text, applicability_json
+            SELECT claim_ordinal, claim_text, applicability_json
             FROM knowledge_candidate_generation_claims
             WHERE candidate_generation_id = ? AND candidate_id = ?
             ORDER BY claim_ordinal
@@ -545,9 +377,8 @@ def _snapshot_registry_digest_in(connection: sqlite3.Connection, generation_id: 
             claims.append(
                 {
                     "ordinal": int(claim[0]),
-                    "role": str(claim[1]),
-                    "text": str(claim[2]),
-                    "applicability": _json_value(str(claim[3])),
+                    "text": str(claim[1]),
+                    "applicability": _json_value(str(claim[2])),
                     "evidence_ids": [
                         str(source[0])
                         for source in connection.execute(
@@ -568,24 +399,17 @@ def _snapshot_registry_digest_in(connection: sqlite3.Connection, generation_id: 
                 "kind": str(row[1]),
                 "title": str(row[2]),
                 "normalized_title": str(row[3]),
-                "entity_subtype": str(row[4]) if row[4] is not None else None,
-                "aliases": _json_value(str(row[5])),
-                "tags": _json_value(str(row[6])),
-                "admission_state": str(row[8]),
-                "admission_reason": str(row[9]),
-                "inventory_target_identity_id": (str(row[10]) if row[10] is not None else None),
-                "inventory_target_generation_id": (
-                    int(str(row[11])) if row[11] is not None else None
-                ),
+                "aliases": _json_value(str(row[4])),
+                "identity_labels": _json_value(str(row[5])),
+                "admission_state": str(row[6]),
+                "admission_reason": str(row[7]),
                 "claims": claims,
             }
         )
     candidate_payload_digest = _digest(
         {
             "schema_version": CANDIDATE_REGISTRY_SCHEMA_VERSION,
-            "ontology_version": CANDIDATE_ONTOLOGY_VERSION,
             "normalizer_version": CANDIDATE_NORMALIZER_VERSION,
-            "admission_policy_version": CANDIDATE_ADMISSION_POLICY_VERSION,
             "candidates": values,
         }
     )
@@ -776,7 +600,3 @@ def _json_value(value: str) -> object:
 def _digest(value: object) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _timestamp() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()

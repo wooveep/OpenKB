@@ -203,19 +203,17 @@ class DesktopDiagnosticBundleService:
                                 status, failure_code, failure_stage, failure_signature,
                                 CASE
                                     WHEN operation IN (
-                                        'retrieval_plan',
+                                        'query_planning',
                                         'page_tree_selection',
                                         'knowledge_navigation_step'
                                     )
                                         THEN 'regenerate_answer'
-                                    WHEN operation = 'knowledge_graph_extraction'
+                                    WHEN operation = 'knowledge_relation_analysis'
                                         THEN 'retry_graph_extraction'
                                     WHEN operation = 'page_tree_enrichment'
                                         THEN 'retry_page_tree_enrichment'
                                     WHEN operation IN (
                                         'knowledge_fact_harvest',
-                                        'document_entity_inventory',
-                                        'entity_dossier_planning',
                                         'knowledge_analysis', 'knowledge_analysis_batch',
                                         'knowledge_analysis_merge'
                                     ) THEN 'recover_import_or_start_reanalysis'
@@ -245,19 +243,17 @@ class DesktopDiagnosticBundleService:
                                 failure_stage, failure_signature,
                                 CASE
                                     WHEN operation IN (
-                                        'retrieval_plan',
+                                        'query_planning',
                                         'page_tree_selection',
                                         'knowledge_navigation_step'
                                     )
                                         THEN 'regenerate_answer'
-                                    WHEN operation = 'knowledge_graph_extraction'
+                                    WHEN operation = 'knowledge_relation_analysis'
                                         THEN 'retry_graph_extraction'
                                     WHEN operation = 'page_tree_enrichment'
                                         THEN 'retry_page_tree_enrichment'
                                     WHEN operation IN (
                                         'knowledge_fact_harvest',
-                                        'document_entity_inventory',
-                                        'entity_dossier_planning',
                                         'knowledge_analysis', 'knowledge_analysis_batch',
                                         'knowledge_analysis_merge'
                                     ) THEN 'recover_import_or_start_reanalysis'

@@ -51,9 +51,20 @@ pub struct RetrievalChannelTrace {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AnswerCoverageTrace {
-    pub aspect: String,
-    pub status: String,
+pub struct QuestionFacetTrace {
+    #[serde(alias = "facet_id")]
+    pub facet_id: String,
+    pub label: String,
+    pub description: String,
+    pub importance: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FacetCoverageTrace {
+    #[serde(alias = "facet_id")]
+    pub facet_id: String,
+    pub state: String,
     #[serde(default, alias = "evidence_ids")]
     pub evidence_ids: Vec<String>,
 }
@@ -89,20 +100,30 @@ pub struct RetrievalTrace {
     pub link_hop_count: u64,
     #[serde(default, alias = "page_tree_supplement_count")]
     pub page_tree_supplement_count: u64,
+    #[serde(default, alias = "semantic_structure_state")]
+    pub semantic_structure_state: String,
+    #[serde(default, alias = "question_goal")]
+    pub question_goal: String,
+    #[serde(default, alias = "question_facets")]
+    pub question_facets: Vec<QuestionFacetTrace>,
+    #[serde(default, alias = "question_facet_plan_digest")]
+    pub question_facet_plan_digest: String,
+    #[serde(default, alias = "query_planning_prompt_contract_digest")]
+    pub query_planning_prompt_contract_digest: String,
+    #[serde(default, alias = "query_planning_execution_profile_json")]
+    pub query_planning_execution_profile_json: String,
+    #[serde(default, alias = "query_planning_execution_profile_digest")]
+    pub query_planning_execution_profile_digest: String,
+    #[serde(default, alias = "facet_coverage")]
+    pub facet_coverage: Vec<FacetCoverageTrace>,
     #[serde(default, alias = "coverage_gate_state")]
     pub coverage_gate_state: String,
-    #[serde(default, alias = "navigation_answer_kind")]
-    pub navigation_answer_kind: String,
-    #[serde(default, alias = "navigation_subject")]
-    pub navigation_subject: String,
     #[serde(default, alias = "navigation_round_count")]
     pub navigation_round_count: u64,
     #[serde(default, alias = "navigation_action_kinds")]
     pub navigation_action_kinds: Vec<String>,
     #[serde(default, alias = "navigation_stop_reason")]
     pub navigation_stop_reason: String,
-    #[serde(default, alias = "coverage_aspects")]
-    pub coverage_aspects: Vec<AnswerCoverageTrace>,
     #[serde(default, alias = "navigation_model_calls")]
     pub navigation_model_calls: u64,
     #[serde(default, alias = "navigation_logical_read_count")]

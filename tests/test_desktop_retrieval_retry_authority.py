@@ -15,7 +15,7 @@ from openkb.desktop_model_settings import save_desktop_model_settings
 from openkb.desktop_page_tree_selection import select_page_tree_evidence
 from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
-from openkb.desktop_retrieval_planning import build_retrieval_plan
+from openkb.desktop_retrieval_planning import build_query_plan
 from openkb.desktop_structured_output import structured_output_repair_contract_digest
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
@@ -50,7 +50,7 @@ def _gateway(kb_dir, monkeypatch, transport_type):
     gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert gateway is not None
     DesktopModelCapabilityStore(kb_dir).mark_verified(
-        gateway.execution_profile_for_operation("retrieval_plan")
+        gateway.execution_profile_for_operation("query_planning")
     )
     return gateway
 
@@ -103,6 +103,27 @@ def _selection_response(request) -> str:
     )
 
 
+def _query_planning_response() -> str:
+    return json.dumps(
+        {
+            "retrieval_plan": {"terms": ["alpha"]},
+            "question_facet_plan": {
+                "goal": "Answer the question from available Evidence.",
+                "facets": [
+                    {
+                        "label": "Available Evidence",
+                        "description": "What the available Evidence establishes.",
+                        "importance": "required",
+                    }
+                ],
+            },
+            "initial_answer_coverage": [
+                {"facet_ordinal": 0, "state": "missing", "evidence_ids": []}
+            ],
+        }
+    )
+
+
 def test_retrieval_retry_cannot_authorize_a_suspension_created_after_precheck(
     tmp_path, monkeypatch
 ) -> None:
@@ -115,11 +136,11 @@ def test_retrieval_retry_cannot_authorize_a_suspension_created_after_precheck(
 
         def __call__(self, request, _timeout_seconds):
             provider_calls.append(request.operation)
-            return '{"terms":["alpha"]}'
+            return _query_planning_response()
 
     gateway = _gateway(kb_dir, monkeypatch, ValidTransport)
     retry_scope = "grounded-answer:precheck-race"
-    _authorize_contracts(kb_dir, gateway, retry_scope, "retrieval_plan")
+    _authorize_contracts(kb_dir, gateway, retry_scope, "query_planning")
     original = desktop_retrieval_planning.model_operation_dispatch_possible
     injected = False
 
@@ -128,7 +149,7 @@ def test_retrieval_retry_cannot_authorize_a_suspension_created_after_precheck(
         allowed = original(*args, **kwargs)
         if not injected:
             injected = True
-            _suspend(kb_dir, gateway, "retrieval_plan", "newer pre-dispatch suspension")
+            _suspend(kb_dir, gateway, "query_planning", "newer pre-dispatch suspension")
         return allowed
 
     monkeypatch.setattr(
@@ -137,16 +158,16 @@ def test_retrieval_retry_cannot_authorize_a_suspension_created_after_precheck(
         suspend_after_precheck,
     )
 
-    result = build_retrieval_plan(
+    result = build_query_plan(
         "What is Alpha?",
         gateway,
         kb_dir=kb_dir,
         retry_scope=retry_scope,
     )
 
-    assert result.degradations == ("retrieval_plan_suspended",)
+    assert result.degradations == ("query_planning_suspended",)
     assert provider_calls == []
-    assert _state(kb_dir, gateway, "retrieval_plan").status == "suspended"
+    assert _state(kb_dir, gateway, "query_planning").status == "suspended"
 
 
 def test_retrieval_retry_success_does_not_clear_a_newer_suspension(tmp_path, monkeypatch) -> None:
@@ -157,15 +178,15 @@ def test_retrieval_retry_success_does_not_clear_a_newer_suspension(tmp_path, mon
             del model, bundle
 
         def __call__(self, _request, _timeout_seconds):
-            _suspend(kb_dir, gateway, "retrieval_plan", "newer in-flight suspension")
-            return '{"terms":["alpha"]}'
+            _suspend(kb_dir, gateway, "query_planning", "newer in-flight suspension")
+            return _query_planning_response()
 
     gateway = _gateway(kb_dir, monkeypatch, SuspendDuringTransport)
-    _suspend(kb_dir, gateway, "retrieval_plan", "observed suspension")
+    _suspend(kb_dir, gateway, "query_planning", "observed suspension")
     retry_scope = "grounded-answer:in-flight-race"
-    _authorize_contracts(kb_dir, gateway, retry_scope, "retrieval_plan")
+    _authorize_contracts(kb_dir, gateway, retry_scope, "query_planning")
 
-    result = build_retrieval_plan(
+    result = build_query_plan(
         "What is Alpha?",
         gateway,
         kb_dir=kb_dir,
@@ -173,7 +194,7 @@ def test_retrieval_retry_success_does_not_clear_a_newer_suspension(tmp_path, mon
     )
 
     assert result.degradations == ()
-    state = _state(kb_dir, gateway, "retrieval_plan")
+    state = _state(kb_dir, gateway, "query_planning")
     assert state.status == "suspended"
     assert state.reason == "newer in-flight suspension"
 
@@ -265,7 +286,7 @@ def test_grounded_answer_preauthorizes_the_exact_retrieval_repair_contract(
     tmp_path, monkeypatch
 ) -> None:
     kb_dir = _knowledge_base(tmp_path)
-    exact_repair_digest = structured_output_repair_contract_digest("retrieval_plan")
+    exact_repair_digest = structured_output_repair_contract_digest("query_planning")
     repair_permit_visible_at_first_dispatch: list[bool] = []
 
     class InvalidThenValidTransport:
@@ -273,7 +294,7 @@ def test_grounded_answer_preauthorizes_the_exact_retrieval_repair_contract(
             del model, bundle
 
         def __call__(self, request, _timeout_seconds):
-            if request.operation == "retrieval_plan":
+            if request.operation == "query_planning":
                 with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
                     repair_permit_visible_at_first_dispatch.append(
                         connection.execute(
@@ -288,13 +309,13 @@ def test_grounded_answer_preauthorizes_the_exact_retrieval_repair_contract(
                     )
                 return "not-json"
             if request.operation == "structured_output_repair":
-                return '{"terms":["alpha"]}'
+                return _query_planning_response()
             if request.operation == "grounded_answer":
                 return "Alpha is supported by the imported evidence."
             raise AssertionError(request.operation)
 
     gateway = _gateway(kb_dir, monkeypatch, InvalidThenValidTransport)
-    _suspend(kb_dir, gateway, "retrieval_plan", "observed parent suspension")
+    _suspend(kb_dir, gateway, "query_planning", "observed parent suspension")
     profile = gateway.execution_profile_for_operation("structured_output_repair")
     DesktopModelOperationContractStore(kb_dir).suspend(
         operation="structured_output_repair",

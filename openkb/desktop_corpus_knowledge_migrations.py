@@ -130,12 +130,11 @@ CORPUS_KNOWLEDGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         source_document_id TEXT NOT NULL
             REFERENCES source_documents(document_id) ON DELETE RESTRICT,
         created_at TEXT NOT NULL,
-        provenance_state TEXT NOT NULL DEFAULT 'legacy_unmapped'
-            CHECK(provenance_state IN ('source_backed', 'structural', 'legacy_unmapped')),
-        entity_subtype TEXT,
+        provenance_state TEXT NOT NULL DEFAULT 'structural'
+            CHECK(provenance_state IN ('source_backed', 'structural')),
         analysis_provenance_json TEXT,
         aliases_json TEXT NOT NULL DEFAULT '[]',
-        tags_json TEXT NOT NULL DEFAULT '[]',
+        identity_labels_json TEXT NOT NULL DEFAULT '[]',
         identity_id TEXT,
         PRIMARY KEY(generation_id, item_key),
         UNIQUE(generation_id, kind, normalized_title)
@@ -145,8 +144,8 @@ CORPUS_KNOWLEDGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
     INSERT INTO knowledge_generation_items_v53 SELECT
         generation_id, item_key, kind, title, normalized_title,
         content_markdown, content_sha256, source_document_id, created_at,
-        provenance_state, entity_subtype, analysis_provenance_json,
-        aliases_json, tags_json, identity_id
+        provenance_state, analysis_provenance_json,
+        aliases_json, identity_labels_json, identity_id
     FROM knowledge_generation_items
     """,
     "DROP TABLE knowledge_generation_items",
@@ -194,10 +193,9 @@ CORPUS_KNOWLEDGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         )),
         resolved_at TEXT,
         created_at TEXT NOT NULL,
-        entity_subtype TEXT,
         analysis_provenance_json TEXT,
         aliases_json TEXT NOT NULL DEFAULT '[]',
-        tags_json TEXT NOT NULL DEFAULT '[]'
+        identity_labels_json TEXT NOT NULL DEFAULT '[]'
     )
     """,
     """
@@ -209,7 +207,7 @@ CORPUS_KNOWLEDGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         working_draft_title, working_draft_content_markdown,
         working_draft_content_sha256, working_draft_updated_at, staged_decision,
         staged_content_markdown, resolution_status, resolved_at, created_at,
-        entity_subtype, analysis_provenance_json, aliases_json, tags_json
+        analysis_provenance_json, aliases_json, identity_labels_json
     FROM knowledge_reconciliation_candidates
     """,
     "DROP TABLE knowledge_reconciliation_candidates",
@@ -271,9 +269,8 @@ CORPUS_KNOWLEDGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         kind TEXT NOT NULL CHECK(kind IN ('concept', 'entity', 'procedure')),
         title TEXT NOT NULL,
         normalized_title TEXT NOT NULL,
-        entity_subtype TEXT,
         aliases_json TEXT NOT NULL DEFAULT '[]',
-        tags_json TEXT NOT NULL DEFAULT '[]',
+        identity_labels_json TEXT NOT NULL DEFAULT '[]',
         claim_text TEXT NOT NULL,
         reason TEXT NOT NULL CHECK(reason IN (
             'source_not_provided', 'source_reference_unresolved'
@@ -369,7 +366,7 @@ CORPUS_KNOWLEDGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         document_id TEXT NOT NULL REFERENCES document_summaries(document_id)
             ON DELETE CASCADE,
         unit_ordinal INTEGER NOT NULL CHECK(unit_ordinal >= 0),
-        role TEXT NOT NULL CHECK(role IN ('purpose', 'applicability', 'key_topic')),
+        label TEXT NOT NULL,
         unit_text TEXT NOT NULL,
         PRIMARY KEY(document_id, unit_ordinal)
     )
@@ -391,10 +388,9 @@ CORPUS_KNOWLEDGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         kind TEXT NOT NULL CHECK(kind IN ('concept', 'entity', 'procedure')),
         title TEXT NOT NULL,
         normalized_title TEXT NOT NULL,
-        entity_subtype TEXT,
         aliases_json TEXT NOT NULL,
-        tags_json TEXT NOT NULL,
-        admission_state TEXT NOT NULL CHECK(admission_state IN ('admitted', 'rejected')),
+        identity_labels_json TEXT NOT NULL,
+        admission_state TEXT NOT NULL CHECK(admission_state IN ('admit', 'review', 'exclude')),
         admission_reason TEXT NOT NULL,
         analysis_provenance_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
@@ -410,7 +406,6 @@ CORPUS_KNOWLEDGE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         candidate_id TEXT NOT NULL REFERENCES knowledge_document_candidates(candidate_id)
             ON DELETE CASCADE,
         claim_ordinal INTEGER NOT NULL CHECK(claim_ordinal >= 0),
-        role TEXT NOT NULL,
         claim_text TEXT NOT NULL,
         applicability_json TEXT NOT NULL,
         PRIMARY KEY(candidate_id, claim_ordinal)

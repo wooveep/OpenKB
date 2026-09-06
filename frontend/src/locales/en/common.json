@@ -284,7 +284,6 @@
       "provenance": {
         "source_backed": "Source-backed knowledge",
         "structural": "Structural navigation",
-        "legacy_unmapped": "Unmapped knowledge revision",
         "unsourced": "Unsourced note — browse only",
         "invalid": "Source mapping needs attention"
       },
@@ -303,7 +302,6 @@
           "not_verified": "This published revision has not been reviewed by a person.",
           "revision_changed": "This is a new published revision and needs a new human review.",
           "publication_gate_blocked": "Verification is unavailable until every factual claim resolves to Available Knowledge.",
-          "legacy_unmapped_not_verifiable": "This legacy revision has no claim-level Source Map. Bind its factual claims to original evidence before verification.",
           "deprecated_not_verifiable": "Restore this deprecated page before verification.",
           "lifecycle_changed": "The lifecycle changed after the last review. Verify this stable revision again."
         },
@@ -1001,7 +999,7 @@
         "title": "Knowledge navigation trace",
         "coverage": "Evidence coverage",
         "stopReason": "Stop reason",
-        "aspects": "Required answer aspects",
+        "facets": "Question facets",
         "evidenceCount": "{{count}} evidence",
         "coverageStates": {
           "not_applicable": "Not used",
@@ -1010,7 +1008,7 @@
           "partial": "Partially covered",
           "uncovered": "Uncovered"
         },
-        "aspectStates": {
+        "facetStates": {
           "covered": "Covered",
           "partial": "Partial",
           "missing": "Missing",

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
-from openkb.desktop_corpus_entity_briefs import load_relevant_corpus_entity_briefs
-from openkb.desktop_corpus_generation_quality import generation_content_quality_in
 from openkb.desktop_corpus_knowledge_pipeline import CorpusKnowledgeSynthesisPipeline
 from openkb.desktop_import_runner import DesktopTextImportService
 from openkb.desktop_knowledge_analysis import (
@@ -46,24 +45,26 @@ def _candidate_fixture(tmp_path: Path, monkeypatch):
                 kind="entity",
                 title="Alpha",
                 aliases=(),
-                tags=("snapshots",),
-                subtype="service",
+                identity_labels=("snapshots",),
                 claims=(
                     KnowledgeAnalysisClaim(
                         "Alpha is a durable service.",
                         (evidence_id,),
-                        "definition",
                     ),
                     KnowledgeAnalysisClaim(
                         "Alpha supports immutable snapshots.",
                         (evidence_id,),
-                        "capability",
-                        KnowledgeClaimApplicability(platform="Linux"),
+                        (
+                            KnowledgeClaimApplicability(
+                                "platform",
+                                "Linux",
+                                (evidence_id,),
+                            ),
+                        ),
                     ),
                 ),
             ),
         ),
-        corpus_ready=True,
     )
     candidate = _publish_candidate(
         kb_dir,
@@ -81,7 +82,7 @@ def _publish_candidate(kb_dir, document_id, analysis, evidence, *, marker: str):
         analysis=analysis,
         analysis_provenance_json=json.dumps(
             {
-                "analysis_operation": "document_entity_inventory",
+                "analysis_operation": "knowledge_analysis",
                 "prompt_digest": f"test-prompt-{marker}",
                 "contract_digest": "test-contract",
             }
@@ -90,205 +91,306 @@ def _publish_candidate(kb_dir, document_id, analysis, evidence, *, marker: str):
     )
 
 
-def _dossier_response(request) -> str:
+def _page_response(request, *, title: str = "Snapshot behavior") -> str:
     payload = json.loads(request.content)
     claim_ids = [claim["claim_id"] for claim in payload["claims"]]
     return json.dumps(
         {
             "generation_id": payload["generation_id"],
             "identity_id": payload["identity_id"],
-            "summary_claim_ids": claim_ids[:1],
+            "lead": {
+                "presentation": "paragraph",
+                "claim_ids": claim_ids[:1],
+                "relation_assertion_ids": [],
+            },
             "sections": [
                 {
-                    "title": "Capabilities",
-                    "purpose": "capabilities",
-                    "units": [{"presentation": "paragraph", "claim_ids": claim_ids[1:]}],
+                    "title": title,
+                    "units": [
+                        {
+                            "presentation": "unordered_list",
+                            "claim_ids": claim_ids[1:],
+                            "relation_assertion_ids": [],
+                        }
+                    ],
+                    "sections": [],
                 }
-            ],
-            "related_identity_ids": [],
+            ]
+            if len(claim_ids) > 1
+            else [],
         }
     )
 
 
-def _accept_structural_benchmark(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "openkb.desktop_knowledge_generations._record_corpus_benchmark_in",
-        lambda connection, generation_id: connection.execute(
-            "UPDATE knowledge_generations SET qualification_report_json = ? "
-            "WHERE generation_id = ?",
-            ('{"schema_version":"openkb.corpus-benchmark.v3","passed":true}', generation_id),
-        ),
+def _identity_from_repair_request(request) -> str:
+    payload = json.loads(request.content)
+    source = json.loads(payload["evidence_bound_source_material"])
+    return str(source["identity_id"])
+
+
+def _gateway(transport, *, model: str = "planner-v1") -> DesktopModelGateway:
+    return DesktopModelGateway(
+        transport,
+        provider_name="scripted",
+        model_name=model,
     )
 
 
-def test_corpus_pipeline_persists_a_generation_owned_entity_dossier_before_activation(
+def test_corpus_pipeline_persists_a_dynamic_page_before_activation(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    _accept_structural_benchmark(monkeypatch)
-    kb_dir, _document_id, analysis, _evidence, candidate = _candidate_fixture(tmp_path, monkeypatch)
-    assert candidate.generation is not None
-
-    dossier_requests = []
-
-    def plan_dossier(request, _timeout_seconds):
-        dossier_requests.append(request)
-        return _dossier_response(request)
-
-    gateway = DesktopModelGateway(
-        plan_dossier,
-        provider_name="scripted",
-        model_name="dossier-v1",
+    kb_dir, _document_id, _analysis, _evidence, candidate = _candidate_fixture(
+        tmp_path, monkeypatch
     )
+    assert candidate.generation is not None
+    requests = []
+
+    def plan_page(request, _timeout_seconds):
+        requests.append(request)
+        return _page_response(request)
 
     outcome = CorpusKnowledgeSynthesisPipeline(kb_dir).run_generation(
         candidate_generation_ids=(candidate.generation.generation_id,),
         preferred_language="en",
-        gateway=gateway,
+        gateway=_gateway(plan_page),
     )
 
+    assert outcome.status == "active"
     assert outcome.generation_id is not None
     assert outcome.manifest is not None
-    assert outcome.manifest.dossier_state == "ready"
-    assert len(outcome.dossiers) == 1
-    dossier = outcome.dossiers[0]
-    assert dossier.generation_id == outcome.generation_id
-    assert dossier.plan.generation_id == outcome.generation_id
-    assert dossier.plan.identity_id == dossier.identity_id
-    assert dossier.fact_count == 2
-    assert {section.purpose for section in dossier.plan.sections} == {"capabilities"}
-    assert [request.operation for request in dossier_requests] == ["entity_dossier_planning"]
+    assert outcome.manifest.page_state == "ready"
+    assert len(outcome.pages) == 1
+    page = outcome.pages[0]
+    assert page.status == "ready"
+    assert page.plan is not None
+    assert page.plan.generation_id == outcome.generation_id
+    assert page.plan.sections[0].title == "Snapshot behavior"
+    assert page.factual_unit_count == 2
+    assert [request.operation for request in requests] == ["knowledge_page_planning"]
     with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
-        operation, digest, provenance = connection.execute(
-            "SELECT planning_operation, prompt_contract_digest, planner_provenance_json "
-            "FROM knowledge_generation_dossier_plans WHERE generation_id = ?",
+        operation, digest, profile_digest, provenance = connection.execute(
+            "SELECT planning_operation, prompt_contract_digest, "
+            "execution_profile_digest, planner_provenance_json "
+            "FROM knowledge_generation_page_plans WHERE generation_id = ?",
             (outcome.generation_id,),
         ).fetchone()
-        quality = generation_content_quality_in(connection, outcome.generation_id)
+        markdown = connection.execute(
+            "SELECT content_markdown FROM knowledge_generation_items WHERE generation_id = ?",
+            (outcome.generation_id,),
+        ).fetchone()[0]
         task = connection.execute(
             "SELECT status, phase, execution_token "
             "FROM knowledge_corpus_synthesis_tasks WHERE generation_id = ?",
             (outcome.generation_id,),
         ).fetchone()
-    assert operation == "entity_dossier_planning"
-    assert digest == prompt_contract_for("entity_dossier_planning").digest
+    assert operation == "knowledge_page_planning"
+    assert digest == prompt_contract_for("knowledge_page_planning").digest
+    assert len(profile_digest) == 64
     assert json.loads(provenance)["call_id"]
-    assert quality.entity_noise_leakage_rate == 0.0
-    assert quality.duplicate_identity_rate == 0.0
-    assert quality.dossier_readability_passed is True
-    assert quality.dossier_facet_coverage == 1.0
+    assert "## Snapshot behavior" in markdown
+    assert "Identity and role" not in markdown
+    assert "[^src-" in markdown
     assert task == ("completed", "completed", None)
-    briefs = load_relevant_corpus_entity_briefs(
-        desktop_state_database_path(kb_dir),
-        analysis,
-    )
-    assert len(briefs) == 1
-    assert briefs[0].identity_id == dossier.identity_id
-    assert briefs[0].canonical_title == "Alpha"
-    assert briefs[0].current_claim_count == 2
-    assert briefs[0].match_signals == ("exact_title", "controlled_separator")
 
 
-def test_late_dossier_response_cannot_publish_after_candidate_reanalysis(
+def test_invalid_page_is_deferred_while_valid_sibling_activates(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    _accept_structural_benchmark(monkeypatch)
-    kb_dir, document_id, analysis, evidence, initial = _candidate_fixture(tmp_path, monkeypatch)
-    assert initial.generation is not None
-    baseline = CorpusKnowledgeSynthesisPipeline(kb_dir).run_generation()
-    assert baseline.status == "active"
-    current = baseline.current_generation_id
-    claimed = _publish_candidate(
+    kb_dir, document_id, analysis, evidence, _initial = _candidate_fixture(tmp_path, monkeypatch)
+    evidence_id = evidence[0][0]
+    expanded = replace(
+        analysis,
+        entities=(
+            *analysis.entities,
+            KnowledgeAnalysisCandidate(
+                kind="entity",
+                title="Beta",
+                aliases=(),
+                identity_labels=("replication",),
+                claims=(
+                    KnowledgeAnalysisClaim(
+                        "Beta supports replication.",
+                        (evidence_id,),
+                    ),
+                ),
+            ),
+        ),
+    )
+    candidate = _publish_candidate(
         kb_dir,
         document_id,
-        analysis,
+        expanded,
         evidence,
-        marker="claimed",
+        marker="mixed",
     )
-    assert claimed.generation is not None
-    newer_generation_ids: list[str] = []
+    assert candidate.generation is not None
+    requests: list[tuple[str, str]] = []
 
-    def reanalyze_while_model_is_running(request, _timeout_seconds):
-        newer = _publish_candidate(
-            kb_dir,
-            document_id,
-            analysis,
-            evidence,
-            marker="newer",
+    def mixed_page_plans(request, _timeout_seconds):
+        identity_id = (
+            _identity_from_repair_request(request)
+            if request.operation == "structured_output_repair"
+            else str(json.loads(request.content)["identity_id"])
         )
-        assert newer.generation is not None
-        newer_generation_ids.append(newer.generation.generation_id)
-        return _dossier_response(request)
+        requests.append((request.operation, identity_id))
+        title = json.loads(request.content).get("title", "")
+        return _page_response(request) if title == "Alpha" else "{}"
 
     outcome = CorpusKnowledgeSynthesisPipeline(kb_dir).run_generation(
-        candidate_generation_ids=(claimed.generation.generation_id,),
-        gateway=DesktopModelGateway(
-            reanalyze_while_model_is_running,
-            provider_name="scripted",
-            model_name="dossier-v1",
+        candidate_generation_ids=(candidate.generation.generation_id,),
+        gateway=_gateway(mixed_page_plans),
+    )
+
+    assert outcome.status == "active"
+    assert {page.status for page in outcome.pages} == {"ready", "deferred"}
+    deferred = next(page for page in outcome.pages if page.status == "deferred")
+    assert deferred.error_codes == ("knowledge_page_plan_invalid",)
+    assert [operation for operation, _identity in requests].count("structured_output_repair") == 1
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        published_titles = tuple(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT title FROM knowledge_generation_items WHERE generation_id = ?",
+                (outcome.generation_id,),
+            )
+        )
+        evidence_still_available = connection.execute(
+            "SELECT 1 FROM evidence_occurrences WHERE evidence_id = ?",
+            (evidence_id,),
+        ).fetchone()
+    assert published_titles == ("Alpha",)
+    assert evidence_still_available == (1,)
+
+
+def test_invalid_replacement_carries_forward_the_previous_page(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    kb_dir, document_id, analysis, evidence, candidate = _candidate_fixture(tmp_path, monkeypatch)
+    assert candidate.generation is not None
+    baseline = CorpusKnowledgeSynthesisPipeline(kb_dir).run_generation(
+        candidate_generation_ids=(candidate.generation.generation_id,),
+        gateway=_gateway(lambda request, _timeout_seconds: _page_response(request)),
+    )
+    assert baseline.status == "active"
+    newer = _publish_candidate(kb_dir, document_id, analysis, evidence, marker="newer")
+    assert newer.generation is not None
+
+    replacement = CorpusKnowledgeSynthesisPipeline(kb_dir).run_generation(
+        candidate_generation_ids=(newer.generation.generation_id,),
+        force_generation=True,
+        gateway=_gateway(lambda _request, _timeout_seconds: "{}"),
+    )
+
+    assert replacement.status == "active"
+    assert replacement.pages[0].status == "carried_forward"
+    assert replacement.pages[0].published_generation_id == baseline.generation_id
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        rows = connection.execute(
+            "SELECT generation_id, content_markdown FROM knowledge_generation_items "
+            "WHERE identity_id = ? ORDER BY generation_id",
+            (replacement.pages[0].identity_id,),
+        ).fetchall()
+    assert len(rows) == 2
+    assert str(rows[0][1]) == str(rows[1][1])
+
+
+def test_runtime_report_contains_integrity_only_and_dynamic_heading_activates(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    kb_dir, _document_id, _analysis, _evidence, candidate = _candidate_fixture(
+        tmp_path, monkeypatch
+    )
+    assert candidate.generation is not None
+
+    outcome = CorpusKnowledgeSynthesisPipeline(kb_dir).run_generation(
+        candidate_generation_ids=(candidate.generation.generation_id,),
+        gateway=_gateway(
+            lambda request, _timeout_seconds: _page_response(
+                request,
+                title="A domain expert's surprising but safe organization",
+            )
         ),
     )
 
-    assert newer_generation_ids
-    assert outcome.status == "superseded"
-    assert outcome.manifest is not None
-    assert outcome.manifest.lifecycle_state == "superseded"
-    assert outcome.current_generation_id == current
+    assert outcome.status == "active"
     with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
-        assert connection.execute(
-            "SELECT status, error_code FROM knowledge_corpus_synthesis_tasks "
-            "WHERE generation_id = ?",
-            (outcome.generation_id,),
-        ).fetchone() == ("superseded", "candidate_generation_superseded")
+        report = json.loads(
+            connection.execute(
+                "SELECT integrity_report_json FROM knowledge_generations WHERE generation_id = ?",
+                (outcome.generation_id,),
+            ).fetchone()[0]
+        )
+    assert report["schema_version"] == "openkb.corpus-generation-integrity.v1"
+    assert report["passed"] is True
+    assert report["issues"] == []
+    assert not {
+        "noise_leakage_rate",
+        "dossier_readability_rate",
+        "procedure_stage_coverage",
+        "real_corpus_benchmark",
+    } & set(report)
+
+
+def test_late_page_response_cannot_publish_after_candidate_reanalysis(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    kb_dir, document_id, analysis, evidence, initial = _candidate_fixture(tmp_path, monkeypatch)
+    assert initial.generation is not None
+    baseline = CorpusKnowledgeSynthesisPipeline(kb_dir).run_generation(
+        candidate_generation_ids=(initial.generation.generation_id,),
+        gateway=_gateway(lambda request, _timeout_seconds: _page_response(request)),
+    )
+    claimed = _publish_candidate(kb_dir, document_id, analysis, evidence, marker="claimed")
+    assert claimed.generation is not None
+
+    def reanalyze_while_running(request, _timeout_seconds):
+        _publish_candidate(kb_dir, document_id, analysis, evidence, marker="newest")
+        return _page_response(request)
+
+    outcome = CorpusKnowledgeSynthesisPipeline(kb_dir).run_generation(
+        candidate_generation_ids=(claimed.generation.generation_id,),
+        gateway=_gateway(reanalyze_while_running),
+    )
+
+    assert outcome.status == "superseded"
+    assert outcome.current_generation_id == baseline.current_generation_id
 
 
 def test_cancellation_after_provider_return_invalidates_pending_generation(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    _accept_structural_benchmark(monkeypatch)
     kb_dir, _document_id, _analysis, _evidence, candidate = _candidate_fixture(
         tmp_path, monkeypatch
     )
     assert candidate.generation is not None
-    baseline = CorpusKnowledgeSynthesisPipeline(kb_dir).run_generation()
-    assert baseline.status == "active"
     cancelled = False
 
     def cancel_with_response(request, _timeout_seconds):
         nonlocal cancelled
         cancelled = True
-        return _dossier_response(request)
+        return _page_response(request)
 
     outcome = CorpusKnowledgeSynthesisPipeline(kb_dir).run_generation(
         candidate_generation_ids=(candidate.generation.generation_id,),
-        force_generation=True,
-        gateway=DesktopModelGateway(
-            cancel_with_response,
-            provider_name="scripted",
-            model_name="dossier-v1",
-        ),
+        gateway=_gateway(cancel_with_response),
         should_stop=lambda: cancelled,
     )
 
     assert outcome.status == "cancelled"
     assert outcome.manifest is not None
     assert outcome.manifest.lifecycle_state == "cancelled"
-    assert outcome.current_generation_id == baseline.current_generation_id
-    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
-        assert connection.execute(
-            "SELECT status, error_code, execution_token "
-            "FROM knowledge_corpus_synthesis_tasks WHERE generation_id = ?",
-            (outcome.generation_id,),
-        ).fetchone() == ("cancelled", "corpus_synthesis_cancelled", None)
 
 
-def test_dossier_dispatch_consumes_the_supplied_retry_scope(
+def test_page_dispatch_consumes_the_supplied_retry_scope(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    _accept_structural_benchmark(monkeypatch)
     kb_dir, _document_id, _analysis, _evidence, candidate = _candidate_fixture(
         tmp_path, monkeypatch
     )
@@ -299,63 +401,14 @@ def test_dossier_dispatch_consumes_the_supplied_retry_scope(
         dispatch_scopes.append(retry_scope)
 
     monkeypatch.setattr(
-        "openkb.desktop_corpus_knowledge_pipeline.require_model_operation_dispatch",
+        "openkb.desktop_knowledge_page_model_planner.require_model_operation_dispatch",
         record_dispatch,
     )
     outcome = CorpusKnowledgeSynthesisPipeline(kb_dir).run_generation(
         candidate_generation_ids=(candidate.generation.generation_id,),
-        gateway=DesktopModelGateway(
-            lambda request, _timeout_seconds: _dossier_response(request),
-            provider_name="scripted",
-            model_name="dossier-v1",
-        ),
-        retry_scope="retry-dossier-7",
+        gateway=_gateway(lambda request, _timeout_seconds: _page_response(request)),
+        retry_scope="retry-page-7",
     )
 
     assert outcome.status == "active"
-    assert dispatch_scopes == ["retry-dossier-7"]
-    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
-        assert connection.execute(
-            "SELECT status, retry_scope FROM knowledge_corpus_synthesis_tasks "
-            "WHERE generation_id = ?",
-            (outcome.generation_id,),
-        ).fetchone() == ("completed", "retry-dossier-7")
-
-
-def test_explicit_cancel_revokes_the_durable_claim_before_the_response_returns(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    _accept_structural_benchmark(monkeypatch)
-    kb_dir, _document_id, _analysis, _evidence, candidate = _candidate_fixture(
-        tmp_path, monkeypatch
-    )
-    assert candidate.generation is not None
-    pipeline = CorpusKnowledgeSynthesisPipeline(kb_dir)
-    cancellation_observed: list[bool] = []
-
-    def cancel_before_return(request, _timeout_seconds):
-        generation_id = int(json.loads(request.content)["generation_id"])
-        cancellation_observed.append(pipeline.request_cancel(generation_id))
-        with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
-            cancellation_observed.append(
-                connection.execute(
-                    "SELECT execution_token IS NULL "
-                    "FROM knowledge_corpus_synthesis_tasks WHERE generation_id = ?",
-                    (generation_id,),
-                ).fetchone()
-                == (1,)
-            )
-        return _dossier_response(request)
-
-    outcome = pipeline.run_generation(
-        candidate_generation_ids=(candidate.generation.generation_id,),
-        gateway=DesktopModelGateway(
-            cancel_before_return,
-            provider_name="scripted",
-            model_name="dossier-v1",
-        ),
-    )
-
-    assert cancellation_observed == [True, True]
-    assert outcome.status == "cancelled"
+    assert dispatch_scopes == ["retry-page-7"]

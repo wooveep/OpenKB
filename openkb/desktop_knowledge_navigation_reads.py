@@ -16,7 +16,6 @@ from openkb.desktop_source_sections import section_from_heading_path
 class _GuidanceUnit:
     text: str
     evidence_ids: tuple[str, ...]
-    role: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,13 +37,7 @@ def resolve_read_in(
 ) -> _NavigationRead | None:
     units: tuple[_GuidanceUnit, ...]
     if descriptor.descriptor_kind == "index":
-        units = (
-            _GuidanceUnit(
-                f"Browse the current {descriptor.title.casefold()} routes.",
-                (),
-                "route_index",
-            ),
-        )
+        units = (_GuidanceUnit(f"Browse the current {descriptor.title.casefold()} routes.", ()),)
     elif descriptor.descriptor_kind == "summary":
         units = _summary_units_in(connection, descriptor.authority_id)
         if not units:
@@ -90,7 +83,7 @@ def _scoped_units_in(
             if scoped_view.preferred_occurrence_in(connection, evidence_id) is not None
         )
         if evidence_ids:
-            values.append(_GuidanceUnit(unit.text, evidence_ids, unit.role))
+            values.append(_GuidanceUnit(unit.text, evidence_ids))
     return tuple(values)
 
 
@@ -99,7 +92,7 @@ def _summary_units_in(
 ) -> tuple[_GuidanceUnit, ...]:
     rows = connection.execute(
         """
-        SELECT units.unit_ordinal, units.unit_text, units.role, sources.evidence_id
+        SELECT units.unit_ordinal, units.unit_text, sources.evidence_id
         FROM document_summary_units AS units
         JOIN document_summary_unit_sources AS sources
           ON sources.document_id = units.document_id
@@ -113,8 +106,7 @@ def _summary_units_in(
         rows,
         ordinal_index=0,
         text_index=1,
-        evidence_index=3,
-        role_index=2,
+        evidence_index=2,
     )
 
 
@@ -144,12 +136,12 @@ def _source_structure_units_in(
         if not heading or key in seen or evidence_value is None:
             continue
         seen.add(key)
-        units.append(_GuidanceUnit(heading, (str(evidence_value),), "section"))
+        units.append(_GuidanceUnit(heading, (str(evidence_value),)))
     if units:
         return tuple(units)
     if fallback_evidence_id is None:
         return ()
-    return (_GuidanceUnit("Document source", (fallback_evidence_id,), "source"),)
+    return (_GuidanceUnit("Document source", (fallback_evidence_id,)),)
 
 
 def _source_section_units_in(
@@ -177,7 +169,7 @@ def _source_section_units_in(
     evidence_ids = tuple(dict.fromkeys(str(row[0]) for row in rows))
     if not evidence_ids:
         return ()
-    return (_GuidanceUnit(descriptor.title, evidence_ids, "section"),)
+    return (_GuidanceUnit(descriptor.title, evidence_ids),)
 
 
 def _generated_units_in(
@@ -277,7 +269,6 @@ def _group_units(
     ordinal_index: int,
     text_index: int,
     evidence_index: int,
-    role_index: int | None = None,
 ) -> tuple[_GuidanceUnit, ...]:
     grouped: defaultdict[int, list[tuple[object, ...]]] = defaultdict(list)
     for row in rows:
@@ -286,7 +277,6 @@ def _group_units(
         _GuidanceUnit(
             str(values[0][text_index]),
             tuple(dict.fromkeys(str(value[evidence_index]) for value in values)),
-            str(values[0][role_index]) if role_index is not None else None,
         )
         for _ordinal, values in sorted(grouped.items())
     )

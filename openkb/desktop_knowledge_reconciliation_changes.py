@@ -37,9 +37,8 @@ class IncomingKnowledgeChange:
     normalized_title: str
     content_markdown: str
     content_sha256: str
-    entity_subtype: str | None = None
     aliases: tuple[str, ...] = ()
-    tags: tuple[str, ...] = ()
+    identity_labels: tuple[str, ...] = ()
     sources: tuple[KnowledgeGenerationSource, ...] = ()
     analysis_provenance_json: str | None = None
 

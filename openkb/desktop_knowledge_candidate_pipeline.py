@@ -38,8 +38,6 @@ class DesktopKnowledgeCandidatePipeline:
         analysis_provenance_json: str,
         evidence: tuple[tuple[str, DocumentIRBlock], ...],
     ) -> CandidateRegistryOutcome:
-        if not analysis.corpus_ready:
-            raise ValueError("Candidate Pipeline requires the corpus analysis contract.")
         with kb_ingest_lock(self._state_dir):
             connection = sqlite3.connect(self._database_path)
             connection.execute("PRAGMA foreign_keys = ON")
@@ -78,8 +76,6 @@ def materialize_candidate_registry_in(
     now: str,
 ) -> CandidateRegistryOutcome:
     """Internal transaction-aware entry used by the import/reanalysis owners."""
-    if not analysis.corpus_ready:
-        raise ValueError("Candidate Pipeline requires the corpus analysis contract.")
     replace_document_corpus_analysis_in(
         connection,
         document_id=document_id,

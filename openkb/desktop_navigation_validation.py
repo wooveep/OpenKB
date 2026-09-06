@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from openkb.desktop_retrieval_trace import DesktopAnswerCoverageTrace
+from openkb.desktop_retrieval_trace import DesktopFacetCoverageTrace
 
 _SQL_TERM = re.compile(
     r"^\s*(?:pragma\b|select\s+(?:\*|\d+|['\"])|select\b.+\b(?:from|where|join)\b)",
@@ -62,10 +62,10 @@ def unsafe_navigation_term(term: str) -> bool:
 
 @dataclass(frozen=True)
 class NavigationAction:
-    """One validated query-scoped expansion request bound to an open aspect."""
+    """One validated query-scoped expansion request bound to an open required facet."""
 
     kind: str
-    aspect: str
+    facet_id: str
     terms: tuple[str, ...] = ()
     routes: tuple[str, ...] = ()
     evidence_ids: tuple[str, ...] = ()
@@ -84,20 +84,25 @@ def validated_navigation_actions(
     available_routes: frozenset[str],
     completed_routes: frozenset[str] = frozenset(),
     known_evidence_ids: frozenset[str],
-    coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
+    required_facet_ids: frozenset[str],
     maximum_actions: int,
 ) -> tuple[NavigationAction, ...]:
-    """Validate a bounded batch of explicitly aspect-bound model actions."""
+    """Validate a bounded batch of explicitly facet-bound model actions."""
     if not isinstance(value, list) or len(value) > maximum_actions:
         raise ValueError("Navigation action batch exceeds its remaining budget.")
     actions: list[NavigationAction] = []
     seen: set[str] = set()
-    open_aspects = tuple(item.aspect for item in coverage if item.status in {"missing", "partial"})
+    open_facets = tuple(
+        item.facet_id
+        for item in coverage
+        if item.facet_id in required_facet_ids and item.state in {"missing", "partial"}
+    )
     for item in value:
         if not isinstance(item, dict):
             raise ValueError("Navigation action is invalid.")
-        if not open_aspects:
-            raise ValueError("Navigation actions require an uncovered aspect.")
+        if not open_facets:
+            raise ValueError("Navigation actions require an uncovered required facet.")
         kind = item.get("kind")
         if not isinstance(kind, str):
             raise ValueError("Navigation action kind is not allowed.")
@@ -109,15 +114,14 @@ def validated_navigation_actions(
         if action_fields is None:
             raise ValueError("Navigation action kind is not allowed.")
         _require_action_fields(item, action_fields)
-        raw_aspect = item.get("aspect")
-        aspect = bounded_string(raw_aspect, 80)
-        if aspect not in open_aspects:
-            raise ValueError("Navigation action aspect is not currently open.")
+        facet_id = bounded_string(item.get("facet_id"), 160)
+        if facet_id not in open_facets:
+            raise ValueError("Navigation action facet is not currently open and required.")
         if kind == "search_routes":
             terms = bounded_string_array(item["terms"], maximum=8, item_limit=120)
             if not terms or any(unsafe_navigation_term(term) for term in terms):
                 raise ValueError("Route search terms are missing or unsafe.")
-            action = NavigationAction("search_routes", aspect, terms=terms)
+            action = NavigationAction("search_routes", facet_id, terms=terms)
         elif kind == "read_routes":
             routes = bounded_string_array(item["routes"], maximum=4, item_limit=320)
             unread_routes = tuple(route for route in routes if route not in completed_routes)
@@ -125,12 +129,12 @@ def validated_navigation_actions(
                 continue
             if not set(unread_routes) <= available_routes:
                 raise ValueError("Navigation route is unavailable or unpublished.")
-            action = NavigationAction("read_routes", aspect, routes=unread_routes)
+            action = NavigationAction("read_routes", facet_id, routes=unread_routes)
         elif kind == "read_source_sections":
             evidence_ids = bounded_string_array(item["evidence_ids"], maximum=4, item_limit=160)
             if not evidence_ids or not set(evidence_ids) <= known_evidence_ids:
                 raise ValueError("Source section anchor is not known Available Evidence.")
-            action = NavigationAction("read_source_sections", aspect, evidence_ids=evidence_ids)
+            action = NavigationAction("read_source_sections", facet_id, evidence_ids=evidence_ids)
         if action.identity in seen or action.identity in visited_action_ids:
             # A repeated read cannot add Evidence. Discard it locally so one
             # redundant aspect binding does not invalidate an otherwise safe
@@ -142,7 +146,7 @@ def validated_navigation_actions(
 
 
 def _require_action_fields(item: dict[object, object], fields: set[str]) -> None:
-    """Require the production contract, including an explicit open aspect."""
+    """Require the production contract, including an explicit open facet."""
     actual = frozenset(item)
-    if actual != frozenset((*fields, "aspect")):
+    if actual != frozenset((*fields, "facet_id")):
         raise ValueError("Navigation action must contain exactly its allowed fields.")

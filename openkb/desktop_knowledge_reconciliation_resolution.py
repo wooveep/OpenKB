@@ -52,9 +52,8 @@ class _StagedCandidate:
     normalized_title: str
     content_markdown: str
     content_sha256: str
-    entity_subtype: str | None
     aliases: tuple[str, ...]
-    tags: tuple[str, ...]
+    identity_labels: tuple[str, ...]
     analysis_provenance_json: str | None
     sources: tuple[KnowledgeGenerationSource, ...]
     baseline_kind: str
@@ -235,9 +234,8 @@ class DesktopKnowledgeReconciliationResolutionService:
                             resolution_status = ?,
                             resolved_at = ?,
                             content_markdown = '',
-                            entity_subtype = NULL,
                             aliases_json = '[]',
-                            tags_json = '[]',
+                            identity_labels_json = '[]',
                             analysis_provenance_json = NULL,
                             baseline_content_markdown = NULL,
                             working_draft_content_markdown = NULL,
@@ -439,7 +437,7 @@ def _staged_candidates_in(connection: sqlite3.Connection) -> tuple[_StagedCandid
         SELECT candidates.candidate_id, candidates.document_id, documents.availability,
             candidates.kind, candidates.title, candidates.normalized_title,
             candidates.content_markdown, candidates.content_sha256,
-            candidates.entity_subtype, candidates.aliases_json, candidates.tags_json,
+            candidates.aliases_json, candidates.identity_labels_json,
             candidates.analysis_provenance_json,
             candidates.baseline_kind, candidates.baseline_id,
             candidates.baseline_content_markdown, candidates.reconciliation_mode,
@@ -467,33 +465,29 @@ def _staged_candidates_in(connection: sqlite3.Connection) -> tuple[_StagedCandid
             normalized_title=str(row[5]),
             content_markdown=str(row[6]),
             content_sha256=str(row[7]),
-            entity_subtype=str(row[8]) if row[8] is not None else None,
-            aliases=decode_knowledge_labels(row[9]),
-            tags=decode_knowledge_labels(row[10]),
-            analysis_provenance_json=str(row[11]) if row[11] is not None else None,
+            aliases=decode_knowledge_labels(row[8]),
+            identity_labels=decode_knowledge_labels(row[9]),
+            analysis_provenance_json=str(row[10]) if row[10] is not None else None,
             sources=_candidate_sources_in(connection, str(row[0])),
-            baseline_kind=str(row[12]),
-            baseline_id=str(row[13]),
-            baseline_content_markdown=str(row[14]),
-            reconciliation_mode=str(row[15]),
-            target_page_id=str(row[16]) if row[16] is not None else None,
-            working_draft_title=str(row[17]) if row[17] is not None else None,
-            working_draft_content_markdown=str(row[18]) if row[18] is not None else None,
-            working_draft_content_sha256=str(row[19]) if row[19] is not None else None,
-            working_draft_updated_at=str(row[20]) if row[20] is not None else None,
-            decision=str(row[21]),
-            staged_content_markdown=str(row[22]) if row[22] is not None else None,
+            baseline_kind=str(row[11]),
+            baseline_id=str(row[12]),
+            baseline_content_markdown=str(row[13]),
+            reconciliation_mode=str(row[14]),
+            target_page_id=str(row[15]) if row[15] is not None else None,
+            working_draft_title=str(row[16]) if row[16] is not None else None,
+            working_draft_content_markdown=str(row[17]) if row[17] is not None else None,
+            working_draft_content_sha256=str(row[18]) if row[18] is not None else None,
+            working_draft_updated_at=str(row[19]) if row[19] is not None else None,
+            decision=str(row[20]),
+            staged_content_markdown=str(row[21]) if row[21] is not None else None,
         )
         if candidate.decision not in _DECISIONS:
             raise DesktopImportError(
                 "knowledge_reconciliation_stage_invalid",
                 "A staged knowledge conflict has an invalid decision.",
             )
-        if (
-            not candidate.document_available
-            and not candidate_has_durable_adoption_origin_in(
-                connection, candidate.candidate_id
-            )
+        if not candidate.document_available and not candidate_has_durable_adoption_origin_in(
+            connection, candidate.candidate_id
         ):
             raise DesktopImportError(
                 "knowledge_reconciliation_candidate_unavailable",
@@ -724,9 +718,8 @@ def _generation_change(candidate: _StagedCandidate) -> KnowledgeGenerationChange
         normalized_title=candidate.normalized_title,
         content_markdown=candidate.content_markdown,
         content_sha256=candidate.content_sha256,
-        entity_subtype=candidate.entity_subtype,
         aliases=candidate.aliases,
-        tags=candidate.tags,
+        identity_labels=candidate.identity_labels,
         sources=candidate.sources,
         analysis_provenance_json=candidate.analysis_provenance_json,
     )

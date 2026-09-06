@@ -14,7 +14,7 @@ KNOWLEDGE_SOURCE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         locator_json TEXT NOT NULL,
         excerpt TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        PRIMARY KEY(page_id, source_id)
+        PRIMARY KEY(page_id, source_id, claim_text)
     )
     """,
     """
@@ -34,7 +34,7 @@ KNOWLEDGE_SOURCE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         locator_json TEXT NOT NULL,
         excerpt TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        PRIMARY KEY(revision_id, source_id)
+        PRIMARY KEY(revision_id, source_id, claim_text)
     )
     """,
     """

@@ -32,10 +32,8 @@ from openkb.desktop_knowledge_analysis_requests import (
     CURRENT_KNOWLEDGE_ANALYSIS_PIPELINE_OPERATIONS,
 )
 from openkb.desktop_knowledge_analysis_reuse import (
-    ReusableKnowledgeAnalysis,
     analysis_evidence_for_document_in,
     canonical_analysis_document_id_in,
-    canonical_analysis_evidence_map_in,
     latest_knowledge_analysis_checkpoint_in,
     persisted_analysis_prompt_digest_in,
 )
@@ -51,7 +49,6 @@ from openkb.desktop_knowledge_reanalysis_recovery import (
     recover_interrupted_knowledge_reanalysis,
 )
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
-from openkb.desktop_missing_sources import record_missing_source_candidates_in
 from openkb.desktop_model_analysis_gate import (
     DesktopAnalysisCapabilityGate,
     DesktopImportAnalysisExecution,
@@ -622,24 +619,6 @@ class DesktopKnowledgeReanalysisService:
                         "The document became unavailable before Reanalysis completed.",
                     )
                 initial_generation = current_generation_id_in(connection)
-                if not analysis.corpus_ready:
-                    reusable = ReusableKnowledgeAnalysis(analysis, provenance_json, evidence)
-                    evidence_map = canonical_analysis_evidence_map_in(
-                        connection, document_id, reusable
-                    )
-                    changes = analysis.incoming_changes(
-                        evidence_map, analysis_provenance_json=provenance_json
-                    )
-                    self._reconciliation.record_analysis_changes_in(
-                        connection, document_id, changes
-                    )
-                    record_missing_source_candidates_in(
-                        connection,
-                        document_id=canonical_analysis_document_id_in(connection, document_id),
-                        claims=analysis.missing_source_claims(evidence_map),
-                        evidence=evidence,
-                        analysis_provenance_json=provenance_json,
-                    )
                 now = timestamp()
                 cursor = connection.execute(
                     """
@@ -654,22 +633,21 @@ class DesktopKnowledgeReanalysisService:
                 reanalysis_store.require_execution_update(cursor)
                 run_id = reanalysis_store.run_id_for_job_in(connection, job_id)
                 reanalysis_store.refresh_run_in(connection, run_id, now)
-                if analysis.corpus_ready:
-                    refined_generation = activate_completed_corpus_reanalysis_in(
-                        connection,
-                        run_id=run_id,
-                        now=now,
-                    )
-                    refine_corpus = refined_generation is not None
-                    if refine_corpus:
-                        graph_document_ids = tuple(
-                            str(row[0])
-                            for row in connection.execute(
-                                "SELECT document_id FROM knowledge_reanalysis_jobs "
-                                "WHERE run_id = ? ORDER BY created_at, rowid",
-                                (run_id,),
-                            )
+                refined_generation = activate_completed_corpus_reanalysis_in(
+                    connection,
+                    run_id=run_id,
+                    now=now,
+                )
+                refine_corpus = refined_generation is not None
+                if refine_corpus:
+                    graph_document_ids = tuple(
+                        str(row[0])
+                        for row in connection.execute(
+                            "SELECT document_id FROM knowledge_reanalysis_jobs "
+                            "WHERE run_id = ? ORDER BY created_at, rowid",
+                            (run_id,),
                         )
+                    )
                 if current_generation_id_in(connection) != initial_generation:
                     queue_catalog_rebuild_in(connection, "successful_reanalysis")
                     staged_projection = stage_okf_projection_in(connection, self._kb_dir)
@@ -696,7 +674,7 @@ class DesktopKnowledgeReanalysisService:
                     retry_scope=retry_scope,
                 )
             except Exception:
-                logger.exception("Could not refine Reanalysis Entity Dossiers.")
+                logger.exception("Could not refine Reanalysis Knowledge Pages.")
         graph_requeued = requeue_reanalysis_graphs(self._kb_dir, graph_document_ids, gateway)
         start_catalog_rebuilds(self._kb_dir)
         return graph_requeued

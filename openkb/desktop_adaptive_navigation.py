@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import sqlite3
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -43,7 +42,12 @@ from openkb.desktop_navigation_validation import (
     require_exact_object_fields,
     validated_navigation_actions,
 )
-from openkb.desktop_retrieval_trace import DesktopAnswerCoverageTrace
+from openkb.desktop_retrieval_trace import (
+    DesktopFacetCoverageTrace,
+    DesktopQuestionFacetTrace,
+    DesktopRetrievalTrace,
+)
+from openkb.desktop_semantic_structure_contracts import FACET_COVERAGE_VALUES
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
     run_structured_output,
@@ -51,7 +55,7 @@ from openkb.desktop_structured_output import (
 
 logger = logging.getLogger(__name__)
 
-NAVIGATION_STEP_SCHEMA_VERSION = "openkb.knowledge-navigation-step.v1"
+NAVIGATION_STEP_SCHEMA_VERSION = "openkb.knowledge-navigation-step.v2"
 NAVIGATION_MAX_ROUNDS = 3
 NAVIGATION_MAX_MODEL_CALLS = 8
 NAVIGATION_MAX_LOGICAL_READS = 24
@@ -63,50 +67,6 @@ NAVIGATION_MAX_BATCH_KNOWLEDGE_READS = 8
 NAVIGATION_MAX_BATCH_SOURCE_READS = 4
 NAVIGATION_MAX_ADVERTISED_ROUTES = 24
 
-_COVERAGE_STATES = frozenset({"covered", "partial", "missing", "not_applicable"})
-_ANSWER_KINDS = frozenset(
-    {"factual_lookup", "how_to", "comparison", "troubleshooting", "explanation"}
-)
-_HOW_TO = re.compile(
-    r"\b(how\s+to|steps?|install|deploy|configure|configuration|set\s*up|build|migrate)\b"
-    r"|如何|怎么|怎样|步骤|流程|安装|部署|配置|搭建|迁移",
-    re.IGNORECASE,
-)
-_COMPARISON = re.compile(
-    r"\b(compare|comparison|difference|versus|vs\.?|both)\b|比较|对比|区别|差异|两者",
-    re.IGNORECASE,
-)
-_TROUBLESHOOTING = re.compile(
-    r"\b(troubleshoot|diagnose|debug|failure|failed|error|repair|recover|fix)\b"
-    r"|排查|诊断|故障|失败|报错|修复|恢复",
-    re.IGNORECASE,
-)
-_EXPLANATION = re.compile(r"\b(why|explain|relationship|works?)\b|为什么|原理|解释|关系")
-_QUESTION_FORM = re.compile(
-    r"\b(?:what|who|when|where|which|why|how)\b|什么|谁|何时|哪里|哪个|为什么|如何|怎么|怎样",
-    re.IGNORECASE,
-)
-_LOOKUP_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]*|[\u4e00-\u9fff]{2,}")
-_LOOKUP_STOP_WORDS = frozenset(
-    {
-        "a",
-        "an",
-        "are",
-        "did",
-        "do",
-        "does",
-        "for",
-        "from",
-        "in",
-        "is",
-        "of",
-        "the",
-        "to",
-        "was",
-        "were",
-    }
-)
-
 
 class _NavigationModelBudgetExhausted(Exception):
     """The structured decision requested a physical call beyond its envelope."""
@@ -114,27 +74,21 @@ class _NavigationModelBudgetExhausted(Exception):
 
 @dataclass(frozen=True)
 class NavigationObjective:
-    """Intent and answer scope kept separate from lexical retrieval terms."""
+    """The immutable model-derived Question Facet Plan for one session."""
 
-    answer_kind: str
-    subject: str
-    requested_scope: str
-    named_entities: tuple[str, ...]
-    concepts: tuple[str, ...]
-    user_actions: tuple[str, ...]
-    constraints: tuple[str, ...]
-    required_aspects: tuple[str, ...]
+    semantic_structure_state: str
+    goal: str
+    facets: tuple[DesktopQuestionFacetTrace, ...]
+
+    @property
+    def required_facet_ids(self) -> frozenset[str]:
+        return frozenset(facet.facet_id for facet in self.facets if facet.importance == "required")
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "answer_kind": self.answer_kind,
-            "subject": self.subject,
-            "requested_scope": self.requested_scope,
-            "named_entities": list(self.named_entities),
-            "concepts": list(self.concepts),
-            "user_actions": list(self.user_actions),
-            "constraints": list(self.constraints),
-            "required_aspects": list(self.required_aspects),
+            "semantic_structure_state": self.semantic_structure_state,
+            "goal": self.goal,
+            "facets": [facet.as_dict() for facet in self.facets],
         }
 
 
@@ -142,8 +96,7 @@ class NavigationObjective:
 class NavigationDecision:
     """Validated observation, coverage and next action for one round."""
 
-    objective: NavigationObjective
-    coverage: tuple[DesktopAnswerCoverageTrace, ...]
+    coverage: tuple[DesktopFacetCoverageTrace, ...]
     actions: tuple[NavigationAction, ...]
     decision: str
 
@@ -178,43 +131,44 @@ class NavigationBudget:
         }
 
 
-def initial_navigation_objective(question: str, plan: DesktopRetrievalPlan) -> NavigationObjective:
-    """Create only the objective fields that deterministic code can establish safely."""
-    answer_kind = answer_kind_for_question(question)
-    terms = _unique(plan.terms)
+def initial_navigation_objective(
+    question: str,
+    plan: DesktopRetrievalPlan,
+    trace: DesktopRetrievalTrace | None = None,
+) -> NavigationObjective:
+    """Use only the accepted immutable Query Planning semantics."""
+    del question, plan
+    if trace is None or trace.semantic_structure_state != "known":
+        return NavigationObjective("unknown", "", ())
     return NavigationObjective(
-        answer_kind=answer_kind,
-        subject=" ".join(question.split()),
-        requested_scope=" ".join(question.split()),
-        named_entities=terms[:8],
-        concepts=terms[8:12],
-        user_actions=(),
-        constraints=(),
-        required_aspects=_required_aspects(answer_kind),
+        semantic_structure_state="known",
+        goal=trace.question_goal,
+        facets=trace.question_facets,
     )
 
 
-def navigation_requires_model(objective: NavigationObjective, pack: DesktopEvidencePack) -> bool:
-    """Let a supported simple fact finish from the deterministic seed."""
-    return not _simple_lookup_evidence_ids(objective, pack)
+def navigation_requires_model(
+    objective: NavigationObjective,
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
+) -> bool:
+    """Only a missing or partial required model-derived facet authorizes expansion."""
+    return objective.semantic_structure_state == "known" and any(
+        item.facet_id in objective.required_facet_ids and item.state in {"missing", "partial"}
+        for item in coverage
+    )
 
 
-def deterministic_seed_coverage(
+def seed_facet_coverage(
     objective: NavigationObjective, pack: DesktopEvidencePack
-) -> tuple[DesktopAnswerCoverageTrace, ...]:
-    """Record only the one coverage conclusion deterministic retrieval can prove."""
-    if evidence_ids := _simple_lookup_evidence_ids(objective, pack):
-        return tuple(
-            DesktopAnswerCoverageTrace(
-                aspect=aspect,
-                status="covered" if aspect == "requested_fact" else "not_applicable",
-                evidence_ids=evidence_ids if aspect == "requested_fact" else (),
-            )
-            for aspect in objective.required_aspects
-        )
+) -> tuple[DesktopFacetCoverageTrace, ...]:
+    """Retain Query Planning coverage only while its Evidence remains in the seed pack."""
+    if objective.semantic_structure_state != "known":
+        return ()
+    available = frozenset(item.evidence_id for item in pack.evidence)
+    by_id = {item.facet_id: item for item in pack.retrieval_trace.facet_coverage}
     return tuple(
-        DesktopAnswerCoverageTrace(aspect=aspect, status="missing")
-        for aspect in objective.required_aspects
+        _bounded_seed_coverage(facet.facet_id, by_id.get(facet.facet_id), available)
+        for facet in objective.facets
     )
 
 
@@ -264,7 +218,7 @@ def run_navigation_step(
     snapshot_id: str,
     objective: NavigationObjective,
     pack: DesktopEvidencePack,
-    current_coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    current_coverage: tuple[DesktopFacetCoverageTrace, ...],
     visited_action_ids: frozenset[str],
     budget: NavigationBudget,
     round_number: int,
@@ -437,16 +391,32 @@ def run_navigation_step(
         )
 
 
-def coverage_complete(coverage: tuple[DesktopAnswerCoverageTrace, ...]) -> bool:
-    return bool(coverage) and all(item.status in {"covered", "not_applicable"} for item in coverage)
+def coverage_complete(
+    objective: NavigationObjective,
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
+) -> bool:
+    states = {
+        item.facet_id: item.state
+        for item in coverage
+        if item.facet_id in objective.required_facet_ids
+    }
+    return bool(objective.required_facet_ids) and all(
+        states.get(facet_id) == "covered" for facet_id in objective.required_facet_ids
+    )
 
 
-def coverage_gate_state(coverage: tuple[DesktopAnswerCoverageTrace, ...]) -> str:
-    if not coverage:
-        return "not_applicable"
-    if coverage_complete(coverage):
+def coverage_gate_state(
+    objective: NavigationObjective,
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
+) -> str:
+    if objective.semantic_structure_state != "known":
+        return "unknown"
+    required = tuple(item for item in coverage if item.facet_id in objective.required_facet_ids)
+    if not required:
         return "covered"
-    if any(item.status in {"covered", "partial"} for item in coverage):
+    if coverage_complete(objective, coverage):
+        return "covered"
+    if any(item.state in {"covered", "partial"} for item in required):
         return "partial"
     return "uncovered"
 
@@ -462,7 +432,7 @@ def _navigation_prompt(
     objective: NavigationObjective,
     pack: DesktopEvidencePack,
     available_routes: tuple[DesktopKnowledgeRouteOption, ...],
-    current_coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    current_coverage: tuple[DesktopFacetCoverageTrace, ...],
     visited_action_ids: frozenset[str],
     budget: NavigationBudget,
     round_number: int,
@@ -574,15 +544,14 @@ def _navigation_decision(
     payload = json.loads(content)
     require_exact_object_fields(
         payload,
-        {"schema_version", "snapshot_id", "objective", "coverage", "actions", "decision"},
+        {"schema_version", "snapshot_id", "coverage", "actions", "decision"},
         context="Navigation decision",
     )
     if payload["schema_version"] != NAVIGATION_STEP_SCHEMA_VERSION:
         raise ValueError("Navigation schema version is invalid.")
     if payload["snapshot_id"] != snapshot_id:
         raise ValueError("Navigation Snapshot is stale.")
-    objective = _objective(payload["objective"], seed_objective)
-    coverage = _coverage(payload["coverage"], objective, known_evidence_ids)
+    coverage = _coverage(payload["coverage"], seed_objective, known_evidence_ids)
     actions = validated_navigation_actions(
         payload["actions"],
         visited_action_ids=visited_action_ids,
@@ -591,6 +560,7 @@ def _navigation_decision(
         known_evidence_ids=known_evidence_ids,
         maximum_actions=min(3, budget.search_actions),
         coverage=coverage,
+        required_facet_ids=seed_objective.required_facet_ids,
     )
     decision = payload["decision"]
     if decision not in {"continue", "stop"}:
@@ -599,145 +569,64 @@ def _navigation_decision(
         decision = "stop"
     if decision == "stop" and actions:
         raise ValueError("A stop decision cannot request more actions.")
-    if coverage_complete(coverage) and decision != "stop":
+    if coverage_complete(seed_objective, coverage) and decision != "stop":
         raise ValueError("Covered navigation must stop.")
-    return NavigationDecision(objective, coverage, actions, decision)
-
-
-def _objective(value: object, seed: NavigationObjective) -> NavigationObjective:
-    require_exact_object_fields(
-        value,
-        {
-            "answer_kind",
-            "subject",
-            "requested_scope",
-            "named_entities",
-            "concepts",
-            "user_actions",
-            "constraints",
-            "required_aspects",
-        },
-        context="Navigation objective",
-    )
-    assert isinstance(value, dict)
-    answer_kind = bounded_string(value["answer_kind"], 40)
-    if answer_kind not in _ANSWER_KINDS or answer_kind != seed.answer_kind:
-        raise ValueError("Navigation answer kind cannot drift.")
-    required_aspects = bounded_string_array(value["required_aspects"], maximum=12, item_limit=80)
-    if not set(seed.required_aspects) <= set(required_aspects):
-        raise ValueError("Navigation removed a code-owned required aspect.")
-    return NavigationObjective(
-        answer_kind=answer_kind,
-        subject=bounded_string(value["subject"], 240),
-        requested_scope=bounded_string(value["requested_scope"], 400),
-        named_entities=bounded_string_array(value["named_entities"], maximum=12, item_limit=120),
-        concepts=bounded_string_array(value["concepts"], maximum=12, item_limit=120),
-        user_actions=bounded_string_array(value["user_actions"], maximum=12, item_limit=120),
-        constraints=bounded_string_array(value["constraints"], maximum=12, item_limit=120),
-        required_aspects=required_aspects,
-    )
+    return NavigationDecision(coverage, actions, decision)
 
 
 def _coverage(
     value: object,
     objective: NavigationObjective,
     known_evidence_ids: frozenset[str],
-) -> tuple[DesktopAnswerCoverageTrace, ...]:
-    if not isinstance(value, list) or len(value) != len(objective.required_aspects):
-        raise ValueError("Navigation coverage must describe every required aspect exactly once.")
-    by_aspect: dict[str, DesktopAnswerCoverageTrace] = {}
+) -> tuple[DesktopFacetCoverageTrace, ...]:
+    if not isinstance(value, list) or len(value) != len(objective.facets):
+        raise ValueError("Navigation coverage must describe every facet exactly once.")
+    by_facet: dict[str, DesktopFacetCoverageTrace] = {}
+    known_facet_ids = frozenset(facet.facet_id for facet in objective.facets)
     for item in value:
         require_exact_object_fields(
             item,
-            {"aspect", "status", "evidence_ids"},
+            {"facet_id", "state", "evidence_ids"},
             context="Navigation coverage",
         )
         assert isinstance(item, dict)
-        aspect = bounded_string(item["aspect"], 80)
-        status = item["status"]
-        if aspect in by_aspect or aspect not in objective.required_aspects:
-            raise ValueError("Navigation coverage aspect is unknown or duplicated.")
-        if status not in _COVERAGE_STATES:
+        facet_id = bounded_string(item["facet_id"], 160)
+        state = item["state"]
+        if facet_id in by_facet or facet_id not in known_facet_ids:
+            raise ValueError("Navigation coverage facet is unknown or duplicated.")
+        if state not in FACET_COVERAGE_VALUES:
             raise ValueError("Navigation coverage state is invalid.")
         proposed_evidence_ids = bounded_string_array(
             item["evidence_ids"], maximum=16, item_limit=160
         )
-        evidence_ids = tuple(
-            evidence_id
-            for evidence_id in proposed_evidence_ids
-            if evidence_id in known_evidence_ids
-        )
-        if status in {"covered", "partial"} and not evidence_ids:
-            status = "missing"
-        if status in {"missing", "not_applicable"} and evidence_ids:
-            raise ValueError("Missing or inapplicable coverage cannot cite Evidence.")
-        by_aspect[aspect] = DesktopAnswerCoverageTrace(aspect, str(status), evidence_ids)
-    return tuple(by_aspect[aspect] for aspect in objective.required_aspects)
+        if any(evidence_id not in known_evidence_ids for evidence_id in proposed_evidence_ids):
+            raise ValueError("Navigation coverage cites unknown Evidence.")
+        if state in {"covered", "partial"} and not proposed_evidence_ids:
+            state = "missing"
+        if state == "missing" and proposed_evidence_ids:
+            raise ValueError("Missing coverage cannot cite Evidence.")
+        by_facet[facet_id] = DesktopFacetCoverageTrace(facet_id, str(state), proposed_evidence_ids)
+    return tuple(by_facet[facet.facet_id] for facet in objective.facets)
 
 
-def _simple_lookup_evidence_ids(
-    objective: NavigationObjective, pack: DesktopEvidencePack
-) -> tuple[str, ...]:
-    if objective.answer_kind != "factual_lookup" or not pack.evidence:
-        return ()
-    subject = objective.subject.strip()
-    if len(subject) > 160 or objective.constraints:
-        return ()
-    question_terms = tuple(
-        dict.fromkeys(
-            token.casefold()
-            for token in _LOOKUP_TOKEN.findall(subject)
-            if token.casefold() not in _LOOKUP_STOP_WORDS
-            and _QUESTION_FORM.fullmatch(token) is None
-        )
+def _bounded_seed_coverage(
+    facet_id: str,
+    coverage: DesktopFacetCoverageTrace | None,
+    available_evidence_ids: frozenset[str],
+) -> DesktopFacetCoverageTrace:
+    if coverage is None:
+        return DesktopFacetCoverageTrace(facet_id, "missing")
+    evidence_ids = tuple(
+        evidence_id
+        for evidence_id in coverage.evidence_ids
+        if evidence_id in available_evidence_ids
     )
-    if not question_terms:
-        return ()
-    required_matches = 1 if len(question_terms) == 1 else max(2, (len(question_terms) * 3 + 3) // 4)
-    return tuple(
-        item.evidence_id
-        for item in pack.evidence
-        if sum(
-            term in f"{item.document_name} {item.section} {item.excerpt}".casefold()
-            for term in question_terms
-        )
-        >= required_matches
-    )
-
-
-def answer_kind_for_question(question: str) -> str:
-    """Classify generic answer shape without interpreting subject-matter vocabulary."""
-    if _HOW_TO.search(question):
-        return "how_to"
-    if _TROUBLESHOOTING.search(question):
-        return "troubleshooting"
-    if _COMPARISON.search(question):
-        return "comparison"
-    if _EXPLANATION.search(question):
-        return "explanation"
-    return "factual_lookup"
-
-
-def _required_aspects(answer_kind: str) -> tuple[str, ...]:
-    return {
-        "how_to": (
-            "prerequisites",
-            "ordered_actions",
-            "commands_or_configuration",
-            "validation",
-            "safety_warnings",
-        ),
-        "comparison": ("subjects", "comparison_dimensions", "differences", "scope"),
-        "troubleshooting": (
-            "symptoms",
-            "possible_causes",
-            "diagnostics",
-            "remedies",
-            "verification",
-        ),
-        "explanation": ("subject", "mechanism", "scope"),
-        "factual_lookup": ("requested_fact", "scope"),
-    }[answer_kind]
+    state = coverage.state
+    if state in {"covered", "partial"} and not evidence_ids:
+        state = "missing"
+    elif state == "covered" and len(evidence_ids) < len(coverage.evidence_ids):
+        state = "partial"
+    return DesktopFacetCoverageTrace(facet_id, state, evidence_ids)
 
 
 def _rows(connection: sqlite3.Connection, statement: str) -> tuple[tuple[object, ...], ...]:

@@ -1,4 +1,4 @@
-"""Additive schema for immutable document Candidate Registry Generations."""
+"""Current-epoch schema for immutable document Candidate Registry Generations."""
 
 CANDIDATE_REGISTRY_MIGRATION_STATEMENTS: tuple[str, ...] = (
     """
@@ -12,9 +12,7 @@ CANDIDATE_REGISTRY_MIGRATION_STATEMENTS: tuple[str, ...] = (
         candidate_count INTEGER NOT NULL CHECK(candidate_count >= 0),
         admitted_count INTEGER NOT NULL CHECK(admitted_count >= 0),
         schema_version TEXT NOT NULL,
-        ontology_version TEXT NOT NULL,
         normalizer_version TEXT NOT NULL,
-        admission_policy_version TEXT NOT NULL,
         created_at TEXT NOT NULL,
         CHECK(admitted_count <= candidate_count),
         UNIQUE(document_id, candidate_generation_id)
@@ -33,10 +31,9 @@ CANDIDATE_REGISTRY_MIGRATION_STATEMENTS: tuple[str, ...] = (
         kind TEXT NOT NULL CHECK(kind IN ('concept', 'entity', 'procedure')),
         title TEXT NOT NULL,
         normalized_title TEXT NOT NULL,
-        entity_subtype TEXT,
         aliases_json TEXT NOT NULL,
-        tags_json TEXT NOT NULL,
-        admission_state TEXT NOT NULL CHECK(admission_state IN ('admitted', 'rejected')),
+        identity_labels_json TEXT NOT NULL,
+        admission_state TEXT NOT NULL CHECK(admission_state IN ('admit', 'review', 'exclude')),
         admission_reason TEXT NOT NULL,
         PRIMARY KEY(candidate_generation_id, candidate_id),
         UNIQUE(candidate_generation_id, kind, normalized_title)
@@ -47,7 +44,6 @@ CANDIDATE_REGISTRY_MIGRATION_STATEMENTS: tuple[str, ...] = (
         candidate_generation_id TEXT NOT NULL,
         candidate_id TEXT NOT NULL,
         claim_ordinal INTEGER NOT NULL CHECK(claim_ordinal >= 0),
-        role TEXT NOT NULL,
         claim_text TEXT NOT NULL,
         applicability_json TEXT NOT NULL,
         PRIMARY KEY(candidate_generation_id, candidate_id, claim_ordinal),
@@ -83,18 +79,10 @@ CANDIDATE_REGISTRY_MIGRATION_STATEMENTS: tuple[str, ...] = (
     CREATE TABLE IF NOT EXISTS knowledge_candidate_registry_state (
         document_id TEXT PRIMARY KEY
             REFERENCES source_documents(document_id) ON DELETE CASCADE,
-        provenance_state TEXT NOT NULL CHECK(provenance_state IN (
-            'semantic', 'explicit_legacy', 'dependency_unavailable'
-        )),
         current_candidate_generation_id TEXT
             REFERENCES knowledge_candidate_generations(candidate_generation_id)
             ON DELETE RESTRICT,
-        updated_at TEXT NOT NULL,
-        CHECK(
-            (provenance_state = 'semantic' AND current_candidate_generation_id IS NOT NULL)
-            OR
-            (provenance_state != 'semantic' AND current_candidate_generation_id IS NULL)
-        )
+        updated_at TEXT NOT NULL
     )
     """,
     """
@@ -107,13 +95,13 @@ CANDIDATE_REGISTRY_MIGRATION_STATEMENTS: tuple[str, ...] = (
             'pending', 'identity_ready', 'qualified', 'active', 'failed',
             'cancelled', 'superseded'
         )),
-        dossier_state TEXT NOT NULL CHECK(dossier_state IN ('pending', 'ready', 'failed')),
+        page_state TEXT NOT NULL CHECK(page_state IN ('pending', 'ready', 'failed')),
         graph_state TEXT NOT NULL CHECK(graph_state IN (
             'pending', 'ready', 'completed_empty', 'degraded', 'unavailable_optional'
         )),
         manifest_digest TEXT NOT NULL,
         compatibility_digest TEXT NOT NULL,
-        qualification_policy_version TEXT NOT NULL,
+        integrity_policy_version TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )
@@ -152,17 +140,12 @@ CANDIDATE_REGISTRY_MIGRATION_STATEMENTS: tuple[str, ...] = (
     AFTER INSERT ON source_documents
     BEGIN
         INSERT INTO knowledge_candidate_registry_state (
-            document_id, provenance_state, current_candidate_generation_id, updated_at
+            document_id, current_candidate_generation_id, updated_at
         ) VALUES (
-            NEW.document_id, 'dependency_unavailable', NULL,
+            NEW.document_id, NULL,
             strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         );
     END
-    """,
-    """
-    ALTER TABLE knowledge_graph_extraction_tasks
-        ADD COLUMN input_provenance TEXT NOT NULL DEFAULT 'dependency_unavailable'
-        CHECK(input_provenance IN ('semantic', 'explicit_legacy', 'dependency_unavailable'))
     """,
     """
     ALTER TABLE knowledge_graph_extraction_tasks
@@ -183,8 +166,5 @@ CANDIDATE_REGISTRY_MIGRATION_STATEMENTS: tuple[str, ...] = (
     """,
     """
     ALTER TABLE knowledge_graph_attempts ADD COLUMN candidate_generation_digest TEXT
-    """,
-    """
-    ALTER TABLE knowledge_document_relationships ADD COLUMN candidate_generation_id TEXT
     """,
 )

@@ -95,8 +95,8 @@ class DesktopKnowledgeAdoptionService:
                 generated = connection.execute(
                     """
                     SELECT kind, title, normalized_title, content_markdown,
-                        content_sha256, source_document_id, entity_subtype,
-                        aliases_json, tags_json, analysis_provenance_json
+                        content_sha256, source_document_id, aliases_json,
+                        identity_labels_json, analysis_provenance_json
                     FROM knowledge_generation_items
                     WHERE generation_id = ? AND item_key = ?
                     """,
@@ -158,11 +158,7 @@ class DesktopKnowledgeAdoptionService:
                     if _match_confidence(match) >= _AUTO_RECONCILIATION_CONFIDENCE
                 )
                 selected = next(
-                    (
-                        match
-                        for match in matches
-                        if match["page_id"] == candidate_page_id
-                    ),
+                    (match for match in matches if match["page_id"] == candidate_page_id),
                     None,
                 )
                 if decision == "use_existing" and selected is None:
@@ -173,9 +169,7 @@ class DesktopKnowledgeAdoptionService:
                 elif decision is None and not exact and len(high_confidence) == 1:
                     target = high_confidence[0]
                 if target is not None:
-                    DesktopKnowledgeReconciliationService(
-                        self._kb_dir
-                    ).record_adoption_match_in(
+                    DesktopKnowledgeReconciliationService(self._kb_dir).record_adoption_match_in(
                         connection,
                         document_id=str(generated[5]),
                         change=_incoming_change_in(
@@ -300,13 +294,10 @@ def _incoming_change_in(
         normalized_title=str(generated[2]),
         content_markdown=str(generated[3]),
         content_sha256=str(generated[4]),
-        entity_subtype=str(generated[6]) if generated[6] is not None else None,
-        aliases=decode_knowledge_labels(generated[7]),
-        tags=decode_knowledge_labels(generated[8]),
+        aliases=decode_knowledge_labels(generated[6]),
+        identity_labels=decode_knowledge_labels(generated[7]),
         sources=sources,
-        analysis_provenance_json=(
-            str(generated[9]) if generated[9] is not None else None
-        ),
+        analysis_provenance_json=(str(generated[8]) if generated[8] is not None else None),
     )
 
 

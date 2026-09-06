@@ -6,7 +6,7 @@ import re
 
 from openkb.desktop_answer_types import DesktopEvidenceRef
 from openkb.desktop_navigation_validation import NavigationAction, unsafe_navigation_term
-from openkb.desktop_retrieval_trace import DesktopAnswerCoverageTrace
+from openkb.desktop_retrieval_trace import DesktopFacetCoverageTrace
 
 _REFERENCE_CONTEXT = re.compile(
     r"(?:详见|参见|参考|见|see(?:\s+also)?|refer\s+to)[^。；;\n]{0,180}",
@@ -17,7 +17,7 @@ _QUOTED_TITLE = re.compile(r"[“‘\"']([^”’\"']{2,80})[”’\"']")
 
 def unresolved_reference_actions(
     evidence: tuple[DesktopEvidenceRef, ...],
-    coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
     *,
     visited_action_ids: frozenset[str],
     maximum: int,
@@ -29,7 +29,7 @@ def unresolved_reference_actions(
     actions: list[NavigationAction] = []
     seen_titles: set[str] = set()
     for coverage_item in coverage:
-        if coverage_item.status not in {"missing", "partial"}:
+        if coverage_item.state not in {"missing", "partial"}:
             continue
         for evidence_id in coverage_item.evidence_ids:
             reference = by_id.get(evidence_id)
@@ -49,7 +49,7 @@ def unresolved_reference_actions(
                     continue
                 action = NavigationAction(
                     "search_routes",
-                    coverage_item.aspect,
+                    coverage_item.facet_id,
                     terms=(title,),
                 )
                 if action.identity in visited_action_ids:

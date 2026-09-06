@@ -213,7 +213,7 @@ def _generated_items_in(
         """
         SELECT state.current_generation_id, items.item_key, items.kind, items.title,
             items.normalized_title, items.content_markdown, items.source_document_id,
-            items.provenance_state, items.entity_subtype, items.aliases_json, items.tags_json,
+            items.provenance_state, items.aliases_json, items.identity_labels_json,
             items.analysis_provenance_json
         FROM knowledge_generation_state AS state
         JOIN knowledge_generation_items AS items
@@ -228,16 +228,15 @@ def _generated_items_in(
     for row in rows:
         generation_id, item_key, kind = int(row[0]), str(row[1]), str(row[2])
         node_id = f"generated:{item_key}"
-        aliases = decode_knowledge_labels(row[9])
-        tags = decode_knowledge_labels(row[10])
+        aliases = decode_knowledge_labels(row[8])
+        identity_labels = decode_knowledge_labels(row[9])
         metadata = {
             "generation_id": generation_id,
             "origin_document_id": str(row[6]),
             "provenance": str(row[7]),
-            "entity_subtype": str(row[8]) if row[8] is not None else None,
             "aliases": list(aliases),
-            "tags": list(tags),
-            "analysis_provenance": _json_object(row[11]),
+            "identity_labels": list(identity_labels),
+            "analysis_provenance": _json_object(row[10]),
         }
         values.append(
             _KnowledgeValue(
@@ -251,7 +250,7 @@ def _generated_items_in(
                     authority_id=item_key,
                     title=str(row[3]),
                     normalized_title=str(row[4]),
-                    search_text=_search_text(str(row[3]), kind, *aliases, *tags),
+                    search_text=_search_text(str(row[3]), kind, *aliases, *identity_labels),
                     lifecycle_state="stable",
                     availability=None,
                     metadata_json=_json(metadata),

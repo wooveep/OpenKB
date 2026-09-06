@@ -24,6 +24,7 @@ from openkb.desktop_knowledge_analysis_batches import (
     plan_knowledge_analysis_batches,
 )
 from openkb.desktop_knowledge_analysis_plan import (
+    KnowledgeAnalysisPlan,
     build_knowledge_analysis_plan,
     estimate_model_tokens,
     hierarchical_merge_topology,
@@ -141,9 +142,9 @@ def test_plan_is_committed_before_first_batch_model_call(tmp_path) -> None:
     assert plan["merge_topology"]
 
 
-def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_an_older_plan(tmp_path) -> None:
+def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_the_plan(tmp_path) -> None:
     kb_dir = tmp_path / "knowledge"
-    source = tmp_path / "legacy-prompt.txt"
+    source = tmp_path / "pinned-prompt.txt"
     source.write_text("Evidence analyzed under a persisted prompt contract.", encoding="utf-8")
     DesktopKnowledgeBaseRuntime().create(kb_dir)
 
@@ -158,7 +159,7 @@ def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_an_older_plan(tmp_
         importer.import_text(source)
     job_id = str(importer.list_import_jobs()["jobs"][0]["job"]["job_id"])
 
-    legacy_instructions = "Legacy v1 instructions pinned before the prompt changed."
+    pinned_instructions = "Pinned instructions captured before provider dispatch."
     database_path = kb_dir / ".openkb" / "state.sqlite3"
     with sqlite3.connect(database_path) as connection:
         (plan_json,) = connection.execute(
@@ -166,13 +167,8 @@ def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_an_older_plan(tmp_
         ).fetchone()
         plan = json.loads(plan_json)
         contracts = plan["prompt_contract_snapshot"]["contracts"]
-        contracts.pop("knowledge_fact_harvest")
-        contracts.pop("document_entity_inventory")
-        contracts.pop("entity_dossier_planning")
-        plan["prompt_contract_snapshot"]["primary_operation"] = "knowledge_analysis_batch"
-        snapshot = contracts["knowledge_analysis"]
-        snapshot["version"] = "openkb.prompt.knowledge_analysis.v1"
-        snapshot["instructions"] = legacy_instructions
+        snapshot = contracts["knowledge_fact_harvest"]
+        snapshot["instructions"] = pinned_instructions
         bundle = json.dumps(
             plan["prompt_contract_snapshot"],
             ensure_ascii=False,
@@ -182,6 +178,7 @@ def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_an_older_plan(tmp_
         digest = hashlib.sha256(bundle.encode("utf-8")).hexdigest()
         plan["prompt_contract_digest"] = digest
         plan.pop("plan_identity", None)
+        plan = KnowledgeAnalysisPlan.from_dict(plan).as_dict()
         connection.execute(
             "UPDATE knowledge_analysis_plans "
             "SET prompt_contract_digest = ?, plan_json = ? WHERE job_id = ?",
@@ -201,8 +198,8 @@ def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_an_older_plan(tmp_
                 "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                 "analysis_scope": "document",
                 "document_description": "Recovered with the pinned contract.",
-                "concepts": [],
-                "entities": [],
+                "document_summary": [],
+                "candidates": [],
             }
         )
 
@@ -213,8 +210,8 @@ def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_an_older_plan(tmp_
 
     assert len(recovered_requests) == 1
     request = recovered_requests[0]
-    assert request.prompt_contract_version == "openkb.prompt.knowledge_analysis.v1"
-    assert request.prompt_contract_snapshot["instructions"] == legacy_instructions
+    assert request.prompt_contract_version == "openkb.prompt.knowledge_fact_harvest.v1"
+    assert request.prompt_contract_snapshot["instructions"] == pinned_instructions
     with sqlite3.connect(database_path) as connection:
         (checkpoint_json,) = connection.execute(
             """
@@ -226,7 +223,7 @@ def test_recovery_uses_the_exact_prompt_snapshot_persisted_by_an_older_plan(tmp_
             (job_id,),
         ).fetchone()
     checkpoint = json.loads(checkpoint_json)
-    assert checkpoint["prompt_contract_snapshot"]["instructions"] == legacy_instructions
+    assert checkpoint["prompt_contract_snapshot"]["instructions"] == pinned_instructions
     assert (
         checkpoint["prompt_digest"]
         == hashlib.sha256(
@@ -525,22 +522,20 @@ def test_pinned_requests_use_each_operations_own_output_reserve() -> None:
         return int(pinned.generation_parameters["max_tokens"])
 
     assert ceiling("knowledge_fact_harvest") == 49_152
-    assert ceiling("document_entity_inventory") == 24_576
-    assert ceiling("entity_dossier_planning") == 12_288
+    assert ceiling("knowledge_page_planning") == 24_576
+    assert ceiling("query_planning") == 12_288
 
 
 def test_analysis_profile_identity_covers_every_structured_prompt_contract() -> None:
     operations = {
+        "query_planning",
+        "knowledge_page_planning",
         "knowledge_fact_harvest",
-        "document_entity_inventory",
-        "entity_dossier_planning",
         "knowledge_analysis",
         "knowledge_analysis_batch",
         "knowledge_analysis_merge",
         "page_tree_enrichment",
-        "knowledge_graph_extraction",
         "knowledge_relation_analysis",
-        "retrieval_plan",
         "page_tree_selection",
         "knowledge_navigation_step",
         "structured_output_repair",
@@ -591,27 +586,30 @@ def test_analysis_capability_identity_excludes_operation_prompt_contracts() -> N
 
 
 def test_exact_knowledge_is_deduplicated_before_description_merge() -> None:
-    def analysis(evidence_id: str, aliases: list[str], tags: list[str]):
+    def analysis(evidence_id: str, aliases: list[str], identity_labels: list[str]):
         return parse_knowledge_analysis(
             json.dumps(
                 {
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                     "analysis_scope": "batch",
                     "document_description": "Batch description.",
-                    "concepts": [
+                    "document_summary": [],
+                    "candidates": [
                         {
+                            "kind": "concept",
                             "title": " OpenKB ",
                             "aliases": aliases,
-                            "tags": tags,
+                            "identity_labels": identity_labels,
+                            "admission": "admit",
                             "claims": [
                                 {
                                     "text": "Evidence-bound analysis.",
                                     "source_evidence_ids": [evidence_id],
+                                    "applicability": [],
                                 }
                             ],
                         }
                     ],
-                    "entities": [],
                 }
             ),
             expected_scope="batch",
@@ -626,32 +624,34 @@ def test_exact_knowledge_is_deduplicated_before_description_merge() -> None:
 
     assert len(merged.concepts) == 1
     assert merged.concepts[0].aliases == ("OKB", "Open KB")
-    assert merged.concepts[0].tags == ("knowledge", "local")
+    assert merged.concepts[0].identity_labels == ("knowledge", "local")
     assert merged.concepts[0].claims[0].source_evidence_ids == (
         "evidence-1",
         "evidence-2",
     )
 
 
-def test_deterministic_merge_uses_validator_identity_across_entity_subtypes() -> None:
-    def analysis(subtype: str, evidence_id: str, claim: str):
+def test_deterministic_merge_uses_identity_across_open_model_labels() -> None:
+    def analysis(identity_label: str, evidence_id: str, claim: str):
         return parse_knowledge_analysis(
             json.dumps(
                 {
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                     "analysis_scope": "batch",
                     "document_description": "Batch description.",
-                    "concepts": [],
-                    "entities": [
+                    "document_summary": [],
+                    "candidates": [
                         {
+                            "kind": "entity",
                             "title": "OpenKB",
-                            "subtype": subtype,
                             "aliases": [],
-                            "tags": [],
+                            "identity_labels": [identity_label],
+                            "admission": "admit",
                             "claims": [
                                 {
                                     "text": claim,
                                     "source_evidence_ids": [evidence_id],
+                                    "applicability": [],
                                 }
                             ],
                         }
@@ -669,7 +669,7 @@ def test_deterministic_merge_uses_validator_identity_across_entity_subtypes() ->
     )
 
     assert len(merged.entities) == 1
-    assert merged.entities[0].subtype == "product"
+    assert merged.entities[0].identity_labels == ("Product", "Software")
     assert tuple(claim.source_evidence_ids for claim in merged.entities[0].claims) == (
         ("evidence-1",),
         ("evidence-2",),
@@ -699,8 +699,8 @@ def test_completed_hierarchical_merge_nodes_are_reused_on_recovery(tmp_path) -> 
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                     "analysis_scope": "batch",
                     "document_description": f"Batch {payload['batch_ordinal']}.",
-                    "concepts": [],
-                    "entities": [],
+                    "document_summary": [],
+                    "candidates": [],
                 }
             )
         if request.operation == "knowledge_analysis_merge":
@@ -776,8 +776,8 @@ def test_recovery_uses_the_analysis_model_pinned_before_settings_changed(
                         "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                         "analysis_scope": "batch",
                         "document_description": "Pinned batch.",
-                        "concepts": [],
-                        "entities": [],
+                        "document_summary": [],
+                        "candidates": [],
                     }
                 )
             if request.operation == "knowledge_analysis_merge":

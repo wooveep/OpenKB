@@ -25,7 +25,7 @@ def semantic_graph_evidence_ids_in(
     generation_id: int | None = None,
     use_current_generation: bool = True,
 ) -> tuple[str, ...] | None:
-    """Return ``None`` when no semantic identity root matched, enabling legacy fallback."""
+    """Traverse model-labelled assertions as bidirectional discovery adjacency."""
     if use_current_generation:
         generation = fetch_rows(
             "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1",
@@ -62,9 +62,9 @@ def semantic_graph_evidence_ids_in(
         return None
     root_rows = fetch_rows(
         f"""
-        SELECT items.item_key
+        SELECT items.identity_id
         FROM knowledge_generation_items AS items
-        WHERE items.generation_id = ? {item_scope}
+        WHERE items.generation_id = ? AND items.identity_id IS NOT NULL {item_scope}
           AND ({" OR ".join(conditions)})
         ORDER BY items.kind, items.normalized_title, items.item_key
         LIMIT ?
@@ -74,14 +74,14 @@ def semantic_graph_evidence_ids_in(
     if not root_rows:
         return None
 
-    item_ids = [str(row[0]) for row in root_rows]
-    seen = set(item_ids)
-    frontier = list(item_ids)
+    identity_ids = [str(row[0]) for row in root_rows]
+    seen = set(identity_ids)
+    frontier = list(identity_ids)
     evidence_ids: list[str] = []
-    _append_item_evidence(
+    _append_identity_evidence(
         fetch_rows,
         generation_id,
-        item_ids,
+        identity_ids,
         evidence_ids,
         allowed_document_ids=allowed_document_ids,
     )
@@ -94,22 +94,18 @@ def semantic_graph_evidence_ids_in(
         )
         edge_rows = fetch_rows(
             f"""
-            SELECT relationships.source_item_key, relationships.target_item_key,
-                sources.binding_role, sources.evidence_id
-            FROM knowledge_generation_relationships AS relationships
-            JOIN knowledge_generation_relationship_sources AS sources
-              ON sources.generation_id = relationships.generation_id
-             AND sources.source_item_key = relationships.source_item_key
-             AND sources.target_item_key = relationships.target_item_key
-             AND sources.relation_kind = relationships.relation_kind
-            WHERE relationships.generation_id = ?
-              AND (relationships.source_item_key IN ({placeholders})
-                   OR relationships.target_item_key IN ({placeholders}))
+            SELECT assertions.source_identity_id, assertions.target_identity_id,
+                sources.evidence_id
+            FROM knowledge_generation_relation_assertions AS assertions
+            JOIN knowledge_generation_relation_sources AS sources
+              ON sources.generation_id = assertions.generation_id
+             AND sources.assertion_id = assertions.assertion_id
+            WHERE assertions.generation_id = ?
+              AND (assertions.source_identity_id IN ({placeholders})
+                   OR assertions.target_identity_id IN ({placeholders}))
               {evidence_scope}
-            ORDER BY CASE sources.binding_role WHEN 'assertion' THEN 0
-                     WHEN 'target' THEN 1 ELSE 2 END,
-                relationships.source_item_key, relationships.target_item_key,
-                relationships.relation_kind, sources.evidence_id
+            ORDER BY assertions.source_identity_id, assertions.target_identity_id,
+                assertions.normalized_label, sources.evidence_id
             LIMIT ?
             """,
             (
@@ -121,24 +117,24 @@ def semantic_graph_evidence_ids_in(
             ),
         )
         next_items: list[str] = []
-        for source_item_key, target_item_key, _role, evidence_id in edge_rows:
+        for source_identity_id, target_identity_id, evidence_id in edge_rows:
             _append_available_evidence(
                 fetch_rows,
                 str(evidence_id),
                 evidence_ids,
                 allowed_document_ids=allowed_document_ids,
             )
-            for item_key in (str(source_item_key), str(target_item_key)):
-                if item_key not in seen:
-                    seen.add(item_key)
-                    next_items.append(item_key)
+            for identity_id in (str(source_identity_id), str(target_identity_id)):
+                if identity_id not in seen:
+                    seen.add(identity_id)
+                    next_items.append(identity_id)
                     if len(seen) >= _MAX_ITEMS:
                         break
             if len(seen) >= _MAX_ITEMS:
                 break
         if not next_items:
             break
-        _append_item_evidence(
+        _append_identity_evidence(
             fetch_rows,
             generation_id,
             next_items,
@@ -149,27 +145,30 @@ def semantic_graph_evidence_ids_in(
     return tuple(evidence_ids[:_MAX_EVIDENCE])
 
 
-def _append_item_evidence(
+def _append_identity_evidence(
     fetch_rows: RowFetcher,
     generation_id: int,
-    item_ids: list[str],
+    identity_ids: list[str],
     evidence_ids: list[str],
     *,
     allowed_document_ids: frozenset[str] | None = None,
 ) -> None:
-    if not item_ids:
+    if not identity_ids:
         return
     evidence_scope, scope_parameters = _evidence_scope("sources.evidence_id", allowed_document_ids)
     rows = fetch_rows(
         f"""
         SELECT sources.evidence_id
-        FROM knowledge_generation_item_sources AS sources
-        WHERE sources.generation_id = ?
-          AND sources.item_key IN ({sqlite_placeholders(tuple(item_ids))})
+        FROM knowledge_generation_items AS items
+        JOIN knowledge_generation_item_sources AS sources
+          ON sources.generation_id = items.generation_id
+         AND sources.item_key = items.item_key
+        WHERE items.generation_id = ?
+          AND items.identity_id IN ({sqlite_placeholders(tuple(identity_ids))})
           {evidence_scope}
-        ORDER BY sources.item_key, sources.evidence_id
+        ORDER BY items.identity_id, sources.evidence_id
         """,
-        (generation_id, *item_ids, *scope_parameters),
+        (generation_id, *identity_ids, *scope_parameters),
     )
     for row in rows:
         _append_available_evidence(

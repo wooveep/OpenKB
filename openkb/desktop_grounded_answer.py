@@ -23,15 +23,6 @@ from openkb.desktop_answer_types import (
 from openkb.desktop_grounded_answer_outline import (
     citation_guarded_answer as _citation_guarded_answer,
 )
-from openkb.desktop_grounded_answer_outline import (
-    complete_repeated_evidence_occurrences as _complete_repeated_evidence_occurrences,
-)
-from openkb.desktop_grounded_answer_outline import (
-    evidence_occurrence_index as _evidence_occurrence_index,
-)
-from openkb.desktop_grounded_answer_outline import (
-    evidence_phase_index as _evidence_phase_index,
-)
 from openkb.desktop_model_execution_profile import estimate_model_tokens
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
@@ -47,7 +38,7 @@ from openkb.desktop_model_result_failure import (
 from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_retrieval import DesktopEvidenceRetriever
 from openkb.desktop_retrieval_trace import (
-    DesktopAnswerCoverageTrace,
+    DesktopFacetCoverageTrace,
     DesktopRetrievalTrace,
 )
 from openkb.desktop_structured_output import structured_output_repair_contract_digest
@@ -174,7 +165,7 @@ class DesktopGroundedAnswerService:
                 contracts=tuple(
                     contract
                     for operation in (
-                        "retrieval_plan",
+                        "query_planning",
                         "page_tree_selection",
                         "knowledge_navigation_step",
                     )
@@ -188,7 +179,7 @@ class DesktopGroundedAnswerService:
                 ),
             )
             operation_retry_scopes = {
-                "retrieval_plan": retry_scope,
+                "query_planning": retry_scope,
                 "page_tree_selection": retry_scope,
                 "knowledge_navigation_step": retry_scope,
             }
@@ -200,6 +191,7 @@ class DesktopGroundedAnswerService:
                     is_cancelled=is_cancelled,
                     on_model_event=on_model_event,
                     operation_retry_scopes=operation_retry_scopes,
+                    conversation_context=conversation_context,
                 ),
                 context_capacity_tokens=answer_budget.context_capacity_tokens,
                 output_reserve_tokens=answer_budget.provider_output_ceiling_tokens,
@@ -359,16 +351,16 @@ def prepare_grounded_evidence_pack(
         if item.source_evidence_ids and set(item.source_evidence_ids) <= sent_evidence_ids
     )
     sent_guidance, guidance_tokens = _guidance_for_prompt(evidence_bound_guidance, guidance_budget)
-    coverage_aspects = _coverage_after_grounding_budget(
-        pack.retrieval_trace.coverage_aspects,
+    facet_coverage = _coverage_after_grounding_budget(
+        pack.retrieval_trace.facet_coverage,
         sent_evidence_ids,
     )
     coverage_gate_state = (
-        _coverage_state(coverage_aspects)
-        if coverage_aspects
+        _coverage_state(pack.retrieval_trace, facet_coverage)
+        if facet_coverage
         else pack.retrieval_trace.coverage_gate_state
     )
-    if not coverage_aspects and pack.guidance and len(sent_guidance) < len(pack.guidance):
+    if not facet_coverage and pack.guidance and len(sent_guidance) < len(pack.guidance):
         coverage_gate_state = "partial" if sent_guidance else "uncovered"
     trace = replace(
         pack.retrieval_trace.with_canonical_evidence_ids(
@@ -379,7 +371,7 @@ def prepare_grounded_evidence_pack(
         evidence_input_tokens=evidence_tokens,
         guidance_input_tokens=guidance_tokens,
         coverage_gate_state=coverage_gate_state,
-        coverage_aspects=coverage_aspects,
+        facet_coverage=facet_coverage,
     )
     return DesktopEvidencePack(
         retrieval_plan=pack.retrieval_plan,
@@ -459,9 +451,8 @@ def generate_grounded_answer(
             is_cancelled=is_cancelled,
         )
         attempts = max(attempts, result.attempt_count)
-        answer_text = _complete_repeated_evidence_occurrences(
-            _citation_guarded_answer(result.content.strip(), evidence_count=len(pack.evidence)),
-            pack.evidence,
+        answer_text = _citation_guarded_answer(
+            result.content.strip(), evidence_count=len(pack.evidence)
         )
         if _is_cancelled(is_cancelled):
             return _cancelled_generation(model_calls=attempts, prompt=prompt)
@@ -554,32 +545,8 @@ def _answer_prompt(
         if blueprint
         else ""
     )
-    phase_index = (
-        _evidence_phase_index(evidence)
-        if retrieval_trace.navigation_answer_kind == "how_to"
-        else ""
-    )
-    phase_section = (
-        "Evidence Phase Index (source headings only; inspect and cite Original Evidence):\n"
-        f"{phase_index}\n\n"
-        if phase_index
-        else ""
-    )
-    occurrence_index = (
-        _evidence_occurrence_index(evidence)
-        if retrieval_trace.navigation_answer_kind == "how_to"
-        else ""
-    )
-    occurrence_section = (
-        "Repeated Evidence Occurrence Index (mandatory how-to checklist; each row is a "
-        "distinct source position; inspect and cite Original Evidence):\n"
-        f"{occurrence_index}\n\n"
-        if occurrence_index
-        else ""
-    )
     return (
         f"{history}Current question: {question}\n\n{guidance_section}{blueprint_section}"
-        f"{phase_section}{occurrence_section}"
         "Original Evidence is the only factual authority; cite it by number.\n"
         f"Evidence:\n{context}"
     )
@@ -589,16 +556,17 @@ def _answer_blueprint(
     trace: DesktopRetrievalTrace,
     evidence: tuple[DesktopEvidenceRef, ...],
 ) -> str:
-    if not trace.coverage_aspects:
+    if trace.semantic_structure_state != "known" or not trace.question_facets:
         return ""
     ordinals = {item.evidence_id: ordinal for ordinal, item in enumerate(evidence, start=1)}
-    lines = [
-        f"Answer kind: {trace.navigation_answer_kind or 'unspecified'}",
-    ]
-    for ordinal, item in enumerate(trace.coverage_aspects, start=1):
+    coverage = {item.facet_id: item for item in trace.facet_coverage}
+    lines = [f"Goal: {trace.question_goal}"]
+    for ordinal, facet in enumerate(trace.question_facets, start=1):
+        item = coverage.get(facet.facet_id)
+        state = item.state if item is not None else "missing"
         citations = [
             f"[{ordinals[evidence_id]}]"
-            for evidence_id in item.evidence_ids
+            for evidence_id in (item.evidence_ids if item is not None else ())
             if evidence_id in ordinals
         ]
         support = (
@@ -606,33 +574,41 @@ def _answer_blueprint(
             if citations
             else "navigation unconfirmed; inspect Original Evidence before declaring a gap"
         )
-        lines.append(f"{ordinal}. {item.aspect} — {item.status} — {support}")
+        lines.append(
+            f"{ordinal}. {facet.label} ({facet.importance}) — {state} — "
+            f"{facet.description} — {support}"
+        )
     return "\n".join(lines)
 
 
 def _coverage_after_grounding_budget(
-    coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
     evidence_ids: set[str],
-) -> tuple[DesktopAnswerCoverageTrace, ...]:
-    values: list[DesktopAnswerCoverageTrace] = []
+) -> tuple[DesktopFacetCoverageTrace, ...]:
+    values: list[DesktopFacetCoverageTrace] = []
     for item in coverage:
         retained = tuple(
             evidence_id for evidence_id in item.evidence_ids if evidence_id in evidence_ids
         )
-        status = item.status
-        if status in {"covered", "partial"}:
+        state = item.state
+        if state in {"covered", "partial"}:
             if not retained:
-                status = "missing"
+                state = "missing"
             elif len(retained) < len(item.evidence_ids):
-                status = "partial"
-        values.append(DesktopAnswerCoverageTrace(item.aspect, status, retained))
+                state = "partial"
+        values.append(DesktopFacetCoverageTrace(item.facet_id, state, retained))
     return tuple(values)
 
 
-def _coverage_state(coverage: tuple[DesktopAnswerCoverageTrace, ...]) -> str:
-    if coverage and all(item.status in {"covered", "not_applicable"} for item in coverage):
+def _coverage_state(
+    trace: DesktopRetrievalTrace,
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
+) -> str:
+    required = {facet.facet_id for facet in trace.question_facets if facet.importance == "required"}
+    states = {item.facet_id: item.state for item in coverage if item.facet_id in required}
+    if not required or all(states.get(facet_id) == "covered" for facet_id in required):
         return "covered"
-    if any(item.status in {"covered", "partial"} for item in coverage):
+    if any(state in {"covered", "partial"} for state in states.values()):
         return "partial"
     return "uncovered"
 

@@ -9,7 +9,7 @@ CORPUS_SYNTHESIS_TASK_MIGRATION_STATEMENTS: tuple[str, ...] = (
             'running', 'completed', 'failed', 'cancelled', 'superseded'
         )),
         phase TEXT NOT NULL CHECK(phase IN (
-            'dossier_planning', 'qualification', 'completed', 'failed'
+            'page_planning', 'qualification', 'completed', 'failed'
         )),
         provider TEXT NOT NULL,
         model TEXT NOT NULL,

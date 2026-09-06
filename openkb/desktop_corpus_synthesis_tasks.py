@@ -35,7 +35,7 @@ def claim_corpus_synthesis_task_in(
             execution_token, attempt_count, error_code, error_reason,
             created_at, updated_at, completed_at
         )
-        SELECT generation_id, 'running', 'dossier_planning', ?, ?, ?, ?,
+        SELECT generation_id, 'running', 'page_planning', ?, ?, ?, ?,
             0, NULL, NULL, ?, ?, NULL
         FROM knowledge_generation_manifests
         WHERE generation_id = ? AND lifecycle_state IN ('pending', 'identity_ready')

@@ -3,7 +3,7 @@
 export type DesktopKnowledgePageKind = "concept" | "entity" | "procedure"
 export type DesktopKnowledgePagePublicationState = "draft" | "unpublished_changes" | "published"
 export type DesktopKnowledgeLifecycleState = "draft" | "stable" | "deprecated"
-export type DesktopKnowledgeProvenanceState = "source_backed" | "structural" | "legacy_unmapped" | "unsourced" | "invalid"
+export type DesktopKnowledgeProvenanceState = "source_backed" | "structural" | "unsourced" | "invalid"
 export type DesktopKnowledgeVerificationState = "unverified" | "human_reviewed"
 export type DesktopKnowledgeVerificationReason =
   | "publish_required"
@@ -11,7 +11,6 @@ export type DesktopKnowledgeVerificationReason =
   | "not_verified"
   | "revision_changed"
   | "publication_gate_blocked"
-  | "legacy_unmapped_not_verifiable"
   | "deprecated_not_verifiable"
   | "lifecycle_changed"
 
@@ -135,9 +134,8 @@ export interface DesktopGeneratedKnowledgeItem {
   kind: DesktopKnowledgePageKind
   title: string
   contentMarkdown: string
-  entitySubtype: string | null
   aliases: string[]
-  tags: string[]
+  identityLabels: string[]
   createdAt: string
   provenanceState: DesktopKnowledgeProvenanceState
   analysisProvenance: Record<string, unknown>

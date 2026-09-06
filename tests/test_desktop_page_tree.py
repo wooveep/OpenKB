@@ -6,17 +6,12 @@ import json
 import sqlite3
 import threading
 
-import pytest
-
 from openkb import desktop_page_tree as page_tree_runtime
 from openkb import desktop_page_tree_store as page_tree_store
 from openkb import desktop_workspace
-from openkb.desktop_import import DesktopImportError, DesktopRecoveryOverride
 from openkb.desktop_import_artifacts import DocumentIRBlock, SourceImage, build_evidence
 from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
 from openkb.desktop_knowledge_analysis_batches import plan_knowledge_analysis_batches
-from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
@@ -52,7 +47,6 @@ def _drop_post_v37_schema(connection: sqlite3.Connection) -> None:
         "knowledge_graph_results",
         "knowledge_adoption_requests",
         "knowledge_origin_references",
-        "model_capability_compatibility_audit",
         "model_operation_contract_events",
         "model_operation_retry_permits",
         "model_operation_contract_states",
@@ -703,147 +697,6 @@ def test_tree_failure_keeps_document_available_and_persistent_rebuild_recovers(
         assert connection.execute("SELECT COUNT(*) FROM document_page_tree_current").fetchone() == (
             1,
         )
-
-
-def test_migration_backfills_stage_and_queues_available_legacy_document(tmp_path) -> None:
-    kb_dir = tmp_path / "knowledge"
-    source = tmp_path / "legacy.txt"
-    source.write_text("Legacy available document.", encoding="utf-8")
-    DesktopKnowledgeBaseRuntime().create(kb_dir)
-    imported = DesktopTextImportService(kb_dir).import_text(source)
-    database_path = kb_dir / ".openkb" / "state.sqlite3"
-    with sqlite3.connect(database_path) as connection:
-        _drop_catalog_schema(connection)
-        _drop_post_v37_schema(connection)
-        stage_id = connection.execute(
-            "SELECT stage_run_id FROM stage_runs WHERE job_id = ? "
-            "AND stage = 'deterministic_page_tree'",
-            (imported.job.job_id,),
-        ).fetchone()[0]
-        connection.execute("DELETE FROM stage_run_runtime WHERE stage_run_id = ?", (stage_id,))
-        connection.execute("DELETE FROM stage_runs WHERE stage_run_id = ?", (stage_id,))
-        for table in (
-            "document_page_tree_provider_current",
-            "document_page_tree_enrichment_current",
-            "document_page_tree_enrichment_summaries",
-            "document_page_tree_enrichment_tasks",
-            "document_page_tree_enrichment_generations",
-            "document_page_tree_current",
-            "document_page_tree_node_images",
-            "document_page_tree_node_evidence",
-            "document_page_tree_nodes",
-            "document_page_tree_rebuild_tasks",
-            "document_page_tree_generations",
-        ):
-            connection.execute(f"DROP TABLE {table}")
-        connection.execute("DROP INDEX import_jobs_document_completed_idx")
-        connection.execute("DROP TABLE grounded_answer_retrieval_traces")
-        connection.execute("DROP TABLE conversation_answer_retrieval_traces")
-        connection.execute(
-            "DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35, 36, 37)"
-        )
-
-    activation = DesktopKnowledgeBaseRuntime().open(kb_dir)
-
-    assert activation.knowledge_base.schema_version == LATEST_SCHEMA_VERSION
-    with sqlite3.connect(database_path) as connection:
-        assert connection.execute(
-            "SELECT status FROM stage_runs WHERE job_id = ? AND stage = 'deterministic_page_tree'",
-            (imported.job.job_id,),
-        ).fetchone() == ("skipped",)
-        assert connection.execute(
-            "SELECT status, reason FROM document_page_tree_rebuild_tasks WHERE document_id = ?",
-            (imported.document.document_id,),
-        ).fetchone() == ("pending", "schema_upgrade")
-        assert connection.execute(
-            "SELECT requested_provider_kind, requested_provider_version "
-            "FROM document_page_tree_rebuild_tasks WHERE document_id = ?",
-            (imported.document.document_id,),
-        ).fetchone() == ("openkb_deterministic", "1")
-        query_plan = connection.execute(
-            """
-            EXPLAIN QUERY PLAN
-            SELECT jobs.job_id FROM import_jobs AS jobs
-            WHERE jobs.document_id = ?
-            ORDER BY jobs.completed_at DESC, jobs.created_at DESC LIMIT 1
-            """,
-            (imported.document.document_id,),
-        ).fetchall()
-        assert any("import_jobs_document_completed_idx" in str(row[3]) for row in query_plan)
-
-
-def test_migration_leaves_page_tree_pending_for_a_legacy_quarantined_import(tmp_path) -> None:
-    kb_dir = tmp_path / "knowledge"
-    source = tmp_path / "legacy-quarantined.txt"
-    source.write_text("Legacy model failure with verified evidence.", encoding="utf-8")
-    DesktopKnowledgeBaseRuntime().create(kb_dir)
-
-    def timeout(*_args, **_kwargs):
-        raise TimeoutError()
-
-    with pytest.raises(DesktopImportError):
-        DesktopTextImportService(kb_dir, model_gateway=DesktopModelGateway(timeout)).import_text(
-            source
-        )
-    importer = DesktopTextImportService(kb_dir)
-    job_id = importer.list_import_jobs()["jobs"][0]["job"]["job_id"]
-    database_path = kb_dir / ".openkb" / "state.sqlite3"
-    with sqlite3.connect(database_path) as connection:
-        _drop_catalog_schema(connection)
-        _drop_post_v37_schema(connection)
-        stage_id = connection.execute(
-            "SELECT stage_run_id FROM stage_runs WHERE job_id = ? "
-            "AND stage = 'deterministic_page_tree'",
-            (job_id,),
-        ).fetchone()[0]
-        connection.execute("DELETE FROM stage_run_runtime WHERE stage_run_id = ?", (stage_id,))
-        connection.execute("DELETE FROM stage_runs WHERE stage_run_id = ?", (stage_id,))
-        for table in (
-            "document_page_tree_provider_current",
-            "document_page_tree_enrichment_current",
-            "document_page_tree_enrichment_summaries",
-            "document_page_tree_enrichment_tasks",
-            "document_page_tree_enrichment_generations",
-            "document_page_tree_current",
-            "document_page_tree_node_images",
-            "document_page_tree_node_evidence",
-            "document_page_tree_nodes",
-            "document_page_tree_rebuild_tasks",
-            "document_page_tree_generations",
-        ):
-            connection.execute(f"DROP TABLE {table}")
-        connection.execute("DROP INDEX import_jobs_document_completed_idx")
-        connection.execute("DROP TABLE grounded_answer_retrieval_traces")
-        connection.execute("DROP TABLE conversation_answer_retrieval_traces")
-        connection.execute(
-            "DELETE FROM schema_migrations WHERE version IN (32, 33, 34, 35, 36, 37)"
-        )
-
-    DesktopKnowledgeBaseRuntime().open(kb_dir)
-
-    with sqlite3.connect(database_path) as connection:
-        assert connection.execute(
-            "SELECT status, progress FROM stage_runs "
-            "WHERE job_id = ? AND stage = 'deterministic_page_tree'",
-            (job_id,),
-        ).fetchone() == ("pending", 0)
-    analysis = json.dumps(
-        {
-            "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
-            "analysis_scope": "document",
-            "document_description": "No durable knowledge candidates.",
-            "concepts": [],
-            "entities": [],
-        }
-    )
-    recovered = DesktopTextImportService(
-        kb_dir,
-        model_gateway=DesktopModelGateway(lambda *_args: analysis),
-    ).recover_text(job_id, DesktopRecoveryOverride())
-
-    assert recovered.job.status == "completed"
-    assert recovered.document.availability == "available"
-    assert recovered.stages[4].status == "completed"
 
 
 def test_rebuild_keeps_current_until_switch_and_cleans_after_active_lease(

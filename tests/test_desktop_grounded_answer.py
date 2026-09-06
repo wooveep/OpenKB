@@ -30,8 +30,37 @@ from openkb.desktop_model_gateway import (
 from openkb.desktop_model_roles import DesktopRoleModelGateway
 from openkb.desktop_model_settings import DesktopModelSettings
 from openkb.desktop_retrieval import _source_image_matches_evidence
-from openkb.desktop_retrieval_trace import DesktopRetrievalTrace
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+
+
+def _query_plan_response(
+    request,
+    *,
+    terms: tuple[str, ...] = ("evidence",),
+    facets: tuple[tuple[str, str], ...] = (("Requested answer", "Answer the question."),),
+) -> str:
+    payload = json.loads(request.content)
+    seed_ids = [item["evidence_id"] for item in payload["seed_observations"]]
+    return json.dumps(
+        {
+            "retrieval_plan": {"terms": list(terms)},
+            "question_facet_plan": {
+                "goal": "Answer the supplied question from evidence.",
+                "facets": [
+                    {"label": label, "description": description, "importance": "required"}
+                    for label, description in facets
+                ],
+            },
+            "initial_answer_coverage": [
+                {
+                    "facet_ordinal": ordinal,
+                    "state": "covered" if seed_ids else "missing",
+                    "evidence_ids": seed_ids[:1],
+                }
+                for ordinal, _facet in enumerate(facets)
+            ],
+        }
+    )
 
 
 def test_answer_prompt_exposes_guidance_structure_without_guidance_facts() -> None:
@@ -70,164 +99,7 @@ def test_answer_prompt_exposes_guidance_structure_without_guidance_facts() -> No
     assert "Run the evidence-backed installer" in prompt
 
 
-def test_how_to_answer_prompt_groups_original_evidence_into_major_phases() -> None:
-    evidence = (
-        DesktopEvidenceRef(
-            "evidence-keepalived",
-            "deployment-manual",
-            "Deployment Manual",
-            "Cluster deployment / 1. Management HA / 1.1 Keepalived",
-            {},
-            "Install Keepalived on both nodes.",
-            ("knowledge_navigation_source_window",),
-        ),
-        DesktopEvidenceRef(
-            "evidence-mysql",
-            "deployment-manual",
-            "Deployment Manual",
-            "Cluster deployment / 1. Management HA / 1.4 MySQL",
-            {},
-            "Configure MySQL replication.",
-            ("knowledge_navigation_source_window",),
-        ),
-        DesktopEvidenceRef(
-            "evidence-storage",
-            "deployment-manual",
-            "Deployment Manual",
-            "Cluster deployment / 2. Storage / 2.1 Bcache",
-            {},
-            "Install Bcache.",
-            ("knowledge_navigation_source_window",),
-        ),
-    )
-
-    prompt = _answer_prompt(
-        "How do I install the cluster?",
-        evidence,
-        retrieval_trace=DesktopRetrievalTrace(
-            navigation_answer_kind="how_to",
-            navigation_stop_reason="budget_exhausted",
-        ),
-    )
-
-    assert "Evidence Phase Index" in prompt
-    phase_index = prompt.split("Evidence Phase Index", 1)[1].split("\n\nOriginal Evidence is", 1)[0]
-    assert phase_index.count("Deployment Manual — Cluster deployment / 1. Management HA") == 1
-    assert "[1], [2]" in phase_index
-    assert "1.1 Keepalived" in phase_index
-    assert "1.4 MySQL" in phase_index
-    assert "Deployment Manual — Cluster deployment / 2. Storage" in phase_index
-    assert "Stop reason" not in prompt
-
-
-def test_how_to_answer_prompt_maps_repeated_warning_to_each_source_step() -> None:
-    occurrence_key = "_openkb_source_occurrences"
-    evidence = (
-        DesktopEvidenceRef(
-            "reconfigure",
-            "manual",
-            "Manual",
-            "Recovery",
-            {},
-            "Reconfigure database synchronization.",
-            ("knowledge_navigation_source_window",),
-        ),
-        DesktopEvidenceRef(
-            "reinstall-note",
-            "manual",
-            "Manual",
-            "Recovery",
-            {
-                occurrence_key: [
-                    {"ordinal": 10, "previous_evidence_id": "reconfigure"},
-                    {"ordinal": 12, "previous_evidence_id": "start-services"},
-                ]
-            },
-            "For a reinstall recovery, do not perform this step.",
-            ("knowledge_navigation_source_window",),
-        ),
-        DesktopEvidenceRef(
-            "start-services",
-            "manual",
-            "Manual",
-            "Recovery",
-            {},
-            "Start the Java and host-agent services.",
-            ("knowledge_navigation_source_window",),
-        ),
-    )
-
-    prompt = _answer_prompt(
-        "How do I recover the database?",
-        evidence,
-        retrieval_trace=DesktopRetrievalTrace(navigation_answer_kind="how_to"),
-    )
-
-    assert "Repeated Evidence Occurrence Index" in prompt
-    assert "After step [1], repeat and cite warning/exception [2]" in prompt
-    assert "After step [3], repeat and cite warning/exception [2]" in prompt
-
-
-def test_answer_completion_restores_a_deduplicated_note_at_each_source_position() -> None:
-    from openkb.desktop_grounded_answer_outline import complete_repeated_evidence_occurrences
-
-    occurrence_key = "_openkb_source_occurrences"
-    evidence = (
-        DesktopEvidenceRef("configure", "manual", "Manual", "Recovery", {}, "Configure.", ()),
-        DesktopEvidenceRef(
-            "note",
-            "manual",
-            "Manual",
-            "Recovery",
-            {
-                occurrence_key: [
-                    {"ordinal": 10, "previous_evidence_id": "configure"},
-                    {"ordinal": 12, "previous_evidence_id": "start"},
-                ]
-            },
-            r"\\For this recovery mode, do not perform this step.\\",
-            (),
-        ),
-        DesktopEvidenceRef("start", "manual", "Manual", "Recovery", {}, "Start.", ()),
-    )
-    draft = "Configure the system. [1]\n\nDo not perform this step. [2]\n\nStart services. [3]"
-
-    completed = complete_repeated_evidence_occurrences(draft, evidence)
-
-    assert completed.count("[2]") == 2
-    assert completed.index("Start services. [3]") < completed.rindex("[2]")
-    assert r"\\For this recovery" not in completed
-    assert "For this recovery mode, do not perform this step. [2]" in completed
-
-
-def test_answer_completion_does_not_duplicate_already_repeated_evidence() -> None:
-    from openkb.desktop_grounded_answer_outline import complete_repeated_evidence_occurrences
-
-    occurrence_key = "_openkb_source_occurrences"
-    evidence = (
-        DesktopEvidenceRef("first", "manual", "Manual", "Flow", {}, "First.", ()),
-        DesktopEvidenceRef(
-            "note",
-            "manual",
-            "Manual",
-            "Flow",
-            {
-                occurrence_key: [
-                    {"ordinal": 2, "previous_evidence_id": "first"},
-                    {"ordinal": 4, "previous_evidence_id": "second"},
-                ]
-            },
-            "Repeat this note.",
-            (),
-        ),
-        DesktopEvidenceRef("second", "manual", "Manual", "Flow", {}, "Second.", ()),
-    )
-    draft = "First. [1]\n\nRepeat this note. [2]\n\nSecond. [3]\n\nRepeat this note. [2]"
-
-    assert complete_repeated_evidence_occurrences(draft, evidence) == draft
-
-
-def test_citation_guard_removes_uncited_validation_items_only() -> None:
+def test_citation_guard_removes_uncited_list_claims_without_semantic_classification() -> None:
     from openkb.desktop_grounded_answer import _citation_guarded_answer
 
     answer = """# Install cluster
@@ -248,7 +120,7 @@ def test_citation_guard_removes_uncited_validation_items_only() -> None:
 
     assert "Stop nginx and verify VIP failover. [2]" in guarded
     assert "Confirm storage is healthy." not in guarded
-    assert "Optional scope note without a citation." in guarded
+    assert "Optional scope note without a citation." not in guarded
 
 
 def test_answer_output_budget_expands_only_for_large_context_models() -> None:
@@ -412,7 +284,7 @@ def test_grounded_answer_persists_an_interruption_when_the_answer_model_fails(tm
     ).answer("What baseline does OpenKB keep?")
 
     assert answer.citations
-    assert "retrieval_plan_fallback" in answer.degradations
+    assert "query_planning_failed" in answer.degradations
     assert answer.status == "interrupted"
     assert answer.interruption_code == "model_response_invalid"
     assert answer.answer_text == ""
@@ -455,13 +327,13 @@ def test_answer_result_failures_are_explicit_interrupted_cards_without_retry(
     grounded_calls = 0
 
     class ResultFailureTransport:
-        def __call__(self, _request, _timeout_seconds):
-            return '{"terms":["evidence"]}'
+        def __call__(self, request, _timeout_seconds):
+            return _query_plan_response(request)
 
         def stream_until_terminal(self, request, _timeout_seconds, _on_delta):
             nonlocal grounded_calls
-            if request.operation == "retrieval_plan":
-                return '{"terms":["evidence"]}'
+            if request.operation == "query_planning":
+                return _query_plan_response(request)
             grounded_calls += 1
             return DesktopModelProviderResponse("", observations=observations)
 
@@ -535,12 +407,12 @@ def test_reasoning_only_answer_is_replaced_only_after_an_explicit_successful_ret
         def __init__(self) -> None:
             self.grounded_calls = 0
 
-        def __call__(self, _request, _timeout_seconds):
-            return '{"terms":["evidence"]}'
+        def __call__(self, request, _timeout_seconds):
+            return _query_plan_response(request)
 
         def stream_until_terminal(self, request, _timeout_seconds, on_delta):
-            if request.operation == "retrieval_plan":
-                return '{"terms":["evidence"]}'
+            if request.operation == "query_planning":
+                return _query_plan_response(request)
             self.grounded_calls += 1
             if self.grounded_calls == 1:
                 return DesktopModelProviderResponse(
@@ -586,12 +458,12 @@ def test_grounded_answer_streams_model_deltas_without_losing_baseline_terms(tmp_
 
     class StreamingTransport:
         def __call__(self, request, _timeout_seconds):
-            assert request.operation == "retrieval_plan"
-            return '{"terms": ["unrelated"]}'
+            assert request.operation == "query_planning"
+            return _query_plan_response(request, terms=("unrelated",))
 
         def stream_until_terminal(self, request, _connect_timeout_seconds, on_delta):
-            if request.operation == "retrieval_plan":
-                return '{"terms": ["unrelated"]}'
+            if request.operation == "query_planning":
+                return _query_plan_response(request, terms=("unrelated",))
             assert request.operation == "grounded_answer"
             on_delta("The orbital ")
             on_delta("ledger.")
@@ -634,23 +506,30 @@ def test_grounded_answer_receives_source_backed_navigation_blueprint(tmp_path) -
         answer_prompt = ""
 
         def __call__(self, request, _timeout_seconds):
-            if request.operation == "retrieval_plan":
-                return '{"terms":["Alpha","安装","健康检查"]}'
+            if request.operation == "query_planning":
+                return _query_plan_response(
+                    request,
+                    terms=("Alpha", "安装", "健康检查"),
+                    facets=(
+                        ("环境准备", "安装前需确认的条件。"),
+                        ("执行安装", "证据支持的安装动作。"),
+                        ("结果确认", "证据支持的完成状态。"),
+                    ),
+                )
             if request.operation == "knowledge_navigation_step":
                 prompt = json.loads(request.content)
                 evidence_ids = [item["evidence_id"] for item in prompt["evidence"]]
                 return json.dumps(
                     {
-                        "schema_version": "openkb.knowledge-navigation-step.v1",
+                        "schema_version": "openkb.knowledge-navigation-step.v2",
                         "snapshot_id": prompt["snapshot_id"],
-                        "objective": prompt["objective"],
                         "coverage": [
                             {
-                                "aspect": aspect,
-                                "status": "covered",
+                                "facet_id": facet["facet_id"],
+                                "state": "covered",
                                 "evidence_ids": evidence_ids[:1],
                             }
-                            for aspect in prompt["objective"]["required_aspects"]
+                            for facet in prompt["objective"]["facets"]
                         ],
                         "actions": [],
                         "decision": "stop",
@@ -672,7 +551,8 @@ def test_grounded_answer_receives_source_backed_navigation_blueprint(tmp_path) -
 
     assert answer.retrieval_trace.navigation_stop_reason == "covered"
     assert "Answer Blueprint (navigation only" in transport.answer_prompt
-    assert "prerequisites — covered — [1]" in transport.answer_prompt
+    assert "环境准备 (required) — covered" in transport.answer_prompt
+    assert "执行安装 (required) — covered" in transport.answer_prompt
     assert "Original Evidence is the only factual authority" in transport.answer_prompt
 
 
@@ -702,12 +582,12 @@ def test_grounded_answer_replaces_a_failed_stream_attempt(tmp_path):
         def __init__(self) -> None:
             self.attempts = 0
 
-        def __call__(self, _request, _timeout_seconds):
-            return '{"terms": ["evidence"]}'
+        def __call__(self, request, _timeout_seconds):
+            return _query_plan_response(request)
 
         def stream_until_terminal(self, request, _connect_timeout_seconds, on_delta):
-            if request.operation == "retrieval_plan":
-                return '{"terms": ["evidence"]}'
+            if request.operation == "query_planning":
+                return _query_plan_response(request)
             self.attempts += 1
             if self.attempts == 1:
                 on_delta("failed attempt")
@@ -747,12 +627,12 @@ def test_grounded_answer_persists_partial_text_when_the_model_stream_is_interrup
         def __init__(self) -> None:
             self.attempts = 0
 
-        def __call__(self, _request, _timeout_seconds):
-            return '{"terms": ["evidence"]}'
+        def __call__(self, request, _timeout_seconds):
+            return _query_plan_response(request)
 
         def stream_until_terminal(self, request, _connect_timeout_seconds, on_delta):
-            if request.operation == "retrieval_plan":
-                return '{"terms": ["evidence"]}'
+            if request.operation == "query_planning":
+                return _query_plan_response(request)
             self.attempts += 1
             if self.attempts == 1:
                 on_delta("partial model text")
@@ -788,12 +668,12 @@ def test_grounded_answer_retry_preserves_the_old_card_until_a_complete_replaceme
         def __init__(self) -> None:
             self.stream_attempts = 0
 
-        def __call__(self, _request, _timeout_seconds):
-            return '{"terms": ["evidence"]}'
+        def __call__(self, request, _timeout_seconds):
+            return _query_plan_response(request)
 
         def stream_until_terminal(self, request, _connect_timeout_seconds, on_delta):
-            if request.operation == "retrieval_plan":
-                return '{"terms": ["evidence"]}'
+            if request.operation == "query_planning":
+                return _query_plan_response(request)
             self.stream_attempts += 1
             if self.stream_attempts < 3:
                 on_delta(f"partial attempt {self.stream_attempts}")

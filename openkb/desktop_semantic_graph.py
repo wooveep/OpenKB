@@ -21,19 +21,20 @@ from openkb.desktop_semantic_graph_contract import (
     MAX_SEMANTIC_IDENTIFIER_CHARS,
     MAX_SEMANTIC_RELATIONS_PER_BATCH,
     MAX_SEMANTIC_SUPPORT_CLAIMS,
-    SEMANTIC_GRAPH_RELATION_KINDS,
-    relation_endpoint_allowed,
+)
+from openkb.desktop_semantic_structure_contracts import (
+    SEMANTIC_STRUCTURE_LIMITS,
+    normalize_dynamic_semantic_text,
 )
 from openkb.desktop_structured_output import normalize_structured_output
 
 SEMANTIC_RELATION_OPERATION = "knowledge_relation_analysis"
-SEMANTIC_GRAPH_SCHEMA_VERSION = "openkb.semantic-identity-graph.v1"
-_INPUT_SCHEMA_VERSION = "openkb.semantic-relation-input.v1"
+SEMANTIC_GRAPH_SCHEMA_VERSION = "openkb.semantic-identity-graph.v2"
+_INPUT_SCHEMA_VERSION = "openkb.semantic-relation-input.v2"
 _MAX_CLAIMS_PER_BATCH = 64
-_MAX_ELIGIBLE_ENDPOINT_MENTIONS_PER_BATCH = 64
 _MAX_RESPONSE_CHARS = 1_000_000
 _RELATION_FIELDS = frozenset(
-    {"source_candidate_id", "target_candidate_id", "type", "supporting_claims"}
+    {"source_candidate_id", "target_candidate_id", "label", "supporting_claims"}
 )
 _SUPPORT_FIELDS = frozenset({"candidate_id", "claim_ordinal"})
 
@@ -50,7 +51,6 @@ class SemanticGraphStoredDataError(ValueError):
 class SemanticGraphClaim:
     candidate_id: str
     claim_ordinal: int
-    role: str
     text: str
     applicability_json: str
     evidence_ids: tuple[str, ...]
@@ -66,7 +66,7 @@ class SemanticGraphCandidate:
     kind: str
     title: str
     aliases: tuple[str, ...]
-    entity_subtype: str | None
+    identity_labels: tuple[str, ...]
     claims: tuple[SemanticGraphClaim, ...]
 
 
@@ -110,7 +110,7 @@ class SemanticClaimReference:
 class SemanticRelation:
     source_candidate_id: str
     target_candidate_id: str
-    relation_kind: str
+    label: str
     supporting_claims: tuple[SemanticClaimReference, ...]
     assertion_evidence_ids: tuple[str, ...]
     applicability_json: str
@@ -144,7 +144,7 @@ class SemanticRelationInterpretationError(ValueError):
 def load_semantic_graph_document_in(
     connection: sqlite3.Connection, document_id: str
 ) -> SemanticGraphDocument | None:
-    """Compatibility projection for callers that only consume semantic input."""
+    """Load the current semantic input document, if its dependency is available."""
     return load_semantic_graph_input_in(connection, document_id).document
 
 
@@ -160,15 +160,15 @@ def load_semantic_graph_input_in(
     if document is None:
         return SemanticGraphInputOutcome("dependency_unavailable")
     registry = candidate_registry_outcome_in(connection, document_id)
-    if registry.status in {"dependency_unavailable", "explicit_legacy"}:
-        return SemanticGraphInputOutcome(registry.status)
+    if registry.status not in {"ready", "empty"}:
+        return SemanticGraphInputOutcome("dependency_unavailable")
     assert registry.generation is not None
     generation = registry.generation
     rows = connection.execute(
         """
-        SELECT candidate_id, kind, title, aliases_json, entity_subtype
+        SELECT candidate_id, kind, title, aliases_json, identity_labels_json
         FROM knowledge_candidate_generation_candidates
-        WHERE candidate_generation_id = ? AND admission_state = 'admitted'
+        WHERE candidate_generation_id = ? AND admission_state = 'admit'
         ORDER BY kind, normalized_title, candidate_id
         """,
         (generation.generation_id,),
@@ -190,10 +190,8 @@ def load_semantic_graph_input_in(
 def semantic_graph_operation_for_document_in(
     connection: sqlite3.Connection, document_id: str
 ) -> str:
-    """Choose from explicit provenance; never infer legacy from an empty candidate table."""
-    outcome = candidate_registry_outcome_in(connection, document_id)
-    if outcome.status == "explicit_legacy":
-        return "knowledge_graph_extraction"
+    """Return the only current-epoch semantic graph operation."""
+    del connection, document_id
     return SEMANTIC_RELATION_OPERATION
 
 
@@ -214,12 +212,7 @@ def plan_semantic_relation_batches(
         proposed = (*current, claim)
         material = _source_material(document, proposed, ordinal=len(batches))
         tokens = estimate_model_tokens(material)
-        endpoint_mentions = _eligible_endpoint_mention_count(document, proposed)
-        if current and (
-            tokens > input_budget_tokens
-            or len(proposed) > _MAX_CLAIMS_PER_BATCH
-            or endpoint_mentions > _MAX_ELIGIBLE_ENDPOINT_MENTIONS_PER_BATCH
-        ):
+        if current and (tokens > input_budget_tokens or len(proposed) > _MAX_CLAIMS_PER_BATCH):
             batches.append(_batch(document, len(batches), tuple(current), input_budget_tokens))
             current = [claim]
             continue
@@ -293,7 +286,7 @@ class SemanticRelationBoundary:
             key = (
                 relation.source_candidate_id,
                 relation.target_candidate_id,
-                relation.relation_kind,
+                _normalized_relation_label(relation.label),
             )
             existing = retained.get(key)
             retained[key] = relation if existing is None else _merge_relation(existing, relation)
@@ -329,7 +322,7 @@ def merge_semantic_relation_interpretations(
             key = (
                 relation.source_candidate_id,
                 relation.target_candidate_id,
-                relation.relation_kind,
+                _normalized_relation_label(relation.label),
             )
             existing = retained.get(key)
             retained[key] = relation if existing is None else _merge_relation(existing, relation)
@@ -358,45 +351,50 @@ def replace_document_semantic_relations_in(
     if interpretation.lifecycle not in {"completed", "completed_empty"}:
         raise ValueError("Only completed semantic graph results can be published.")
     connection.execute(
-        "DELETE FROM knowledge_document_relationships WHERE document_id = ?",
+        "DELETE FROM knowledge_document_relation_assertions WHERE document_id = ?",
         (document.document_id,),
     )
+    claims = {claim.key: claim for claim in document.claims}
     for relation in interpretation.relations:
+        assertion_id = _document_relation_assertion_id(document, relation)
+        normalized_label = _normalized_relation_label(relation.label)
         connection.execute(
             """
-            INSERT INTO knowledge_document_relationships (
-                document_id, source_candidate_id, target_candidate_id,
-                relation_kind, applicability_json, provenance,
-                candidate_generation_id, graph_result_id
-            ) VALUES (?, ?, ?, ?, ?, 'semantic_relation_analysis', ?, ?)
+            INSERT INTO knowledge_document_relation_assertions (
+                document_id, candidate_generation_id, graph_result_id, assertion_id,
+                source_candidate_id, target_candidate_id, label, normalized_label,
+                applicability_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 document.document_id,
-                relation.source_candidate_id,
-                relation.target_candidate_id,
-                relation.relation_kind,
-                relation.applicability_json,
                 document.candidate_generation_id,
                 graph_result_id,
+                assertion_id,
+                relation.source_candidate_id,
+                relation.target_candidate_id,
+                relation.label,
+                normalized_label,
+                relation.applicability_json,
             ),
         )
         connection.executemany(
             """
-            INSERT INTO knowledge_document_relationship_claims (
-                document_id, source_candidate_id, target_candidate_id,
-                relation_kind, support_candidate_id, claim_ordinal
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO knowledge_document_relation_sources (
+                document_id, assertion_id, support_candidate_id, claim_ordinal,
+                evidence_id
+            ) VALUES (?, ?, ?, ?, ?)
             """,
             (
                 (
                     document.document_id,
-                    relation.source_candidate_id,
-                    relation.target_candidate_id,
-                    relation.relation_kind,
+                    assertion_id,
                     support.candidate_id,
                     support.claim_ordinal,
+                    evidence_id,
                 )
                 for support in relation.supporting_claims
+                for evidence_id in claims[support.candidate_id, support.claim_ordinal].evidence_ids
             ),
         )
 
@@ -411,7 +409,7 @@ def _candidate_in(
     if candidate_generation_id is None:
         claim_rows = connection.execute(
             """
-            SELECT claims.claim_ordinal, claims.role, claims.claim_text,
+            SELECT claims.claim_ordinal, claims.claim_text,
                 claims.applicability_json, sources.evidence_id
             FROM knowledge_document_candidate_claims AS claims
             JOIN knowledge_document_candidate_claim_sources AS sources
@@ -425,7 +423,7 @@ def _candidate_in(
     else:
         claim_rows = connection.execute(
             """
-            SELECT claims.claim_ordinal, claims.role, claims.claim_text,
+            SELECT claims.claim_ordinal, claims.claim_text,
                 claims.applicability_json, sources.evidence_id
             FROM knowledge_candidate_generation_claims AS claims
             JOIN knowledge_candidate_generation_claim_sources AS sources
@@ -444,10 +442,9 @@ def _candidate_in(
         SemanticGraphClaim(
             candidate_id=candidate_id,
             claim_ordinal=ordinal,
-            role=str(values[0][1]),
-            text=str(values[0][2]),
-            applicability_json=str(values[0][3]),
-            evidence_ids=tuple(dict.fromkeys(str(value[4]) for value in values)),
+            text=str(values[0][1]),
+            applicability_json=str(values[0][2]),
+            evidence_ids=tuple(dict.fromkeys(str(value[3]) for value in values)),
         )
         for ordinal, values in sorted(grouped.items())
     )
@@ -456,7 +453,7 @@ def _candidate_in(
         kind=str(row[1]),
         title=str(row[2]),
         aliases=decode_knowledge_labels(row[3]),
-        entity_subtype=str(row[4]) if row[4] is not None else None,
+        identity_labels=decode_knowledge_labels(row[4]),
         claims=claims,
     )
 
@@ -471,13 +468,6 @@ def _batch(
         raise SemanticGraphCapacityError("Semantic relation batch must contain a claim.")
     if len(claims) > _MAX_CLAIMS_PER_BATCH:
         raise SemanticGraphCapacityError("Semantic relation batch exceeds its claim limit.")
-    if (
-        _eligible_endpoint_mention_count(document, claims)
-        > _MAX_ELIGIBLE_ENDPOINT_MENTIONS_PER_BATCH
-    ):
-        raise SemanticGraphCapacityError(
-            "Semantic relation batch exceeds its endpoint mention limit."
-        )
     material = _source_material(document, claims, ordinal=ordinal)
     tokens = estimate_model_tokens(material)
     if tokens > input_budget_tokens:
@@ -491,7 +481,6 @@ def _source_material(
     *,
     ordinal: int,
 ) -> str:
-    eligible_candidates = _eligible_candidates(document, claims)
     payload = {
         "schema_version": _INPUT_SCHEMA_VERSION,
         "document_id": document.document_id,
@@ -503,15 +492,14 @@ def _source_material(
                 "kind": candidate.kind,
                 "title": candidate.title,
                 "aliases": list(candidate.aliases),
-                "entity_subtype": candidate.entity_subtype or "",
+                "identity_labels": list(candidate.identity_labels),
             }
-            for candidate in eligible_candidates
+            for candidate in document.candidates
         ],
         "claims": [
             {
                 "candidate_id": claim.candidate_id,
                 "claim_ordinal": claim.claim_ordinal,
-                "role": claim.role,
                 "text": claim.text,
                 "applicability": _json_value(claim.applicability_json),
                 "source_evidence_ids": list(claim.evidence_ids),
@@ -520,33 +508,6 @@ def _source_material(
         ],
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _eligible_candidates(
-    document: SemanticGraphDocument,
-    claims: tuple[SemanticGraphClaim, ...] | list[SemanticGraphClaim],
-) -> tuple[SemanticGraphCandidate, ...]:
-    """Return every identity that can be an endpoint under the literal-support rule."""
-    source_ids = {claim.candidate_id for claim in claims}
-    claim_texts = tuple(claim.text for claim in claims)
-    return tuple(
-        candidate
-        for candidate in document.candidates
-        if candidate.candidate_id in source_ids
-        or any(_candidate_named_in_text(candidate, text) for text in claim_texts)
-    )
-
-
-def _eligible_endpoint_mention_count(
-    document: SemanticGraphDocument,
-    claims: tuple[SemanticGraphClaim, ...] | list[SemanticGraphClaim],
-) -> int:
-    return sum(
-        candidate.candidate_id != claim.candidate_id
-        and _candidate_named_in_text(candidate, claim.text)
-        for claim in claims
-        for candidate in document.candidates
-    )
 
 
 def _relation(
@@ -560,19 +521,20 @@ def _relation(
         raise _problem("invalid_relation_fields", path, "shape")
     source_id = _identifier(value.get("source_candidate_id"), f"{path}.source_candidate_id")
     target_id = _identifier(value.get("target_candidate_id"), f"{path}.target_candidate_id")
-    relation_kind = _identifier(value.get("type"), f"{path}.type")
-    source = candidates.get(source_id)
-    target = candidates.get(target_id)
-    if source is None:
+    try:
+        label = normalize_dynamic_semantic_text(
+            value.get("label"),
+            field=f"{path}.label",
+            maximum_characters=SEMANTIC_STRUCTURE_LIMITS.max_label_characters,
+        )
+    except ValueError:
+        raise _problem("invalid_relation_label", f"{path}.label", "shape") from None
+    if source_id not in candidates:
         raise _problem("unknown_source_candidate", f"{path}.source_candidate_id", "semantic")
-    if target is None:
+    if target_id not in candidates:
         raise _problem("unknown_target_candidate", f"{path}.target_candidate_id", "semantic")
     if source_id == target_id:
         raise _problem("self_relation", path, "semantic")
-    if relation_kind not in SEMANTIC_GRAPH_RELATION_KINDS:
-        raise _problem("unsupported_relationship", f"{path}.type", "semantic")
-    if not relation_endpoint_allowed(relation_kind, source.kind, target.kind):
-        raise _problem("incompatible_relation_endpoints", path, "semantic")
     raw_supports = value.get("supporting_claims")
     if (
         not isinstance(raw_supports, list)
@@ -595,8 +557,6 @@ def _relation(
             raise _problem("unknown_supporting_claim", support_path, "evidence")
         if candidate_id not in {source_id, target_id}:
             raise _problem("support_not_endpoint_bound", support_path, "evidence")
-        if not _claim_supports_endpoints(claim, source, target):
-            raise _problem("support_does_not_name_other_endpoint", support_path, "evidence")
         reference = SemanticClaimReference(candidate_id, ordinal)
         if reference not in supports:
             supports.append(reference)
@@ -604,57 +564,56 @@ def _relation(
     evidence_ids = tuple(
         dict.fromkeys(evidence_id for claim in support_claims for evidence_id in claim.evidence_ids)
     )
-    applicability = tuple(
-        dict.fromkeys(
-            _canonical_json(_json_value(claim.applicability_json)) for claim in support_claims
-        )
-    )
+    applicability = [
+        value for claim in support_claims for value in _json_list(claim.applicability_json)
+    ]
     return SemanticRelation(
         source_candidate_id=source_id,
         target_candidate_id=target_id,
-        relation_kind=relation_kind,
+        label=label,
         supporting_claims=tuple(supports),
         assertion_evidence_ids=evidence_ids,
-        applicability_json=_canonical_json([_json_value(value) for value in applicability]),
-    )
-
-
-def _claim_supports_endpoints(
-    claim: SemanticGraphClaim,
-    source: SemanticGraphCandidate,
-    target: SemanticGraphCandidate,
-) -> bool:
-    other = target if claim.candidate_id == source.candidate_id else source
-    return _candidate_named_in_text(other, claim.text)
-
-
-def _candidate_named_in_text(candidate: SemanticGraphCandidate, text: str) -> bool:
-    folded = " ".join(text.casefold().split())
-    names = (candidate.title, *candidate.aliases)
-    return any(
-        (normalized := " ".join(name.casefold().split())) and normalized in folded for name in names
+        applicability_json=_canonical_applicability(applicability),
     )
 
 
 def _merge_relation(left: SemanticRelation, right: SemanticRelation) -> SemanticRelation:
-    applicability = tuple(
-        dict.fromkeys(
-            (
-                *(_canonical_json(value) for value in _json_list(left.applicability_json)),
-                *(_canonical_json(value) for value in _json_list(right.applicability_json)),
-            )
-        )
-    )
+    applicability = [
+        *_json_list(left.applicability_json),
+        *_json_list(right.applicability_json),
+    ]
     return SemanticRelation(
         source_candidate_id=left.source_candidate_id,
         target_candidate_id=left.target_candidate_id,
-        relation_kind=left.relation_kind,
+        label=left.label,
         supporting_claims=tuple(dict.fromkeys((*left.supporting_claims, *right.supporting_claims))),
         assertion_evidence_ids=tuple(
             dict.fromkeys((*left.assertion_evidence_ids, *right.assertion_evidence_ids))
         ),
-        applicability_json=_canonical_json([_json_value(value) for value in applicability]),
+        applicability_json=_canonical_applicability(applicability),
     )
+
+
+def _normalized_relation_label(label: str) -> str:
+    return " ".join(label.casefold().split())
+
+
+def _document_relation_assertion_id(
+    document: SemanticGraphDocument,
+    relation: SemanticRelation,
+) -> str:
+    if document.candidate_generation_id is None:
+        raise ValueError("Semantic relations require a Candidate Registry Generation.")
+    material = "\x1f".join(
+        (
+            document.document_id,
+            document.candidate_generation_id,
+            relation.source_candidate_id,
+            relation.target_candidate_id,
+            _normalized_relation_label(relation.label),
+        )
+    )
+    return f"relation:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
 def _identifier(value: object, path: str) -> str:
@@ -723,3 +682,8 @@ def _json_list(value: str) -> list[object]:
 
 def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _canonical_applicability(values: list[object]) -> str:
+    unique = {_canonical_json(value): value for value in values}
+    return _canonical_json([unique[key] for key in sorted(unique)])

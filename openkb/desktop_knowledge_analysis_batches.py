@@ -29,9 +29,6 @@ from openkb.desktop_knowledge_analysis_checkpoints import (
     analysis_from_document_checkpoint as _analysis_from_document_checkpoint,
 )
 from openkb.desktop_knowledge_analysis_checkpoints import (
-    harvest_from_inventory_checkpoint as _harvest_from_inventory_checkpoint,
-)
-from openkb.desktop_knowledge_analysis_checkpoints import (
     parse_batch_checkpoint,
 )
 from openkb.desktop_knowledge_analysis_checkpoints import (
@@ -240,7 +237,6 @@ def run_knowledge_analysis(
                 harvest.analysis_scope,
                 harvest.procedures,
                 harvest.document_summary,
-                harvest.corpus_ready,
             )
             recovery_metadata = {
                 "output_limit_recovery_from_operation": direct_harvest_operation,
@@ -380,8 +376,7 @@ def run_knowledge_analysis(
     merged_checkpoint = store.merge_checkpoint(job_id)
     if merged_checkpoint is not None:
         merged = _analysis_from_document_checkpoint(merged_checkpoint)
-        harvested = _harvest_from_inventory_checkpoint(merged_checkpoint) or merged
-        _validate_merge_sources(harvested, tuple(analyses))
+        _validate_merge_sources(merged, tuple(analyses))
     else:
         honor_control()
         store.start_merge(job_id)
@@ -405,7 +400,6 @@ def run_knowledge_analysis(
                 deterministic.entities,
                 procedures=deterministic.procedures,
                 document_summary=deterministic.document_summary,
-                corpus_ready=deterministic.corpus_ready,
             )
             _validate_merge_sources(merged, tuple(analyses))
             inventory_stage = apply_document_inventory_stage(
@@ -542,10 +536,10 @@ def _validated_document_analysis(
     content: str,
     evidence: tuple[tuple[str, DocumentIRBlock], ...],
 ) -> DesktopKnowledgeAnalysis:
-    # Unresolved source IDs become Missing Source review work; they must not
-    # discard valid sibling claims or make the parsed document unavailable.
-    del evidence
-    return parse_knowledge_analysis(content)
+    return parse_knowledge_analysis(
+        content,
+        known_evidence_ids=frozenset(evidence_id for evidence_id, _block in evidence),
+    )
 
 
 def _validated_batch_analysis(
@@ -760,7 +754,6 @@ def _validate_merge_sources(
         or merged.entities != expected.entities
         or merged.procedures != expected.procedures
         or merged.document_summary != expected.document_summary
-        or merged.corpus_ready != expected.corpus_ready
         or merged.analysis_scope != expected.analysis_scope
     ):
         raise _invalid_model_result(

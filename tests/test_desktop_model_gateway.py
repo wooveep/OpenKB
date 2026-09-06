@@ -45,7 +45,7 @@ def test_gateway_factory_has_no_response_timeout_constructor() -> None:
 def test_request_scoped_response_timeout_must_be_finite_and_positive(timeout: float) -> None:
     with pytest.raises(ValueError, match="timeout must be finite and positive"):
         DesktopModelRequest(
-            "retrieval_plan",
+            "query_planning",
             "Question",
             "{}",
             response_timeout_seconds=timeout,

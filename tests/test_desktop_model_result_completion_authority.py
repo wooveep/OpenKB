@@ -18,9 +18,9 @@ def test_ordinary_completion_authority_preserves_a_concurrent_suspension(
     DesktopKnowledgeBaseRuntime().create(kb_dir)
     store = DesktopModelOperationContractStore(kb_dir)
     contract = {
-        "operation": "retrieval_plan",
+        "operation": "query_planning",
         "capability_identity": "analysis-capability",
-        "prompt_contract_digest": "retrieval-contract",
+        "prompt_contract_digest": "query-planning-contract",
     }
     store.suspend(
         **contract,

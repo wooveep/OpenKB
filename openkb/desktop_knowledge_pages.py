@@ -44,9 +44,7 @@ from openkb.desktop_workspace import desktop_state_database_path, desktop_state_
 from openkb.locks import kb_ingest_lock, kb_read_lock
 
 DesktopKnowledgePagePublicationState = Literal["draft", "unpublished_changes", "published"]
-DesktopKnowledgeProvenanceState = Literal[
-    "source_backed", "structural", "legacy_unmapped", "unsourced", "invalid"
-]
+DesktopKnowledgeProvenanceState = Literal["source_backed", "structural", "unsourced", "invalid"]
 _PAGE_KINDS = frozenset({"concept", "entity", "procedure"})
 logger = logging.getLogger(__name__)
 

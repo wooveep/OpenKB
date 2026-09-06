@@ -21,11 +21,11 @@ from openkb.desktop_adaptive_navigation import (
     coverage_complete,
     coverage_gate_state,
     current_navigation_snapshot_id,
-    deterministic_seed_coverage,
     estimated_source_tokens,
     initial_navigation_objective,
     navigation_requires_model,
     run_navigation_step,
+    seed_facet_coverage,
 )
 from openkb.desktop_answer_types import (
     DesktopAnswerSourceImage,
@@ -33,7 +33,6 @@ from openkb.desktop_answer_types import (
     DesktopEvidenceRef,
     DesktopKnowledgeGuidance,
     DesktopKnowledgeRouteOption,
-    DesktopRetrievalModelCost,
     DesktopRetrievalPlan,
 )
 from openkb.desktop_model_gateway import DesktopModelGateway
@@ -61,9 +60,21 @@ from openkb.desktop_navigation_evidence import (
 )
 from openkb.desktop_navigation_references import unique_actions as _unique_actions
 from openkb.desktop_navigation_references import unresolved_reference_actions
+from openkb.desktop_navigation_session_values import (
+    logical_reads as _logical_reads,
+)
+from openkb.desktop_navigation_session_values import (
+    order_evidence_by_coverage as _order_evidence_by_coverage,
+)
+from openkb.desktop_navigation_session_values import (
+    sum_cost as _sum_cost,
+)
+from openkb.desktop_navigation_session_values import (
+    with_added_cost as _with_added_cost,
+)
 from openkb.desktop_navigation_validation import NavigationAction
 from openkb.desktop_retrieval_trace import (
-    DesktopAnswerCoverageTrace,
+    DesktopFacetCoverageTrace,
     DesktopRetrievalChannelTrace,
     DesktopRetrievalTrace,
 )
@@ -113,8 +124,8 @@ def run_navigation_session(
         initial_pack,
         evidence_envelope=evidence_envelope,
     )
-    objective = initial_navigation_objective(question, pack.retrieval_plan)
-    coverage = deterministic_seed_coverage(objective, pack)
+    objective = initial_navigation_objective(question, pack.retrieval_plan, pack.retrieval_trace)
+    coverage = seed_facet_coverage(objective, pack)
     rounds = 0
     model_calls = initial_pack.retrieval_model_cost.model_calls
     logical_reads = _logical_reads(pack.retrieval_trace)
@@ -186,7 +197,7 @@ def run_navigation_session(
             source_tokens=source_tokens,
             degradations=degradations,
         )
-    if not navigation_requires_model(objective, pack):
+    if not navigation_requires_model(objective, coverage):
         return _finalize(
             pack,
             pinned_snapshot_id=pinned_snapshot_id,
@@ -194,7 +205,11 @@ def run_navigation_session(
             coverage=coverage,
             rounds=rounds,
             action_kinds=action_kinds,
-            stop_reason="covered",
+            stop_reason=(
+                "semantic_structure_unknown"
+                if objective.semantic_structure_state == "unknown"
+                else "covered"
+            ),
             model_calls=model_calls,
             logical_reads=logical_reads,
             source_tokens=source_tokens,
@@ -259,27 +274,28 @@ def run_navigation_session(
             stop_reason = step.stop_reason or "model_degraded"
             break
 
-        objective = step.decision.objective
         coverage = step.decision.coverage
         action_limit = min(3, max(0, NAVIGATION_MAX_SEARCH_ACTIONS - search_actions))
         reference_actions = unresolved_reference_actions(
             pack.evidence,
-            coverage,
+            tuple(item for item in coverage if item.facet_id in objective.required_facet_ids),
             visited_action_ids=frozenset(visited_action_ids),
             maximum=action_limit,
         )
-        if coverage_complete(coverage):
+        if coverage_complete(objective, coverage):
             stop_reason = "covered"
             break
         actions = _unique_actions((*reference_actions, *step.decision.actions))[:action_limit]
         if step.decision.decision == "stop" and not actions:
-            stop_reason = "absent" if coverage_gate_state(coverage) == "uncovered" else "partial"
+            stop_reason = (
+                "absent" if coverage_gate_state(objective, coverage) == "uncovered" else "partial"
+            )
             break
 
-        action_groups = _actions_by_aspect(actions)
+        action_groups = _actions_by_facet(actions)
         reference_action_ids = frozenset(action.identity for action in reference_actions)
         if not any(action.terms or action.routes or action.evidence_ids for action in actions):
-            stop_reason = _incomplete_stop_reason(coverage)
+            stop_reason = _incomplete_stop_reason(objective, coverage)
             break
         for action in actions:
             visited_action_ids.add(action.identity)
@@ -298,7 +314,7 @@ def run_navigation_session(
         prior_ids = frozenset(item.evidence_id for item in pack.evidence)
         prior_routes = frozenset(pack.retrieval_trace.navigation_routes)
         prior_options = frozenset(item.route for item in pack.route_options)
-        aspect_evidence_ids: dict[str, tuple[str, ...]] = {}
+        facet_evidence_ids: dict[str, tuple[str, ...]] = {}
         earlier_priority_evidence_ids = priority_evidence_ids
         round_priority_evidence_ids: tuple[str, ...] = ()
         round_stop_reason: str | None = None
@@ -306,7 +322,7 @@ def run_navigation_session(
             NAVIGATION_MAX_LOGICAL_READS,
             logical_reads + NAVIGATION_MAX_LOGICAL_READS_PER_ROUND,
         )
-        for group_index, (aspect, group) in enumerate(action_groups):
+        for group_index, (facet_id, group) in enumerate(action_groups):
             if is_cancelled is not None and is_cancelled():
                 degradations.append("knowledge_navigation_cancelled")
                 round_stop_reason = "cancelled"
@@ -352,7 +368,7 @@ def run_navigation_session(
                 break
             model_calls += supplement.retrieval_model_cost.model_calls
             logical_reads += _logical_reads(supplement.retrieval_trace)
-            aspect_evidence_ids[aspect] = _new_action_evidence_ids(
+            facet_evidence_ids[facet_id] = _new_action_evidence_ids(
                 supplement.evidence,
                 prior_ids=group_prior_ids,
             )
@@ -377,7 +393,7 @@ def run_navigation_session(
                 pack,
                 supplement,
                 coverage,
-                aspect_evidence_ids=aspect_evidence_ids,
+                facet_evidence_ids=facet_evidence_ids,
                 priority_evidence_ids=priority_evidence_ids,
                 evidence_envelope=evidence_envelope,
             )
@@ -385,10 +401,10 @@ def run_navigation_session(
         if round_stop_reason is not None:
             stop_reason = round_stop_reason
             break
-        coverage = _bind_observed_aspect_evidence(coverage, aspect_evidence_ids)
+        coverage = _bind_observed_facet_evidence(coverage, facet_evidence_ids)
         preferred_evidence_ids = _unique(
             evidence_id
-            for evidence_ids in aspect_evidence_ids.values()
+            for evidence_ids in facet_evidence_ids.values()
             for evidence_id in evidence_ids
         )
         observation_progress = (
@@ -397,7 +413,7 @@ def run_navigation_session(
             or frozenset(item.route for item in pack.route_options) - prior_options
         )
         if not observation_progress:
-            stop_reason = _incomplete_stop_reason(coverage)
+            stop_reason = _incomplete_stop_reason(objective, coverage)
             break
 
     return _finalize(
@@ -455,14 +471,17 @@ def _budget_stop_reason(
     return None
 
 
-def _incomplete_stop_reason(coverage: tuple[DesktopAnswerCoverageTrace, ...]) -> str:
-    return "absent" if coverage_gate_state(coverage) == "uncovered" else "partial"
+def _incomplete_stop_reason(
+    objective: NavigationObjective,
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
+) -> str:
+    return "absent" if coverage_gate_state(objective, coverage) == "uncovered" else "partial"
 
 
 def _expanded_plan(plan: DesktopRetrievalPlan, new_terms: tuple[str, ...]) -> DesktopRetrievalPlan:
     terms: list[str] = []
     seen: set[str] = set()
-    # A feedback round is a scoped search for the missing aspect. Put its terms first so
+    # A feedback round is a scoped search for the missing facet. Put its terms first so
     # generic seed words cannot keep winning every bounded channel ranking.
     for term in (*new_terms, *plan.terms[:12]):
         normalized = " ".join(term.split())
@@ -475,27 +494,27 @@ def _expanded_plan(plan: DesktopRetrievalPlan, new_terms: tuple[str, ...]) -> De
     return DesktopRetrievalPlan(query=plan.query, terms=tuple(terms), source="adaptive")
 
 
-def _actions_by_aspect(
+def _actions_by_facet(
     actions: tuple[NavigationAction, ...],
 ) -> tuple[tuple[str, tuple[NavigationAction, ...]], ...]:
     grouped: dict[str, list[NavigationAction]] = {}
     for action in actions:
-        grouped.setdefault(action.aspect, []).append(action)
-    return tuple((aspect, tuple(values)) for aspect, values in grouped.items())
+        grouped.setdefault(action.facet_id, []).append(action)
+    return tuple((facet_id, tuple(values)) for facet_id, values in grouped.items())
 
 
-def _bind_observed_aspect_evidence(
-    coverage: tuple[DesktopAnswerCoverageTrace, ...],
-    evidence_ids_by_aspect: dict[str, tuple[str, ...]],
-) -> tuple[DesktopAnswerCoverageTrace, ...]:
+def _bind_observed_facet_evidence(
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
+    evidence_ids_by_facet: dict[str, tuple[str, ...]],
+) -> tuple[DesktopFacetCoverageTrace, ...]:
     """Retain last-round candidate support without claiming model-confirmed coverage."""
-    updated: list[DesktopAnswerCoverageTrace] = []
+    updated: list[DesktopFacetCoverageTrace] = []
     for item in coverage:
-        observed = _unique(evidence_ids_by_aspect.get(item.aspect, ()))[:16]
-        if item.status in {"missing", "partial"} and observed:
+        observed = _unique(evidence_ids_by_facet.get(item.facet_id, ()))[:16]
+        if item.state in {"missing", "partial"} and observed:
             updated.append(
-                DesktopAnswerCoverageTrace(
-                    item.aspect,
+                DesktopFacetCoverageTrace(
+                    item.facet_id,
                     "partial",
                     _unique((*item.evidence_ids, *observed))[:16],
                 )
@@ -517,9 +536,9 @@ def _new_action_terms(
 def _merge_packs(
     current: DesktopEvidencePack,
     supplement: DesktopEvidencePack,
-    coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
     *,
-    aspect_evidence_ids: dict[str, tuple[str, ...]] | None = None,
+    facet_evidence_ids: dict[str, tuple[str, ...]] | None = None,
     priority_evidence_ids: tuple[str, ...] = (),
     evidence_envelope: NavigationEvidenceEnvelope | None = None,
 ) -> DesktopEvidencePack:
@@ -531,7 +550,7 @@ def _merge_packs(
         current.evidence,
         supplement.evidence,
         coverage,
-        aspect_evidence_ids=aspect_evidence_ids,
+        facet_evidence_ids=facet_evidence_ids,
         priority_evidence_ids=priority_evidence_ids,
         max_evidence_refs=envelope.max_evidence_refs,
         max_source_tokens=envelope.max_source_tokens,
@@ -680,7 +699,8 @@ def _merge_trace(
         )
         for name in channel_names
     )
-    return DesktopRetrievalTrace(
+    return replace(
+        first,
         catalog_generation_ids=_unique(
             (*first.catalog_generation_ids, *second.catalog_generation_ids)
         ),
@@ -717,7 +737,7 @@ def _finalize(
     *,
     pinned_snapshot_id: str,
     objective: NavigationObjective,
-    coverage: tuple[DesktopAnswerCoverageTrace, ...],
+    coverage: tuple[DesktopFacetCoverageTrace, ...],
     rounds: int,
     action_kinds: list[str],
     stop_reason: str,
@@ -736,13 +756,11 @@ def _finalize(
         navigation_snapshot_ids=_unique(
             (pinned_snapshot_id, *pack.retrieval_trace.navigation_snapshot_ids)
         ),
-        coverage_gate_state=coverage_gate_state(coverage),
-        navigation_answer_kind=objective.answer_kind,
-        navigation_subject=objective.subject,
+        coverage_gate_state=coverage_gate_state(objective, coverage),
         navigation_round_count=rounds,
         navigation_action_kinds=_unique(action_kinds),
         navigation_stop_reason=stop_reason,
-        coverage_aspects=coverage,
+        facet_coverage=coverage,
         navigation_model_calls=model_calls,
         navigation_logical_read_count=logical_reads,
         navigation_source_tokens=source_tokens,
@@ -756,42 +774,6 @@ def _finalize(
         ),
         guidance=_merge_guidance((), pack.guidance, evidence_ids),
         retrieval_trace=trace,
-    )
-
-
-def _order_evidence_by_coverage(
-    evidence: tuple[DesktopEvidenceRef, ...],
-    coverage: tuple[DesktopAnswerCoverageTrace, ...],
-) -> tuple[DesktopEvidenceRef, ...]:
-    by_id = {item.evidence_id: item for item in evidence}
-    ordered = _unique(
-        (
-            *(evidence_id for item in coverage for evidence_id in item.evidence_ids),
-            *(item.evidence_id for item in evidence),
-        )
-    )
-    return tuple(by_id[evidence_id] for evidence_id in ordered if evidence_id in by_id)
-
-
-def _with_added_cost(
-    pack: DesktopEvidencePack, cost: DesktopRetrievalModelCost
-) -> DesktopEvidencePack:
-    return replace(pack, retrieval_model_cost=_sum_cost(pack.retrieval_model_cost, cost))
-
-
-def _sum_cost(
-    first: DesktopRetrievalModelCost, second: DesktopRetrievalModelCost
-) -> DesktopRetrievalModelCost:
-    return DesktopRetrievalModelCost(
-        model_calls=first.model_calls + second.model_calls,
-        input_characters=first.input_characters + second.input_characters,
-        output_characters=first.output_characters + second.output_characters,
-    )
-
-
-def _logical_reads(trace: DesktopRetrievalTrace) -> int:
-    return (
-        trace.navigation_read_count + trace.source_window_count + trace.page_tree_supplement_count
     )
 
 

@@ -1,0 +1,36 @@
+{
+  "schema_version": "openkb.semantic-quality-rubric.v1",
+  "suite_dimensions": [
+    {
+      "id": "question_facets",
+      "prompt": "Are the question facets relevant, non-redundant, and sufficient for this source and question?"
+    },
+    {
+      "id": "importance_judgment",
+      "prompt": "Are required and supporting facets distinguished appropriately without forcing a generic answer template?"
+    },
+    {
+      "id": "page_organization",
+      "prompt": "Does the page plan organize every supplied claim naturally for this domain and language?"
+    },
+    {
+      "id": "domain_and_language_fit",
+      "prompt": "Do labels and organization fit the actual domain and requested language rather than an IT-specific or fixed dossier outline?"
+    },
+    {
+      "id": "evidence_respect",
+      "prompt": "Does the structure stay within the supplied evidence and claim identities without inventing factual content?"
+    }
+  ],
+  "pair_dimensions": [
+    {
+      "id": "structural_equivalence",
+      "prompt": "Do the translated cases receive semantically equivalent coverage and organization despite natural language differences?"
+    },
+    {
+      "id": "language_naturalness",
+      "prompt": "Is each member expressed naturally in its own language without copying headings from the other language?"
+    }
+  ],
+  "decision_rule": "Every dimension must pass for every suite and every declared pair; aggregate averages cannot mask a failed suite."
+}

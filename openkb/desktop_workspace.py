@@ -12,30 +12,42 @@ from openkb.desktop_import_deduplication import (
     backfill_deduplication_metadata,
     deduplication_backfill_needed,
 )
-from openkb.desktop_knowledge_analysis_migrations import (
-    register_knowledge_analysis_migration_functions,
-)
-from openkb.desktop_model_capability_compatibility import (
-    migrate_legacy_analysis_capability_profiles_in,
-)
 from openkb.desktop_model_operation_recovery import (
     discard_model_operation_retry_permits_in,
 )
 from openkb.desktop_workspace_backup import migrate_existing_database
 from openkb.desktop_workspace_feature_migrations import (
     DESKTOP_FEATURE_MIGRATIONS,
-    MODEL_OPERATION_STATE_MIGRATION_VERSION,
 )
 from openkb.desktop_workspace_migration_execution import (
     apply_feature_migration_backfill_in,
     pending_migration_statements,
 )
+from openkb.desktop_workspace_paths import (
+    STATE_DIRNAME as _STATE_DIRNAME,
+)
+from openkb.desktop_workspace_paths import (
+    desktop_state_database_path as desktop_state_database_path,
+)
+from openkb.desktop_workspace_paths import (
+    desktop_state_dir as desktop_state_dir,
+)
+from openkb.desktop_workspace_paths import (
+    initialization_marker_path as _initialization_marker_path,
+)
+from openkb.desktop_workspace_paths import (
+    resolve_directory as _resolve_directory,
+)
+from openkb.desktop_workspace_paths import (
+    state_database_path as _state_database_path,
+)
+from openkb.desktop_workspace_paths import (
+    state_dir as _state_dir,
+)
 from openkb.locks import kb_import_runtime_lock, kb_ingest_lock
 
-_STATE_DIRNAME = ".openkb"
-_STATE_FILENAME = "state.sqlite3"
-_INITIALIZING_FILENAME = "initializing"
 _DESKTOP_FORMAT = "openkb-desktop"
+DESKTOP_SCHEMA_EPOCH = "openkb.semantic-authority.v1"
 
 
 class DesktopKnowledgeBaseError(RuntimeError):
@@ -102,6 +114,18 @@ class DesktopKnowledgeBaseMigrationError(DesktopKnowledgeBaseError):
             "desktop_knowledge_base_schema_too_new",
             "This Desktop Knowledge Base uses schema version "
             f"{version}, which is newer than this OpenKB Desktop release.",
+        )
+
+
+class ObsoleteDesktopKnowledgeBaseEpochError(DesktopKnowledgeBaseError):
+    """Raised before mutation when a KB predates the semantic-authority cutover."""
+
+    def __init__(self, kb_dir: Path) -> None:
+        super().__init__(
+            "desktop_knowledge_base_epoch_obsolete",
+            "This Desktop Knowledge Base uses an obsolete semantic schema and was left "
+            f"unchanged: {kb_dir}. Create a new Knowledge Base and reimport the original "
+            "sources.",
         )
 
 
@@ -378,6 +402,12 @@ class DesktopKnowledgeBaseRuntime:
                         _set_metadata(connection, "format", _DESKTOP_FORMAT, in_transaction=True)
                         _set_metadata(
                             connection,
+                            "schema_epoch",
+                            DESKTOP_SCHEMA_EPOCH,
+                            in_transaction=True,
+                        )
+                        _set_metadata(
+                            connection,
                             "knowledge_base_name",
                             display_name,
                             in_transaction=True,
@@ -433,32 +463,6 @@ class DesktopKnowledgeBaseRuntime:
             )
 
 
-def _resolve_directory(kb_dir: Path) -> Path:
-    return kb_dir.expanduser().resolve()
-
-
-def _state_dir(kb_dir: Path) -> Path:
-    return kb_dir / _STATE_DIRNAME
-
-
-def _state_database_path(kb_dir: Path) -> Path:
-    return _state_dir(kb_dir) / _STATE_FILENAME
-
-
-def desktop_state_dir(kb_dir: Path) -> Path:
-    """Return the Desktop-owned state directory for a known knowledge base."""
-    return _state_dir(kb_dir)
-
-
-def desktop_state_database_path(kb_dir: Path) -> Path:
-    """Return the SQLite authority path for a known Desktop knowledge base."""
-    return _state_database_path(kb_dir)
-
-
-def _initialization_marker_path(kb_dir: Path) -> Path:
-    return _state_dir(kb_dir) / _INITIALIZING_FILENAME
-
-
 def _is_legacy_knowledge_base(kb_dir: Path) -> bool:
     state_dir = _state_dir(kb_dir)
     return (state_dir / "hashes.json").is_file() or (kb_dir / "wiki").is_dir()
@@ -474,7 +478,6 @@ def _display_name(name: str | None, kb_dir: Path) -> str:
 def _connect(database_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path)
     connection.execute("PRAGMA foreign_keys = ON")
-    register_knowledge_analysis_migration_functions(connection)
     return connection
 
 
@@ -528,6 +531,7 @@ def _is_completed_initial_database(database_path: Path) -> bool:
             return (
                 has_initial_migration is not None
                 and _metadata(connection, "format") == _DESKTOP_FORMAT
+                and _metadata(connection, "schema_epoch") == DESKTOP_SCHEMA_EPOCH
                 and bool(_metadata(connection, "knowledge_base_name"))
             )
         finally:
@@ -572,7 +576,6 @@ def _apply_migrations(
             "Desktop Knowledge Base has a non-contiguous migration ledger."
         )
 
-    newly_applied: set[int] = set()
     for version, statements in _MIGRATIONS:
         if version in applied:
             continue
@@ -602,12 +605,6 @@ def _apply_migrations(
             else:
                 connection.commit()
         applied.add(version)
-        newly_applied.add(version)
-    if MODEL_OPERATION_STATE_MIGRATION_VERSION in newly_applied:
-        migrate_legacy_analysis_capability_profiles_in(
-            connection,
-            migrated_at=_timestamp(),
-        )
     if 12 in applied and deduplication_backfill_needed(connection):
         try:
             if in_transaction:
@@ -718,6 +715,8 @@ def _load_desktop_knowledge_base(kb_dir: Path) -> DesktopKnowledgeBase:
                 raise DesktopKnowledgeBaseNotFoundError(kb_dir)
             connection = _connect(database_path)
             try:
+                if _metadata(connection, "schema_epoch") != DESKTOP_SCHEMA_EPOCH:
+                    raise ObsoleteDesktopKnowledgeBaseEpochError(kb_dir)
                 schema_version = migrate_existing_database(
                     connection,
                     database_path=database_path,

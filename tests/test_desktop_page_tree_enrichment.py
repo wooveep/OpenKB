@@ -722,14 +722,17 @@ def test_desktop_import_starts_engine_owned_enrichment_after_document_publicatio
     workspace.create(kb_dir)
 
     def transport(request, _timeout):
-        if request.operation == "knowledge_fact_harvest":
+        if request.operation in {
+            "knowledge_fact_harvest",
+            "knowledge_analysis_merge",
+        }:
             return json.dumps(
                 {
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                     "analysis_scope": "document",
                     "document_description": "No durable knowledge candidates.",
-                    "concepts": [],
-                    "entities": [],
+                    "document_summary": [],
+                    "candidates": [],
                 }
             )
         if request.operation == "page_tree_enrichment":

@@ -39,30 +39,14 @@ from openkb.desktop_knowledge_generations import (
     publish_corpus_generation_in,
     publish_incremental_corpus_generation_in,
 )
-from openkb.desktop_knowledge_rendering import (
-    UNSPECIFIED_APPLICABILITY,
-    RenderedKnowledgeClaim,
-    render_generated_knowledge,
-)
+from openkb.desktop_knowledge_rendering import RenderedKnowledgeClaim, render_generated_knowledge
 from openkb.desktop_knowledge_sources import stable_source_id
 from openkb.desktop_knowledge_titles import (
-    claim_explicitly_supports_alias,
-    controlled_latin_title_key,
     normalize_knowledge_title,
 )
 
 CORPUS_SYNTHESIS_SCHEMA_VERSION = "openkb.corpus-knowledge.v1"
 _IDENTITY_NAMESPACE = uuid.UUID("fd4bc9f7-4c24-5e43-9a93-a4e235318586")
-_CONFLICT_VALUE = re.compile(
-    r"(?<![0-9a-z_])(?:v?\d+(?:\.\d+){0,3}|true|false|enabled?|disabled?|on|off)"
-    r"(?![0-9a-z_])",
-    re.IGNORECASE,
-)
-_CONFLICT_VALUE_CONTEXT = re.compile(
-    r"port|default|timeout|version|address|gateway|mask|replica|端口|默认|超时|版本|"
-    r"地址|网关|掩码|副本|数值|取值",
-    re.IGNORECASE,
-)
 
 
 def replace_document_corpus_analysis_in(
@@ -76,8 +60,6 @@ def replace_document_corpus_analysis_in(
     now: str,
 ) -> None:
     """Replace one Document Version's summary and candidate authority in-place."""
-    if not analysis.corpus_ready:
-        raise ValueError("Corpus analysis requires the extended Knowledge Analysis contract.")
     _replace_document_summary_in(
         connection,
         document_id=document_id,
@@ -109,7 +91,7 @@ def synthesize_qualified_corpus_in(
     affected_document_ids: tuple[str, ...] = (),
     candidate_inputs: tuple[CorpusCandidateInput, ...] | None = None,
     force_generation: bool = False,
-    dossier_planner=None,
+    page_outcomes=None,
     defer_completion: bool = False,
 ) -> int | None:
     """Consolidate the full corpus or only identities affected by new documents."""
@@ -176,7 +158,7 @@ def synthesize_qualified_corpus_in(
             now=now,
             candidate_inputs=candidate_inputs,
             language=language,
-            dossier_planner=dossier_planner,
+            page_outcomes=page_outcomes,
             defer_completion=defer_completion,
         )
     if affected_document_ids:
@@ -189,7 +171,7 @@ def synthesize_qualified_corpus_in(
             now=now,
             candidate_inputs=candidate_inputs,
             language=language,
-            dossier_planner=dossier_planner,
+            page_outcomes=page_outcomes,
             defer_completion=defer_completion,
         )
     return publish_corpus_generation_in(
@@ -202,7 +184,7 @@ def synthesize_qualified_corpus_in(
         now=now,
         candidate_inputs=candidate_inputs,
         language=language,
-        dossier_planner=dossier_planner,
+        page_outcomes=page_outcomes,
         defer_completion=defer_completion,
     )
 
@@ -260,10 +242,10 @@ def _replace_document_summary_in(
         connection.execute(
             """
             INSERT INTO document_summary_units (
-                document_id, unit_ordinal, role, unit_text
+                document_id, unit_ordinal, label, unit_text
             ) VALUES (?, ?, ?, ?)
             """,
-            (document_id, ordinal, unit.role, unit.text),
+            (document_id, ordinal, unit.label, unit.text),
         )
         connection.executemany(
             """
@@ -293,27 +275,13 @@ def _candidate_clusters(candidates: tuple[_Candidate, ...]) -> tuple[tuple[_Cand
 
 
 def _same_identity(left: _Candidate, right: _Candidate) -> bool:
-    if left.kind != right.kind or _identity_contradiction(left, right):
+    if left.kind != right.kind:
         return False
     if left.normalized_title == right.normalized_title:
         return True
-    if controlled_latin_title_key(left.title) != controlled_latin_title_key(right.title):
-        return False
-    return any(
-        claim_explicitly_supports_alias(left.title, right.title, claim.text)
-        for candidate in (left, right)
-        for claim in candidate.claims
-    )
-
-
-def _identity_contradiction(left: _Candidate, right: _Candidate) -> bool:
-    if (
-        left.entity_subtype
-        and right.entity_subtype
-        and left.entity_subtype.casefold() != right.entity_subtype.casefold()
-    ):
-        return True
-    return False
+    left_aliases = {normalize_knowledge_title(value)[1] for value in left.aliases}
+    right_aliases = {normalize_knowledge_title(value)[1] for value in right.aliases}
+    return left.normalized_title in right_aliases and right.normalized_title in left_aliases
 
 
 def _record_uncertain_identity_reviews_in(
@@ -329,15 +297,6 @@ def _record_uncertain_identity_reviews_in(
             if left.kind != right.kind:
                 continue
             if left.normalized_title == right.normalized_title:
-                if _identity_contradiction(left, right):
-                    _record_identity_review_in(
-                        connection,
-                        left.kind,
-                        (left, right),
-                        reason="identity_contradiction",
-                        now=now,
-                    )
-                    blocked.update((left.candidate_id, right.candidate_id))
                 continue
             left_aliases = {
                 normalize_knowledge_title(value)[1] for value in left.aliases if value.strip()
@@ -345,14 +304,10 @@ def _record_uncertain_identity_reviews_in(
             right_aliases = {
                 normalize_knowledge_title(value)[1] for value in right.aliases if value.strip()
             }
-            reciprocal_alias = (
-                left.normalized_title in right_aliases and right.normalized_title in left_aliases
+            any_alias_match = (
+                left.normalized_title in right_aliases or right.normalized_title in left_aliases
             )
-            shared_names = _identity_tokens(left) & _identity_tokens(right)
-            shared_tags = {tag.casefold() for tag in left.tags if tag.strip()} & {
-                tag.casefold() for tag in right.tags if tag.strip()
-            }
-            if reciprocal_alias or (len(shared_names) >= 2 and shared_tags):
+            if any_alias_match and not _same_identity(left, right):
                 _record_identity_review_in(
                     connection,
                     left.kind,
@@ -418,9 +373,7 @@ def _synthesize_cluster_in(
             (
                 identity_id,
                 candidate.candidate_id,
-                "inventory_target"
-                if candidate.inventory_target_identity_id is not None
-                else "exact_title",
+                "exact_title",
             )
             for candidate in cluster
         ),
@@ -430,11 +383,9 @@ def _synthesize_cluster_in(
     content = render_generated_knowledge(kind, rendered_claims, language=language)
     if not content or not sources:
         return None
-    subtype_counts = Counter(
-        candidate.entity_subtype for candidate in cluster if candidate.entity_subtype
+    identity_labels = tuple(
+        dict.fromkeys(label for candidate in cluster for label in candidate.identity_labels)
     )
-    subtype = subtype_counts.most_common(1)[0][0] if subtype_counts else None
-    tags = tuple(dict.fromkeys(tag for candidate in cluster for tag in candidate.tags))
     return KnowledgeGenerationChange(
         document_id=min(candidate.document_id for candidate in cluster),
         kind=kind,
@@ -442,9 +393,8 @@ def _synthesize_cluster_in(
         normalized_title=normalized_title,
         content_markdown=content,
         content_sha256=knowledge_content_sha256(content),
-        entity_subtype=subtype,
         aliases=aliases,
-        tags=tags,
+        identity_labels=identity_labels,
         sources=sources,
         analysis_provenance_json=cluster[0].provenance_json,
         identity_id=identity_id,
@@ -456,53 +406,6 @@ def _matching_identity_rows_in(
     kind: str,
     cluster: tuple[_Candidate, ...],
 ) -> list[tuple[object, ...]]:
-    targeted_candidates = tuple(
-        candidate
-        for candidate in cluster
-        if candidate.inventory_target_identity_id is not None
-        or candidate.inventory_target_generation_id is not None
-    )
-    target_identity_ids = {
-        candidate.inventory_target_identity_id
-        for candidate in targeted_candidates
-        if candidate.inventory_target_identity_id is not None
-    }
-    if target_identity_ids:
-        if any(
-            candidate.inventory_target_identity_id is None
-            or candidate.inventory_target_generation_id is None
-            for candidate in targeted_candidates
-        ):
-            raise ValueError("Inventory target identity and generation must remain paired.")
-        target_generation_ids = {
-            candidate.inventory_target_generation_id for candidate in targeted_candidates
-        }
-        current_row = connection.execute(
-            "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1"
-        ).fetchone()
-        current_generation_id = (
-            int(current_row[0])
-            if current_row is not None
-            and current_row[0] is not None
-            and type(current_row[0]) is int
-            else None
-        )
-        if len(target_generation_ids) != 1 or current_generation_id not in target_generation_ids:
-            raise ValueError("Inventory target generation is no longer current.")
-        placeholders = ", ".join("?" for _identity_id in target_identity_ids)
-        rows = connection.execute(
-            "SELECT DISTINCT identities.identity_id, identities.canonical_title, "
-            "identities.normalized_title FROM knowledge_identities AS identities "
-            "JOIN knowledge_generation_items AS items "
-            "ON items.identity_id = identities.identity_id "
-            "WHERE identities.kind = ? AND identities.identity_id IN "
-            f"({placeholders}) AND identities.status = 'active' "
-            "AND items.generation_id = ? ORDER BY identities.identity_id",
-            (kind, *sorted(target_identity_ids), current_generation_id),
-        ).fetchall()
-        if len(rows) != len(target_identity_ids):
-            raise ValueError("Inventory target identity is no longer available.")
-        return rows
     titles = {candidate.normalized_title for candidate in cluster if candidate.normalized_title}
     canonical_normalized = _canonical_title(cluster)[1]
     titles.update(
@@ -533,10 +436,10 @@ def _matching_identity_rows_in(
 def _merge_cluster_claims(
     cluster: tuple[_Candidate, ...],
 ) -> tuple[tuple[RenderedKnowledgeClaim, ...], tuple[KnowledgeGenerationSource, ...]]:
-    merged: dict[tuple[str, tuple[tuple[str, str], ...], str], tuple[_Claim, set[str]]] = {}
+    merged: dict[tuple[tuple[tuple[str, str], ...], str], tuple[_Claim, set[str]]] = {}
     for candidate in cluster:
         for claim in candidate.claims:
-            key = claim.role, claim.applicability, _normalized_text(claim.text)
+            key = claim.applicability, _normalized_text(claim.text)
             current = merged.get(key)
             if current is None:
                 merged[key] = (claim, set(claim.evidence_ids))
@@ -549,7 +452,6 @@ def _merge_cluster_claims(
         rendered.append(
             RenderedKnowledgeClaim(
                 text=claim.text,
-                role=claim.role,
                 source_markers=tuple(f"[^{stable_source_id(value)}]" for value in ordered_ids),
                 applicability=claim.applicability,
             )
@@ -569,19 +471,8 @@ def _merge_cluster_claims(
 
 
 def _claim_conflicts(cluster: tuple[_Candidate, ...]) -> bool:
-    claims = tuple(claim for candidate in cluster for claim in candidate.claims)
-    for index, left in enumerate(claims):
-        for right in claims[index + 1 :]:
-            if (
-                left.role == right.role
-                and _normalized_text(left.text) != _normalized_text(right.text)
-                and _claim_scopes_overlap(left, right)
-                and (
-                    _opposed_claims(left.text, right.text)
-                    or _incompatible_claim_values(left.text, right.text)
-                )
-            ):
-                return True
+    """Conflict semantics require evidence-bound model judgment or human review."""
+    del cluster
     return False
 
 
@@ -597,65 +488,6 @@ def _corpus_language(
     )
     chinese = sum(bool(re.search(r"[\u3400-\u9fff]", text)) for text in texts)
     return "zh" if chinese * 2 > max(1, len(texts)) else "en"
-
-
-def _claim_scopes_overlap(left: _Claim, right: _Claim) -> bool:
-    left_scope = dict(left.applicability)
-    right_scope = dict(right.applicability)
-    for dimension in left_scope.keys() & right_scope.keys():
-        left_value = left_scope[dimension]
-        right_value = right_scope[dimension]
-        if (
-            left_value != UNSPECIFIED_APPLICABILITY
-            and right_value != UNSPECIFIED_APPLICABILITY
-            and left_value.casefold() != right_value.casefold()
-        ):
-            return False
-    return True
-
-
-def _opposed_claims(left: str, right: str) -> bool:
-    left_key, left_negative = _claim_polarity(left)
-    right_key, right_negative = _claim_polarity(right)
-    return bool(left_key and left_key == right_key and left_negative != right_negative)
-
-
-def _incompatible_claim_values(left: str, right: str) -> bool:
-    if not _CONFLICT_VALUE_CONTEXT.search(left) or not _CONFLICT_VALUE_CONTEXT.search(right):
-        return False
-    left_values = tuple(value.casefold() for value in _CONFLICT_VALUE.findall(left))
-    right_values = tuple(value.casefold() for value in _CONFLICT_VALUE.findall(right))
-    if not left_values or not right_values or left_values == right_values:
-        return False
-    left_skeleton = _normalized_text(_CONFLICT_VALUE.sub(" VALUE ", left))
-    right_skeleton = _normalized_text(_CONFLICT_VALUE.sub(" VALUE ", right))
-    return bool(left_skeleton and left_skeleton == right_skeleton)
-
-
-def _claim_polarity(value: str) -> tuple[str, bool]:
-    normalized = value.casefold()
-    negative = False
-    replacements = (
-        ("不需要", "需要"),
-        ("无需", "需要"),
-        ("不要", ""),
-        ("禁止", ""),
-        ("不得", ""),
-        ("不可", "可"),
-        ("不能", "能"),
-        ("must not", ""),
-        ("do not", ""),
-        ("does not", ""),
-        ("should not", ""),
-        ("cannot", "can"),
-        ("disable", "enable"),
-    )
-    for marker, replacement in replacements:
-        if marker in normalized:
-            negative = True
-            normalized = normalized.replace(marker, replacement)
-    key = re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", normalized)
-    return key, negative
 
 
 def _identity_tokens(candidate: _Candidate) -> frozenset[str]:
@@ -679,36 +511,10 @@ def _cluster_aliases(
     cluster: tuple[_Candidate, ...], canonical_normalized_title: str
 ) -> tuple[str, ...]:
     aliases: dict[str, str] = {}
-    canonical_title = next(
-        (
-            candidate.title
-            for candidate in cluster
-            if candidate.normalized_title == canonical_normalized_title
-        ),
-        canonical_normalized_title,
-    )
-
-    def supported(left: str, right: str) -> bool:
-        return any(
-            claim_explicitly_supports_alias(left, right, claim.text)
-            for candidate in cluster
-            for claim in candidate.claims
-        )
-
     for candidate in cluster:
-        values = (
-            (candidate.title, supported(canonical_title, candidate.title)),
-            *(
-                (
-                    value,
-                    supported(candidate.title, value) or supported(canonical_title, value),
-                )
-                for value in candidate.aliases
-            ),
-        )
-        for value, evidence_supported in values:
+        for value in (candidate.title, *candidate.aliases):
             alias, normalized = normalize_knowledge_title(value)
-            if evidence_supported and normalized and normalized != canonical_normalized_title:
+            if normalized and normalized != canonical_normalized_title:
                 aliases.setdefault(normalized, alias)
     return tuple(aliases.values())
 

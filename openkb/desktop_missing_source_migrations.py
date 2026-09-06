@@ -6,12 +6,11 @@ MISSING_SOURCE_MIGRATION_STATEMENTS: tuple[str, ...] = (
         candidate_id TEXT PRIMARY KEY,
         document_id TEXT NOT NULL
             REFERENCES source_documents(document_id) ON DELETE RESTRICT,
-        kind TEXT NOT NULL CHECK(kind IN ('concept', 'entity')),
+        kind TEXT NOT NULL CHECK(kind IN ('concept', 'entity', 'procedure')),
         title TEXT NOT NULL,
         normalized_title TEXT NOT NULL,
-        entity_subtype TEXT,
         aliases_json TEXT NOT NULL DEFAULT '[]',
-        tags_json TEXT NOT NULL DEFAULT '[]',
+        identity_labels_json TEXT NOT NULL DEFAULT '[]',
         claim_text TEXT NOT NULL,
         reason TEXT NOT NULL CHECK(reason IN (
             'source_not_provided', 'source_reference_unresolved'

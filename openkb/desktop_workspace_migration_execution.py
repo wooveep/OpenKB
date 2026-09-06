@@ -1,60 +1,39 @@
-"""Compatibility filtering for interrupted pre-ledger Desktop migrations."""
+"""Migration statement selection for the current Desktop schema epoch."""
 
 from __future__ import annotations
 
-import re
 import sqlite3
 
-from openkb.desktop_corpus_benchmark_migrations import CORPUS_BENCHMARK_COLUMNS
+from openkb.desktop_corpus_integrity_migrations import CORPUS_INTEGRITY_COLUMNS
 from openkb.desktop_corpus_knowledge_migrations import (
     pending_corpus_knowledge_migration_statements,
 )
 from openkb.desktop_knowledge_adoption_migrations import (
     KNOWLEDGE_ADOPTION_REQUEST_INPUT_COLUMNS,
 )
-from openkb.desktop_knowledge_analysis_migrations import (
-    KNOWLEDGE_ANALYSIS_ENTITY_SUBTYPE_MIGRATION_STATEMENT,
-)
 from openkb.desktop_model_observability_migrations import MODEL_LIFECYCLE_COLUMNS
 from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
 from openkb.desktop_workspace_feature_migrations import (
-    CANDIDATE_REGISTRY_MIGRATION_VERSION,
-    CORPUS_BENCHMARK_MIGRATION_VERSION,
+    CORPUS_INTEGRITY_MIGRATION_VERSION,
     CORPUS_KNOWLEDGE_MIGRATION_VERSION,
     DOCUMENT_VERSION_CATALOG_MIGRATION_VERSION,
-    INVENTORY_IDENTITY_BINDING_MIGRATION_VERSION,
     KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_VERSION,
-    KNOWLEDGE_ANALYSIS_MIGRATION_VERSION,
     MODEL_LIFECYCLE_MIGRATION_VERSION,
     MODEL_RESULT_OBSERVATION_MIGRATION_VERSION,
-    SEMANTIC_GRAPH_RESULT_BINDING_MIGRATION_VERSION,
 )
 
 _REPAIRABLE_COLUMN_MIGRATIONS = {
-    CORPUS_BENCHMARK_MIGRATION_VERSION: CORPUS_BENCHMARK_COLUMNS,
+    CORPUS_INTEGRITY_MIGRATION_VERSION: CORPUS_INTEGRITY_COLUMNS,
     KNOWLEDGE_ADOPTION_REQUEST_INPUT_MIGRATION_VERSION: (KNOWLEDGE_ADOPTION_REQUEST_INPUT_COLUMNS),
     MODEL_LIFECYCLE_MIGRATION_VERSION: MODEL_LIFECYCLE_COLUMNS,
     MODEL_RESULT_OBSERVATION_MIGRATION_VERSION: MODEL_RESULT_OBSERVATION_COLUMNS,
 }
-_REPAIRABLE_ADDITIVE_MIGRATIONS = frozenset(
-    {
-        CANDIDATE_REGISTRY_MIGRATION_VERSION,
-        DOCUMENT_VERSION_CATALOG_MIGRATION_VERSION,
-        INVENTORY_IDENTITY_BINDING_MIGRATION_VERSION,
-        SEMANTIC_GRAPH_RESULT_BINDING_MIGRATION_VERSION,
-    }
-)
-_ADD_COLUMN = re.compile(
-    r"^\s*ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+"
-    r"ADD\s+COLUMN\s+([A-Za-z_][A-Za-z0-9_]*)\b",
-    re.IGNORECASE,
-)
 
 
 def pending_migration_statements(
     connection: sqlite3.Connection, version: int, statements: tuple[str, ...]
 ) -> tuple[str, ...]:
-    """Skip known columns left by an interrupted pre-release migration."""
+    """Return statements required by a current-epoch database."""
     migration_columns = _REPAIRABLE_COLUMN_MIGRATIONS.get(version)
     if migration_columns is not None:
         existing = {
@@ -71,26 +50,7 @@ def pending_migration_statements(
         )
     if version == CORPUS_KNOWLEDGE_MIGRATION_VERSION:
         return pending_corpus_knowledge_migration_statements(connection)
-    if version in _REPAIRABLE_ADDITIVE_MIGRATIONS:
-        return tuple(
-            statement
-            for statement in statements
-            if not (
-                (match := _ADD_COLUMN.match(statement)) is not None
-                and _table_has_column(connection, match.group(1), match.group(2))
-            )
-        )
-    if version != KNOWLEDGE_ANALYSIS_MIGRATION_VERSION:
-        return statements
-    if not _table_has_column(connection, "knowledge_reconciliation_candidates", "entity_subtype"):
-        return statements
-    # A pre-release database may expose the v26 column before recording v26.
-    # Keep the remaining migration atomic while accepting that exact shape.
-    return tuple(
-        statement
-        for statement in statements
-        if statement != KNOWLEDGE_ANALYSIS_ENTITY_SUBTYPE_MIGRATION_STATEMENT
-    )
+    return statements
 
 
 def apply_feature_migration_backfill_in(
@@ -100,16 +60,6 @@ def apply_feature_migration_backfill_in(
     now: str,
 ) -> None:
     """Run deterministic data backfills owned by an additive schema migration."""
-    if version == INVENTORY_IDENTITY_BINDING_MIGRATION_VERSION:
-        from openkb.desktop_candidate_registry import (
-            backfill_candidate_registry_generations_in,
-        )
-        from openkb.desktop_corpus_synthesis_generation import (
-            backfill_corpus_generation_manifests_in,
-        )
-
-        backfill_candidate_registry_generations_in(connection, now=now)
-        backfill_corpus_generation_manifests_in(connection, now=now)
     if version == DOCUMENT_VERSION_CATALOG_MIGRATION_VERSION:
         from openkb.desktop_document_version_catalog import (
             backfill_document_version_catalog_in,

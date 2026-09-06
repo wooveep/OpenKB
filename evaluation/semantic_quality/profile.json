@@ -1,0 +1,12 @@
+{
+  "schema_version": "openkb.semantic-quality-profile.v1",
+  "provider": "deepseek",
+  "api_base_url": "https://api.deepseek.com",
+  "model": "deepseek-v4-flash",
+  "structured_output_mode": "json_object",
+  "thinking": "disabled",
+  "repetitions": 3,
+  "temperature": 0.0,
+  "max_output_tokens": 8192,
+  "timeout_seconds": 120.0
+}

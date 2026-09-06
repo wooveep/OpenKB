@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -14,6 +12,7 @@ from openkb.desktop_corpus_knowledge import synthesize_qualified_corpus_in
 from openkb.desktop_corpus_synthesis_generation import (
     CorpusCandidateInput,
     CorpusGenerationManifest,
+    bind_generation_graph_inputs_in,
     capture_corpus_candidate_inputs_in,
     corpus_generation_manifest_in,
     fail_corpus_manifest_in,
@@ -26,20 +25,24 @@ from openkb.desktop_corpus_synthesis_tasks import (
     mark_corpus_synthesis_qualification_in,
     record_corpus_synthesis_attempt_in,
 )
-from openkb.desktop_entity_dossier import EntityDossierPlan
-from openkb.desktop_entity_dossier_planner import run_entity_dossier_planning
-from openkb.desktop_entity_dossier_store import (
-    EntityDossierPlanner,
-    PlannedEntityDossier,
-    PublishedEntityDossier,
-    dossier_claims_for_identity_in,
-    generation_entity_dossiers_in,
-)
 from openkb.desktop_import_clock import timestamp
 from openkb.desktop_knowledge_generations import (
     complete_prepared_corpus_generation_in,
     current_generation_id_in,
 )
+from openkb.desktop_knowledge_page import knowledge_page_claim_snapshot_digest
+from openkb.desktop_knowledge_page_model_planner import model_knowledge_page_planner
+from openkb.desktop_knowledge_page_planning import KnowledgePagePlan
+from openkb.desktop_knowledge_page_store import (
+    DeferredKnowledgePage,
+    KnowledgePagePlanner,
+    PlannedKnowledgePage,
+    PublishedKnowledgePage,
+    generation_knowledge_pages_in,
+    knowledge_page_claims_for_identity_in,
+    knowledge_page_relations_for_identity_in,
+)
+from openkb.desktop_knowledge_relationships import rebuild_generation_relationships_in
 from openkb.desktop_model_event import normalize_model_event
 from openkb.desktop_model_gateway import (
     DesktopModelCallError,
@@ -51,16 +54,13 @@ from openkb.desktop_model_result_failure import (
     DesktopModelOperationSuspendedError,
     mark_structured_output_operations_ready,
     model_operation_dispatch_possible,
-    require_model_operation_dispatch,
     suspend_analysis_operation_failure,
-    suspend_structured_model_operation,
 )
 from openkb.desktop_okf_projection import (
     activate_okf_projection,
     discard_okf_projection_staging,
     stage_okf_projection_in,
 )
-from openkb.desktop_prompt_contracts import prompt_contract_for
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
     DesktopValidatedStructuredOutput,
@@ -78,7 +78,7 @@ class CorpusSynthesisOutcome:
     previous_current_generation_id: int | None
     current_generation_id: int | None
     manifest: CorpusGenerationManifest | None
-    dossiers: tuple[PublishedEntityDossier, ...] = ()
+    pages: tuple[PublishedKnowledgePage, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -111,71 +111,57 @@ class CorpusKnowledgeSynthesisPipeline:
         """Run one generation without exposing SQLite or stage ordering to callers."""
         if should_stop():
             return CorpusSynthesisOutcome("cancelled", None, None, None, None)
-        if gateway is not None:
-            return self._run_model_generation(
+        if gateway is None:
+            return self._run_without_planner(
                 candidate_generation_ids=candidate_generation_ids,
                 preferred_language=preferred_language,
                 affected_document_ids=affected_document_ids,
                 should_stop=should_stop,
                 force_generation=force_generation,
-                gateway=gateway,
-                retry_scope=retry_scope,
             )
-        return self._run_deterministic_generation(
+        return self._run_model_generation(
             candidate_generation_ids=candidate_generation_ids,
             preferred_language=preferred_language,
             affected_document_ids=affected_document_ids,
+            should_stop=should_stop,
             force_generation=force_generation,
+            gateway=gateway,
+            retry_scope=retry_scope,
         )
 
-    def _run_deterministic_generation(
+    def _run_without_planner(
         self,
         *,
         candidate_generation_ids: tuple[str, ...],
         preferred_language: str | None,
         affected_document_ids: tuple[str, ...],
+        should_stop: Callable[[], bool],
         force_generation: bool,
     ) -> CorpusSynthesisOutcome:
-        staged: Path | None = None
-        with kb_ingest_lock(self._state_dir):
-            connection = self._connect()
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                previous = current_generation_id_in(connection)
-                inputs = capture_corpus_candidate_inputs_in(connection)
-                _require_candidate_generations(inputs, candidate_generation_ids)
-                before = _latest_generation_id_in(connection)
-                current = synthesize_qualified_corpus_in(
-                    connection,
-                    now=timestamp(),
-                    preferred_language=preferred_language,
-                    affected_document_ids=affected_document_ids,
-                    candidate_inputs=inputs,
-                    force_generation=force_generation,
-                )
-                attempted = _latest_generation_id_in(connection)
-                generation_id = attempted if attempted != before else None
-                staged = stage_okf_projection_in(connection, self._kb_dir)
-                connection.commit()
-                outcome = _outcome_in(
-                    connection,
-                    generation_id=generation_id,
-                    previous_current_generation_id=previous,
-                    current_generation_id=current,
-                )
-            except BaseException:
-                connection.rollback()
-                if staged is not None:
-                    discard_okf_projection_staging(staged)
-                raise
-            finally:
-                connection.close()
-        assert staged is not None
-        try:
-            activate_okf_projection(self._kb_dir, staged)
-        finally:
-            discard_okf_projection_staging(staged)
-        return outcome
+        prepared_or_outcome = self._prepare_generation(
+            candidate_generation_ids=candidate_generation_ids,
+            preferred_language=preferred_language,
+            affected_document_ids=affected_document_ids,
+            force_generation=force_generation,
+            provider="unavailable",
+            model="unavailable",
+            retry_scope=None,
+        )
+        if isinstance(prepared_or_outcome, CorpusSynthesisOutcome):
+            return prepared_or_outcome
+        prepared = prepared_or_outcome
+        if should_stop():
+            return self._finish_terminal(
+                prepared,
+                "cancelled",
+                error_code="corpus_synthesis_cancelled",
+                error_reason="Corpus synthesis was cancelled before page planning.",
+            )
+        outcomes = self._deferred_generation(
+            prepared,
+            error_code="knowledge_page_planner_unavailable",
+        )
+        return self._complete_generation(prepared, outcomes, should_stop=should_stop)
 
     def _run_model_generation(
         self,
@@ -188,21 +174,27 @@ class CorpusKnowledgeSynthesisPipeline:
         gateway: DesktopModelGateway,
         retry_scope: str | None,
     ) -> CorpusSynthesisOutcome:
-        operation = "entity_dossier_planning"
+        operation = "knowledge_page_planning"
         if not model_operation_dispatch_possible(
             self._kb_dir,
             gateway,
             operation=operation,
             retry_scope=retry_scope,
         ):
-            current = self._current_generation_id()
-            return CorpusSynthesisOutcome("failed", None, current, current, None)
+            return self._run_without_planner(
+                candidate_generation_ids=candidate_generation_ids,
+                preferred_language=preferred_language,
+                affected_document_ids=affected_document_ids,
+                should_stop=should_stop,
+                force_generation=force_generation,
+            )
         prepared_or_outcome = self._prepare_generation(
             candidate_generation_ids=candidate_generation_ids,
             preferred_language=preferred_language,
             affected_document_ids=affected_document_ids,
             force_generation=force_generation,
-            gateway=gateway,
+            provider=gateway.provider_name,
+            model=gateway.model_name,
             retry_scope=retry_scope,
         )
         if isinstance(prepared_or_outcome, CorpusSynthesisOutcome):
@@ -227,8 +219,8 @@ class CorpusKnowledgeSynthesisPipeline:
                 return True
             return not self._claim_is_active(prepared.claim)
 
-        outputs: list[DesktopValidatedStructuredOutput[EntityDossierPlan]] = []
-        planner = model_entity_dossier_planner(
+        outputs: list[DesktopValidatedStructuredOutput[KnowledgePagePlan]] = []
+        planner = model_knowledge_page_planner(
             gateway,
             should_stop=claimed_should_stop,
             kb_dir=self._kb_dir,
@@ -240,6 +232,7 @@ class CorpusKnowledgeSynthesisPipeline:
             planned = self._plan_generation(
                 prepared,
                 planner,
+                gateway=gateway,
                 should_stop=claimed_should_stop,
             )
         except DesktopModelCancelledError:
@@ -250,36 +243,6 @@ class CorpusKnowledgeSynthesisPipeline:
                 "cancelled",
                 error_code="corpus_synthesis_cancelled",
                 error_reason="Corpus synthesis was cancelled during model dispatch.",
-            )
-        except DesktopModelOperationSuspendedError as error:
-            return self._finish_terminal(
-                prepared,
-                "failed",
-                error_code="model_operation_suspended",
-                error_reason=str(error),
-            )
-        except DesktopModelCallError as error:
-            suspend_analysis_operation_failure(self._kb_dir, gateway, error)
-            return self._finish_terminal(
-                prepared,
-                "failed",
-                error_code=error.failure.code,
-                error_reason=error.failure.reason,
-            )
-        except DesktopStructuredOutputInvalidError as error:
-            suspend_structured_model_operation(
-                self._kb_dir,
-                gateway,
-                error,
-                operation=operation,
-                failure_code="entity_dossier_response_invalid",
-                reason="Entity Dossier planning returned an invalid result.",
-            )
-            return self._finish_terminal(
-                prepared,
-                "failed",
-                error_code="entity_dossier_response_invalid",
-                error_reason="Entity Dossier planning returned an invalid result.",
             )
         if claimed_should_stop():
             return self._outcome_for_prepared(prepared)
@@ -305,7 +268,8 @@ class CorpusKnowledgeSynthesisPipeline:
         preferred_language: str | None,
         affected_document_ids: tuple[str, ...],
         force_generation: bool,
-        gateway: DesktopModelGateway,
+        provider: str,
+        model: str,
         retry_scope: str | None,
     ) -> _PreparedCorpusGeneration | CorpusSynthesisOutcome:
         with kb_ingest_lock(self._state_dir):
@@ -335,6 +299,8 @@ class CorpusKnowledgeSynthesisPipeline:
                         previous_current_generation_id=previous,
                         current_generation_id=current_generation_id_in(connection),
                     )
+                bind_generation_graph_inputs_in(connection, generation_id, now=timestamp())
+                rebuild_generation_relationships_in(connection, generation_id)
                 language = _generation_language_in(
                     connection,
                     generation_id,
@@ -343,8 +309,8 @@ class CorpusKnowledgeSynthesisPipeline:
                 claim = claim_corpus_synthesis_task_in(
                     connection,
                     generation_id,
-                    provider=gateway.provider_name,
-                    model=gateway.model_name,
+                    provider=provider,
+                    model=model,
                     retry_scope=retry_scope,
                     now=timestamp(),
                 )
@@ -364,58 +330,109 @@ class CorpusKnowledgeSynthesisPipeline:
     def _plan_generation(
         self,
         prepared: _PreparedCorpusGeneration,
-        planner: EntityDossierPlanner,
+        planner: KnowledgePagePlanner,
         *,
+        gateway: DesktopModelGateway,
         should_stop: Callable[[], bool],
-    ) -> dict[str, PlannedEntityDossier]:
+    ) -> dict[str, PlannedKnowledgePage | DeferredKnowledgePage]:
         connection = self._connect()
         try:
             rows = connection.execute(
                 "SELECT identity_id, title FROM knowledge_generation_items "
-                "WHERE generation_id = ? AND kind = 'entity' ORDER BY item_key",
+                "WHERE generation_id = ? AND identity_id IS NOT NULL ORDER BY item_key",
                 (prepared.generation_id,),
             ).fetchall()
-            known_identity_ids = frozenset(
-                str(row[0])
-                for row in connection.execute(
-                    "SELECT identity_id FROM knowledge_generation_items "
-                    "WHERE generation_id = ? AND identity_id IS NOT NULL",
-                    (prepared.generation_id,),
-                )
-            )
-            planned: dict[str, PlannedEntityDossier] = {}
+            planned: dict[str, PlannedKnowledgePage | DeferredKnowledgePage] = {}
             for row in rows:
                 if should_stop():
                     raise DesktopModelCancelledError()
                 identity_id = str(row[0])
-                planned[identity_id] = planner(
-                    document_name=str(row[1]),
-                    generation_id=prepared.generation_id,
-                    identity_id=identity_id,
-                    claims=dossier_claims_for_identity_in(
-                        connection, prepared.generation_id, identity_id
-                    ),
-                    language=prepared.language,
-                    known_related_identity_ids=known_identity_ids - {identity_id},
+                claims = knowledge_page_claims_for_identity_in(
+                    connection, prepared.generation_id, identity_id
                 )
+                snapshot_digest = knowledge_page_claim_snapshot_digest(claims)
+                if not claims:
+                    planned[identity_id] = DeferredKnowledgePage(
+                        identity_id,
+                        snapshot_digest,
+                        ("empty_claim_snapshot",),
+                    )
+                    continue
+                try:
+                    planned[identity_id] = planner(
+                        document_name=str(row[1]),
+                        generation_id=prepared.generation_id,
+                        identity_id=identity_id,
+                        title=str(row[1]),
+                        claims=claims,
+                        relations=knowledge_page_relations_for_identity_in(
+                            connection,
+                            prepared.generation_id,
+                            identity_id,
+                        ),
+                        knowledge_language=prepared.language,
+                    )
+                except DesktopStructuredOutputInvalidError:
+                    planned[identity_id] = DeferredKnowledgePage(
+                        identity_id,
+                        snapshot_digest,
+                        ("knowledge_page_plan_invalid",),
+                    )
+                except DesktopModelOperationSuspendedError:
+                    planned[identity_id] = DeferredKnowledgePage(
+                        identity_id,
+                        snapshot_digest,
+                        ("knowledge_page_planner_suspended",),
+                    )
+                except DesktopModelCallError as error:
+                    suspend_analysis_operation_failure(self._kb_dir, gateway, error)
+                    planned[identity_id] = DeferredKnowledgePage(
+                        identity_id,
+                        snapshot_digest,
+                        (error.failure.code,),
+                    )
             return planned
+        finally:
+            connection.close()
+
+    def _deferred_generation(
+        self,
+        prepared: _PreparedCorpusGeneration,
+        *,
+        error_code: str,
+    ) -> dict[str, PlannedKnowledgePage | DeferredKnowledgePage]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT DISTINCT identity_id FROM knowledge_generation_items "
+                "WHERE generation_id = ? AND identity_id IS NOT NULL ORDER BY identity_id",
+                (prepared.generation_id,),
+            ).fetchall()
+            result: dict[str, PlannedKnowledgePage | DeferredKnowledgePage] = {}
+            for row in rows:
+                identity_id = str(row[0])
+                claims = knowledge_page_claims_for_identity_in(
+                    connection,
+                    prepared.generation_id,
+                    identity_id,
+                )
+                result[identity_id] = DeferredKnowledgePage(
+                    identity_id,
+                    knowledge_page_claim_snapshot_digest(claims),
+                    (error_code,),
+                )
+            return result
         finally:
             connection.close()
 
     def _complete_generation(
         self,
         prepared: _PreparedCorpusGeneration,
-        planned: dict[str, PlannedEntityDossier],
+        planned: dict[str, PlannedKnowledgePage | DeferredKnowledgePage],
         *,
         should_stop: Callable[[], bool],
     ) -> CorpusSynthesisOutcome:
         staged: Path | None = None
-
-        def prepared_planner(**kwargs) -> PlannedEntityDossier:
-            identity_id = str(kwargs["identity_id"])
-            if identity_id not in planned:
-                raise KeyError(identity_id)
-            return planned[identity_id]
 
         if should_stop():
             return self._outcome_for_prepared(prepared)
@@ -439,7 +456,7 @@ class CorpusKnowledgeSynthesisPipeline:
                     prepared.generation_id,
                     language=prepared.language,
                     now=now,
-                    planner=prepared_planner,
+                    page_outcomes=planned,
                 )
                 outcome = _outcome_in(
                     connection,
@@ -654,60 +671,6 @@ class CorpusKnowledgeSynthesisPipeline:
 DesktopCorpusKnowledgeSynthesisPipeline = CorpusKnowledgeSynthesisPipeline
 
 
-def model_entity_dossier_planner(
-    gateway: DesktopModelGateway,
-    *,
-    should_stop: Callable[[], bool],
-    kb_dir: Path | None = None,
-    retry_scope: str | None = None,
-    completed_outputs: list[DesktopValidatedStructuredOutput[EntityDossierPlan]] | None = None,
-    on_model_event: Callable[[object], None] | None = None,
-) -> EntityDossierPlanner:
-    contract_digest = prompt_contract_for("entity_dossier_planning").digest
-
-    def plan(**kwargs) -> PlannedEntityDossier:
-        def invoke(request):
-            if kb_dir is not None:
-                require_model_operation_dispatch(
-                    kb_dir,
-                    gateway,
-                    request,
-                    retry_scope=retry_scope,
-                )
-            return gateway.analyze(
-                request,
-                on_event=on_model_event or (lambda _event: None),
-                is_cancelled=should_stop,
-            )
-
-        run = run_entity_dossier_planning(
-            **kwargs,
-            invoke=invoke,
-        )
-        if completed_outputs is not None:
-            completed_outputs.append(run.output)
-        provenance = json.dumps(
-            {
-                "provider": gateway.provider_name,
-                "model": gateway.model_name,
-                "call_id": run.result.call_id,
-                "response_sha256": hashlib.sha256(run.result.content.encode("utf-8")).hexdigest(),
-                "repaired": run.repaired,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return PlannedEntityDossier(
-            plan=run.plan,
-            planning_operation="entity_dossier_planning",
-            prompt_contract_digest=contract_digest,
-            planner_provenance_json=provenance,
-        )
-
-    return plan
-
-
 def _outcome_in(
     connection: sqlite3.Connection,
     *,
@@ -740,7 +703,7 @@ def _outcome_in(
         previous_current_generation_id=previous_current_generation_id,
         current_generation_id=current_generation_id,
         manifest=manifest,
-        dossiers=generation_entity_dossiers_in(connection, generation_id),
+        pages=generation_knowledge_pages_in(connection, generation_id),
     )
 
 

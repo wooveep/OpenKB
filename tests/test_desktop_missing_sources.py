@@ -9,11 +9,17 @@ from pathlib import Path
 import pytest
 
 from openkb.desktop_import import DesktopImportError, DesktopTextImportService
-from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.desktop_knowledge_analysis import (
+    KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+    KnowledgeAnalysisMissingClaim,
+)
+from openkb.desktop_knowledge_analysis_reuse import analysis_evidence_for_document_in
 from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
 from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
-from openkb.desktop_missing_sources import DesktopMissingSourceService
-from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
+from openkb.desktop_missing_sources import (
+    DesktopMissingSourceService,
+    record_missing_source_candidates_in,
+)
 from openkb.desktop_model_gateway import DesktopModelGateway
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
@@ -25,41 +31,74 @@ def _analysis_response(request_content: str) -> str:
             "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
             "analysis_scope": "document",
             "document_description": "One valid claim and reviewable unsupported claims.",
-            "concepts": [
+            "document_summary": [],
+            "candidates": [
                 {
+                    "kind": "concept",
                     "title": "Supported knowledge",
                     "aliases": [],
-                    "tags": [],
+                    "identity_labels": [],
+                    "admission": "admit",
                     "claims": [
                         {
                             "text": "The source documents an available fact.",
                             "source_evidence_ids": [evidence_id],
+                            "applicability": [],
                         }
                     ],
                 },
-                {
-                    "title": "Needs binding",
-                    "aliases": ["unresolved alias"],
-                    "tags": ["review"],
-                    "claims": [
-                        {
-                            "text": "A useful claim still needs a source.",
-                            "source_evidence_ids": [],
-                        },
-                        {
-                            "text": "A second claim references an unknown source.",
-                            "source_evidence_ids": ["unknown-evidence"],
-                        },
-                    ],
-                },
             ],
-            "entities": [],
         }
     )
 
 
+def _page_plan_response(request_content: str) -> str:
+    payload = json.loads(request_content)
+    return json.dumps(
+        {
+            "generation_id": payload["generation_id"],
+            "identity_id": payload["identity_id"],
+            "lead": {
+                "presentation": "paragraph",
+                "claim_ids": [claim["claim_id"] for claim in payload["claims"]],
+                "relation_assertion_ids": [],
+            },
+            "sections": [],
+        }
+    )
+
+
+def _missing_claims(
+    *, first_claim: str = "A useful claim still needs a source."
+) -> tuple[KnowledgeAnalysisMissingClaim, ...]:
+    common = {
+        "kind": "concept",
+        "title": "Needs binding",
+        "normalized_title": "needs binding",
+        "aliases": ("unresolved alias",),
+        "identity_labels": ("review",),
+    }
+    return (
+        KnowledgeAnalysisMissingClaim(
+            **common,
+            claim_text=first_claim,
+            source_evidence_ids=(),
+            reason="source_not_provided",
+        ),
+        KnowledgeAnalysisMissingClaim(
+            **common,
+            claim_text="A second claim references an unknown source.",
+            source_evidence_ids=("unknown-evidence",),
+            reason="source_reference_unresolved",
+        ),
+    )
+
+
 def _knowledge_base_with_missing_sources(
-    tmp_path: Path, *, response=_analysis_response
+    tmp_path: Path,
+    *,
+    response=_analysis_response,
+    missing_claims: tuple[KnowledgeAnalysisMissingClaim, ...] | None = None,
 ) -> tuple[Path, str]:
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "source.md"
@@ -67,6 +106,8 @@ def _knowledge_base_with_missing_sources(
     DesktopKnowledgeBaseRuntime().create(kb_dir)
 
     def analyze(request, _timeout_seconds):
+        if request.operation == "knowledge_page_planning":
+            return _page_plan_response(request.content)
         return response(request.content)
 
     result = DesktopTextImportService(
@@ -75,10 +116,19 @@ def _knowledge_base_with_missing_sources(
             analyze, provider_name="review-provider", model_name="review-model"
         ),
     ).import_text(source)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        evidence = analysis_evidence_for_document_in(connection, result.document.document_id)
+        record_missing_source_candidates_in(
+            connection,
+            document_id=result.document.document_id,
+            claims=missing_claims or _missing_claims(),
+            evidence=evidence,
+            analysis_provenance_json="{}",
+        )
     return kb_dir, result.document.document_id
 
 
-def test_schema_valid_missing_claims_do_not_block_document_or_valid_knowledge(
+def test_manually_recorded_missing_claims_do_not_block_valid_candidates(
     tmp_path: Path,
 ) -> None:
     kb_dir, document_id = _knowledge_base_with_missing_sources(tmp_path)
@@ -95,19 +145,17 @@ def test_schema_valid_missing_claims_do_not_block_document_or_valid_knowledge(
         assert connection.execute(
             "SELECT availability FROM source_documents WHERE document_id = ?", (document_id,)
         ).fetchone() == ("available",)
-        published = "\n".join(
+        candidate_claims = "\n".join(
             str(row[0])
             for row in connection.execute(
                 """
-                SELECT content_markdown FROM knowledge_generation_state AS state
-                JOIN knowledge_generation_items AS items
-                    ON items.generation_id = state.current_generation_id
+                SELECT claim_text FROM knowledge_candidate_generation_claims
                 """
             ).fetchall()
         )
-    assert "The source documents an available fact." in published
-    assert "still needs a source" not in published
-    assert "unknown source" not in published
+    assert "The source documents an available fact." in candidate_claims
+    assert "still needs a source" not in candidate_claims
+    assert "unknown source" not in candidate_claims
     projection = "\n".join(
         path.read_text(encoding="utf-8") for path in (kb_dir / "knowledge-pages").rglob("*.md")
     )
@@ -235,14 +283,9 @@ def test_partial_user_revision_claim_routes_to_reconciliation(
 def test_binding_rejects_reserved_source_markers_and_retains_candidate(
     tmp_path: Path,
 ) -> None:
-    def marker_response(request_content: str) -> str:
-        payload = json.loads(_analysis_response(request_content))
-        payload["concepts"][1]["claims"][0]["text"] = (
-            "The model inserted a bogus marker.[^src-bogus]"
-        )
-        return json.dumps(payload)
-
-    kb_dir, _document_id = _knowledge_base_with_missing_sources(tmp_path, response=marker_response)
+    marker_claim = "The model inserted a bogus marker.[^src-bogus]"
+    seeded = _missing_claims(first_claim=marker_claim)
+    kb_dir, _document_id = _knowledge_base_with_missing_sources(tmp_path, missing_claims=seeded)
     service = DesktopMissingSourceService(kb_dir)
     candidate = next(
         item for item in service.list_candidates() if "bogus marker" in item.claim_text
@@ -314,76 +357,51 @@ def test_bulk_dismiss_deletes_candidate_bodies_and_keeps_minimal_records(
     assert deleted.value.code == "missing_source_candidate_not_found"
 
 
-def test_bulk_dismiss_redacts_long_document_batch_and_merge_checkpoints(
+def test_unknown_evidence_is_repaired_then_rejected_without_queueing_a_candidate(
     tmp_path: Path,
 ) -> None:
     kb_dir = tmp_path / "knowledge"
-    source = tmp_path / "long.md"
-    source.write_text(
-        "\n\n".join(
-            f"# Section {ordinal}\n\nOriginal evidence for section {ordinal}."
-            for ordinal in range(7)
-        ),
-        encoding="utf-8",
-    )
+    source = tmp_path / "source.md"
+    source.write_text("# Evidence\n\nOriginal available evidence.", encoding="utf-8")
     DesktopKnowledgeBaseRuntime().create(kb_dir)
-    secret = "Batch checkpoint secret candidate."
-    supported = "A retained supported batch claim."
+    responses: list[str] = []
 
     def transport(request, _timeout_seconds):
-        payload = json.loads(request.content)
         if request.operation == "knowledge_fact_harvest":
-            evidence_id = str(payload["evidence"][0]["evidence_id"])
-            return json.dumps(
+            invalid = json.dumps(
                 {
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
-                    "analysis_scope": "batch",
-                    "document_description": "Batch review.",
-                    "concepts": [
+                    "analysis_scope": "document",
+                    "document_description": "Invalid evidence reference.",
+                    "document_summary": [],
+                    "candidates": [
                         {
-                            "title": "Batched review",
+                            "kind": "concept",
+                            "title": "Unsupported",
                             "aliases": [],
-                            "tags": [],
+                            "identity_labels": [],
+                            "admission": "admit",
                             "claims": [
-                                {"text": secret, "source_evidence_ids": []},
-                                {"text": supported, "source_evidence_ids": [evidence_id]},
+                                {
+                                    "text": "This claim cites unknown Evidence.",
+                                    "source_evidence_ids": ["unknown-evidence"],
+                                    "applicability": [],
+                                }
                             ],
                         }
                     ],
-                    "entities": [],
                 }
             )
-        assert request.operation == "knowledge_analysis_merge"
-        return json.dumps({"document_description": "Merged review."})
+            responses.append(invalid)
+            return invalid
+        assert request.operation == "structured_output_repair"
+        return responses[0]
 
-    gateway = DesktopModelGateway(transport)
-    gateway.capability_for_operation = lambda _operation: DesktopModelCapabilityProfile(
-        context_capacity=8_192,
-        document_input_capacity=300,
-        supports_native_json_schema=False,
-        supports_streaming=True,
-        supports_reasoning=False,
-    )
-    DesktopTextImportService(kb_dir, model_gateway=gateway).import_text(source)
-    service = DesktopMissingSourceService(kb_dir)
-    candidate = next(item for item in service.list_candidates() if item.claim_text == secret)
+    with pytest.raises(DesktopImportError) as invalid:
+        DesktopTextImportService(
+            kb_dir,
+            model_gateway=DesktopModelGateway(transport),
+        ).import_text(source)
 
-    service.dismiss((candidate.candidate_id,))
-
-    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
-        payloads = [
-            str(row[0])
-            for row in connection.execute(
-                """
-                SELECT checkpoint_json FROM stage_run_runtime WHERE checkpoint_json IS NOT NULL
-                UNION ALL
-                SELECT checkpoint_json FROM knowledge_analysis_batches
-                    WHERE checkpoint_json IS NOT NULL
-                UNION ALL
-                SELECT checkpoint_json FROM knowledge_analysis_merges
-                    WHERE checkpoint_json IS NOT NULL
-                """
-            ).fetchall()
-        ]
-    assert all(secret not in payload for payload in payloads)
-    assert any(supported in payload for payload in payloads)
+    assert invalid.value.code == "model_response_invalid"
+    assert DesktopMissingSourceService(kb_dir).list_candidates() == ()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import replace
 
 from openkb.desktop_import_artifacts import DesktopImportError
 from openkb.desktop_knowledge_analysis import (
@@ -40,73 +39,7 @@ def analysis_from_document_checkpoint(checkpoint: object) -> DesktopKnowledgeAna
     ):
         raise _state_error("Knowledge Analysis merge checkpoint is invalid.")
     analysis = parse_knowledge_analysis(_json(checkpoint["normalized_result"]), aggregate=True)
-    return restore_inventory_reason_codes(analysis, checkpoint)
-
-
-def restore_inventory_reason_codes(
-    analysis: DesktopKnowledgeAnalysis,
-    checkpoint: dict[str, object],
-) -> DesktopKnowledgeAnalysis:
-    raw = checkpoint.get("inventory_entity_reason_codes")
-    decisions = checkpoint.get("inventory_entity_decisions")
-    target_identity_ids = checkpoint.get("inventory_target_identity_ids")
-    target_generation_ids = checkpoint.get("inventory_target_generation_ids")
-    if not isinstance(raw, list) or len(raw) != len(analysis.entities):
-        return analysis
-    if not isinstance(decisions, list) or len(decisions) != len(analysis.entities):
-        decisions = [None] * len(analysis.entities)
-    if not isinstance(target_identity_ids, list) or len(target_identity_ids) != len(
-        analysis.entities
-    ):
-        target_identity_ids = [None] * len(analysis.entities)
-    if not isinstance(target_generation_ids, list) or len(target_generation_ids) != len(
-        analysis.entities
-    ):
-        target_generation_ids = [None] * len(analysis.entities)
-    reason_codes: list[tuple[str, ...]] = []
-    for value in raw:
-        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-            return analysis
-        reason_codes.append(tuple(value))
-    return replace(
-        analysis,
-        entities=tuple(
-            replace(
-                candidate,
-                admission_reason_codes=codes,
-                inventory_decision=(
-                    decision
-                    if decision in {"create", "update", "alias", "review", "reject"}
-                    else None
-                ),
-                inventory_target_identity_id=(
-                    target_identity_id if isinstance(target_identity_id, str) else None
-                ),
-                inventory_target_generation_id=(
-                    target_generation_id
-                    if type(target_generation_id) is int and target_generation_id > 0
-                    else None
-                ),
-            )
-            for candidate, codes, decision, target_identity_id, target_generation_id in zip(
-                analysis.entities,
-                reason_codes,
-                decisions,
-                target_identity_ids,
-                target_generation_ids,
-                strict=True,
-            )
-        ),
-    )
-
-
-def harvest_from_inventory_checkpoint(
-    checkpoint: dict[str, object],
-) -> DesktopKnowledgeAnalysis | None:
-    value = checkpoint.get("harvest_normalized_result")
-    if not isinstance(value, dict):
-        return None
-    return parse_knowledge_analysis(_json(value), aggregate=True)
+    return analysis
 
 
 def result_checkpoint(

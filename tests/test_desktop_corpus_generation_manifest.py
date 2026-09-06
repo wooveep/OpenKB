@@ -18,7 +18,7 @@ from openkb.desktop_import_runner import DesktopTextImportService
 from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
-def _import_legacy_document(tmp_path: Path, monkeypatch) -> tuple[Path, str]:
+def _import_document_without_background_graph(tmp_path: Path, monkeypatch) -> tuple[Path, str]:
     monkeypatch.setattr(
         "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
@@ -70,7 +70,7 @@ def _pending_generation(connection: sqlite3.Connection, document_id: str, ordina
 def test_superseded_candidate_input_cannot_move_corpus_current_pointer(
     tmp_path: Path, monkeypatch
 ) -> None:
-    kb_dir, document_id = _import_legacy_document(tmp_path, monkeypatch)
+    kb_dir, document_id = _import_document_without_background_graph(tmp_path, monkeypatch)
     with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         first_candidate_id = _publish_empty_candidate_generation(
@@ -105,7 +105,7 @@ def test_superseded_candidate_input_cannot_move_corpus_current_pointer(
 def test_open_recovers_an_interrupted_pending_corpus_generation_without_model_work(
     tmp_path: Path, monkeypatch
 ) -> None:
-    kb_dir, document_id = _import_legacy_document(tmp_path, monkeypatch)
+    kb_dir, document_id = _import_document_without_background_graph(tmp_path, monkeypatch)
     with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
         _publish_empty_candidate_generation(connection, document_id, "candidate-1")
         now = "2026-09-04T00:01:01+00:00"
@@ -131,7 +131,7 @@ def test_open_recovers_an_interrupted_pending_corpus_generation_without_model_wo
             connection,
             generation_id,
             provider="scripted",
-            model="dossier-v1",
+            model="page-planner-v1",
             retry_scope=None,
             now=now,
         )
@@ -140,7 +140,7 @@ def test_open_recovers_an_interrupted_pending_corpus_generation_without_model_wo
 
     with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
         assert connection.execute(
-            "SELECT lifecycle_state, dossier_state "
+            "SELECT lifecycle_state, page_state "
             "FROM knowledge_generation_manifests WHERE generation_id = ?",
             (generation_id,),
         ).fetchone() == ("failed", "failed")

@@ -78,7 +78,7 @@ def test_role_gateway_pins_deepseek_adapter_mode_and_effective_analysis_reasonin
     )
 
     gateway.analyze(
-        DesktopModelRequest("retrieval_plan", "question", "Build a retrieval plan."),
+        DesktopModelRequest("query_planning", "question", "Build a retrieval plan."),
         on_event=lambda _event: None,
     )
 
@@ -90,7 +90,7 @@ def test_role_gateway_pins_deepseek_adapter_mode_and_effective_analysis_reasonin
     assert requests[0].generation_parameters == {
         "temperature": 0,
         "max_tokens": analysis_execution_profile_for_settings(
-            settings, operation="retrieval_plan"
+            settings, operation="query_planning"
         ).provider_output_ceiling_tokens,
     }
 
@@ -144,7 +144,7 @@ def test_deepseek_structured_request_uses_json_object_and_disables_thinking(monk
 
     transport(
         DesktopModelRequest(
-            "retrieval_plan",
+            "query_planning",
             "question",
             "Build a retrieval plan.",
             reasoning_effort="off",
@@ -224,11 +224,11 @@ def test_deepseek_initial_graph_request_renders_its_complete_output_contract(
             base_url="https://api.deepseek.com",
         ),
     )
-    contract = prompt_contract_for("knowledge_graph_extraction")
+    contract = prompt_contract_for("knowledge_relation_analysis")
 
     transport(
         DesktopModelRequest(
-            "knowledge_graph_extraction",
+            "knowledge_relation_analysis",
             "guide.md",
             json.dumps(
                 {
@@ -257,10 +257,13 @@ def test_deepseek_initial_graph_request_renders_its_complete_output_contract(
     system_message = messages[0]["content"]
     assert "STRUCTURED OUTPUT CONTRACT" in system_message
     assert '"output_schema"' in system_message
-    assert '"RELATED_TO"' in system_message
-    assert '"support_quote"' in system_message
+    assert '"relations"' in system_message
+    assert '"label"' in system_message
+    assert '"supporting_claims"' in system_message
+    assert '"claim_ordinal"' in system_message
     assert '"output_example"' in system_message
-    assert "evidence-1" in system_message
+    assert "evidence-1" not in system_message
+    assert any("evidence-1" in str(message["content"]) for message in messages[1:])
     assert captured[0]["response_format"] == {"type": "json_object"}
 
 
@@ -330,7 +333,7 @@ def test_deepseek_graph_repair_request_keeps_the_parent_contract_visible(
             base_url="https://api.deepseek.com",
         ),
     )
-    graph_contract = prompt_contract_for("knowledge_graph_extraction")
+    graph_contract = prompt_contract_for("knowledge_relation_analysis")
     repair_contract = prompt_contract_for("structured_output_repair")
 
     transport(
@@ -344,7 +347,7 @@ def test_deepseek_graph_repair_request_keeps_the_parent_contract_visible(
             structured_output_mode="json_object",
             response_schema=graph_contract.output_schema,
             response_example=graph_contract.output_example,
-            parent_operation="knowledge_graph_extraction",
+            parent_operation="knowledge_relation_analysis",
             parent_prompt_contract_digest=graph_contract.digest,
             prompt_contract_version=repair_contract.version,
             prompt_contract_snapshot=repair_contract.snapshot(),
@@ -359,10 +362,9 @@ def test_deepseek_graph_repair_request_keeps_the_parent_contract_visible(
     assert '"parent_contract_version"' in system_message
     assert '"parent_instructions"' in system_message
     assert '"parent_validation_rules"' in system_message
-    assert '"exact_support_quote_required"' in system_message
-    assert '"same_evidence_edge_endpoints"' in system_message
-    assert '"RELATED_TO"' in system_message
-    assert '"support_quote"' in system_message
+    assert '"known_endpoint_claims_only"' in system_message
+    assert '"safe_bounded_dynamic_labels_only"' in system_message
+    assert '"supporting_claims"' in system_message
     assert '"output_example"' in system_message
     assert captured[0]["response_format"] == {"type": "json_object"}
 
@@ -409,7 +411,9 @@ def test_deepseek_knowledge_analysis_renders_its_complete_output_contract(
     assert "STRUCTURED OUTPUT CONTRACT" in system_message
     assert '"document_summary"' in system_message
     assert '"applicability"' in system_message
-    assert '"troubleshooting"' in system_message
+    assert '"identity_labels"' in system_message
+    assert '"admission"' in system_message
+    assert '"role"' not in system_message
     assert captured[0]["response_format"] == {"type": "json_object"}
 
 
@@ -469,7 +473,7 @@ def test_custom_provider_model_name_cannot_impersonate_a_structured_analysis_ada
 
     with pytest.raises(DesktopModelSettingsError, match="Custom.*structured Analysis"):
         gateway.analyze(
-            DesktopModelRequest("retrieval_plan", "question", "Build a plan."),
+            DesktopModelRequest("query_planning", "question", "Build a plan."),
             on_event=lambda _event: None,
         )
 
@@ -507,7 +511,7 @@ def test_deepseek_stream_separates_private_reasoning_from_final_output(monkeypat
 
     result = gateway.stream(
         DesktopModelRequest(
-            "retrieval_plan",
+            "query_planning",
             "question",
             "Build a plan.",
             provider_adapter="deepseek",
@@ -602,7 +606,7 @@ def test_deepseek_empty_final_results_are_specific_and_never_retried(
     with pytest.raises(DesktopModelCallError) as captured:
         gateway.stream(
             DesktopModelRequest(
-                "retrieval_plan",
+                "query_planning",
                 "question",
                 "Build a plan.",
                 provider_adapter="deepseek",

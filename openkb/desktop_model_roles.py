@@ -41,24 +41,23 @@ AnalysisCapabilityInvalidator = Callable[
 
 ANALYSIS_MODEL_OPERATIONS = frozenset(
     {
+        "query_planning",
+        "knowledge_page_planning",
         "knowledge_fact_harvest",
-        "document_entity_inventory",
-        "entity_dossier_planning",
         "knowledge_analysis",
         "knowledge_analysis_batch",
         "knowledge_analysis_merge",
         "page_tree_enrichment",
         "page_tree_selection",
         "knowledge_navigation_step",
-        "knowledge_graph_extraction",
         "knowledge_relation_analysis",
-        "retrieval_plan",
         "structured_output_repair",
         "model_capability_analysis",
         "model_capability_analysis_streaming",
     }
 )
 ANSWER_MODEL_OPERATIONS = frozenset({"grounded_answer", "model_capability_answer"})
+INTERACTIVE_MODEL_OPERATIONS = frozenset({"query_planning", "grounded_answer"})
 
 
 def model_role_for_operation(operation: str) -> str:
@@ -68,6 +67,11 @@ def model_role_for_operation(operation: str) -> str:
     if operation in ANSWER_MODEL_OPERATIONS:
         return "answer"
     return "default"
+
+
+def model_lane_for_operation(operation: str) -> ExecutionLane:
+    """Return the code-owned scheduling lane for one model operation."""
+    return "interactive" if operation in INTERACTIVE_MODEL_OPERATIONS else "background"
 
 
 class DesktopRoleModelGateway(DesktopModelGateway):

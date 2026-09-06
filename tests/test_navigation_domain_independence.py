@@ -141,9 +141,12 @@ def test_seed_objective_does_not_guess_actions_or_constraints_from_domain_words(
 
     objective = initial_navigation_objective(plan.query, plan)
 
-    assert objective.answer_kind == "how_to"
-    assert objective.user_actions == ()
-    assert objective.constraints == ()
+    assert objective.semantic_structure_state == "unknown"
+    assert objective.goal == ""
+    assert objective.facets == ()
+    assert not hasattr(objective, "answer_kind")
+    assert not hasattr(objective, "user_actions")
+    assert not hasattr(objective, "constraints")
 
 
 def test_evidence_allocation_interface_has_no_query_vocabulary_hook() -> None:

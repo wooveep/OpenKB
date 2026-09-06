@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.server
+import json
 import threading
 from dataclasses import replace
 
@@ -30,11 +31,20 @@ from openkb.desktop_model_terminal import (
     DesktopTerminalModelGateway,
     TerminalModelCallStatus,
 )
-from openkb.desktop_retrieval_plan import model_plan
 from openkb.desktop_structured_output import (
     DesktopStructuredOutputInvalidError,
     run_structured_output,
 )
+
+
+def _validated_document_description(content: str) -> str:
+    value = json.loads(content)
+    if not isinstance(value, dict) or set(value) != {"document_description"}:
+        raise ValueError("invalid document description")
+    description = value["document_description"]
+    if not isinstance(description, str) or not description:
+        raise ValueError("invalid document description")
+    return description
 
 
 class FakeClock:
@@ -395,7 +405,7 @@ def test_terminal_gateway_enforces_a_request_scoped_response_deadline() -> None:
             return True
 
     request = DesktopModelRequest(
-        "retrieval_plan",
+        "query_planning",
         "Question",
         "How should Alpha be deployed?",
         response_timeout_seconds=0.05,
@@ -524,7 +534,7 @@ def test_structured_analyze_prefers_streaming_and_keeps_chunks_private() -> None
             return '{"terms":["OpenKB"]}'
 
     result = DesktopTerminalModelGateway(StreamingProvider()).analyze(
-        DesktopModelRequest("retrieval_plan", "Question", "Build a plan."),
+        DesktopModelRequest("query_planning", "Question", "Build a plan."),
         on_event=events.append,
     )
 
@@ -548,7 +558,7 @@ def test_structured_analyze_uses_equivalent_non_streaming_fallback_when_required
 
     result = DesktopTerminalModelGateway(CompatibilityProvider()).analyze(
         DesktopModelRequest(
-            "retrieval_plan",
+            "query_planning",
             "Question",
             "Build a plan.",
             supports_streaming=False,
@@ -561,16 +571,16 @@ def test_structured_analyze_uses_equivalent_non_streaming_fallback_when_required
     assert "model_output_activity" not in [event.status for event in events]
 
 
-def test_streaming_and_non_streaming_structured_analysis_validate_to_same_domain_state() -> None:
-    content = '{"terms":["OpenKB","evidence"]}'
+def test_streaming_and_non_streaming_structured_analysis_validate_to_same_state() -> None:
+    content = '{"document_description":"OpenKB preserves evidence."}'
 
     class StreamingProvider:
         def stream_until_terminal_with_lifecycle(
             self, _request, _connect_timeout_seconds, on_delta, on_request_sent
         ):
             on_request_sent()
-            on_delta('{"terms":["OpenKB",')
-            on_delta('"evidence"]}')
+            on_delta('{"document_description":')
+            on_delta('"OpenKB preserves evidence."}')
             return content
 
     class CompatibilityProvider:
@@ -580,17 +590,14 @@ def test_streaming_and_non_streaming_structured_analysis_validate_to_same_domain
     def execute(provider, *, supports_streaming: bool):
         events: list[DesktopTerminalModelEvent] = []
         output = run_structured_output(
-            operation="retrieval_plan",
+            operation="knowledge_analysis_merge",
             document_name="Grounded answer question",
             source_material="How does OpenKB preserve evidence?",
             invoke=lambda request: DesktopTerminalModelGateway(provider).analyze(
                 replace(request, supports_streaming=supports_streaming),
                 on_event=events.append,
             ),
-            validate=lambda value: model_plan(
-                "How does OpenKB preserve evidence?",
-                value,
-            ),
+            validate=_validated_document_description,
         )
         lifecycle = [event.status for event in events if event.status != "model_output_activity"]
         return output.value, lifecycle, events
@@ -603,7 +610,7 @@ def test_streaming_and_non_streaming_structured_analysis_validate_to_same_domain
     )
 
     assert streamed == compatible
-    assert streamed.terms == ("openkb", "evidence")
+    assert streamed == "OpenKB preserves evidence."
     assert (
         streamed_lifecycle
         == compatible_lifecycle
@@ -627,17 +634,14 @@ def test_invalid_structured_results_emit_failure_only_after_local_validation() -
 
     with pytest.raises(DesktopStructuredOutputInvalidError) as captured:
         run_structured_output(
-            operation="retrieval_plan",
+            operation="knowledge_analysis_merge",
             document_name="Grounded answer question",
             source_material="How does OpenKB preserve evidence?",
             invoke=lambda request: gateway.analyze(
                 replace(request, supports_streaming=False),
                 on_event=events.append,
             ),
-            validate=lambda value: model_plan(
-                "How does OpenKB preserve evidence?",
-                value,
-            ),
+            validate=_validated_document_description,
         )
 
     calls: dict[str, list[DesktopTerminalModelEvent]] = {}

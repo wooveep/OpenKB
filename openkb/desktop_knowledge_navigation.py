@@ -157,7 +157,6 @@ def build_knowledge_navigation_in(
     excluded_routes: frozenset[str] = frozenset(),
     requested_routes: tuple[str, ...] = (),
     requested_evidence_ids: tuple[str, ...] = (),
-    answer_kind: str | None = None,
     scoped_view: ScopedEvidenceView | None = None,
 ) -> DesktopKnowledgeNavigationResult:
     """Spend the supplied slice of the session-wide logical-read budget."""
@@ -289,10 +288,7 @@ def build_knowledge_navigation_in(
         )
     )
     baseline_ids = {reference.evidence_id for reference in baseline_evidence}
-    automatic_source_expansion = _automatic_source_expansion(
-        reads,
-        answer_kind=answer_kind,
-    )
+    automatic_source_expansion = _automatic_source_expansion(reads)
     structural_anchors = (
         _structural_anchor_evidence_ids(baseline_evidence, terms=normalized_terms)
         if automatic_source_expansion
@@ -376,13 +372,9 @@ def _focused_inventory_routes(
 
 def _automatic_source_expansion(
     reads: tuple[_NavigationRead, ...],
-    *,
-    answer_kind: str | None,
 ) -> bool:
-    """Expand source from explicit answer shape or resolved structural route metadata."""
-    return any(
-        read.kind == "procedure" or read.authority == "source_section" for read in reads
-    ) or answer_kind in {"how_to", "troubleshooting"}
+    """Expand source only from resolved structural route metadata."""
+    return any(read.kind == "procedure" or read.authority == "source_section" for read in reads)
 
 
 def _rank_source_evidence_ids_in(
@@ -413,9 +405,7 @@ def _rank_source_evidence_ids_in(
                 section_matches, administrative, section, document_id = relevance
                 # The original section is the routing authority. Summary prose can be broad
                 # or multilingual, so it may refine but must not outweigh its own source.
-                effective_score = (
-                    section_matches * 2 + unit_matches + _guidance_role_bonus(unit.role)
-                )
+                effective_score = section_matches * 2 + unit_matches
                 if evidence_id in baseline_ids:
                     # The baseline pack is bounded again after routed fusion. Keep an
                     # existing anchor eligible for section expansion, but prefer a
@@ -555,7 +545,3 @@ def _structural_anchor_evidence_ids(
             by_document[reference.document_id] = candidate
     candidates = sorted(by_document.values(), key=lambda item: item[0])
     return tuple(item[1] for item in candidates[:NAVIGATION_MAX_STRUCTURAL_ANCHORS])
-
-
-def _guidance_role_bonus(role: str | None) -> int:
-    return {"key_topic": 3, "purpose": 1}.get(role or "", 0)

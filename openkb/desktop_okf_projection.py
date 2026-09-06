@@ -22,22 +22,6 @@ from openkb.locks import atomic_write_text, kb_ingest_lock
 
 _OKF_VERSION = "0.2"
 logger = logging.getLogger(__name__)
-_ENTITY_SUBTYPES = frozenset(
-    {
-        "API",
-        "Dataset",
-        "Event",
-        "Location",
-        "Metric",
-        "Organization",
-        "Person",
-        "Policy",
-        "Process",
-        "Product",
-        "Service",
-        "Table",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -79,9 +63,8 @@ class _ProjectionDocument:
     stale_after: str | None = None
     verified_by: str | None = None
     verified_at: str | None = None
-    entity_subtype: str | None = None
     aliases: tuple[str, ...] = ()
-    tags: tuple[str, ...] = ()
+    identity_labels: tuple[str, ...] = ()
     analysis: dict[str, str] | None = None
     sources: tuple[_ProjectionSource, ...] = ()
     related: tuple[_ProjectionRelation, ...] = ()
@@ -220,15 +203,15 @@ def _start_catalog_rebuilds(kb_dir: Path) -> None:
         logger.warning("Could not start Knowledge Catalog rebuilds.", exc_info=True)
 
 
-def canonical_okf_type(kind: str, entity_subtype: str | None = None) -> str:
-    """Map OpenKB kind/subtype to one safe OKF type value."""
+def canonical_okf_type(kind: str) -> str:
+    """Map the code-owned storage kind to one portable OKF type value."""
     if kind == "concept":
         return "Concept"
     if kind == "procedure":
         return "Procedure"
     if kind != "entity":
         raise ValueError(f"Unsupported OpenKB knowledge kind: {kind}")
-    return entity_subtype if entity_subtype in _ENTITY_SUBTYPES else "Entity"
+    return "Entity"
 
 
 def _projection_documents_in(
@@ -260,9 +243,7 @@ def _published_pages_in(connection: sqlite3.Connection) -> list[_ProjectionDocum
     for row in rows:
         revision_id = str(row[2])
         provenance = str(row[7])
-        sources = (
-            () if provenance == "legacy_unmapped" else _revision_sources_in(connection, revision_id)
-        )
+        sources = _revision_sources_in(connection, revision_id)
         documents.append(
             _ProjectionDocument(
                 identity=str(row[0]),
@@ -327,8 +308,8 @@ def _current_generation_in(connection: sqlite3.Connection) -> list[_ProjectionDo
         """
         SELECT state.current_generation_id, items.item_key, items.kind, items.title,
             items.content_markdown, items.source_document_id, items.created_at,
-            items.provenance_state, items.entity_subtype, items.aliases_json,
-            items.tags_json, items.analysis_provenance_json
+            items.provenance_state, items.aliases_json,
+            items.identity_labels_json, items.analysis_provenance_json
         FROM knowledge_generation_state AS state
         JOIN knowledge_generation_items AS items
             ON items.generation_id = state.current_generation_id
@@ -358,10 +339,9 @@ def _current_generation_in(connection: sqlite3.Connection) -> list[_ProjectionDo
             provenance=str(row[7]),
             status="stable",
             authority="published_generation",
-            entity_subtype=str(row[8]) if row[8] is not None else None,
-            aliases=decode_knowledge_labels(row[9]),
-            tags=decode_knowledge_labels(row[10]),
-            analysis=_analysis_metadata(row[11]),
+            aliases=decode_knowledge_labels(row[8]),
+            identity_labels=decode_knowledge_labels(row[9]),
+            analysis=_analysis_metadata(row[10]),
             sources=_generation_sources_in(connection, int(row[0]), str(row[1])),
             related=tuple(related.get(str(row[1]), ())),
         )
@@ -435,7 +415,7 @@ def _render_bundle_in(
 
 def _render_document(document: _ProjectionDocument) -> str:
     metadata: dict[str, object] = {
-        "type": canonical_okf_type(document.kind, document.entity_subtype),
+        "type": canonical_okf_type(document.kind),
         "title": document.title,
         "status": document.status,
         "generated": {
@@ -451,8 +431,8 @@ def _render_document(document: _ProjectionDocument) -> str:
     }
     if document.stale_after is not None:
         metadata["stale_after"] = document.stale_after
-    if document.tags:
-        metadata["tags"] = list(document.tags)
+    if document.identity_labels:
+        metadata["identity_labels"] = list(document.identity_labels)
     if document.verified_by is not None and document.verified_at is not None:
         metadata["verified"] = [
             {"by": _okf_human_actor(document.verified_by), "at": document.verified_at}

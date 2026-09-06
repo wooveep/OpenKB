@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from openkb.desktop_corpus_benchmark import (
-    CORPUS_BENCHMARK_SCHEMA_VERSION,
-    corpus_benchmark_report_in,
+from openkb.desktop_corpus_integrity import (
+    corpus_generation_integrity_issues_in,
+    corpus_generation_integrity_report_in,
 )
 from openkb.desktop_corpus_synthesis_generation import (
     CorpusCandidateInput,
@@ -24,11 +23,14 @@ from openkb.desktop_corpus_synthesis_generation import (
     refresh_corpus_identity_mappings_in,
     refresh_corpus_manifest_digest_in,
 )
-from openkb.desktop_entity_dossier_store import build_generation_entity_dossiers_in
 from openkb.desktop_identity_candidate_store import bind_identity_candidates_in
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels, encode_knowledge_labels
+from openkb.desktop_knowledge_page_store import (
+    DeferredKnowledgePage,
+    PlannedKnowledgePage,
+    build_generation_knowledge_pages_in,
+)
 from openkb.desktop_knowledge_relationships import (
-    generation_relationship_issues_in,
     rebuild_generation_relationships_in,
 )
 from openkb.desktop_knowledge_sources import merge_claim_source_markers
@@ -59,9 +61,8 @@ class KnowledgeGenerationChange:
     normalized_title: str
     content_markdown: str
     content_sha256: str
-    entity_subtype: str | None = None
     aliases: tuple[str, ...] = ()
-    tags: tuple[str, ...] = ()
+    identity_labels: tuple[str, ...] = ()
     sources: tuple[KnowledgeGenerationSource, ...] = ()
     analysis_provenance_json: str | None = None
     identity_id: str | None = None
@@ -114,12 +115,12 @@ def publish_generation_changes_in(
             INSERT INTO knowledge_generation_items (
                 generation_id, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
-                provenance_state, entity_subtype, aliases_json, tags_json,
+                provenance_state, aliases_json, identity_labels_json,
                 analysis_provenance_json, identity_id
             )
             SELECT ?, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
-                provenance_state, entity_subtype, aliases_json, tags_json,
+                provenance_state, aliases_json, identity_labels_json,
                 analysis_provenance_json, identity_id
             FROM knowledge_generation_items WHERE generation_id = ?
             """,
@@ -164,8 +165,7 @@ def publish_additional_generation_sources_in(
     row = connection.execute(
         """
         SELECT item_key, title, content_markdown, content_sha256, source_document_id,
-            entity_subtype, aliases_json, tags_json, analysis_provenance_json,
-            identity_id
+            aliases_json, identity_labels_json, analysis_provenance_json, identity_id
         FROM knowledge_generation_items
         WHERE generation_id = ? AND kind = ? AND normalized_title = ?
         """,
@@ -207,12 +207,11 @@ def publish_additional_generation_sources_in(
                 normalized_title=normalized_title,
                 content_markdown=content_markdown,
                 content_sha256=knowledge_content_sha256(content_markdown),
-                entity_subtype=str(row[5]) if row[5] is not None else None,
-                aliases=decode_knowledge_labels(row[6]),
-                tags=decode_knowledge_labels(row[7]),
+                aliases=decode_knowledge_labels(row[5]),
+                identity_labels=decode_knowledge_labels(row[6]),
                 sources=tuple(merged.values()),
-                analysis_provenance_json=str(row[8]) if row[8] is not None else None,
-                identity_id=str(row[9]) if row[9] is not None else None,
+                analysis_provenance_json=str(row[7]) if row[7] is not None else None,
+                identity_id=str(row[8]) if row[8] is not None else None,
             ),
         ),
         now=now,
@@ -235,7 +234,7 @@ def publish_corpus_generation_in(
     now: str,
     candidate_inputs: tuple[CorpusCandidateInput, ...] | None = None,
     language: str = "en",
-    dossier_planner=None,
+    page_outcomes: dict[str, PlannedKnowledgePage | DeferredKnowledgePage] | None = None,
     defer_completion: bool = False,
 ) -> int | None:
     """Atomically replace generated knowledge with one structurally qualified corpus snapshot."""
@@ -288,7 +287,7 @@ def publish_corpus_generation_in(
         generation_id,
         language=language,
         now=now,
-        planner=dossier_planner,
+        page_outcomes=page_outcomes,
     )
 
 
@@ -302,7 +301,7 @@ def publish_incremental_corpus_generation_in(
     now: str,
     candidate_inputs: tuple[CorpusCandidateInput, ...] | None = None,
     language: str = "en",
-    dossier_planner=None,
+    page_outcomes: dict[str, PlannedKnowledgePage | DeferredKnowledgePage] | None = None,
     defer_completion: bool = False,
 ) -> int | None:
     """Qualify affected identities while preserving every unaffected current item."""
@@ -358,7 +357,7 @@ def publish_incremental_corpus_generation_in(
         generation_id,
         language=language,
         now=now,
-        planner=dossier_planner,
+        page_outcomes=page_outcomes,
     )
 
 
@@ -368,26 +367,26 @@ def complete_prepared_corpus_generation_in(
     *,
     language: str,
     now: str,
-    planner=None,
+    page_outcomes: dict[str, PlannedKnowledgePage | DeferredKnowledgePage] | None = None,
 ) -> int | None:
     """Finish a prepared generation after model work, then atomically activate it."""
     manifest = corpus_generation_manifest_in(connection, generation_id)
     if manifest is None or manifest.lifecycle_state not in {"pending", "identity_ready"}:
         return current_generation_id_in(connection)
-    dossier_issues = build_generation_entity_dossiers_in(
-        connection,
-        generation_id,
-        language="zh" if language == "zh" else "en",
-        now=now,
-        planner=planner,
-    )
     bind_generation_graph_inputs_in(connection, generation_id, now=now)
     rebuild_generation_relationships_in(connection, generation_id)
+    page_issues = build_generation_knowledge_pages_in(
+        connection,
+        generation_id,
+        knowledge_language=language,
+        now=now,
+        outcomes=page_outcomes or {},
+    )
     refresh_corpus_manifest_digest_in(connection, generation_id, now=now)
-    _record_corpus_benchmark_in(connection, generation_id)
+    _record_corpus_integrity_in(connection, generation_id)
     qualification_issues = (
-        *dossier_issues,
-        *corpus_generation_qualification_issues_in(connection, generation_id),
+        *page_issues,
+        *corpus_generation_integrity_issues_in(connection, generation_id),
         *qualify_corpus_manifest_in(connection, generation_id, now=now),
     )
     if qualification_issues:
@@ -423,98 +422,10 @@ def complete_prepared_corpus_generation_in(
     )
 
 
-def corpus_generation_qualification_issues_in(
-    connection: sqlite3.Connection,
-    generation_id: int,
-) -> tuple[str, ...]:
-    """Validate the source and identity invariants required before activation."""
-    issues: list[str] = []
-    item_rows = connection.execute(
-        """
-        SELECT item_key, content_markdown, content_sha256, identity_id, provenance_state
-        FROM knowledge_generation_items WHERE generation_id = ?
-        """,
-        (generation_id,),
-    ).fetchall()
-    if not item_rows:
-        issues.append("empty_generation")
-    if any(
-        not str(row[1]).strip()
-        or str(row[2]) != knowledge_content_sha256(str(row[1]))
-        or row[3] is None
-        or str(row[4]) != "source_backed"
-        for row in item_rows
-    ):
-        issues.append("invalid_item")
-    missing_sources = connection.execute(
-        """
-        SELECT COUNT(*)
-        FROM knowledge_generation_items AS items
-        WHERE items.generation_id = ? AND NOT EXISTS (
-            SELECT 1 FROM knowledge_generation_item_sources AS sources
-            WHERE sources.generation_id = items.generation_id
-              AND sources.item_key = items.item_key
-        )
-        """,
-        (generation_id,),
-    ).fetchone()
-    if missing_sources is not None and int(missing_sources[0]) > 0:
-        issues.append("missing_item_source")
-    invalid_sources = connection.execute(
-        """
-        SELECT COUNT(*)
-        FROM knowledge_generation_item_sources AS sources
-        WHERE sources.generation_id = ? AND (
-            trim(sources.claim_text) = '' OR NOT EXISTS (
-                SELECT 1 FROM evidence_occurrences AS occurrences
-                JOIN source_documents AS documents
-                  ON documents.document_id = occurrences.document_id
-                WHERE occurrences.evidence_id = sources.evidence_id
-                  AND documents.availability = 'available'
-            )
-        )
-        """,
-        (generation_id,),
-    ).fetchone()
-    if invalid_sources is not None and int(invalid_sources[0]) > 0:
-        issues.append("invalid_item_source")
-    issues.extend(generation_relationship_issues_in(connection, generation_id))
-    duplicates = connection.execute(
-        """
-        SELECT COUNT(*) FROM (
-            SELECT identity_id
-            FROM knowledge_generation_items
-            WHERE generation_id = ?
-            GROUP BY identity_id HAVING COUNT(*) > 1
-        )
-        """,
-        (generation_id,),
-    ).fetchone()
-    if duplicates is not None and int(duplicates[0]) > 0:
-        issues.append("duplicate_identity")
-    benchmark_row = connection.execute(
-        "SELECT qualification_report_json FROM knowledge_generations WHERE generation_id = ?",
-        (generation_id,),
-    ).fetchone()
-    try:
-        benchmark = (
-            json.loads(str(benchmark_row[0])) if benchmark_row and benchmark_row[0] else None
-        )
-    except json.JSONDecodeError:
-        benchmark = None
-    if (
-        not isinstance(benchmark, dict)
-        or benchmark.get("schema_version") != CORPUS_BENCHMARK_SCHEMA_VERSION
-        or benchmark.get("passed") is not True
-    ):
-        issues.append("corpus_benchmark_failed")
-    return tuple(issues)
-
-
-def _record_corpus_benchmark_in(connection: sqlite3.Connection, generation_id: int) -> None:
-    report = corpus_benchmark_report_in(connection, generation_id)
+def _record_corpus_integrity_in(connection: sqlite3.Connection, generation_id: int) -> None:
+    report = corpus_generation_integrity_report_in(connection, generation_id)
     connection.execute(
-        "UPDATE knowledge_generations SET qualification_report_json = ? WHERE generation_id = ?",
+        "UPDATE knowledge_generations SET integrity_report_json = ? WHERE generation_id = ?",
         (report.as_json(), generation_id),
     )
 
@@ -561,7 +472,7 @@ def _carry_forward_generation_identities_in(
         JOIN knowledge_candidate_generation_candidates AS candidates
           ON candidates.candidate_generation_id = mappings.candidate_generation_id
          AND candidates.candidate_id = mappings.candidate_id
-         AND candidates.admission_state = 'admitted'
+         AND candidates.admission_state = 'admit'
         WHERE mappings.generation_id = ?
           AND mappings.identity_id IN ({requested_placeholders})
         ORDER BY mappings.identity_id, mappings.candidate_generation_id,
@@ -600,12 +511,12 @@ def _carry_forward_generation_identities_in(
         INSERT INTO knowledge_generation_items (
             generation_id, item_key, kind, title, normalized_title,
             content_markdown, content_sha256, source_document_id, created_at,
-            provenance_state, entity_subtype, aliases_json, tags_json,
+            provenance_state, aliases_json, identity_labels_json,
             analysis_provenance_json, identity_id
         )
         SELECT ?, item_key, kind, title, normalized_title,
             content_markdown, content_sha256, source_document_id, created_at,
-            provenance_state, entity_subtype, aliases_json, tags_json,
+            provenance_state, aliases_json, identity_labels_json,
             analysis_provenance_json, identity_id
         FROM knowledge_generation_items
         WHERE generation_id = ? AND identity_id IN ({placeholders})
@@ -677,9 +588,9 @@ def _upsert_generation_change_in(
             INSERT INTO knowledge_generation_items (
                 generation_id, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
-                provenance_state, entity_subtype, aliases_json, tags_json,
+                provenance_state, aliases_json, identity_labels_json,
                 analysis_provenance_json, identity_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 generation_id,
@@ -691,10 +602,9 @@ def _upsert_generation_change_in(
                 change.content_sha256,
                 change.document_id,
                 now,
-                "source_backed" if change.sources else "legacy_unmapped",
-                change.entity_subtype,
+                "source_backed" if change.sources else "structural",
                 encode_knowledge_labels(change.aliases),
-                encode_knowledge_labels(change.tags),
+                encode_knowledge_labels(change.identity_labels),
                 change.analysis_provenance_json,
                 change.identity_id,
             ),
@@ -706,7 +616,7 @@ def _upsert_generation_change_in(
             UPDATE knowledge_generation_items
             SET title = ?, content_markdown = ?, content_sha256 = ?,
                 source_document_id = ?, created_at = ?, provenance_state = ?,
-                entity_subtype = ?, aliases_json = ?, tags_json = ?,
+                aliases_json = ?, identity_labels_json = ?,
                 analysis_provenance_json = ?, identity_id = ?
             WHERE generation_id = ? AND item_key = ?
             """,
@@ -716,10 +626,9 @@ def _upsert_generation_change_in(
                 change.content_sha256,
                 change.document_id,
                 now,
-                "source_backed" if change.sources else "legacy_unmapped",
-                change.entity_subtype,
+                "source_backed" if change.sources else "structural",
                 encode_knowledge_labels(change.aliases),
-                encode_knowledge_labels(change.tags),
+                encode_knowledge_labels(change.identity_labels),
                 change.analysis_provenance_json,
                 change.identity_id,
                 generation_id,

@@ -10,8 +10,6 @@ FUSION_POLICY_VERSION = "openkb.rrf-protected-baseline-routed.v3"
 
 @dataclass(frozen=True)
 class DesktopRetrievalChannelTrace:
-    """One retrieval channel's bounded contribution and degradation state."""
-
     channel: str
     candidate_count: int
     trigger_reasons: tuple[str, ...] = ()
@@ -27,24 +25,38 @@ class DesktopRetrievalChannelTrace:
 
 
 @dataclass(frozen=True)
-class DesktopAnswerCoverageTrace:
-    """Source-content-free coverage state for one required answer aspect."""
+class DesktopQuestionFacetTrace:
+    facet_id: str
+    label: str
+    description: str
+    importance: str
 
-    aspect: str
-    status: str
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "facet_id": self.facet_id,
+            "label": self.label,
+            "description": self.description,
+            "importance": self.importance,
+        }
+
+
+@dataclass(frozen=True)
+class DesktopFacetCoverageTrace:
+    facet_id: str
+    state: str
     evidence_ids: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "aspect": self.aspect,
-            "status": self.status,
+            "facet_id": self.facet_id,
+            "state": self.state,
             "evidence_ids": list(self.evidence_ids),
         }
 
 
 @dataclass(frozen=True)
 class DesktopRetrievalTrace:
-    """Derived-generation identities and routing decisions retained by an answer."""
+    """Derived identities, dynamic Question Facets, and bounded routing decisions."""
 
     catalog_generation_ids: tuple[str, ...] = ()
     page_tree_generation_ids: tuple[str, ...] = ()
@@ -60,13 +72,18 @@ class DesktopRetrievalTrace:
     source_window_count: int = 0
     link_hop_count: int = 0
     page_tree_supplement_count: int = 0
-    coverage_gate_state: str = "not_applicable"
-    navigation_answer_kind: str = ""
-    navigation_subject: str = ""
+    semantic_structure_state: str = "unknown"
+    question_goal: str = ""
+    question_facets: tuple[DesktopQuestionFacetTrace, ...] = ()
+    question_facet_plan_digest: str = ""
+    query_planning_prompt_contract_digest: str = ""
+    query_planning_execution_profile_json: str = ""
+    query_planning_execution_profile_digest: str = ""
+    facet_coverage: tuple[DesktopFacetCoverageTrace, ...] = ()
+    coverage_gate_state: str = "unknown"
     navigation_round_count: int = 0
     navigation_action_kinds: tuple[str, ...] = ()
     navigation_stop_reason: str = ""
-    coverage_aspects: tuple[DesktopAnswerCoverageTrace, ...] = ()
     navigation_model_calls: int = 0
     navigation_logical_read_count: int = 0
     navigation_source_tokens: int = 0
@@ -100,13 +117,20 @@ class DesktopRetrievalTrace:
             "source_window_count": self.source_window_count,
             "link_hop_count": self.link_hop_count,
             "page_tree_supplement_count": self.page_tree_supplement_count,
+            "semantic_structure_state": self.semantic_structure_state,
+            "question_goal": self.question_goal,
+            "question_facets": [item.as_dict() for item in self.question_facets],
+            "question_facet_plan_digest": self.question_facet_plan_digest,
+            "query_planning_prompt_contract_digest": (self.query_planning_prompt_contract_digest),
+            "query_planning_execution_profile_json": (self.query_planning_execution_profile_json),
+            "query_planning_execution_profile_digest": (
+                self.query_planning_execution_profile_digest
+            ),
+            "facet_coverage": [item.as_dict() for item in self.facet_coverage],
             "coverage_gate_state": self.coverage_gate_state,
-            "navigation_answer_kind": self.navigation_answer_kind,
-            "navigation_subject": self.navigation_subject,
             "navigation_round_count": self.navigation_round_count,
             "navigation_action_kinds": list(self.navigation_action_kinds),
             "navigation_stop_reason": self.navigation_stop_reason,
-            "coverage_aspects": [item.as_dict() for item in self.coverage_aspects],
             "navigation_model_calls": self.navigation_model_calls,
             "navigation_logical_read_count": self.navigation_logical_read_count,
             "navigation_source_tokens": self.navigation_source_tokens,
@@ -130,41 +154,49 @@ class DesktopRetrievalTrace:
 
 
 def retrieval_trace_from_json(value: str) -> DesktopRetrievalTrace:
-    """Read an optional historical trace without making old answers unreadable."""
+    """Read one current-epoch trace; obsolete schemas are intentionally not adapted."""
     try:
         payload = json.loads(value)
     except json.JSONDecodeError:
         return DesktopRetrievalTrace()
     if not isinstance(payload, dict):
         return DesktopRetrievalTrace()
-    channels = _channels(payload.get("channels"))
-    fusion_policy = payload.get("fusion_policy_version")
+    state = payload.get("semantic_structure_state")
+    if state not in {"known", "unknown"}:
+        state = "unknown"
     return DesktopRetrievalTrace(
         catalog_generation_ids=_strings(payload.get("catalog_generation_ids")),
         page_tree_generation_ids=_strings(payload.get("page_tree_generation_ids")),
-        channels=channels,
+        channels=_channels(payload.get("channels")),
         trigger_reasons=_strings(payload.get("trigger_reasons")),
         degradation_reasons=_strings(payload.get("degradation_reasons")),
         selected_node_ids=_strings(payload.get("selected_node_ids")),
         canonical_evidence_ids=_strings(payload.get("canonical_evidence_ids")),
-        fusion_policy_version=fusion_policy if isinstance(fusion_policy, str) else "",
+        fusion_policy_version=_string(payload.get("fusion_policy_version")),
         navigation_snapshot_ids=_strings(payload.get("navigation_snapshot_ids")),
         navigation_routes=_strings(payload.get("navigation_routes")),
         navigation_read_count=_non_negative_int(payload.get("navigation_read_count")),
         source_window_count=_non_negative_int(payload.get("source_window_count")),
         link_hop_count=_non_negative_int(payload.get("link_hop_count")),
         page_tree_supplement_count=_non_negative_int(payload.get("page_tree_supplement_count")),
-        coverage_gate_state=(
-            str(payload["coverage_gate_state"])
-            if isinstance(payload.get("coverage_gate_state"), str)
-            else "not_applicable"
+        semantic_structure_state=state,
+        question_goal=_string(payload.get("question_goal")),
+        question_facets=_question_facets(payload.get("question_facets")),
+        question_facet_plan_digest=_string(payload.get("question_facet_plan_digest")),
+        query_planning_prompt_contract_digest=_string(
+            payload.get("query_planning_prompt_contract_digest")
         ),
-        navigation_answer_kind=_string(payload.get("navigation_answer_kind")),
-        navigation_subject=_string(payload.get("navigation_subject")),
+        query_planning_execution_profile_json=_string(
+            payload.get("query_planning_execution_profile_json")
+        ),
+        query_planning_execution_profile_digest=_string(
+            payload.get("query_planning_execution_profile_digest")
+        ),
+        facet_coverage=_facet_coverage(payload.get("facet_coverage")),
+        coverage_gate_state=_string(payload.get("coverage_gate_state")) or "unknown",
         navigation_round_count=_non_negative_int(payload.get("navigation_round_count")),
         navigation_action_kinds=_strings(payload.get("navigation_action_kinds")),
         navigation_stop_reason=_string(payload.get("navigation_stop_reason")),
-        coverage_aspects=_coverage_aspects(payload.get("coverage_aspects")),
         navigation_model_calls=_non_negative_int(payload.get("navigation_model_calls")),
         navigation_logical_read_count=_non_negative_int(
             payload.get("navigation_logical_read_count")
@@ -209,6 +241,50 @@ def _channels(value: object) -> tuple[DesktopRetrievalChannelTrace, ...]:
     return tuple(channels)
 
 
+def _question_facets(value: object) -> tuple[DesktopQuestionFacetTrace, ...]:
+    if not isinstance(value, list):
+        return ()
+    result: list[DesktopQuestionFacetTrace] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {
+            "facet_id",
+            "label",
+            "description",
+            "importance",
+        }:
+            continue
+        if not all(isinstance(item[field], str) and item[field] for field in item):
+            continue
+        if item["importance"] not in {"required", "supporting"}:
+            continue
+        result.append(DesktopQuestionFacetTrace(**item))
+    return tuple(result)
+
+
+def _facet_coverage(value: object) -> tuple[DesktopFacetCoverageTrace, ...]:
+    if not isinstance(value, list):
+        return ()
+    result: list[DesktopFacetCoverageTrace] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"facet_id", "state", "evidence_ids"}:
+            continue
+        facet_id = item.get("facet_id")
+        state = item.get("state")
+        if (
+            not isinstance(facet_id, str)
+            or not facet_id
+            or facet_id in seen
+            or state not in {"covered", "partial", "missing"}
+        ):
+            continue
+        seen.add(facet_id)
+        result.append(
+            DesktopFacetCoverageTrace(facet_id, str(state), _strings(item.get("evidence_ids")))
+        )
+    return tuple(result)
+
+
 def _strings(value: object) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
@@ -217,34 +293,6 @@ def _strings(value: object) -> tuple[str, ...]:
 
 def _string(value: object) -> str:
     return value if isinstance(value, str) else ""
-
-
-def _coverage_aspects(value: object) -> tuple[DesktopAnswerCoverageTrace, ...]:
-    if not isinstance(value, list):
-        return ()
-    aspects: list[DesktopAnswerCoverageTrace] = []
-    seen: set[str] = set()
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        aspect = item.get("aspect")
-        status = item.get("status")
-        if (
-            not isinstance(aspect, str)
-            or not aspect
-            or aspect in seen
-            or status not in {"covered", "partial", "missing", "not_applicable"}
-        ):
-            continue
-        seen.add(aspect)
-        aspects.append(
-            DesktopAnswerCoverageTrace(
-                aspect=aspect,
-                status=status,
-                evidence_ids=_strings(item.get("evidence_ids")),
-            )
-        )
-    return tuple(aspects)
 
 
 def _non_negative_int(value: object) -> int:

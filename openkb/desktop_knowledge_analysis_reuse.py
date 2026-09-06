@@ -101,7 +101,6 @@ def _uses_current_pipeline_contract(
         and operation
         in {
             "knowledge_fact_harvest",
-            "document_entity_inventory",
         }
         and prompt_digest == prompt_contract_for(operation).digest
     )

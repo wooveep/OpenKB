@@ -16,7 +16,6 @@ from openkb import desktop_import_logging as importlog
 from openkb import desktop_page_tree as page_tree_runtime
 from openkb import desktop_page_tree_store as page_tree_store
 from openkb.config import ensure_preferred_knowledge_language
-from openkb.desktop_candidate_registry import DesktopKnowledgeCandidateRegistry
 from openkb.desktop_document_parsers import parse_structured_document
 from openkb.desktop_document_usability import require_usable_document_ir
 from openkb.desktop_document_versions import DesktopDocumentVersionService
@@ -70,7 +69,6 @@ from openkb.desktop_knowledge_analysis_batches import (
     run_knowledge_analysis,
 )
 from openkb.desktop_knowledge_analysis_reuse import (
-    canonical_analysis_changes_in,
     load_reusable_knowledge_analysis,
 )
 from openkb.desktop_knowledge_graph import (
@@ -216,9 +214,6 @@ class DesktopTextImportService:
 
     def _start_graph_extraction(self, result: DesktopTextImportResult) -> None:
         """Make optional graph work independent from the completed Import Job result."""
-        DesktopKnowledgeCandidateRegistry(self._store.kb_dir).mark_explicit_legacy(
-            result.document.document_id
-        )
         try:
             from openkb.desktop_catalog_store import start_catalog_rebuilds
 
@@ -517,8 +512,6 @@ class DesktopTextImportService:
                         analysis=knowledge_analysis,
                         analysis_provenance_json=analysis_provenance_json,
                         evidence=evidence,
-                        reconciliation=self._knowledge_reconciliation,
-                        model_gateway=self._model_gateway,
                     )
                 except Exception:
                     logger.exception(
@@ -759,24 +752,15 @@ class DesktopTextImportService:
             if existing is None:
                 self._knowledge_reconciliation.record_existing_document_changes(document_id)
                 return
-            if existing.analysis.corpus_ready:
-                staged_projection = apply_import_knowledge_analysis(
-                    self._store.kb_dir,
-                    document_id=document_id,
-                    analysis=existing.analysis,
-                    analysis_provenance_json=existing.provenance_json,
-                    evidence=existing.evidence,
-                    reconciliation=self._knowledge_reconciliation,
-                )
-                activate_okf_projection(self._store.kb_dir, staged_projection)
-                return
-            connection = sqlite3.connect(self._store.database_path)
-            connection.execute("PRAGMA foreign_keys = ON")
-            try:
-                changes = canonical_analysis_changes_in(connection, document_id, existing)
-            finally:
-                connection.close()
-            self._knowledge_reconciliation.record_analysis_changes(document_id, changes)
+            staged_projection = apply_import_knowledge_analysis(
+                self._store.kb_dir,
+                document_id=document_id,
+                analysis=existing.analysis,
+                analysis_provenance_json=existing.provenance_json,
+                evidence=existing.evidence,
+            )
+            activate_okf_projection(self._store.kb_dir, staged_projection)
+            return
         except (DesktopImportError, OSError, sqlite3.Error, ValueError) as error:
             logger.warning(
                 "Could not reconcile reused imported knowledge for %s: %s", document_id, error

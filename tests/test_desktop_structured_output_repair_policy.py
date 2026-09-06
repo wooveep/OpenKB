@@ -47,7 +47,7 @@ def test_explicit_output_limit_is_not_treated_as_repairable_json() -> None:
 
     with pytest.raises(DesktopStructuredOutputInvalidError) as captured:
         run_structured_output(
-            operation="retrieval_plan",
+            operation="query_planning",
             document_name="question",
             source_material="evidence",
             invoke=invoke,
@@ -56,7 +56,7 @@ def test_explicit_output_limit_is_not_treated_as_repairable_json() -> None:
             ),
         )
 
-    assert [request.operation for request in requests] == ["retrieval_plan"]
+    assert [request.operation for request in requests] == ["query_planning"]
     assert captured.value.attempt_count == 1
     assert captured.value.final_result is captured.value.initial_result
     assert not captured.value.repair_attempted
@@ -71,7 +71,7 @@ def test_operation_can_end_an_unrepairable_structured_failure_without_a_second_c
 
     with pytest.raises(DesktopStructuredOutputInvalidError) as captured:
         run_structured_output(
-            operation="retrieval_plan",
+            operation="query_planning",
             document_name="question",
             source_material="evidence",
             invoke=invoke,
@@ -79,7 +79,7 @@ def test_operation_can_end_an_unrepairable_structured_failure_without_a_second_c
             should_repair=lambda error: isinstance(error, _RepairableError),
         )
 
-    assert [request.operation for request in requests] == ["retrieval_plan"]
+    assert [request.operation for request in requests] == ["query_planning"]
     assert captured.value.attempt_count == 1
     assert captured.value.final_result is captured.value.initial_result
     assert not captured.value.repair_attempted
@@ -101,7 +101,7 @@ def test_operation_can_allow_the_single_repair_for_an_eligible_failure() -> None
         return list(payload["terms"])
 
     output = run_structured_output(
-        operation="retrieval_plan",
+        operation="query_planning",
         document_name="question",
         source_material="evidence",
         invoke=invoke,
@@ -112,11 +112,11 @@ def test_operation_can_allow_the_single_repair_for_an_eligible_failure() -> None
     assert output.value == ["OpenKB"]
     assert output.repaired
     assert [request.operation for request in requests] == [
-        "retrieval_plan",
+        "query_planning",
         "structured_output_repair",
     ]
     assert requests[1].prompt_contract_digest == structured_output_repair_contract_digest(
-        "retrieval_plan"
+        "query_planning"
     )
     repair = json.loads(requests[1].content)
     assert repair["validation_errors"] == ["missing_terms at $.terms"]
@@ -125,24 +125,22 @@ def test_operation_can_allow_the_single_repair_for_an_eligible_failure() -> None
 def test_knowledge_analysis_repair_receives_all_independent_validation_errors() -> None:
     requests: list[DesktopModelRequest] = []
     valid = {
-        "schema_version": "openkb.knowledge-analysis.v1",
+        "schema_version": "openkb.knowledge-analysis.v2",
         "analysis_scope": "batch",
         "document_description": "Deployment manual table of contents.",
         "document_summary": [],
-        "concepts": [],
-        "entities": [],
-        "procedures": [],
+        "candidates": [],
     }
     invalid = {
         **valid,
         "document_summary": [
             {
-                "role": "key_topic",
+                "label": "Key topic",
                 "text": "The manual covers deployment topics.",
                 "source_evidence_ids": [f"evidence-{index}" for index in range(33)],
             }
         ],
-        "procedures": [{} for _index in range(33)],
+        "candidates": [{} for _index in range(97)],
     }
 
     def invoke(request: DesktopModelRequest) -> DesktopModelResult:
@@ -162,6 +160,6 @@ def test_knowledge_analysis_repair_receives_all_independent_validation_errors() 
     repair = json.loads(requests[1].content)
     errors = repair["validation_errors"]
     assert len(errors) == 2
-    assert any("procedure candidates" in error for error in errors)
+    assert any("candidates" in error for error in errors)
     assert any("at most 32 supplied Evidence IDs" in error for error in errors)
     assert any("document_summary[0].source_evidence_ids has 33 items" in error for error in errors)

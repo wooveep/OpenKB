@@ -438,7 +438,7 @@ def _write_summary_page(
 ) -> None:
     rows = connection.execute(
         """
-        SELECT units.unit_ordinal, units.role, units.unit_text, sources.evidence_id
+        SELECT units.unit_ordinal, units.label, units.unit_text, sources.evidence_id
         FROM document_summary_units AS units
         JOIN document_summary_unit_sources AS sources
           ON sources.document_id = units.document_id
@@ -456,8 +456,8 @@ def _write_summary_page(
         lines = [f"# {document.title}", "", "> Document Summary · source-backed"]
         evidence_ids: list[str] = []
         for _ordinal, values in sorted(units.items()):
-            role = str(values[0][1]).replace("_", " ").title()
-            lines.extend(("", f"## {role}", "", f"- {values[0][2]}"))
+            label = str(values[0][1])
+            lines.extend(("", f"## {label}", "", f"- {values[0][2]}"))
             evidence_ids.extend(str(value[3]) for value in values)
     else:
         lines, evidence_ids = _structural_summary_in(connection, document)

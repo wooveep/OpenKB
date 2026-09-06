@@ -21,7 +21,6 @@ DesktopKnowledgeVerificationReason = Literal[
     "not_verified",
     "revision_changed",
     "publication_gate_blocked",
-    "legacy_unmapped_not_verifiable",
     "deprecated_not_verifiable",
     "lifecycle_changed",
 ]
@@ -73,8 +72,6 @@ def verification_status_in(
     reason: DesktopKnowledgeVerificationReason | None = None
     if has_working_draft:
         reason = "working_draft_not_verifiable"
-    elif provenance_state == "legacy_unmapped":
-        reason = "legacy_unmapped_not_verifiable"
     elif lifecycle_state == "deprecated":
         reason = "deprecated_not_verifiable"
     elif diagnostics:
@@ -108,7 +105,9 @@ def verification_status_in(
         (
             "lifecycle_changed"
             if previous is not None and previous[0] == "lifecycle_changed"
-            else "revision_changed" if previous is not None else "not_verified"
+            else "revision_changed"
+            if previous is not None
+            else "not_verified"
         ),
     )
 
@@ -117,9 +116,12 @@ def verify_current_revision_in(
     connection: sqlite3.Connection, *, page_id: str, verified_at: str
 ) -> None:
     """Record an explicit local-human review after re-running the Publication Gate."""
-    if connection.execute(
-        "SELECT 1 FROM knowledge_page_working_drafts WHERE page_id = ?", (page_id,)
-    ).fetchone() is not None:
+    if (
+        connection.execute(
+            "SELECT 1 FROM knowledge_page_working_drafts WHERE page_id = ?", (page_id,)
+        ).fetchone()
+        is not None
+    ):
         raise ValueError("knowledge_verification_requires_current_publication")
     row = connection.execute(
         """
@@ -134,23 +136,22 @@ def verify_current_revision_in(
     ).fetchone()
     if row is None:
         raise ValueError("knowledge_verification_requires_current_publication")
-    revision_id, content_markdown, provenance_state, lifecycle_state = (
-        str(value) for value in row
-    )
-    if provenance_state == "legacy_unmapped":
-        raise ValueError("knowledge_verification_legacy_unmapped")
+    revision_id, content_markdown, provenance_state, lifecycle_state = (str(value) for value in row)
     if lifecycle_state == "deprecated":
         raise ValueError("knowledge_verification_deprecated")
     source_map = revision_source_map_in(connection, revision_id)
     if publication_diagnostics_in(connection, content_markdown, source_map):
         raise ValueError("knowledge_verification_blocked")
-    if connection.execute(
-        """
+    if (
+        connection.execute(
+            """
         SELECT 1 FROM knowledge_page_verifications
         WHERE revision_id = ? AND invalidated_at IS NULL
         """,
-        (revision_id,),
-    ).fetchone() is not None:
+            (revision_id,),
+        ).fetchone()
+        is not None
+    ):
         return
     connection.execute(
         """
@@ -191,9 +192,6 @@ def verification_error(code: str) -> DesktopKnowledgePageError:
         ),
         "knowledge_verification_blocked": (
             "All factual claims must pass the Publication Gate before verification."
-        ),
-        "knowledge_verification_legacy_unmapped": (
-            "Bind this legacy revision to original evidence before verification."
         ),
         "knowledge_verification_deprecated": (
             "Restore this deprecated Knowledge Page before verification."

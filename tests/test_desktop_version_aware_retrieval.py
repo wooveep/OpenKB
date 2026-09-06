@@ -98,7 +98,7 @@ def test_unavailable_exact_scope_fails_closed_before_retrieval_planning(
     def unexpected_planning(*_args, **_kwargs):
         raise AssertionError("retrieval planning must not run for an unavailable Version Scope")
 
-    monkeypatch.setattr("openkb.desktop_retrieval.build_retrieval_plan", unexpected_planning)
+    monkeypatch.setattr("openkb.desktop_retrieval.build_query_plan", unexpected_planning)
 
     with pytest.raises(DesktopAnswerError) as caught:
         DesktopEvidenceRetriever(kb_dir).retrieve(

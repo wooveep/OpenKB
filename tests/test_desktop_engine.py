@@ -39,8 +39,8 @@ def _empty_knowledge_analysis() -> str:
             "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
             "analysis_scope": "document",
             "document_description": "No durable knowledge candidates.",
-            "concepts": [],
-            "entities": [],
+            "document_summary": [],
+            "candidates": [],
         }
     )
 
@@ -79,7 +79,7 @@ def _seed_generated_workspace_item(
             INSERT INTO knowledge_generation_items (
                 generation_id, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
-                provenance_state, aliases_json, tags_json
+                provenance_state, aliases_json, identity_labels_json
             ) VALUES (?, ?, 'concept', ?, ?, ?, ?, ?, '2026-08-28T00:00:00+00:00',
                 'source_backed', '[]', '[]')
             """,
@@ -690,216 +690,6 @@ def test_engine_keeps_model_summary_status_separate_from_failure_lifecycle(tmp_p
     assert call["attempts"][0]["lifecycle_status"] == "provider_failure"
 
 
-def test_engine_preserves_nullable_historical_model_lifecycle_without_rewriting_it(tmp_path):
-    """A pre-v38 ledger migrates and future lifecycle values stay non-destructive."""
-    desktop_kb = tmp_path / "desktop-kb"
-    source = tmp_path / "notes.txt"
-    source.write_text("One historical import task.", encoding="utf-8")
-    desktop_kb.mkdir()
-    (desktop_kb / "raw").mkdir()
-    state_dir = desktop_kb / ".openkb"
-    state_dir.mkdir()
-    database_path = desktop_kb / ".openkb" / "state.sqlite3"
-    with desktop_workspace_module._connect(database_path) as connection:
-        for version, statements in desktop_workspace_module._MIGRATIONS:
-            if version >= 38:
-                break
-            for statement in statements:
-                connection.execute(statement)
-            connection.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-                (version, "2026-01-01T00:00:00+00:00"),
-            )
-        connection.executemany(
-            "INSERT INTO metadata (key, value) VALUES (?, ?)",
-            (("format", "openkb-desktop"), ("knowledge_base_name", "Historical KB")),
-        )
-        connection.execute(
-            """
-            INSERT INTO import_jobs (
-                job_id, source_path, document_id, status, progress, error_code,
-                created_at, completed_at
-            ) VALUES ('historical-job', ?, NULL, 'failed', 100, 'provider_failure', ?, ?)
-            """,
-            (str(source), "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:01+00:00"),
-        )
-        connection.execute(
-            """
-            INSERT INTO import_job_runtime (
-                job_id, status, lease_owner, lease_expires_at, updated_at
-            ) VALUES ('historical-job', 'failed', NULL, NULL, ?)
-            """,
-            ("2026-01-01T00:00:01+00:00",),
-        )
-        stages = (
-            "preflight",
-            "raw_asset",
-            "document_ir",
-            "evidence",
-            "deterministic_page_tree",
-            "model_analysis",
-            "search",
-        )
-        for stage in stages:
-            status = "failed" if stage == "model_analysis" else "completed"
-            error_code = "provider_failure" if status == "failed" else None
-            connection.execute(
-                """
-                INSERT INTO stage_runs (
-                    stage_run_id, job_id, stage, status, progress, error_code,
-                    started_at, completed_at
-                ) VALUES (?, 'historical-job', ?, ?, 100, ?, ?, ?)
-                """,
-                (
-                    f"historical-{stage}",
-                    stage,
-                    status,
-                    error_code,
-                    "2026-01-01T00:00:00+00:00",
-                    "2026-01-01T00:00:01+00:00",
-                ),
-            )
-            connection.execute(
-                """
-                INSERT INTO stage_run_runtime (
-                    stage_run_id, job_id, status, checkpoint_json, error_code, updated_at
-                ) VALUES (?, 'historical-job', ?, NULL, ?, ?)
-                """,
-                (
-                    f"historical-{stage}",
-                    status,
-                    error_code,
-                    "2026-01-01T00:00:01+00:00",
-                ),
-            )
-        connection.execute(
-            """
-            INSERT INTO model_calls (
-                call_id, job_id, stage_run_id, operation, status, attempt_count,
-                timeout_seconds, next_timeout_seconds, remaining_seconds,
-                error_code, reason, suggested_action, created_at, completed_at
-            ) VALUES (
-                'historical-call', 'historical-job', 'historical-model_analysis',
-                'knowledge_analysis', 'failed', 1, 60, NULL, 0,
-                'provider_failure', 'Historical provider failure.', NULL, ?, ?
-            )
-            """,
-            ("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:01+00:00"),
-        )
-        connection.execute(
-            """
-            INSERT INTO model_attempts (
-                call_id, attempt, status, timeout_seconds, remaining_seconds,
-                error_code, reason, created_at, completed_at
-            ) VALUES (
-                'historical-call', 1, 'failed', 60, 0, 'provider_failure',
-                'Historical provider failure.', ?, ?
-            )
-            """,
-            ("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:01+00:00"),
-        )
-        connection.commit()
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (37,)
-        assert "lifecycle_status" not in {
-            row[1] for row in connection.execute("PRAGMA table_info(model_calls)")
-        }
-
-    migrated_workspace = DesktopKnowledgeBaseRuntime()
-    migrated_workspace.open(desktop_kb)
-    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=migrated_workspace)
-    server._handshake_complete = True
-
-    for status in ("running", "retry_wait", "completed", "failed"):
-        with sqlite3.connect(database_path) as connection:
-            connection.execute(
-                "UPDATE model_calls SET status = ?, lifecycle_status = NULL WHERE job_id = ?",
-                (status, "historical-job"),
-            )
-            connection.execute(
-                """
-                UPDATE model_attempts
-                SET status = ?, lifecycle_status = NULL
-                WHERE call_id IN (SELECT call_id FROM model_calls WHERE job_id = ?)
-                """,
-                (status, "historical-job"),
-            )
-
-        history = server._dispatch(
-            DesktopRequest(request_id="history", method="workbench.import_jobs", params={}),
-            cancel_event=None,
-        )
-
-        call = history["jobs"][0]["model_calls"][0]
-        assert call["status"] == status
-        assert call["lifecycle_status"] is None
-        assert call["attempts"][0]["status"] == status
-        assert call["attempts"][0]["lifecycle_status"] is None
-
-    with sqlite3.connect(database_path) as connection:
-        connection.execute("PRAGMA ignore_check_constraints = ON")
-        connection.execute(
-            "UPDATE model_calls SET status = 'future_summary_state', "
-            "lifecycle_status = 'completed' WHERE job_id = ?",
-            ("historical-job",),
-        )
-        connection.execute(
-            """
-            UPDATE model_attempts
-            SET status = 'future_summary_state', lifecycle_status = 'queued'
-            WHERE call_id IN (SELECT call_id FROM model_calls WHERE job_id = ?)
-            """,
-            ("historical-job",),
-        )
-
-    independent = server._dispatch(
-        DesktopRequest(
-            request_id="independent-statuses", method="workbench.import_jobs", params={}
-        ),
-        cancel_event=None,
-    )["jobs"][0]["model_calls"][0]
-    assert independent["status"] == "failed"
-    assert independent["lifecycle_status"] == "completed"
-    assert independent["attempts"][0]["status"] == "failed"
-    assert independent["attempts"][0]["lifecycle_status"] == "queued"
-
-    with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            "UPDATE model_calls SET lifecycle_status = 'future_provider_state' WHERE job_id = ?",
-            ("historical-job",),
-        )
-        connection.execute(
-            """
-            UPDATE model_attempts
-            SET lifecycle_status = 'future_provider_state'
-            WHERE call_id IN (SELECT call_id FROM model_calls WHERE job_id = ?)
-            """,
-            ("historical-job",),
-        )
-
-    history = server._dispatch(
-        DesktopRequest(request_id="history", method="workbench.import_jobs", params={}),
-        cancel_event=None,
-    )
-
-    call = history["jobs"][0]["model_calls"][0]
-    assert call["status"] == "failed"
-    assert call["lifecycle_status"] is None
-    assert call["attempts"][0]["status"] == "failed"
-    assert call["attempts"][0]["lifecycle_status"] is None
-    with sqlite3.connect(database_path) as connection:
-        assert connection.execute(
-            "SELECT lifecycle_status FROM model_calls WHERE job_id = ?",
-            ("historical-job",),
-        ).fetchone() == ("future_provider_state",)
-        assert connection.execute(
-            """
-            SELECT lifecycle_status FROM model_attempts
-            WHERE call_id IN (SELECT call_id FROM model_calls WHERE job_id = ?)
-            """,
-            ("historical-job",),
-        ).fetchone() == ("future_provider_state",)
-
-
 def test_engine_classifies_provider_timeout_as_a_network_failure(tmp_path):
     """An explicit network timeout is a provider failure, never a response deadline."""
     desktop_kb = tmp_path / "desktop-kb"
@@ -1169,12 +959,15 @@ def test_engine_emits_sanitized_interactive_answer_model_lifecycle(tmp_path):
     output = io.BytesIO()
 
     class ObservedInteractiveGateway:
+        provider_name = "custom"
+        model_name = "analysis-model"
+
         def for_lane(self, lane):
             assert lane == "interactive"
             return self
 
         def analyze(self, request, *, on_event, is_cancelled):
-            assert request.operation == "retrieval_plan"
+            assert request.operation == "query_planning"
             assert is_cancelled is not None
             for status in (
                 "queued",
@@ -1189,14 +982,41 @@ def test_engine_emits_sanitized_interactive_answer_model_lifecycle(tmp_path):
                         1,
                         status,
                         4,
-                        operation="retrieval_plan",
+                        operation="query_planning",
                         model_role="analysis",
                         provider_name="custom",
                         model_name="analysis-model",
                         execution_lane="interactive",
                     )
                 )
-            return DesktopModelResult("retrieval-call", '{"terms":["evidence"]}', 1)
+            prompt = json.loads(request.content)
+            evidence_ids = [item["evidence_id"] for item in prompt["seed_observations"]]
+            return DesktopModelResult(
+                "retrieval-call",
+                json.dumps(
+                    {
+                        "retrieval_plan": {"terms": ["evidence"]},
+                        "question_facet_plan": {
+                            "goal": "Answer from supplied evidence.",
+                            "facets": [
+                                {
+                                    "label": "Requested fact",
+                                    "description": "The fact requested by the question.",
+                                    "importance": "required",
+                                }
+                            ],
+                        },
+                        "initial_answer_coverage": [
+                            {
+                                "facet_ordinal": 0,
+                                "state": "covered",
+                                "evidence_ids": evidence_ids[:1],
+                            }
+                        ],
+                    }
+                ),
+                1,
+            )
 
         def analyze_once(self, request, *, on_event, is_cancelled):
             return self.analyze(request, on_event=on_event, is_cancelled=is_cancelled)
@@ -1259,7 +1079,7 @@ def test_engine_emits_sanitized_interactive_answer_model_lifecycle(tmp_path):
         if frame.get("method") == "event" and frame["params"]["kind"] == "model.call_lifecycle"
     ]
     assert {event["operation"] for event in lifecycle} == {
-        "retrieval_plan",
+        "query_planning",
         "grounded_answer",
     }
     answer_activity = next(
@@ -1410,10 +1230,10 @@ def test_engine_knowledge_workspace_lists_current_generated_and_user_authorities
             INSERT INTO knowledge_generation_items (
                 generation_id, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
-                provenance_state, entity_subtype, aliases_json, tags_json,
+                provenance_state, aliases_json, identity_labels_json,
                 analysis_provenance_json
             ) VALUES (?, 'openkb-item', 'concept', 'OpenKB', 'openkb', ?, ?, ?, ?,
-                'source_backed', NULL, '["OKB"]', '["knowledge"]', ?)
+                'source_backed', '["OKB"]', '["knowledge"]', ?)
             """,
             (
                 generation_id,
@@ -1427,7 +1247,7 @@ def test_engine_knowledge_workspace_lists_current_generated_and_user_authorities
                         "model": "deepseek-v4-pro",
                         "prompt_digest": "prompt-digest",
                         "engine_version": "0.1.0",
-                        "schema_version": "openkb.knowledge-analysis.v1",
+                        "schema_version": "openkb.knowledge-analysis.v2",
                     }
                 ),
             ),
@@ -1458,9 +1278,9 @@ def test_engine_knowledge_workspace_lists_current_generated_and_user_authorities
         ),
         cancel_event=None,
     )
-    legacy = server._dispatch(
+    page_list = server._dispatch(
         DesktopRequest(
-            request_id="legacy-knowledge-pages",
+            request_id="knowledge-pages",
             method="workbench.knowledge_pages",
             params={},
         ),
@@ -1486,11 +1306,11 @@ def test_engine_knowledge_workspace_lists_current_generated_and_user_authorities
         ("user", "OpenKB Team"),
     }
     assert generated["current"] is True
-    assert legacy["pages"] == [DesktopKnowledgePageService(kb_dir).list_pages()[0].as_dict()]
+    assert page_list["pages"] == [DesktopKnowledgePageService(kb_dir).list_pages()[0].as_dict()]
     assert detail["authority"] == "generated"
     assert detail["content_markdown"].startswith("# OpenKB")
     assert detail["aliases"] == ["OKB"]
-    assert detail["tags"] == ["knowledge"]
+    assert detail["identity_labels"] == ["knowledge"]
     assert detail["source_map"][0]["evidence_id"] == evidence_id
     assert detail["editable"] is False
 
@@ -2428,12 +2248,39 @@ def test_engine_returns_a_persisted_interrupted_answer_after_user_stop(tmp_path)
     stop = threading.Event()
 
     class StoppingTransport:
-        def __call__(self, _request, _timeout_seconds):
-            return '{"terms": ["evidence"]}'
+        def __call__(self, request, _timeout_seconds):
+            return self.query_result(request)
+
+        @staticmethod
+        def query_result(request):
+            prompt = json.loads(request.content)
+            evidence_ids = [item["evidence_id"] for item in prompt["seed_observations"]]
+            return json.dumps(
+                {
+                    "retrieval_plan": {"terms": ["evidence"]},
+                    "question_facet_plan": {
+                        "goal": "Answer the supplied question from evidence.",
+                        "facets": [
+                            {
+                                "label": "Requested baseline",
+                                "description": "The baseline requested by the question.",
+                                "importance": "required",
+                            }
+                        ],
+                    },
+                    "initial_answer_coverage": [
+                        {
+                            "facet_ordinal": 0,
+                            "state": "covered",
+                            "evidence_ids": evidence_ids[:1],
+                        }
+                    ],
+                }
+            )
 
         def stream_until_terminal(self, request, _connect_timeout_seconds, on_delta):
-            if request.operation == "retrieval_plan":
-                return '{"terms": ["evidence"]}'
+            if request.operation == "query_planning":
+                return self.query_result(request)
             on_delta("partial answer")
             stop.set()
             return "late answer"

@@ -1,8 +1,3 @@
-"""Schema seam for canonical OKF Entity subtype projection."""
+"""Reserved current-epoch OKF projection migration seam."""
 
-OKF_PROJECTION_MIGRATION_STATEMENTS: tuple[str, ...] = (
-    """
-    ALTER TABLE knowledge_generation_items
-    ADD COLUMN entity_subtype TEXT
-    """,
-)
+OKF_PROJECTION_MIGRATION_STATEMENTS: tuple[str, ...] = ()

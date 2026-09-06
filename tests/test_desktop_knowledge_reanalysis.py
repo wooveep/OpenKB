@@ -6,6 +6,7 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -41,21 +42,31 @@ def _analysis_response(evidence_id: str, claim: str) -> str:
             "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
             "analysis_scope": "document",
             "document_description": "Reanalysis fixture.",
-            "concepts": [
+            "document_summary": [],
+            "candidates": [
                 {
+                    "kind": "concept",
                     "title": "Runtime mode",
                     "aliases": [],
-                    "tags": [],
-                    "claims": [{"text": claim, "source_evidence_ids": [evidence_id]}],
+                    "identity_labels": [],
+                    "admission": "admit",
+                    "claims": [
+                        {
+                            "text": claim,
+                            "source_evidence_ids": [evidence_id],
+                            "applicability": [],
+                        }
+                    ],
                 }
             ],
-            "entities": [],
         }
     )
 
 
 def _gateway(claim: str, *, provider: str = "provider", model: str = "model"):
     def transport(request, _timeout_seconds):
+        if request.operation == "knowledge_page_planning":
+            return _page_plan_response(request)
         evidence_id = str(json.loads(request.content)["evidence"][0]["evidence_id"])
         return _analysis_response(evidence_id, claim)
 
@@ -79,8 +90,8 @@ def _empty_analysis(scope: str) -> str:
             "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
             "analysis_scope": scope,
             "document_description": "Batch fixture.",
-            "concepts": [],
-            "entities": [],
+            "document_summary": [],
+            "candidates": [],
         }
     )
 
@@ -93,76 +104,55 @@ def _corpus_analysis_response(evidence_id: str) -> str:
             "document_description": "Runtime service documentation.",
             "document_summary": [
                 {
-                    "role": "purpose",
+                    "label": "Overview",
                     "text": "This document describes the Runtime service.",
                     "source_evidence_ids": [evidence_id],
                 }
             ],
-            "concepts": [],
-            "entities": [
+            "candidates": [
                 {
+                    "kind": "entity",
                     "title": "Runtime",
-                    "subtype": "service",
                     "aliases": [],
-                    "tags": ["local"],
+                    "identity_labels": ["service", "local"],
+                    "admission": "admit",
                     "claims": [
                         {
-                            "role": "capability",
                             "text": "The Runtime service uses a local mode.",
-                            "applicability": {
-                                "product_version": "unspecified",
-                                "platform": "unspecified",
-                                "deployment_scenario": "local",
-                                "time_boundary": "unspecified",
-                            },
+                            "applicability": [
+                                {
+                                    "dimension": "deployment scenario",
+                                    "value": "local",
+                                    "source_evidence_ids": [evidence_id],
+                                }
+                            ],
                             "source_evidence_ids": [evidence_id],
                         }
                     ],
                 }
             ],
-            "procedures": [],
         }
     )
 
 
-def _inventory_response(request) -> str:
+def _page_plan_response(request) -> str:
     snapshot = json.loads(request.content)
-    return json.dumps(
-        {
-            "document_version_id": snapshot["document_version_id"],
-            "analysis_generation_id": snapshot["analysis_generation_id"],
-            "decisions": [
-                {
-                    "proposal_id": proposal["proposal_id"],
-                    "decision": "create",
-                    "canonical_title": proposal["title"],
-                    "entity_subtype": proposal["proposed_subtype"],
-                    "claim_ids": [claim["claim_id"] for claim in proposal["claims"]],
-                    "target_identity_id": None,
-                    "reason_codes": ["durable_named_entity"],
-                    "supporting_proposal_ids": [proposal["proposal_id"]],
-                    "corpus_brief_ids": [],
-                }
-                for proposal in snapshot["proposals"]
-            ],
-        }
-    )
-
-
-def _dossier_response(request) -> str:
-    snapshot = json.loads(request.content)
+    claim_ids = [claim["claim_id"] for claim in snapshot["claims"]]
     return json.dumps(
         {
             "generation_id": snapshot["generation_id"],
             "identity_id": snapshot["identity_id"],
-            "summary_claim_ids": [claim["claim_id"] for claim in snapshot["claims"]],
+            "lead": {
+                "presentation": "paragraph",
+                "claim_ids": claim_ids,
+                "relation_assertion_ids": [],
+            },
             "sections": [],
-            "related_identity_ids": [],
         }
     )
 
 
-def test_reanalysis_routes_changes_to_review_without_overwriting_current_knowledge(
+def test_reanalysis_replaces_generated_knowledge_without_isolating_the_document(
     tmp_path: Path,
 ) -> None:
     kb_dir, document_id = _imported_document(tmp_path)
@@ -187,30 +177,27 @@ def test_reanalysis_routes_changes_to_review_without_overwriting_current_knowled
                 ON items.generation_id = state.current_generation_id
             """
         ).fetchone()[0]
-        assert "local mode" in current
+        assert "global mode" in current
         assert connection.execute(
             "SELECT COUNT(*) FROM knowledge_reconciliation_candidates "
             "WHERE status = 'pending_conflict'"
-        ).fetchone() == (1,)
+        ).fetchone() == (0,)
 
 
-def test_corpus_reanalysis_publishes_candidates_then_plans_dossiers_outside_write_lock(
+def test_corpus_reanalysis_publishes_candidates_then_plans_pages_outside_write_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
-    monkeypatch.setattr(
-        "openkb.desktop_knowledge_generations._record_corpus_benchmark_in",
-        lambda connection, generation_id: connection.execute(
-            "UPDATE knowledge_generations SET qualification_report_json = ? "
-            "WHERE generation_id = ?",
-            ('{"schema_version":"openkb.corpus-benchmark.v3","passed":true}', generation_id),
-        ),
-    )
     kb_dir, document_id = _imported_document(tmp_path)
     database_path = kb_dir / ".openkb" / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        previous_candidate_generations = connection.execute(
+            "SELECT COUNT(*) FROM knowledge_candidate_generations WHERE document_id = ?",
+            (document_id,),
+        ).fetchone()[0]
     operations: list[str] = []
 
     def transport(request, _timeout_seconds):
@@ -218,13 +205,11 @@ def test_corpus_reanalysis_publishes_candidates_then_plans_dossiers_outside_writ
         if request.operation == "knowledge_fact_harvest":
             evidence_id = str(json.loads(request.content)["evidence"][0]["evidence_id"])
             return _corpus_analysis_response(evidence_id)
-        if request.operation == "document_entity_inventory":
-            return _inventory_response(request)
-        if request.operation == "entity_dossier_planning":
+        if request.operation == "knowledge_page_planning":
             with sqlite3.connect(database_path, timeout=0.1) as probe:
                 probe.execute("BEGIN IMMEDIATE")
                 probe.rollback()
-            return _dossier_response(request)
+            return _page_plan_response(request)
         raise AssertionError(request.operation)
 
     service = DesktopKnowledgeReanalysisService(kb_dir)
@@ -232,35 +217,34 @@ def test_corpus_reanalysis_publishes_candidates_then_plans_dossiers_outside_writ
     assert service.run_job(
         run.jobs[0].job_id,
         DesktopModelGateway(transport, provider_name="provider", model_name="model"),
-        retry_scope="reanalysis-dossier-retry",
+        retry_scope="reanalysis-page-plan-retry",
     ) == (document_id,)
 
     assert service.overview()["runs"][0]["status"] == "completed"
     assert operations == [
         "knowledge_fact_harvest",
-        "document_entity_inventory",
-        "entity_dossier_planning",
+        "knowledge_page_planning",
     ]
     with sqlite3.connect(database_path) as connection:
         assert (
             connection.execute(
-                "SELECT provenance_state, current_candidate_generation_id "
+                "SELECT current_candidate_generation_id "
                 "FROM knowledge_candidate_registry_state WHERE document_id = ?",
                 (document_id,),
             ).fetchone()[0]
-            == "semantic"
+            is not None
         )
         assert connection.execute(
             "SELECT COUNT(*) FROM knowledge_candidate_generations WHERE document_id = ?",
             (document_id,),
-        ).fetchone() == (1,)
+        ).fetchone() == (previous_candidate_generations + 1,)
         assert connection.execute(
-            "SELECT tasks.status, manifests.dossier_state, tasks.retry_scope "
+            "SELECT tasks.status, manifests.page_state, tasks.retry_scope "
             "FROM knowledge_corpus_synthesis_tasks AS tasks "
             "JOIN knowledge_generation_manifests AS manifests "
             "ON manifests.generation_id = tasks.generation_id "
             "ORDER BY tasks.generation_id DESC LIMIT 1"
-        ).fetchone() == ("completed", "ready", "reanalysis-dossier-retry")
+        ).fetchone() == ("completed", "ready", "reanalysis-page-plan-retry")
         assert connection.execute(
             """
             SELECT tasks.status,
@@ -312,6 +296,10 @@ def test_reanalysis_failure_does_not_isolate_the_document_or_clear_knowledge(
     tmp_path: Path,
 ) -> None:
     kb_dir, document_id = _imported_document(tmp_path)
+    with sqlite3.connect(kb_dir / ".openkb" / "state.sqlite3") as connection:
+        generation_before = connection.execute(
+            "SELECT current_generation_id FROM knowledge_generation_state"
+        ).fetchone()
     service = DesktopKnowledgeReanalysisService(kb_dir)
     run = service.create_run((document_id,), provider="provider", model="model")
 
@@ -330,7 +318,10 @@ def test_reanalysis_failure_does_not_isolate_the_document_or_clear_knowledge(
             "SELECT availability FROM source_documents WHERE document_id = ?", (document_id,)
         ).fetchone() == ("available",)
         assert (
-            connection.execute("SELECT COUNT(*) FROM knowledge_generation_items").fetchone()[0] > 0
+            connection.execute(
+                "SELECT current_generation_id FROM knowledge_generation_state"
+            ).fetchone()
+            == generation_before
         )
 
 
@@ -346,9 +337,6 @@ def test_d0_and_d1_reuse_latest_reanalysis_with_available_occurrence_fallback(
     run = service.create_run((canonical_document_id,), provider="provider", model="model")
     service.run_job(run.jobs[0].job_id, _gateway("The runtime uses a global mode."))
     database_path = kb_dir / ".openkb" / "state.sqlite3"
-    with sqlite3.connect(database_path) as connection:
-        connection.execute("DELETE FROM knowledge_reconciliation_candidates")
-
     model_calls = 0
 
     def unexpected_call(_request, _timeout_seconds):
@@ -363,16 +351,6 @@ def test_d0_and_d1_reuse_latest_reanalysis_with_available_occurrence_fallback(
     d0 = DesktopTextImportService(kb_dir, model_gateway=reuse_gateway).import_text(source)
     assert d0.job.deduplication is not None
     assert d0.job.deduplication.level == "D0"
-    with sqlite3.connect(database_path) as connection:
-        assert (
-            "global mode"
-            in connection.execute(
-                "SELECT content_markdown FROM knowledge_reconciliation_candidates "
-                "WHERE status = 'pending_conflict'"
-            ).fetchone()[0]
-        )
-        connection.execute("DELETE FROM knowledge_reconciliation_candidates")
-
     d1_source = tmp_path / "source-copy.md"
     d1_source.write_bytes(source.read_bytes().replace(b"\n", b"\r\n"))
     d1 = DesktopTextImportService(kb_dir, model_gateway=reuse_gateway).import_text(d1_source)
@@ -380,12 +358,13 @@ def test_d0_and_d1_reuse_latest_reanalysis_with_available_occurrence_fallback(
     assert d1.job.deduplication.level == "D1"
     assert model_calls == 0
     with sqlite3.connect(database_path) as connection:
-        conflict = connection.execute(
-            "SELECT content_markdown, analysis_provenance_json "
-            "FROM knowledge_reconciliation_candidates WHERE status = 'pending_conflict'"
+        current = connection.execute(
+            "SELECT items.content_markdown FROM knowledge_generation_state AS state "
+            "JOIN knowledge_generation_items AS items "
+            "ON items.generation_id = state.current_generation_id"
         ).fetchone()
-        assert "global mode" in conflict[0]
-        assert json.loads(conflict[1])["model"] == "model"
+        assert current is not None
+        assert "global mode" in current[0]
 
     deduplicated_run = service.create_run(
         (canonical_document_id, d1.document.document_id),
@@ -522,7 +501,7 @@ def test_reanalysis_batches_preserve_duplicate_evidence_occurrences(
         if request.operation == "knowledge_fact_harvest":
             return _empty_analysis("batch")
         if request.operation == "knowledge_analysis_merge":
-            return _empty_analysis("document")
+            return json.dumps({"document_description": "Merged duplicate evidence."})
         raise AssertionError(request.operation)
 
     service.run_job(
@@ -569,7 +548,7 @@ def test_reanalysis_retry_reuses_completed_long_document_batch(
             return _empty_analysis("batch")
         if request.operation == "knowledge_analysis_merge":
             operations.append("merge")
-            return _empty_analysis("document")
+            return json.dumps({"document_description": "Merged long document."})
         raise AssertionError(request.operation)
 
     gateway = DesktopModelGateway(transport, provider_name="provider", model_name="model")
@@ -704,6 +683,13 @@ def test_engine_starts_graph_worker_after_reanalysis_requeues_candidate_graph(
             assert callable(controls["should_stop"])
             assert callable(controls["authorize_retry"])
             assert controls["retry_scope"] == "run-id"
+            controls["authorize_retry"](
+                SimpleNamespace(
+                    operation="knowledge_page_planning",
+                    capability_identity=None,
+                    prompt_contract_digest=None,
+                )
+            )
             return ("document-id",)
 
     class Server:
@@ -721,8 +707,8 @@ def test_engine_starts_graph_worker_after_reanalysis_requeues_candidate_graph(
     monkeypatch.setattr(
         reanalysis_engine,
         "authorize_model_operation_retry",
-        lambda _kb_dir, _gateway, *, operation, retry_scope: retry_authorizations.append(
-            (operation, retry_scope)
+        lambda _kb_dir, _gateway, **kwargs: retry_authorizations.append(
+            (str(kwargs["operation"]), str(kwargs["retry_scope"]))
         ),
     )
     monkeypatch.setattr(
@@ -739,6 +725,6 @@ def test_engine_starts_graph_worker_after_reanalysis_requeues_candidate_graph(
     reanalysis_engine._run_jobs(Server(), tmp_path, "run-id", gateway, 7)  # type: ignore[arg-type]
 
     assert graph_starts == [(tmp_path, gateway)]
-    assert retry_authorizations == [("entity_dossier_planning", "run-id")]
+    assert retry_authorizations == [("knowledge_page_planning", "run-id")]
     assert Server._knowledge_graph_extraction_cancelled == set()
     assert events == [("knowledge_reanalysis.updated", {"run_id": "run-id", "job_id": "job-id"})]

@@ -160,6 +160,23 @@ fn grounded_answer_accepts_python_retrieval_trace_fields() {
             "selected_node_ids": ["node-1"],
             "canonical_evidence_ids": ["evidence-1"],
             "fusion_policy_version": "openkb.rrf-protected-baseline.v1",
+            "semantic_structure_state": "known",
+            "question_goal": "Explain the relationship between Alpha and Beta",
+            "question_facets": [{
+                "facet_id": "relationship",
+                "label": "Relationship",
+                "description": "How the two identities relate",
+                "importance": "required"
+            }],
+            "question_facet_plan_digest": "facet-plan-1",
+            "query_planning_prompt_contract_digest": "prompt-1",
+            "query_planning_execution_profile_json": "{}",
+            "query_planning_execution_profile_digest": "profile-1",
+            "facet_coverage": [{
+                "facet_id": "relationship",
+                "state": "covered",
+                "evidence_ids": ["evidence-1"]
+            }],
             "version_navigation_snapshot_id": "version-snapshot-1",
             "version_catalog_revision_id": "version-catalog-1",
             "version_catalog_digest": "catalog-digest-1",
@@ -176,6 +193,12 @@ fn grounded_answer_accepts_python_retrieval_trace_fields() {
 
     assert_eq!(answer.retrieval_trace.page_tree_generation_ids, ["tree-1"]);
     assert_eq!(answer.retrieval_trace.channels[0].candidate_count, 2);
+    assert_eq!(answer.retrieval_trace.semantic_structure_state, "known");
+    assert_eq!(
+        answer.retrieval_trace.question_facets[0].facet_id,
+        "relationship"
+    );
+    assert_eq!(answer.retrieval_trace.facet_coverage[0].state, "covered");
     assert_eq!(answer.retrieval_trace.version_scope_mode, "comparison");
     assert_eq!(
         answer.retrieval_trace.version_scope_labels,

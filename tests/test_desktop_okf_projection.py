@@ -197,8 +197,7 @@ def test_okf_compatibility_is_permissive_and_resolves_both_link_forms(
     tmp_path: Path,
 ) -> None:
     assert canonical_okf_type("concept") == "Concept"
-    assert canonical_okf_type("entity", "Organization") == "Organization"
-    assert canonical_okf_type("entity", "UnknownVendorType") == "Entity"
+    assert canonical_okf_type("entity") == "Entity"
     bundle = tmp_path / "bundle"
     current = bundle / "entity" / "openkb.md"
     target = bundle / "concept" / "routing.md"
@@ -227,7 +226,9 @@ def test_okf_compatibility_is_permissive_and_resolves_both_link_forms(
     ]
 
 
-def test_okf_projection_uses_a_persisted_known_entity_subtype(tmp_path: Path) -> None:
+def test_okf_projection_keeps_model_owned_identity_labels_out_of_okf_type(
+    tmp_path: Path,
+) -> None:
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "organization.md"
     source.write_text(
@@ -252,7 +253,7 @@ def test_okf_projection_uses_a_persisted_known_entity_subtype(tmp_path: Path) ->
                     normalized_title="acme",
                     content_markdown=content,
                     content_sha256=knowledge_content_sha256(content),
-                    entity_subtype="Organization",
+                    identity_labels=("Organization",),
                 ),
                 KnowledgeGenerationChange(
                     document_id=imported.document.document_id,
@@ -263,7 +264,7 @@ def test_okf_projection_uses_a_persisted_known_entity_subtype(tmp_path: Path) ->
                     content_sha256=knowledge_content_sha256(
                         "Mystery has an unknown vendor subtype."
                     ),
-                    entity_subtype="UnknownVendorType",
+                    identity_labels=("UnknownVendorType",),
                 ),
             ),
             now="2026-08-19T12:00:00+00:00",
@@ -278,10 +279,12 @@ def test_okf_projection_uses_a_persisted_known_entity_subtype(tmp_path: Path) ->
         if path.name != "index.md"
         for metadata, _body in (_markdown_document(path),)
     }
-    assert projected_entities["Acme"]["type"] == "Organization"
+    assert projected_entities["Acme"]["type"] == "Entity"
     assert projected_entities["Acme"]["openkb"]["kind"] == "Entity"
     assert projected_entities["Mystery"]["type"] == "Entity"
     assert projected_entities["Mystery"]["openkb"]["kind"] == "Entity"
+    assert projected_entities["Acme"]["identity_labels"] == ["Organization"]
+    assert projected_entities["Mystery"]["identity_labels"] == ["UnknownVendorType"]
 
 
 def test_okf_activation_restores_the_previous_bundle_when_the_swap_fails(

@@ -477,9 +477,8 @@ def _resolved_kinds_in(
             normalized_title=change.normalized_title,
             content_markdown=change.content_markdown,
             content_sha256=change.content_sha256,
-            entity_subtype=change.entity_subtype,
             aliases=change.aliases,
-            tags=change.tags,
+            identity_labels=change.identity_labels,
             sources=change.sources,
             analysis_provenance_json=change.analysis_provenance_json,
         )
@@ -591,9 +590,8 @@ def _generation_change(
         normalized_title=change.normalized_title,
         content_markdown=change.content_markdown,
         content_sha256=change.content_sha256,
-        entity_subtype=change.entity_subtype,
         aliases=change.aliases,
-        tags=change.tags,
+        identity_labels=change.identity_labels,
         sources=change.sources,
         analysis_provenance_json=change.analysis_provenance_json,
     )
@@ -635,14 +633,13 @@ def _insert_candidate_in(
         connection.execute(
             """
             UPDATE knowledge_reconciliation_candidates
-            SET entity_subtype = ?, aliases_json = ?, tags_json = ?,
+            SET aliases_json = ?, identity_labels_json = ?,
                 analysis_provenance_json = ?
             WHERE candidate_id = ?
             """,
             (
-                change.entity_subtype,
                 encode_knowledge_labels(change.aliases),
-                encode_knowledge_labels(change.tags),
+                encode_knowledge_labels(change.identity_labels),
                 change.analysis_provenance_json,
                 candidate_id,
             ),
@@ -669,13 +666,13 @@ def _insert_candidate_in(
         """
         INSERT INTO knowledge_reconciliation_candidates (
             candidate_id, document_id, source_block_id, kind, title, normalized_title,
-            content_markdown, content_sha256, entity_subtype, classification, status,
-            aliases_json, tags_json, analysis_provenance_json,
+            content_markdown, content_sha256, classification, status,
+            aliases_json, identity_labels_json, analysis_provenance_json,
             baseline_kind, baseline_id, baseline_title, baseline_content_markdown,
             observed_generation_id, reconciliation_mode, target_page_id,
             working_draft_title, working_draft_content_markdown,
             working_draft_content_sha256, working_draft_updated_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             candidate_id,
@@ -686,11 +683,10 @@ def _insert_candidate_in(
             change.normalized_title,
             change.content_markdown,
             change.content_sha256,
-            change.entity_subtype,
             classification,
             status,
             encode_knowledge_labels(change.aliases),
-            encode_knowledge_labels(change.tags),
+            encode_knowledge_labels(change.identity_labels),
             change.analysis_provenance_json,
             baseline.kind if baseline is not None else None,
             baseline.baseline_id if baseline is not None else None,

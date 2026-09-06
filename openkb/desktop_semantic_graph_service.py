@@ -63,7 +63,7 @@ _INVALID_RESPONSE_REASON = "Semantic relation analysis returned an invalid resul
 
 
 class DesktopSemanticGraphService:
-    """Own the admitted-candidate path while leaving legacy documents compatible."""
+    """Own the only current-epoch relation-analysis path."""
 
     def __init__(self, kb_dir: Path, *, model_gateway: DesktopModelGateway | None) -> None:
         self.kb_dir = kb_dir.expanduser().resolve()
@@ -80,15 +80,13 @@ class DesktopSemanticGraphService:
         on_failure: FailureCallback | None = None,
         publish_transaction: PublishTransaction | None = None,
         retry_scope: str | None = None,
-    ) -> bool | None:
-        """Return ``None`` only when the legacy evidence-graph path should run."""
+    ) -> bool:
+        """Publish model-labelled relations, or fail without synthesizing semantics."""
         try:
             graph_input = self._input(document_id)
         except (OSError, sqlite3.Error):
             _report_failure(on_failure, "knowledge_graph_extraction_failed")
             return False
-        if graph_input.status == "explicit_legacy":
-            return None
         if graph_input.status == "dependency_unavailable" or graph_input.document is None:
             _report_failure(on_failure, "candidate_generation_unavailable")
             return False
@@ -223,7 +221,7 @@ class DesktopSemanticGraphService:
                 content,
                 batch,
                 # Every valid edge is independently safe to retain because the
-                # boundary rechecks identity, ontology, and evidence bindings.
+                # boundary rechecks identity and evidence bindings.
                 # If an all-invalid initial result is repaired to another
                 # all-invalid array, retain an auditable degraded-empty leaf so
                 # it cannot erase valid edges from every other document batch.

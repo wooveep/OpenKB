@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 from openkb.desktop_document_summary import bounded_document_summary_units
 from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
@@ -23,8 +23,6 @@ from openkb.desktop_knowledge_analysis_validation import (
 from openkb.desktop_knowledge_analysis_validation import (
     json_object_text as _json_object_text,
 )
-from openkb.desktop_knowledge_candidate_admission import assess_knowledge_candidate
-from openkb.desktop_knowledge_entity_types import is_supported_entity_subtype
 from openkb.desktop_knowledge_generations import (
     KnowledgeGenerationSource,
     knowledge_content_sha256,
@@ -40,29 +38,14 @@ from openkb.desktop_prompt_contracts import (
     KNOWLEDGE_ANALYSIS_MAX_EVIDENCE_IDS_PER_CLAIM,
     prompt_contract_for,
 )
+from openkb.desktop_semantic_structure_contracts import normalize_dynamic_semantic_text
 
-KNOWLEDGE_ANALYSIS_SCHEMA_VERSION = "openkb.knowledge-analysis.v1"
+KNOWLEDGE_ANALYSIS_SCHEMA_VERSION = "openkb.knowledge-analysis.v2"
 KNOWLEDGE_ANALYSIS_SCOPE: Literal["document"] = "document"
 KNOWLEDGE_ANALYSIS_BATCH_SCOPE: Literal["batch"] = "batch"
 KnowledgeAnalysisScope = Literal["document", "batch"]
 KnowledgeAnalysisKind = Literal["concept", "entity", "procedure"]
-KnowledgeInventoryDecision = Literal["create", "update", "alias", "review", "reject"]
-KnowledgeClaimRole = Literal[
-    "definition",
-    "purpose",
-    "mechanism",
-    "capability",
-    "scope",
-    "prerequisite",
-    "step",
-    "validation",
-    "rollback",
-    "troubleshooting",
-    "limitation",
-    "relation",
-    "detail",
-]
-DocumentSummaryRole = Literal["purpose", "applicability", "key_topic"]
+KnowledgeCandidateAdmission = Literal["admit", "review", "exclude"]
 _KNOWLEDGE_ANALYSIS_CONTRACT = prompt_contract_for("knowledge_analysis")
 KNOWLEDGE_ANALYSIS_SYSTEM_PROMPT = _KNOWLEDGE_ANALYSIS_CONTRACT.instructions
 KNOWLEDGE_ANALYSIS_PROMPT_DIGEST = _KNOWLEDGE_ANALYSIS_CONTRACT.digest
@@ -80,52 +63,24 @@ _MAX_AGGREGATE_CANDIDATES_PER_KIND = 4_096
 _MAX_AGGREGATE_CLAIMS_PER_CANDIDATE = 4_096
 _MAX_SUMMARY_UNITS = 32
 _MAX_AGGREGATE_SUMMARY_UNITS = 4_096
-_CLAIM_ROLES = frozenset(
-    {
-        "definition",
-        "purpose",
-        "mechanism",
-        "capability",
-        "scope",
-        "prerequisite",
-        "step",
-        "validation",
-        "rollback",
-        "troubleshooting",
-        "limitation",
-        "relation",
-        "detail",
-    }
-)
-_SUMMARY_ROLES = frozenset({"purpose", "applicability", "key_topic"})
+_CANDIDATE_KINDS = frozenset({"concept", "entity", "procedure"})
+_CANDIDATE_ADMISSIONS = frozenset({"admit", "review", "exclude"})
 
 
 @dataclass(frozen=True)
 class KnowledgeClaimApplicability:
-    product_version: str | None = None
-    platform: str | None = None
-    deployment_scenario: str | None = None
-    time_boundary: str | None = None
+    """One open applicability dimension backed by a subset of its claim Evidence."""
+
+    dimension: str
+    value: str
+    source_evidence_ids: tuple[str, ...]
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "product_version": self.product_version or "",
-            "platform": self.platform or "",
-            "deployment_scenario": self.deployment_scenario or "",
-            "time_boundary": self.time_boundary or "",
+            "dimension": self.dimension,
+            "value": self.value,
+            "source_evidence_ids": list(self.source_evidence_ids),
         }
-
-    def values(self) -> tuple[tuple[str, str], ...]:
-        return tuple(
-            (dimension, value)
-            for dimension, value in (
-                ("product_version", self.product_version),
-                ("platform", self.platform),
-                ("deployment_scenario", self.deployment_scenario),
-                ("time_boundary", self.time_boundary),
-            )
-            if value is not None
-        )
 
 
 @dataclass(frozen=True)
@@ -134,29 +89,25 @@ class KnowledgeAnalysisClaim:
 
     text: str
     source_evidence_ids: tuple[str, ...]
-    role: KnowledgeClaimRole = "detail"
-    applicability: KnowledgeClaimApplicability = KnowledgeClaimApplicability()
+    applicability: tuple[KnowledgeClaimApplicability, ...] = ()
 
-    def as_dict(self, *, extended: bool = False) -> dict[str, object]:
-        payload: dict[str, object] = {
+    def as_dict(self) -> dict[str, object]:
+        return {
             "text": self.text,
             "source_evidence_ids": list(self.source_evidence_ids),
+            "applicability": [entry.as_dict() for entry in self.applicability],
         }
-        if extended:
-            payload["role"] = self.role
-            payload["applicability"] = self.applicability.as_dict()
-        return payload
 
 
 @dataclass(frozen=True)
 class KnowledgeAnalysisSummaryUnit:
-    role: DocumentSummaryRole
+    label: str
     text: str
     source_evidence_ids: tuple[str, ...]
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "role": self.role,
+            "label": self.label,
             "text": self.text,
             "source_evidence_ids": list(self.source_evidence_ids),
         }
@@ -169,24 +120,19 @@ class KnowledgeAnalysisCandidate:
     kind: KnowledgeAnalysisKind
     title: str
     aliases: tuple[str, ...]
-    tags: tuple[str, ...]
+    identity_labels: tuple[str, ...]
     claims: tuple[KnowledgeAnalysisClaim, ...]
-    subtype: str | None = None
-    admission_reason_codes: tuple[str, ...] = ()
-    inventory_decision: KnowledgeInventoryDecision | None = None
-    inventory_target_identity_id: str | None = None
-    inventory_target_generation_id: int | None = None
+    admission: KnowledgeCandidateAdmission = "admit"
 
-    def as_dict(self, *, extended: bool = False) -> dict[str, object]:
-        payload: dict[str, object] = {
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
             "title": self.title,
             "aliases": list(self.aliases),
-            "tags": list(self.tags),
-            "claims": [claim.as_dict(extended=extended) for claim in self.claims],
+            "identity_labels": list(self.identity_labels),
+            "admission": self.admission,
+            "claims": [claim.as_dict() for claim in self.claims],
         }
-        if self.kind == "entity" and self.subtype is not None:
-            payload["subtype"] = self.subtype
-        return payload
 
 
 @dataclass(frozen=True)
@@ -196,9 +142,8 @@ class KnowledgeAnalysisMissingClaim:
     kind: KnowledgeAnalysisKind
     title: str
     normalized_title: str
-    entity_subtype: str | None
     aliases: tuple[str, ...]
-    tags: tuple[str, ...]
+    identity_labels: tuple[str, ...]
     claim_text: str
     source_evidence_ids: tuple[str, ...]
     reason: Literal["source_not_provided", "source_reference_unresolved"]
@@ -214,26 +159,15 @@ class DesktopKnowledgeAnalysis:
     analysis_scope: KnowledgeAnalysisScope = KNOWLEDGE_ANALYSIS_SCOPE
     procedures: tuple[KnowledgeAnalysisCandidate, ...] = ()
     document_summary: tuple[KnowledgeAnalysisSummaryUnit, ...] = ()
-    corpus_ready: bool = False
 
     def as_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
+        return {
             "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
             "analysis_scope": self.analysis_scope,
             "document_description": self.document_description,
-            "concepts": [
-                candidate.as_dict(extended=self.corpus_ready) for candidate in self.concepts
-            ],
-            "entities": [
-                candidate.as_dict(extended=self.corpus_ready) for candidate in self.entities
-            ],
+            "document_summary": [unit.as_dict() for unit in self.document_summary],
+            "candidates": [candidate.as_dict() for candidate in self.candidates],
         }
-        if self.corpus_ready:
-            payload["document_summary"] = [unit.as_dict() for unit in self.document_summary]
-            payload["procedures"] = [
-                candidate.as_dict(extended=True) for candidate in self.procedures
-            ]
-        return payload
 
     @property
     def candidates(self) -> tuple[KnowledgeAnalysisCandidate, ...]:
@@ -256,24 +190,13 @@ class DesktopKnowledgeAnalysis:
             )
             if not resolved_claims:
                 continue
-            if self.corpus_ready:
-                if candidate.inventory_decision in {"review", "reject"}:
-                    continue
-                admission = assess_knowledge_candidate(
-                    kind=candidate.kind,
-                    title=candidate.title,
-                    subtype=candidate.subtype,
-                    claims=tuple((claim.role, claim.text) for claim in resolved_claims),
-                    decision_reasons=candidate.admission_reason_codes,
-                )
-                if not admission.admitted:
-                    continue
+            if candidate.admission != "admit":
+                continue
             title, normalized_title = normalize_knowledge_title(candidate.title)
             if not title:
                 continue
             sources: list[KnowledgeGenerationSource] = []
             rendered_claims: list[RenderedKnowledgeClaim] = []
-            legacy_body: list[str] = []
             for claim in resolved_claims:
                 markers: list[str] = []
                 canonical_evidence_ids: set[str] = set()
@@ -294,17 +217,13 @@ class DesktopKnowledgeAnalysis:
                 rendered_claims.append(
                     RenderedKnowledgeClaim(
                         text=claim.text,
-                        role=claim.role,
                         source_markers=tuple(markers),
-                        applicability=claim.applicability.values(),
+                        applicability=tuple(
+                            (entry.dimension, entry.value) for entry in claim.applicability
+                        ),
                     )
                 )
-                legacy_body.append(f"{claim.text}{''.join(markers)}")
-            content_markdown = (
-                render_generated_knowledge(candidate.kind, tuple(rendered_claims))
-                if self.corpus_ready
-                else "\n\n".join(legacy_body)
-            )
+            content_markdown = render_generated_knowledge(candidate.kind, tuple(rendered_claims))
             changes.append(
                 IncomingKnowledgeChange(
                     source_block_id=None,
@@ -314,9 +233,8 @@ class DesktopKnowledgeAnalysis:
                     normalized_title=normalized_title,
                     content_markdown=content_markdown,
                     content_sha256=knowledge_content_sha256(content_markdown),
-                    entity_subtype=candidate.subtype,
                     aliases=candidate.aliases,
-                    tags=candidate.tags,
+                    identity_labels=candidate.identity_labels,
                     sources=tuple(sources),
                     analysis_provenance_json=analysis_provenance_json,
                 )
@@ -342,9 +260,8 @@ class DesktopKnowledgeAnalysis:
                         kind=candidate.kind,
                         title=title,
                         normalized_title=normalized_title,
-                        entity_subtype=candidate.subtype,
                         aliases=candidate.aliases,
-                        tags=candidate.tags,
+                        identity_labels=candidate.identity_labels,
                         claim_text=claim.text,
                         source_evidence_ids=claim.source_evidence_ids,
                         reason=(
@@ -362,6 +279,7 @@ def parse_knowledge_analysis(
     *,
     expected_scope: KnowledgeAnalysisScope = KNOWLEDGE_ANALYSIS_SCOPE,
     aggregate: bool = False,
+    known_evidence_ids: frozenset[str] | None = None,
 ) -> DesktopKnowledgeAnalysis:
     """Parse and strictly validate one provider response without retrying it."""
     try:
@@ -370,27 +288,26 @@ def parse_knowledge_analysis(
         raise _invalid_response("Knowledge Analysis did not return valid JSON.") from error
     if not isinstance(payload, dict):
         raise _invalid_response("Knowledge Analysis must return one JSON object.")
-    base_fields = {
+    expected_fields = {
         "schema_version",
         "analysis_scope",
         "document_description",
-        "concepts",
-        "entities",
+        "document_summary",
+        "candidates",
     }
-    extended_fields = {"document_summary", "procedures"}
-    fields = frozenset(payload)
-    if fields not in {frozenset(base_fields), frozenset(base_fields | extended_fields)}:
+    if set(payload) != expected_fields:
         raise _invalid_response("Knowledge Analysis returned an unsupported response shape.")
     if payload.get("schema_version") != KNOWLEDGE_ANALYSIS_SCHEMA_VERSION:
         raise _invalid_response("Knowledge Analysis returned an unsupported schema version.")
     if payload.get("analysis_scope") != expected_scope:
         raise _invalid_response(f"Knowledge Analysis must use {expected_scope} scope.")
     maximum_candidates = (
-        _MAX_AGGREGATE_CANDIDATES_PER_KIND if aggregate else _MAX_CANDIDATES_PER_KIND
+        _MAX_AGGREGATE_CANDIDATES_PER_KIND
+        if aggregate
+        else _MAX_CANDIDATES_PER_KIND * len(_CANDIDATE_KINDS)
     )
     maximum_claims = _MAX_AGGREGATE_CLAIMS_PER_CANDIDATE if aggregate else _MAX_CLAIMS_PER_CANDIDATE
     maximum_sources = _MAX_EVIDENCE_PER_CLAIM
-    corpus_ready = extended_fields <= fields
     validation_errors: list[str] = []
     empty_candidates: tuple[KnowledgeAnalysisCandidate, ...] = ()
 
@@ -405,69 +322,50 @@ def parse_knowledge_analysis(
         validation_errors,
     )
 
-    def candidates(
-        field: str, kind: KnowledgeAnalysisKind, *, extended: bool
-    ) -> tuple[KnowledgeAnalysisCandidate, ...]:
-        return validated_or_default(
-            lambda: _candidates(
-                payload.get(field),
-                kind,
-                maximum_candidates=maximum_candidates,
-                maximum_claims=maximum_claims,
-                maximum_sources=maximum_sources,
-                extended=extended,
-            ),
-            empty_candidates,
-            validation_errors,
-        )
-
-    concepts = candidates("concepts", "concept", extended=corpus_ready)
-    entities = candidates("entities", "entity", extended=corpus_ready)
-    procedures = (
-        candidates("procedures", "procedure", extended=True) if corpus_ready else empty_candidates
+    all_candidates = validated_or_default(
+        lambda: _candidates(
+            payload.get("candidates"),
+            maximum_candidates=maximum_candidates,
+            maximum_claims=maximum_claims,
+            maximum_sources=maximum_sources,
+            known_evidence_ids=known_evidence_ids,
+        ),
+        empty_candidates,
+        validation_errors,
     )
     empty_summary: tuple[KnowledgeAnalysisSummaryUnit, ...] = ()
-    document_summary = (
-        validated_or_default(
-            lambda: bounded_document_summary_units(
-                _summary_units(
-                    payload.get("document_summary"),
-                    maximum_sources=maximum_sources,
-                    maximum_units=(
-                        _MAX_AGGREGATE_SUMMARY_UNITS if aggregate else _MAX_SUMMARY_UNITS
-                    ),
-                ),
-                maximum=_MAX_SUMMARY_UNITS,
+    document_summary = validated_or_default(
+        lambda: bounded_document_summary_units(
+            _summary_units(
+                payload.get("document_summary"),
+                maximum_sources=maximum_sources,
+                maximum_units=(_MAX_AGGREGATE_SUMMARY_UNITS if aggregate else _MAX_SUMMARY_UNITS),
+                known_evidence_ids=known_evidence_ids,
             ),
-            empty_summary,
-            validation_errors,
-        )
-        if corpus_ready
-        else empty_summary
+            maximum=_MAX_SUMMARY_UNITS,
+        ),
+        empty_summary,
+        validation_errors,
     )
 
     if validation_errors:
         raise KnowledgeAnalysisValidationError(tuple(validation_errors))
 
-    identities = [
-        (item.kind, normalize_knowledge_title(item.title)[1])
-        for item in (*concepts, *entities, *procedures)
-    ]
+    identities = [(item.kind, normalize_knowledge_title(item.title)[1]) for item in all_candidates]
     if len(identities) != len(set(identities)):
         raise _invalid_response("Knowledge Analysis returned duplicate candidate identities.")
     return DesktopKnowledgeAnalysis(
         description,
-        concepts,
-        entities,
+        tuple(candidate for candidate in all_candidates if candidate.kind == "concept"),
+        tuple(candidate for candidate in all_candidates if candidate.kind == "entity"),
         expected_scope,
-        procedures,
+        tuple(candidate for candidate in all_candidates if candidate.kind == "procedure"),
         document_summary,
-        corpus_ready,
     )
 
 
 def knowledge_analysis_from_checkpoint(payload: object) -> DesktopKnowledgeAnalysis | None:
-    """Restore a new structured checkpoint while leaving legacy summaries compatible."""
+    """Restore only the current structured checkpoint contract."""
     if not isinstance(payload, dict):
         return None
     normalized = payload.get("normalized_result")
@@ -476,9 +374,7 @@ def knowledge_analysis_from_checkpoint(payload: object) -> DesktopKnowledgeAnaly
     analysis = parse_knowledge_analysis(
         json.dumps(normalized, ensure_ascii=False), aggregate="batch_count" in payload
     )
-    from openkb.desktop_knowledge_analysis_checkpoints import restore_inventory_reason_codes
-
-    return restore_inventory_reason_codes(analysis, payload)
+    return analysis
 
 
 def knowledge_analysis_provenance_json(
@@ -558,41 +454,51 @@ def knowledge_analysis_prompt(
 
 def _candidates(
     value: object,
-    kind: KnowledgeAnalysisKind,
     *,
     maximum_candidates: int,
     maximum_claims: int,
     maximum_sources: int,
-    extended: bool,
+    known_evidence_ids: frozenset[str] | None,
 ) -> tuple[KnowledgeAnalysisCandidate, ...]:
     if not isinstance(value, list):
-        raise _invalid_response(f"Knowledge Analysis {kind} candidates are invalid.")
+        raise _invalid_response("Knowledge Analysis candidates are invalid.")
     if _exceeds_limit(value, maximum_candidates):
         raise _invalid_response(
-            f"Knowledge Analysis {kind} candidates must contain at most {maximum_candidates} items."
+            f"Knowledge Analysis candidates must contain at most {maximum_candidates} items."
         )
     candidates: list[KnowledgeAnalysisCandidate] = []
-    collection = {"concept": "concepts", "entity": "entities", "procedure": "procedures"}[kind]
     for candidate_index, item in enumerate(value):
-        path = f"{collection}[{candidate_index}]"
-        if not isinstance(item, dict):
-            raise _invalid_response(f"Knowledge Analysis {path} is invalid.")
-        allowed = {"title", "aliases", "tags", "claims"}
-        if kind == "entity":
-            allowed.add("subtype")
-        required = {"title", "aliases", "tags", "claims"}
-        if kind == "entity" and extended:
-            required.add("subtype")
-        if set(item) - allowed or not required <= set(item):
+        path = f"candidates[{candidate_index}]"
+        required = {
+            "kind",
+            "title",
+            "aliases",
+            "identity_labels",
+            "admission",
+            "claims",
+        }
+        if not isinstance(item, dict) or set(item) != required:
             raise _invalid_response(
                 f"Knowledge Analysis {path} fields are invalid; "
                 "put source_evidence_ids only inside claims."
             )
-        title = _string(item.get("title"), f"{path}.title", maximum=_MAX_TITLE_CHARACTERS)
+        kind_value = item.get("kind")
+        if not isinstance(kind_value, str) or kind_value not in _CANDIDATE_KINDS:
+            raise _invalid_response(f"Knowledge Analysis {path}.kind is invalid.")
+        normalized_kind: KnowledgeAnalysisKind = kind_value  # type: ignore[assignment]
+        admission_value = item.get("admission")
+        if not isinstance(admission_value, str) or admission_value not in _CANDIDATE_ADMISSIONS:
+            raise _invalid_response(f"Knowledge Analysis {path}.admission is invalid.")
+        admission: KnowledgeCandidateAdmission = admission_value  # type: ignore[assignment]
+        title = normalize_dynamic_semantic_text(
+            item.get("title"),
+            field=f"{path}.title",
+            maximum_characters=_MAX_TITLE_CHARACTERS,
+        )
         aliases = _string_list(item.get("aliases"), f"{path}.aliases")
-        tags = _string_list(item.get("tags"), f"{path}.tags")
+        identity_labels = _string_list(item.get("identity_labels"), f"{path}.identity_labels")
         claims_value = item.get("claims")
-        if not isinstance(claims_value, list):
+        if not isinstance(claims_value, list) or not claims_value:
             raise _invalid_response(f"Knowledge Analysis {path}.claims is invalid.")
         if _exceeds_limit(claims_value, maximum_claims):
             raise _invalid_response(
@@ -605,8 +511,8 @@ def _candidates(
             claim = _claim(
                 claim_value,
                 maximum_sources=maximum_sources,
-                extended=extended,
                 path=claim_path,
+                known_evidence_ids=known_evidence_ids,
             )
             claim_key = _claim_identity(claim)
             existing_index = claim_indexes.get(claim_key)
@@ -623,55 +529,57 @@ def _candidates(
             unique_claims[existing_index] = KnowledgeAnalysisClaim(
                 existing.text,
                 source_ids,
-                existing.role,
-                existing.applicability,
+                _merge_applicability(existing.applicability, claim.applicability),
             )
         claims = tuple(unique_claims)
-        subtype_value = item.get("subtype")
-        subtype = (
-            None
-            if subtype_value is None
-            else _string(subtype_value, f"{path}.subtype", maximum=_MAX_ALIAS_OR_TAG_CHARACTERS)
-        )
-        if kind == "entity" and extended and not is_supported_entity_subtype(subtype):
-            raise _invalid_response(
-                f"Knowledge Analysis {path}.subtype is not in the active ontology."
+        candidates.append(
+            KnowledgeAnalysisCandidate(
+                normalized_kind,
+                title,
+                aliases,
+                identity_labels,
+                claims,
+                admission,
             )
-        candidates.append(KnowledgeAnalysisCandidate(kind, title, aliases, tags, claims, subtype))
+        )
     return tuple(candidates)
 
 
 def _claim(
-    value: object, *, maximum_sources: int, extended: bool, path: str
+    value: object,
+    *,
+    maximum_sources: int,
+    path: str,
+    known_evidence_ids: frozenset[str] | None,
 ) -> KnowledgeAnalysisClaim:
-    required = {"text", "source_evidence_ids", "role", "applicability"}
-    legacy = {"text", "source_evidence_ids"}
-    if not isinstance(value, dict) or set(value) != (required if extended else legacy):
+    required = {"text", "source_evidence_ids", "applicability"}
+    if not isinstance(value, dict) or set(value) != required:
         raise _invalid_response(f"Knowledge Analysis {path} is invalid.")
     text = _string(value.get("text"), f"{path}.text", maximum=_MAX_CLAIM_CHARACTERS)
-    source_values = value.get("source_evidence_ids")
-    if not isinstance(source_values, list):
-        raise _invalid_response(f"Knowledge Analysis {path}.source_evidence_ids is invalid.")
-    if _exceeds_limit(source_values, maximum_sources):
-        raise _claim_source_limit_error(maximum_sources, path, len(source_values))
-    source_ids: list[str] = []
-    for source in source_values:
-        evidence_id = _string(source, "evidence ID", maximum=_MAX_EVIDENCE_ID_CHARACTERS)
-        if evidence_id not in source_ids:
-            source_ids.append(evidence_id)
-    role: KnowledgeClaimRole = "detail"
-    applicability = KnowledgeClaimApplicability()
-    if extended:
-        role_value = value.get("role")
-        if not isinstance(role_value, str) or role_value not in _CLAIM_ROLES:
-            raise _invalid_response(f"Knowledge Analysis {path}.role is invalid.")
-        role = cast(KnowledgeClaimRole, role_value)
-        applicability = _applicability(value.get("applicability"), f"{path}.applicability")
-    return KnowledgeAnalysisClaim(text, tuple(source_ids), role, applicability)
+    source_ids = _evidence_ids(
+        value.get("source_evidence_ids"),
+        path=path,
+        maximum_sources=maximum_sources,
+        known_evidence_ids=known_evidence_ids,
+    )
+    if not source_ids:
+        raise _invalid_response(f"Knowledge Analysis {path} must cite Evidence.")
+    applicability = _applicability(
+        value.get("applicability"),
+        f"{path}.applicability",
+        claim_evidence_ids=frozenset(source_ids),
+        maximum_sources=maximum_sources,
+        known_evidence_ids=known_evidence_ids,
+    )
+    return KnowledgeAnalysisClaim(text, source_ids, applicability)
 
 
 def _summary_units(
-    value: object, *, maximum_sources: int, maximum_units: int
+    value: object,
+    *,
+    maximum_sources: int,
+    maximum_units: int,
+    known_evidence_ids: frozenset[str] | None,
 ) -> tuple[KnowledgeAnalysisSummaryUnit, ...]:
     if not isinstance(value, list):
         raise _invalid_response("Knowledge Analysis document summary is invalid.")
@@ -683,64 +591,91 @@ def _summary_units(
     for unit_index, item in enumerate(value):
         path = f"document_summary[{unit_index}]"
         if not isinstance(item, dict) or set(item) != {
-            "role",
+            "label",
             "text",
             "source_evidence_ids",
         }:
             raise _invalid_response(f"Knowledge Analysis {path} is invalid.")
-        role = item.get("role")
-        if not isinstance(role, str) or role not in _SUMMARY_ROLES:
-            raise _invalid_response(f"Knowledge Analysis {path}.role is invalid.")
-        claim = _claim(
-            {
-                "text": item.get("text"),
-                "source_evidence_ids": item.get("source_evidence_ids"),
-            },
-            maximum_sources=maximum_sources,
-            extended=False,
-            path=path,
+        label = normalize_dynamic_semantic_text(
+            item.get("label"),
+            field=f"{path}.label",
+            maximum_characters=80,
         )
+        text = _string(item.get("text"), f"{path}.text", maximum=_MAX_CLAIM_CHARACTERS)
+        source_ids = _evidence_ids(
+            item.get("source_evidence_ids"),
+            path=path,
+            maximum_sources=maximum_sources,
+            known_evidence_ids=known_evidence_ids,
+        )
+        if not source_ids:
+            raise _invalid_response(f"Knowledge Analysis {path} must cite Evidence.")
         units.append(
             KnowledgeAnalysisSummaryUnit(
-                cast(DocumentSummaryRole, role),
-                claim.text,
-                claim.source_evidence_ids,
+                label,
+                text,
+                source_ids,
             )
         )
     return tuple(units)
 
 
-def _applicability(value: object, path: str) -> KnowledgeClaimApplicability:
-    fields = (
-        "product_version",
-        "platform",
-        "deployment_scenario",
-        "time_boundary",
-    )
-    if not isinstance(value, dict) or set(value) != set(fields):
+def _applicability(
+    value: object,
+    path: str,
+    *,
+    claim_evidence_ids: frozenset[str],
+    maximum_sources: int,
+    known_evidence_ids: frozenset[str] | None,
+) -> tuple[KnowledgeClaimApplicability, ...]:
+    if not isinstance(value, list) or len(value) > 32:
         raise _invalid_response(f"Knowledge Analysis {path} is invalid.")
-    values: list[str | None] = []
-    for field in fields:
-        normalized = _string(
-            value.get(field),
-            f"{path}.{field}",
-            maximum=_MAX_ALIAS_OR_TAG_CHARACTERS,
-            allow_empty=True,
+    entries: list[KnowledgeClaimApplicability] = []
+    for index, item in enumerate(value):
+        entry_path = f"{path}[{index}]"
+        if not isinstance(item, dict) or set(item) != {
+            "dimension",
+            "value",
+            "source_evidence_ids",
+        }:
+            raise _invalid_response(f"Knowledge Analysis {entry_path} is invalid.")
+        dimension = normalize_dynamic_semantic_text(
+            item.get("dimension"),
+            field=f"{entry_path}.dimension",
+            maximum_characters=80,
         )
-        values.append(normalized or None)
-    return KnowledgeClaimApplicability(*values)
+        scope_value = normalize_dynamic_semantic_text(
+            item.get("value"),
+            field=f"{entry_path}.value",
+            maximum_characters=_MAX_ALIAS_OR_TAG_CHARACTERS,
+        )
+        evidence_ids = _evidence_ids(
+            item.get("source_evidence_ids"),
+            path=entry_path,
+            maximum_sources=maximum_sources,
+            known_evidence_ids=known_evidence_ids,
+        )
+        if not evidence_ids or any(
+            evidence_id not in claim_evidence_ids for evidence_id in evidence_ids
+        ):
+            raise _invalid_response(
+                f"Knowledge Analysis {entry_path} Evidence must be a subset of its claim."
+            )
+        entry = KnowledgeClaimApplicability(dimension, scope_value, evidence_ids)
+        if entry not in entries:
+            entries.append(entry)
+    return tuple(entries)
 
 
 def _claim_identity(claim: KnowledgeAnalysisClaim) -> str:
-    scope = "\x1f".join(
-        (
-            claim.applicability.product_version or "",
-            claim.applicability.platform or "",
-            claim.applicability.deployment_scenario or "",
-            claim.applicability.time_boundary or "",
-        )
+    scope = json.dumps(
+        sorted(
+            (entry.dimension.casefold(), entry.value.casefold()) for entry in claim.applicability
+        ),
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
-    return f"{claim.role}\x1f{scope}\x1f{' '.join(claim.text.split()).casefold()}"
+    return f"{scope}\x1f{' '.join(claim.text.split()).casefold()}"
 
 
 def _claim_source_limit_error(
@@ -750,6 +685,48 @@ def _claim_source_limit_error(
         f"Knowledge Analysis {path}.source_evidence_ids has {actual_sources} items; "
         f"it must reference at most {maximum_sources} supplied Evidence IDs."
     )
+
+
+def _evidence_ids(
+    value: object,
+    *,
+    path: str,
+    maximum_sources: int,
+    known_evidence_ids: frozenset[str] | None,
+) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise _invalid_response(f"Knowledge Analysis {path}.source_evidence_ids is invalid.")
+    if _exceeds_limit(value, maximum_sources):
+        raise _claim_source_limit_error(maximum_sources, path, len(value))
+    source_ids: list[str] = []
+    for source in value:
+        evidence_id = _string(source, "evidence ID", maximum=_MAX_EVIDENCE_ID_CHARACTERS)
+        if known_evidence_ids is not None and evidence_id not in known_evidence_ids:
+            raise _invalid_response(
+                f"Knowledge Analysis {path} references unknown Evidence ID {evidence_id}."
+            )
+        if evidence_id not in source_ids:
+            source_ids.append(evidence_id)
+    return tuple(source_ids)
+
+
+def _merge_applicability(
+    left: tuple[KnowledgeClaimApplicability, ...],
+    right: tuple[KnowledgeClaimApplicability, ...],
+) -> tuple[KnowledgeClaimApplicability, ...]:
+    by_scope: dict[tuple[str, str], KnowledgeClaimApplicability] = {}
+    for entry in (*left, *right):
+        key = (entry.dimension.casefold(), entry.value.casefold())
+        existing = by_scope.get(key)
+        if existing is None:
+            by_scope[key] = entry
+            continue
+        by_scope[key] = KnowledgeClaimApplicability(
+            existing.dimension,
+            existing.value,
+            tuple(dict.fromkeys((*existing.source_evidence_ids, *entry.source_evidence_ids))),
+        )
+    return tuple(by_scope[key] for key in sorted(by_scope))
 
 
 def _string_list(value: object, field: str) -> tuple[str, ...]:

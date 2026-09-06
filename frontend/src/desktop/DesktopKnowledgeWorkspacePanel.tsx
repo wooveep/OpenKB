@@ -486,8 +486,8 @@ function GeneratedKnowledgeDetail({
         </Button>
       </div>
       <p className="mt-3 text-xs text-muted-foreground">{t("desktop.knowledge.workspace.readOnly")}</p>
-      {item.aliases.length || item.tags.length ? (
-        <div className="mt-3 flex flex-wrap gap-1.5">{[...item.aliases, ...item.tags].map((label) => <Badge variant="secondary" key={label}>{label}</Badge>)}</div>
+      {item.aliases.length || item.identityLabels.length ? (
+        <div className="mt-3 flex flex-wrap gap-1.5">{[...item.aliases, ...item.identityLabels].map((label) => <Badge variant="secondary" key={label}>{label}</Badge>)}</div>
       ) : null}
       {adoption && !adoption.pageId ? (
         <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-100">

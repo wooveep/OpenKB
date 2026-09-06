@@ -3,8 +3,8 @@
 KNOWLEDGE_PROVENANCE_MIGRATION_STATEMENTS: tuple[str, ...] = (
     """
     ALTER TABLE knowledge_page_revisions
-    ADD COLUMN provenance_state TEXT NOT NULL DEFAULT 'legacy_unmapped'
-        CHECK(provenance_state IN ('source_backed', 'structural', 'legacy_unmapped'))
+    ADD COLUMN provenance_state TEXT NOT NULL DEFAULT 'structural'
+        CHECK(provenance_state IN ('source_backed', 'structural'))
     """,
     """
     UPDATE knowledge_page_revisions AS revisions
@@ -15,16 +15,8 @@ KNOWLEDGE_PROVENANCE_MIGRATION_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
-    UPDATE knowledge_page_revisions
-    SET provenance_state = 'structural'
-    WHERE provenance_state = 'legacy_unmapped'
-        AND created_at >= (
-            SELECT applied_at FROM schema_migrations WHERE version = 20
-        )
-    """,
-    """
     ALTER TABLE knowledge_generation_items
-    ADD COLUMN provenance_state TEXT NOT NULL DEFAULT 'legacy_unmapped'
-        CHECK(provenance_state IN ('source_backed', 'structural', 'legacy_unmapped'))
+    ADD COLUMN provenance_state TEXT NOT NULL DEFAULT 'structural'
+        CHECK(provenance_state IN ('source_backed', 'structural'))
     """,
 )

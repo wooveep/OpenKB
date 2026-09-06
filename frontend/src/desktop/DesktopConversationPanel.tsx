@@ -636,8 +636,9 @@ function EvidenceDrawer({ version, tab, focusIndex, onTabChange, onClose, onOpen
 
 function NavigationTraceDetails({ trace }: { trace: DesktopAnswerVersion["retrievalTrace"] }) {
   const { t } = useTranslation("common")
-  const visible = trace.navigationStopReason !== null || trace.coverageAspects.length > 0
+  const visible = Boolean(trace.navigationStopReason) || trace.questionFacets.length > 0 || trace.semanticStructureState === "unknown"
   if (!visible) return null
+  const facetLabels = new Map(trace.questionFacets.map((facet) => [facet.facetId, facet.label]))
   return (
     <details className="mt-4 rounded-lg border border-border/70 bg-muted/20 p-3 text-xs">
       <summary className="cursor-pointer font-medium">{t("desktop.conversations.navigationTrace.title")}</summary>
@@ -647,13 +648,14 @@ function NavigationTraceDetails({ trace }: { trace: DesktopAnswerVersion["retrie
         <dt>{t("desktop.conversations.navigationTrace.stopReason")}</dt>
         <dd>{t(`desktop.conversations.navigationTrace.stopReasons.${trace.navigationStopReason || "legacy"}`)}</dd>
       </dl>
-      {trace.coverageAspects.length ? (
+      {trace.questionGoal ? <p className="mt-3 text-muted-foreground">{trace.questionGoal}</p> : null}
+      {trace.facetCoverage.length ? (
         <div className="mt-3 border-t border-border/60 pt-3">
-          <p className="font-medium">{t("desktop.conversations.navigationTrace.aspects")}</p>
+          <p className="font-medium">{t("desktop.conversations.navigationTrace.facets")}</p>
           <ul className="mt-1 space-y-1 text-muted-foreground">
-            {trace.coverageAspects.map((item) => (
-              <li key={item.aspect}>
-                {item.aspect} · {t(`desktop.conversations.navigationTrace.aspectStates.${item.status}`)} · {t("desktop.conversations.navigationTrace.evidenceCount", { count: item.evidenceIds.length })}
+            {trace.facetCoverage.map((item) => (
+              <li key={item.facetId}>
+                {facetLabels.get(item.facetId) ?? item.facetId} · {t(`desktop.conversations.navigationTrace.facetStates.${item.state}`)} · {t("desktop.conversations.navigationTrace.evidenceCount", { count: item.evidenceIds.length })}
               </li>
             ))}
           </ul>

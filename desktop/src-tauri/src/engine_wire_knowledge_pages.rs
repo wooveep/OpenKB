@@ -290,13 +290,9 @@ pub struct KnowledgeGeneratedDetail {
     pub item_key: String,
     #[serde(alias = "content_markdown")]
     pub content_markdown: String,
-    #[serde(
-        alias = "entity_subtype",
-        deserialize_with = "deserialize_required_nullable"
-    )]
-    pub entity_subtype: Option<String>,
     pub aliases: Vec<String>,
-    pub tags: Vec<String>,
+    #[serde(alias = "identity_labels")]
+    pub identity_labels: Vec<String>,
     #[serde(alias = "created_at")]
     pub created_at: String,
     #[serde(alias = "provenance_state")]
@@ -580,7 +576,7 @@ mod tests {
         let generated_detail = json!({
             "authority": "generated", "identity": "generated:7:item-1", "editable": false,
             "generation_id": 7, "item_key": "item-1", "kind": "concept", "title": "Generated",
-            "content_markdown": "# Generated", "entity_subtype": null, "aliases": [], "tags": [],
+            "content_markdown": "# Generated", "aliases": [], "identity_labels": [],
             "created_at": "2026-08-28T00:00:00Z", "provenance_state": "source_backed",
             "analysis_provenance": {}, "source_map": [], "current": true
         });
@@ -592,9 +588,8 @@ mod tests {
         assert_eq!(detail.generation_id, 7);
         assert!(detail.analysis_provenance.is_empty());
         for required_field in [
-            "entity_subtype",
             "aliases",
-            "tags",
+            "identity_labels",
             "analysis_provenance",
             "source_map",
         ] {
@@ -609,20 +604,26 @@ mod tests {
             );
         }
 
-        assert!(serde_json::from_value::<KnowledgeWorkspaceItemDetail>(json!({
-            "authority": "generated", "identity": "generated:7:item-1", "editable": true,
-            "generation_id": 7, "item_key": "item-1", "kind": "concept", "title": "Generated",
-            "content_markdown": "# Generated", "entity_subtype": null, "aliases": [], "tags": [],
-            "created_at": "2026-08-28T00:00:00Z", "provenance_state": "source_backed",
-            "analysis_provenance": {}, "source_map": [], "current": true
-        })).is_err());
-        assert!(serde_json::from_value::<KnowledgeWorkspaceItemDetail>(json!({
-            "authority": "generated", "identity": "generated:7:item-1", "editable": false,
-            "generation_id": 7, "item_key": "item-1", "kind": "concept", "title": "Generated",
-            "content_markdown": "# Generated", "entity_subtype": null, "aliases": [], "tags": [],
-            "created_at": "2026-08-28T00:00:00Z", "provenance_state": "source_backed",
-            "analysis_provenance": [], "source_map": [], "current": true
-        })).is_err());
+        assert!(
+            serde_json::from_value::<KnowledgeWorkspaceItemDetail>(json!({
+                "authority": "generated", "identity": "generated:7:item-1", "editable": true,
+                "generation_id": 7, "item_key": "item-1", "kind": "concept", "title": "Generated",
+                "content_markdown": "# Generated", "aliases": [], "identity_labels": [],
+                "created_at": "2026-08-28T00:00:00Z", "provenance_state": "source_backed",
+                "analysis_provenance": {}, "source_map": [], "current": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<KnowledgeWorkspaceItemDetail>(json!({
+                "authority": "generated", "identity": "generated:7:item-1", "editable": false,
+                "generation_id": 7, "item_key": "item-1", "kind": "concept", "title": "Generated",
+                "content_markdown": "# Generated", "aliases": [], "identity_labels": [],
+                "created_at": "2026-08-28T00:00:00Z", "provenance_state": "source_backed",
+                "analysis_provenance": [], "source_map": [], "current": true
+            }))
+            .is_err()
+        );
     }
 
     #[test]

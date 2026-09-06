@@ -36,7 +36,7 @@ from openkb.desktop_model_settings import (
 )
 from openkb.desktop_model_usage import DesktopModelUsageStore
 from openkb.desktop_prompt_contracts import prompt_contract_for
-from openkb.desktop_retrieval_planning import build_retrieval_plan
+from openkb.desktop_retrieval_planning import build_query_plan
 from openkb.desktop_workspace import (
     DesktopKnowledgeBaseRuntime,
     desktop_state_database_path,
@@ -63,6 +63,27 @@ def _profile(*, reasoning: str = "off"):
         capability=settings.capability_for_role("analysis"),
         reasoning_effort=settings.reasoning_for_role("analysis") or "off",
         api_base_url=settings.api_base_url,
+    )
+
+
+def _valid_query_planning_response(term: str = "Atlas") -> str:
+    return json.dumps(
+        {
+            "retrieval_plan": {"terms": [term]},
+            "question_facet_plan": {
+                "goal": "Answer from the available Evidence.",
+                "facets": [
+                    {
+                        "label": "Available Evidence",
+                        "description": "What the available Evidence establishes.",
+                        "importance": "required",
+                    }
+                ],
+            },
+            "initial_answer_coverage": [
+                {"facet_ordinal": 0, "state": "missing", "evidence_ids": []}
+            ],
+        }
     )
 
 
@@ -131,10 +152,10 @@ def test_successful_operation_contract_clears_only_its_exact_suspension(tmp_path
     DesktopKnowledgeBaseRuntime().create(kb_dir)
     store = DesktopModelOperationContractStore(kb_dir)
     shared = _profile().capability_evidence_profile
-    graph_digest = prompt_contract_for("knowledge_graph_extraction").digest
-    plan_digest = prompt_contract_for("retrieval_plan").digest
+    graph_digest = prompt_contract_for("knowledge_relation_analysis").digest
+    plan_digest = prompt_contract_for("query_planning").digest
     store.suspend(
-        operation="knowledge_graph_extraction",
+        operation="knowledge_relation_analysis",
         capability_identity=shared.identity,
         prompt_contract_digest=graph_digest,
         failure_code="knowledge_graph_response_invalid",
@@ -142,7 +163,7 @@ def test_successful_operation_contract_clears_only_its_exact_suspension(tmp_path
         failure_stage="domain_validation",
     )
     store.suspend(
-        operation="retrieval_plan",
+        operation="query_planning",
         capability_identity=shared.identity,
         prompt_contract_digest=plan_digest,
         failure_code="model_response_invalid",
@@ -151,18 +172,18 @@ def test_successful_operation_contract_clears_only_its_exact_suspension(tmp_path
     )
 
     store.mark_ready(
-        operation="knowledge_graph_extraction",
+        operation="knowledge_relation_analysis",
         capability_identity=shared.identity,
         prompt_contract_digest=graph_digest,
     )
 
     graph = store.state(
-        operation="knowledge_graph_extraction",
+        operation="knowledge_relation_analysis",
         capability_identity=shared.identity,
         prompt_contract_digest=graph_digest,
     )
     plan = store.state(
-        operation="retrieval_plan",
+        operation="query_planning",
         capability_identity=shared.identity,
         prompt_contract_digest=plan_digest,
     )
@@ -178,10 +199,10 @@ def test_explicit_retry_round_is_scoped_and_keeps_suspension_until_a_terminal_re
     DesktopKnowledgeBaseRuntime().create(kb_dir)
     profile = _profile()
     shared = profile.capability_evidence_profile
-    digest = prompt_contract_for("retrieval_plan").digest
+    digest = prompt_contract_for("query_planning").digest
     store = DesktopModelOperationContractStore(kb_dir)
     store.suspend(
-        operation="retrieval_plan",
+        operation="query_planning",
         capability_identity=shared.identity,
         prompt_contract_digest=digest,
         failure_code="model_response_invalid",
@@ -197,12 +218,12 @@ def test_explicit_retry_round_is_scoped_and_keeps_suspension_until_a_terminal_re
     assert authorize_model_operation_retry(
         kb_dir,
         gateway,
-        operation="retrieval_plan",
+        operation="query_planning",
         retry_scope="answer:one",
     )
     assert (
         store.state(
-            operation="retrieval_plan",
+            operation="query_planning",
             capability_identity=shared.identity,
             prompt_contract_digest=digest,
         ).status
@@ -211,13 +232,13 @@ def test_explicit_retry_round_is_scoped_and_keeps_suspension_until_a_terminal_re
     assert not model_operation_dispatch_allowed(
         kb_dir,
         gateway,
-        operation="retrieval_plan",
+        operation="query_planning",
         retry_scope="answer:other",
     )
     assert model_operation_dispatch_possible(
         kb_dir,
         gateway,
-        operation="retrieval_plan",
+        operation="query_planning",
         retry_scope="answer:one",
     )
 
@@ -225,14 +246,14 @@ def test_explicit_retry_round_is_scoped_and_keeps_suspension_until_a_terminal_re
         return model_operation_dispatch_allowed(
             kb_dir,
             gateway,
-            operation="retrieval_plan",
+            operation="query_planning",
             retry_scope="answer:one",
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         assert list(executor.map(join_retry_round, range(2))) == [True, True]
     store.suspend(
-        operation="retrieval_plan",
+        operation="query_planning",
         capability_identity=shared.identity,
         prompt_contract_digest=digest,
         failure_code="model_response_invalid",
@@ -242,7 +263,7 @@ def test_explicit_retry_round_is_scoped_and_keeps_suspension_until_a_terminal_re
     assert not model_operation_dispatch_allowed(
         kb_dir,
         gateway,
-        operation="retrieval_plan",
+        operation="query_planning",
         retry_scope="answer:one",
     )
 
@@ -256,7 +277,7 @@ def test_new_contract_state_resolves_old_uncertain_signature_for_corroboration(
     shared = _profile().capability_evidence_profile
     signature = "same-uncertain-signature"
     store.suspend(
-        operation="retrieval_plan",
+        operation="query_planning",
         capability_identity=shared.identity,
         prompt_contract_digest="old-retrieval-digest",
         failure_code="empty_final_result",
@@ -265,13 +286,13 @@ def test_new_contract_state_resolves_old_uncertain_signature_for_corroboration(
         failure_signature=signature,
     )
     store.mark_ready(
-        operation="retrieval_plan",
+        operation="query_planning",
         capability_identity=shared.identity,
         prompt_contract_digest="new-retrieval-digest",
     )
 
     independent = store.suspend(
-        operation="knowledge_graph_extraction",
+        operation="knowledge_relation_analysis",
         capability_identity=shared.identity,
         prompt_contract_digest="graph-digest",
         failure_code="empty_final_result",
@@ -283,7 +304,7 @@ def test_new_contract_state_resolves_old_uncertain_signature_for_corroboration(
     assert independent == 1
     assert (
         store.state(
-            operation="retrieval_plan",
+            operation="query_planning",
             capability_identity=shared.identity,
             prompt_contract_digest="old-retrieval-digest",
         ).failure_signature
@@ -394,8 +415,8 @@ def test_unverified_profile_preserves_parsed_import_without_provider_call(
                         "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                         "analysis_scope": "document",
                         "document_description": "Verified Analysis.",
-                        "concepts": [],
-                        "entities": [],
+                        "document_summary": [],
+                        "candidates": [],
                     }
                 )
             return json.dumps({"nodes": [], "edges": []})
@@ -611,8 +632,8 @@ def test_recovery_marks_the_actual_analysis_contract_ready_after_settings_change
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                     "analysis_scope": "document",
                     "document_description": "Recovered with the persisted profile.",
-                    "concepts": [],
-                    "entities": [],
+                    "document_summary": [],
+                    "candidates": [],
                 }
             )
 
@@ -693,7 +714,7 @@ def test_recovery_marks_the_actual_analysis_contract_ready_after_settings_change
         ),
     ],
 )
-def test_retrieval_plan_result_failure_suspends_only_its_operation(
+def test_query_planning_failure_degrades_only_the_current_query(
     tmp_path, monkeypatch, response, failure_code
 ) -> None:
     kb_dir = tmp_path / "knowledge"
@@ -718,22 +739,26 @@ def test_retrieval_plan_result_failure_suspends_only_its_operation(
     monkeypatch.setattr(desktop_model_transport, "DesktopLiteLLMTransport", FakeTransport)
     gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert gateway is not None
-    profile = gateway.execution_profile_for_operation("retrieval_plan")
+    profile = gateway.execution_profile_for_operation("query_planning")
     capability_store = DesktopModelCapabilityStore(kb_dir)
     capability_store.mark_verified(profile)
 
-    result = build_retrieval_plan("What evidence is available?", gateway, kb_dir=kb_dir)
+    result = build_query_plan("What evidence is available?", gateway, kb_dir=kb_dir)
 
-    assert result.degradations == ("retrieval_plan_fallback",)
+    assert result.degradations == (
+        "query_semantic_structure_unknown"
+        if failure_code == "model_response_invalid"
+        else "query_planning_failed",
+    )
     usage = DesktopModelUsageStore(kb_dir).records()
     if failure_code == "model_response_invalid":
         assert [record["operation"] for record in usage] == [
-            "retrieval_plan",
+            "query_planning",
             "structured_output_repair",
         ]
         failed = [record for record in usage if record["failure_code"] is not None]
         assert [record["operation"] for record in failed] == [
-            "retrieval_plan",
+            "query_planning",
             "structured_output_repair",
         ]
         assert {record["lifecycle_status"] for record in failed} == {"model_result_failure"}
@@ -741,21 +766,21 @@ def test_retrieval_plan_result_failure_suspends_only_its_operation(
     state = capability_store.state(profile)
     assert state.status == "verified"
     operation_state = DesktopModelOperationContractStore(kb_dir).state(
-        operation="retrieval_plan",
+        operation="query_planning",
         capability_identity=profile.capability_evidence_profile.identity,
-        prompt_contract_digest=prompt_contract_for("retrieval_plan").digest,
+        prompt_contract_digest=prompt_contract_for("query_planning").digest,
     )
-    assert operation_state.status == "suspended"
-    assert operation_state.failure_code == failure_code
+    assert operation_state.status == "unverified"
+    assert operation_state.failure_code is None
     usage_count = len(DesktopModelUsageStore(kb_dir).records())
 
-    blocked = build_retrieval_plan("What evidence is available?", gateway, kb_dir=kb_dir)
+    retried = build_query_plan("What evidence is available?", gateway, kb_dir=kb_dir)
 
-    assert blocked.degradations == ("retrieval_plan_suspended",)
-    assert len(DesktopModelUsageStore(kb_dir).records()) == usage_count
+    assert retried.degradations == result.degradations
+    assert len(DesktopModelUsageStore(kb_dir).records()) > usage_count
 
 
-def test_explicit_retry_with_valid_repair_marks_parent_and_bound_repair_ready(
+def test_later_query_with_valid_repair_marks_parent_and_bound_repair_ready(
     tmp_path, monkeypatch
 ) -> None:
     kb_dir = tmp_path / "knowledge"
@@ -780,8 +805,8 @@ def test_explicit_retry_with_valid_repair_marks_parent_and_bound_repair_ready(
             if request.operation == "structured_output_repair":
                 assert request.prompt_contract_digest is not None
                 repair_digests.append(request.prompt_contract_digest)
-                return "not-json" if len(repair_digests) == 1 else '{"terms":["Atlas"]}'
-            return "not-json" if len(calls) < 5 else '{"terms":["Atlas"]}'
+                return "not-json" if len(repair_digests) == 1 else _valid_query_planning_response()
+            return "not-json" if len(calls) < 5 else _valid_query_planning_response()
 
     monkeypatch.setattr(
         desktop_model_transport,
@@ -790,30 +815,16 @@ def test_explicit_retry_with_valid_repair_marks_parent_and_bound_repair_ready(
     )
     gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert gateway is not None
-    profile = gateway.execution_profile_for_operation("retrieval_plan")
+    profile = gateway.execution_profile_for_operation("query_planning")
     DesktopModelCapabilityStore(kb_dir).mark_verified(profile)
 
-    first = build_retrieval_plan("What does Atlas use?", gateway, kb_dir=kb_dir)
-    assert first.degradations == ("retrieval_plan_fallback",)
-    assert authorize_model_operation_retry(
-        kb_dir,
-        gateway,
-        operation="retrieval_plan",
-        retry_scope="answer:repair",
-    )
-    assert authorize_model_operation_retry(
-        kb_dir,
-        gateway,
-        operation="structured_output_repair",
-        retry_scope="answer:repair",
-        prompt_contract_digest=repair_digests[0],
-    )
+    first = build_query_plan("What does Atlas use?", gateway, kb_dir=kb_dir)
+    assert first.degradations == ("query_semantic_structure_unknown",)
 
-    repaired = build_retrieval_plan(
+    repaired = build_query_plan(
         "What does Atlas use?",
         gateway,
         kb_dir=kb_dir,
-        retry_scope="answer:repair",
     )
 
     assert repaired.degradations == ()
@@ -821,9 +832,9 @@ def test_explicit_retry_with_valid_repair_marks_parent_and_bound_repair_ready(
     store = DesktopModelOperationContractStore(kb_dir)
     assert (
         store.state(
-            operation="retrieval_plan",
+            operation="query_planning",
             capability_identity=profile.capability_evidence_profile.identity,
-            prompt_contract_digest=prompt_contract_for("retrieval_plan").digest,
+            prompt_contract_digest=prompt_contract_for("query_planning").digest,
         ).status
         == "ready"
     )
@@ -836,14 +847,14 @@ def test_explicit_retry_with_valid_repair_marks_parent_and_bound_repair_ready(
         == "ready"
     )
 
-    normal = build_retrieval_plan("What does Atlas use?", gateway, kb_dir=kb_dir)
+    normal = build_query_plan("What does Atlas use?", gateway, kb_dir=kb_dir)
     assert normal.degradations == ()
     assert calls == [
-        "retrieval_plan",
+        "query_planning",
         "structured_output_repair",
-        "retrieval_plan",
+        "query_planning",
         "structured_output_repair",
-        "retrieval_plan",
+        "query_planning",
     ]
 
 
@@ -875,20 +886,21 @@ def test_confirmed_authentication_failure_invalidates_shared_analysis_role(
     )
     gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert gateway is not None
-    profile = gateway.execution_profile_for_operation("retrieval_plan")
+    profile = gateway.execution_profile_for_operation("query_planning")
     store = DesktopModelCapabilityStore(kb_dir)
     store.mark_verified(profile)
 
-    result = build_retrieval_plan("What evidence is available?", gateway, kb_dir=kb_dir)
+    result = build_query_plan("What evidence is available?", gateway, kb_dir=kb_dir)
 
-    assert result.degradations == ("retrieval_plan_fallback",)
+    assert result.degradations == ("query_planning_failed",)
     state = store.state(profile)
     operation_state = DesktopModelOperationContractStore(kb_dir).state(
-        operation="retrieval_plan",
+        operation="query_planning",
         capability_identity=profile.capability_evidence_profile.identity,
-        prompt_contract_digest=prompt_contract_for("retrieval_plan").digest,
+        prompt_contract_digest=prompt_contract_for("query_planning").digest,
     )
-    assert operation_state.failure_code == "model_authentication_failed"
+    assert operation_state.status == "unverified"
+    assert operation_state.failure_code is None
     assert state.status == "unchecked"
     assert state.failure_code == "model_authentication_failed"
 
@@ -923,11 +935,11 @@ def test_graph_failure_does_not_corroborate_shared_protocol_across_operations(
     monkeypatch.setattr(desktop_model_transport, "DesktopLiteLLMTransport", EmptyResultTransport)
     gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert gateway is not None
-    profile = gateway.execution_profile_for_operation("retrieval_plan")
+    profile = gateway.execution_profile_for_operation("query_planning")
     store = DesktopModelCapabilityStore(kb_dir)
     store.mark_verified(profile)
 
-    build_retrieval_plan("What does Atlas use?", gateway, kb_dir=kb_dir)
+    build_query_plan("What does Atlas use?", gateway, kb_dir=kb_dir)
     assert store.state(profile).status == "verified"
 
     assert not DesktopKnowledgeGraphService(kb_dir, model_gateway=gateway).extract_document(
@@ -935,17 +947,18 @@ def test_graph_failure_does_not_corroborate_shared_protocol_across_operations(
     )
     assert store.state(profile).status == "verified"
     retrieval_state = DesktopModelOperationContractStore(kb_dir).state(
-        operation="retrieval_plan",
+        operation="query_planning",
         capability_identity=profile.capability_evidence_profile.identity,
-        prompt_contract_digest=prompt_contract_for("retrieval_plan").digest,
+        prompt_contract_digest=prompt_contract_for("query_planning").digest,
     )
     graph_state = DesktopModelOperationContractStore(kb_dir).state(
-        operation="knowledge_graph_extraction",
+        operation="knowledge_relation_analysis",
         capability_identity=profile.capability_evidence_profile.identity,
-        prompt_contract_digest=prompt_contract_for("knowledge_graph_extraction").digest,
+        prompt_contract_digest=prompt_contract_for("knowledge_relation_analysis").digest,
     )
-    assert retrieval_state.failure_stage == "uncertain_shared_protocol"
-    assert retrieval_state.failure_signature is not None
+    assert retrieval_state.status == "unverified"
+    assert retrieval_state.failure_stage is None
+    assert retrieval_state.failure_signature is None
     assert graph_state.status == "unverified"
     assert graph_state.failure_signature is None
 
@@ -1000,12 +1013,12 @@ def test_graph_repair_failure_does_not_join_cross_pipeline_corroboration(
     )
     gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert gateway is not None
-    profile = gateway.execution_profile_for_operation("retrieval_plan")
+    profile = gateway.execution_profile_for_operation("query_planning")
     capability_store = DesktopModelCapabilityStore(kb_dir)
     capability_store.mark_verified(profile)
 
-    first = build_retrieval_plan("What does Atlas use?", gateway, kb_dir=kb_dir)
-    assert first.degradations == ("retrieval_plan_fallback",)
+    first = build_query_plan("What does Atlas use?", gateway, kb_dir=kb_dir)
+    assert first.degradations == ("query_planning_failed",)
     assert capability_store.state(profile).status == "verified"
 
     assert not DesktopKnowledgeGraphService(
@@ -1025,15 +1038,9 @@ def test_graph_repair_failure_does_not_join_cross_pipeline_corroboration(
             """,
             (profile.capability_evidence_profile.identity,),
         ).fetchall()
-    assert len(repair_rows) == 1
-    assert {str(row[0]) for row in repair_rows} == {"suspended"}
-    assert {str(row[1]) for row in repair_rows} == {"uncertain_shared_protocol"}
-    signatures = [str(row[2]) for row in repair_rows if row[2] is not None]
-    assert len(signatures) == 1
-    assert set(repair_digests) == {"retrieval_plan", "knowledge_graph_extraction"}
-    assert str(repair_rows[0][3]) == repair_digests["retrieval_plan"]
-    assert str(repair_rows[0][3]) != repair_digests["knowledge_graph_extraction"]
-    for parent_operation in ("retrieval_plan", "knowledge_graph_extraction"):
+    assert repair_rows == []
+    assert set(repair_digests) == {"query_planning"}
+    for parent_operation in ("query_planning", "knowledge_relation_analysis"):
         assert (
             DesktopModelOperationContractStore(kb_dir)
             .state(
@@ -1073,7 +1080,7 @@ def test_unverified_retrieval_plan_uses_fallback_without_provider_call(
     gateway = desktop_model_transport.desktop_model_gateway_for(kb_dir)
     assert gateway is not None
 
-    result = build_retrieval_plan("What evidence is available?", gateway)
+    result = build_query_plan("What evidence is available?", gateway)
 
-    assert result.degradations == ("retrieval_plan_unverified",)
+    assert result.degradations == ("query_planning_unverified",)
     assert calls == []

@@ -15,7 +15,6 @@ from typing import TypeAlias
 
 from openkb.desktop_adaptive_navigation import (
     NAVIGATION_MAX_WALL_SECONDS,
-    answer_kind_for_question,
     current_navigation_snapshot_id,
 )
 from openkb.desktop_answer_types import (
@@ -74,10 +73,12 @@ from openkb.desktop_retrieval_images import source_images_for_evidence
 from openkb.desktop_retrieval_plan import deterministic_plan, validate_question
 from openkb.desktop_retrieval_planning import (
     DesktopRetrievalPlanningResult,
-    build_retrieval_plan,
+    build_query_plan,
 )
 from openkb.desktop_retrieval_trace import (
     FUSION_POLICY_VERSION,
+    DesktopFacetCoverageTrace,
+    DesktopQuestionFacetTrace,
     DesktopRetrievalChannelTrace,
     DesktopRetrievalTrace,
 )
@@ -124,6 +125,7 @@ class DesktopEvidenceRetriever:
         is_cancelled: Callable[[], bool] | None = None,
         on_model_event: Callable[[object], None] | None = None,
         operation_retry_scopes: Mapping[str, str] | None = None,
+        conversation_context: tuple[tuple[str, str], ...] = (),
     ) -> DesktopEvidencePack:
         """Run one bounded adaptive session with deterministic evidence as its fallback."""
         request = coerce_retrieval_request(question)
@@ -142,9 +144,28 @@ class DesktopEvidenceRetriever:
             "local_graph" if local_graph_default_enabled(self._kb_dir) else "baseline"
         )
         pinned_snapshot_id = current_navigation_snapshot_id(self._database_path)
+        seed_pack = self.retrieve_variant(
+            normalized_question,
+            variant=variant,
+            retrieval_plan=deterministic_plan(normalized_question),
+            _version_navigation_snapshot=version_snapshot,
+        )
+        planning = build_query_plan(
+            normalized_question,
+            self._model_gateway,
+            seed_evidence=seed_pack.evidence,
+            conversation_context=conversation_context,
+            kb_dir=self._kb_dir,
+            is_cancelled=session_cancelled,
+            on_model_event=on_model_event,
+            retry_scope=(operation_retry_scopes or {}).get("query_planning"),
+            response_deadline=navigation_deadline,
+        )
         initial_pack = self.retrieve_variant(
             normalized_question,
             variant=variant,
+            retrieval_plan=planning.plan,
+            degradations=planning.degradations,
             _version_navigation_snapshot=version_snapshot,
             is_cancelled=session_cancelled,
             on_model_event=on_model_event,
@@ -153,6 +174,14 @@ class DesktopEvidenceRetriever:
             _enable_navigation=True,
             _bounded_model_attempts=True,
             _model_response_deadline=navigation_deadline,
+        )
+        initial_pack = replace(
+            initial_pack,
+            retrieval_trace=_trace_with_query_planning(initial_pack.retrieval_trace, planning),
+            retrieval_model_cost=_sum_model_cost(
+                planning.model_cost,
+                initial_pack.retrieval_model_cost,
+            ),
         )
         retrieve_round = partial(
             self.retrieve_variant,
@@ -173,6 +202,13 @@ class DesktopEvidenceRetriever:
                 variant=variant,
                 retrieval_plan=deterministic_plan(normalized_question),
                 _version_navigation_snapshot=version_snapshot,
+            )
+            fallback = replace(
+                fallback,
+                retrieval_trace=_trace_with_query_planning(
+                    fallback.retrieval_trace,
+                    planning,
+                ),
             )
             if current_navigation_snapshot_id(self._database_path) != fallback_snapshot_id:
                 fallback_snapshot_id = current_navigation_snapshot_id(self._database_path)
@@ -238,7 +274,7 @@ class DesktopEvidenceRetriever:
         is_cancelled: Callable[[], bool] | None = None,
         on_model_event: Callable[[object], None] | None = None,
     ) -> DesktopRetrievalPlanningResult:
-        return build_retrieval_plan(
+        return build_query_plan(
             validate_question(question),
             self._model_gateway,
             kb_dir=self._kb_dir,
@@ -278,20 +314,22 @@ class DesktopEvidenceRetriever:
             )
         scoped_view = ScopedEvidenceView(_version_navigation_snapshot.version_scope)
         scope_degradations = version_scope_degradations(_version_navigation_snapshot)
+        planning_result: DesktopRetrievalPlanningResult | None = None
         if retrieval_plan is None:
-            planning = build_retrieval_plan(
+            planning_result = build_query_plan(
                 normalized_question,
                 self._model_gateway,
                 kb_dir=self._kb_dir,
                 is_cancelled=is_cancelled,
                 on_model_event=on_model_event,
-                retry_scope=(operation_retry_scopes or {}).get("retrieval_plan"),
-                bounded_model_attempts=_bounded_model_attempts,
+                retry_scope=(operation_retry_scopes or {}).get("query_planning"),
                 response_deadline=_model_response_deadline,
             )
-            plan = planning.plan
-            planning_cost = planning.model_cost
-            all_degradations = tuple((*degradations, *scope_degradations, *planning.degradations))
+            plan = planning_result.plan
+            planning_cost = planning_result.model_cost
+            all_degradations = tuple(
+                (*degradations, *scope_degradations, *planning_result.degradations)
+            )
         else:
             if retrieval_plan.query != normalized_question:
                 raise DesktopAnswerError(
@@ -336,7 +374,6 @@ class DesktopEvidenceRetriever:
                         local_graph_evidence_ids,
                         generation_snapshot=PinnedGraphGenerations(
                             _version_navigation_snapshot.active_knowledge_generation_id,
-                            _version_navigation_snapshot.graph_result_ids,
                         ),
                     ),
                     graph_row_fetcher=bounded_graph_rows,
@@ -409,7 +446,6 @@ class DesktopEvidenceRetriever:
                             excluded_routes=_navigation_excluded_routes,
                             requested_routes=_navigation_requested_routes,
                             requested_evidence_ids=_navigation_source_anchors,
-                            answer_kind=answer_kind_for_question(normalized_question),
                             **navigation_scope,  # type: ignore[arg-type]
                         )
                     except (KeyError, TypeError, ValueError, sqlite3.Error):
@@ -529,6 +565,8 @@ class DesktopEvidenceRetriever:
             version_scope_selection_reason=scoped_view.scope.selection_reason,
             version_scope_degradation_reason=(scoped_view.scope.degradation_reason or ""),
         )
+        if planning_result is not None:
+            trace = _trace_with_query_planning(trace, planning_result)
         return DesktopEvidencePack(
             retrieval_plan=plan,
             evidence=evidence,
@@ -597,4 +635,40 @@ def _sum_model_cost(
         model_calls=first.model_calls + second.model_calls,
         input_characters=first.input_characters + second.input_characters,
         output_characters=first.output_characters + second.output_characters,
+    )
+
+
+def _trace_with_query_planning(
+    trace: DesktopRetrievalTrace,
+    planning: DesktopRetrievalPlanningResult,
+) -> DesktopRetrievalTrace:
+    facet_plan = planning.facet_plan
+    return replace(
+        trace,
+        semantic_structure_state=planning.semantic_structure_state,
+        question_goal=facet_plan.goal if facet_plan is not None else "",
+        question_facets=(
+            tuple(
+                DesktopQuestionFacetTrace(
+                    facet.facet_id,
+                    facet.label,
+                    facet.description,
+                    facet.importance,
+                )
+                for facet in facet_plan.facets
+            )
+            if facet_plan is not None
+            else ()
+        ),
+        question_facet_plan_digest=facet_plan.digest if facet_plan is not None else "",
+        query_planning_prompt_contract_digest=planning.prompt_contract_digest,
+        query_planning_execution_profile_json=planning.execution_profile_json,
+        query_planning_execution_profile_digest=planning.execution_profile_digest,
+        facet_coverage=tuple(
+            DesktopFacetCoverageTrace(item.facet_id, item.state, item.evidence_ids)
+            for item in planning.coverage
+        ),
+        coverage_gate_state=(
+            "uncovered" if planning.semantic_structure_state == "known" else "unknown"
+        ),
     )

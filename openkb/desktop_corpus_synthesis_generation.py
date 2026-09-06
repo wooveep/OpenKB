@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from openkb.desktop_candidate_registry import candidate_registry_outcome_in
 
-CORPUS_QUALIFICATION_POLICY_VERSION = "openkb.corpus-qualification.v2"
+CORPUS_INTEGRITY_POLICY_VERSION = "openkb.corpus-integrity.v2"
 CORPUS_GENERATION_COMPATIBILITY_VERSION = "openkb.corpus-generation-compatibility.v1"
 
 
@@ -31,11 +31,11 @@ class CorpusGenerationManifest:
     generation_id: int
     parent_generation_id: int | None
     lifecycle_state: str
-    dossier_state: str
+    page_state: str
     graph_state: str
     manifest_digest: str
     compatibility_digest: str
-    qualification_policy_version: str
+    integrity_policy_version: str
     created_at: str
     updated_at: str
 
@@ -57,7 +57,7 @@ def capture_corpus_candidate_inputs_in(
                 JOIN knowledge_candidate_registry_state AS state
                   ON state.document_id = documents.document_id
                 WHERE documents.availability = 'available'
-                  AND state.provenance_state = 'semantic'
+                  AND state.current_candidate_generation_id IS NOT NULL
                 ORDER BY documents.document_id
                 """
             ).fetchall()
@@ -125,17 +125,17 @@ def create_pending_corpus_manifest_in(
             "compatibility_version": CORPUS_GENERATION_COMPATIBILITY_VERSION,
             "inputs": input_payload,
             "identity_mappings": [],
-            "dossiers": [],
+            "pages": [],
             "graph_inputs": [],
-            "qualification_policy_version": CORPUS_QUALIFICATION_POLICY_VERSION,
+            "integrity_policy_version": CORPUS_INTEGRITY_POLICY_VERSION,
         }
     )
     connection.execute(
         """
         INSERT INTO knowledge_generation_manifests (
-            generation_id, parent_generation_id, lifecycle_state, dossier_state,
+            generation_id, parent_generation_id, lifecycle_state, page_state,
             graph_state, manifest_digest, compatibility_digest,
-            qualification_policy_version, created_at, updated_at
+            integrity_policy_version, created_at, updated_at
         ) VALUES (?, ?, 'pending', 'pending', 'pending', ?, ?, ?, ?, ?)
         """,
         (
@@ -143,7 +143,7 @@ def create_pending_corpus_manifest_in(
             parent_generation_id,
             manifest_digest,
             compatibility_digest,
-            CORPUS_QUALIFICATION_POLICY_VERSION,
+            CORPUS_INTEGRITY_POLICY_VERSION,
             now,
             now,
         ),
@@ -222,6 +222,19 @@ def bind_generation_graph_inputs_in(
 ) -> str:
     """Pin the compatible optional Graph result selected for every candidate input."""
     inputs = corpus_candidate_inputs_in(connection, generation_id)
+    existing = connection.execute(
+        "SELECT graph_state FROM knowledge_generation_graph_inputs "
+        "WHERE generation_id = ? ORDER BY document_id",
+        (generation_id,),
+    ).fetchall()
+    if existing and len(existing) == len(inputs):
+        graph_state = _aggregate_graph_state([str(row[0]) for row in existing])
+        connection.execute(
+            "UPDATE knowledge_generation_manifests SET graph_state = ?, updated_at = ? "
+            "WHERE generation_id = ?",
+            (graph_state, now, generation_id),
+        )
+        return graph_state
     connection.execute(
         "DELETE FROM knowledge_generation_graph_inputs WHERE generation_id = ?",
         (generation_id,),
@@ -295,7 +308,7 @@ def qualify_corpus_manifest_in(
     """Recheck pinned inputs and all generation-owned stage outputs before activation."""
     refresh_corpus_identity_mappings_in(connection, generation_id, now=now)
     manifest = corpus_generation_manifest_in(connection, generation_id)
-    if manifest is not None and manifest.dossier_state == "pending":
+    if manifest is not None and manifest.page_state == "pending":
         entity_count = connection.execute(
             "SELECT COUNT(*) FROM knowledge_generation_items "
             "WHERE generation_id = ? AND kind = 'entity'",
@@ -303,7 +316,7 @@ def qualify_corpus_manifest_in(
         ).fetchone()
         if entity_count is not None and int(entity_count[0]) == 0:
             connection.execute(
-                "UPDATE knowledge_generation_manifests SET dossier_state = 'ready' "
+                "UPDATE knowledge_generation_manifests SET page_state = 'ready' "
                 "WHERE generation_id = ?",
                 (generation_id,),
             )
@@ -329,13 +342,13 @@ def qualify_corpus_manifest_in(
     if manifest is None:
         issues.append("manifest_unavailable")
     else:
-        if manifest.dossier_state != "ready":
+        if manifest.page_state != "ready":
             issues.append("dossier_not_ready")
         if manifest.graph_state == "pending":
             issues.append("graph_not_ready")
-    from openkb.desktop_entity_dossier_store import generation_entity_dossier_issues_in
+    from openkb.desktop_knowledge_page_store import generation_knowledge_page_issues_in
 
-    issues.extend(generation_entity_dossier_issues_in(connection, generation_id))
+    issues.extend(generation_knowledge_page_issues_in(connection, generation_id))
     connection.execute(
         """
         UPDATE knowledge_generation_manifests
@@ -387,8 +400,8 @@ def recover_interrupted_corpus_generations_in(
     placeholders = ", ".join("?" for _generation_id in generation_ids)
     connection.execute(
         f"UPDATE knowledge_generation_manifests SET lifecycle_state = 'failed', "
-        f"dossier_state = CASE WHEN dossier_state = 'pending' THEN 'failed' "
-        f"ELSE dossier_state END, updated_at = ? "
+        f"page_state = CASE WHEN page_state = 'pending' THEN 'failed' "
+        f"ELSE page_state END, updated_at = ? "
         f"WHERE generation_id IN ({placeholders})",
         (now, *generation_ids),
     )
@@ -421,13 +434,13 @@ def activate_qualified_corpus_generation_in(
     manifest = corpus_generation_manifest_in(connection, generation_id)
     if manifest is None or manifest.lifecycle_state != "qualified":
         return False
-    from openkb.desktop_entity_dossier_store import generation_entity_dossier_issues_in
+    from openkb.desktop_knowledge_page_store import generation_knowledge_page_issues_in
 
     activation_issues = (
         *corpus_manifest_compatibility_issues_in(connection, generation_id),
-        *generation_entity_dossier_issues_in(connection, generation_id),
+        *generation_knowledge_page_issues_in(connection, generation_id),
     )
-    if manifest.dossier_state != "ready" or manifest.graph_state == "pending" or activation_issues:
+    if manifest.page_state != "ready" or manifest.graph_state == "pending" or activation_issues:
         connection.execute(
             "UPDATE knowledge_generation_manifests "
             "SET lifecycle_state = 'superseded', updated_at = ? WHERE generation_id = ?",
@@ -482,9 +495,8 @@ def corpus_manifest_compatibility_issues_in(
     rows = connection.execute(
         """
         SELECT inputs.document_id, inputs.candidate_generation_id,
-            inputs.candidate_generation_digest, state.provenance_state,
-            state.current_candidate_generation_id, generations.registry_digest,
-            documents.availability
+            inputs.candidate_generation_digest, state.current_candidate_generation_id,
+            generations.registry_digest, documents.availability
         FROM knowledge_generation_candidate_inputs AS inputs
         LEFT JOIN source_documents AS documents
           ON documents.document_id = inputs.document_id
@@ -500,9 +512,9 @@ def corpus_manifest_compatibility_issues_in(
     if not rows:
         issues.append("candidate_manifest_empty")
     for row in rows:
-        if str(row[6]) != "available" or str(row[3]) != "semantic":
+        if str(row[5]) != "available" or row[3] is None:
             issues.append("candidate_dependency_unavailable")
-        elif str(row[1]) != str(row[4]) or str(row[2]) != str(row[5]):
+        elif str(row[1]) != str(row[3]) or str(row[2]) != str(row[4]):
             issues.append("candidate_generation_superseded")
     graph_rows = connection.execute(
         """
@@ -544,9 +556,9 @@ def corpus_generation_manifest_in(
 ) -> CorpusGenerationManifest | None:
     row = connection.execute(
         """
-        SELECT generation_id, parent_generation_id, lifecycle_state, dossier_state,
+        SELECT generation_id, parent_generation_id, lifecycle_state, page_state,
             graph_state, manifest_digest, compatibility_digest,
-            qualification_policy_version, created_at, updated_at
+            integrity_policy_version, created_at, updated_at
         FROM knowledge_generation_manifests WHERE generation_id = ?
         """,
         (generation_id,),
@@ -557,83 +569,14 @@ def corpus_generation_manifest_in(
         generation_id=int(row[0]),
         parent_generation_id=int(row[1]) if row[1] is not None else None,
         lifecycle_state=str(row[2]),
-        dossier_state=str(row[3]),
+        page_state=str(row[3]),
         graph_state=str(row[4]),
         manifest_digest=str(row[5]),
         compatibility_digest=str(row[6]),
-        qualification_policy_version=str(row[7]),
+        integrity_policy_version=str(row[7]),
         created_at=str(row[8]),
         updated_at=str(row[9]),
     )
-
-
-def backfill_corpus_generation_manifests_in(connection: sqlite3.Connection, *, now: str) -> None:
-    """Bind historical generations to model-free synthetic candidate snapshots."""
-    rows = connection.execute(
-        """
-        SELECT generations.generation_id, generations.parent_generation_id,
-            generations.qualification_state
-        FROM knowledge_generations AS generations
-        WHERE NOT EXISTS (
-            SELECT 1 FROM knowledge_generation_manifests AS manifests
-            WHERE manifests.generation_id = generations.generation_id
-        )
-        ORDER BY generations.generation_id
-        """
-    ).fetchall()
-    current = connection.execute(
-        "SELECT current_generation_id FROM knowledge_generation_state WHERE singleton = 1"
-    ).fetchone()
-    current_id = int(current[0]) if current is not None else None
-    for row in rows:
-        generation_id = int(row[0])
-        documents = tuple(
-            str(value[0])
-            for value in connection.execute(
-                "SELECT document_id FROM knowledge_generation_documents "
-                "WHERE generation_id = ? ORDER BY document_id",
-                (generation_id,),
-            ).fetchall()
-        )
-        if not documents:
-            continue
-        try:
-            create_pending_corpus_manifest_in(
-                connection,
-                generation_id=generation_id,
-                parent_generation_id=int(row[1]) if row[1] is not None else None,
-                document_ids=documents,
-                now=now,
-            )
-        except CorpusGenerationDependencyError:
-            continue
-        refresh_corpus_identity_mappings_in(connection, generation_id, now=now)
-        entity_count = connection.execute(
-            "SELECT COUNT(*) FROM knowledge_generation_items "
-            "WHERE generation_id = ? AND kind = 'entity'",
-            (generation_id,),
-        ).fetchone()
-        connection.execute(
-            "UPDATE knowledge_generation_manifests SET dossier_state = ?, updated_at = ? "
-            "WHERE generation_id = ?",
-            (
-                "ready" if entity_count is None or int(entity_count[0]) == 0 else "failed",
-                now,
-                generation_id,
-            ),
-        )
-        bind_generation_graph_inputs_in(connection, generation_id, now=now)
-        refresh_corpus_manifest_digest_in(connection, generation_id, now=now)
-        lifecycle = (
-            "active"
-            if generation_id == current_id
-            else ("failed" if str(row[2]) == "failed" else "superseded")
-        )
-        connection.execute(
-            "UPDATE knowledge_generation_manifests SET lifecycle_state = ?, updated_at = ? "
-            "WHERE generation_id = ?",
-            (lifecycle, now, generation_id),
-        )
 
 
 def _identity_mappings_in(
@@ -724,12 +667,18 @@ def _manifest_payload_in(
         """,
         (generation_id,),
     ).fetchall()
-    dossiers = connection.execute(
+    pages = connection.execute(
         """
-        SELECT identity_id, status, plan_digest, planning_operation,
-            prompt_contract_digest, rendered_content_digest, fact_count, language
-        FROM knowledge_generation_dossier_plans
-        WHERE generation_id = ? ORDER BY identity_id
+        SELECT outcomes.identity_id, outcomes.status, outcomes.claim_snapshot_digest,
+            outcomes.published_generation_id, outcomes.error_codes_json,
+            plans.plan_digest, plans.planning_operation, plans.prompt_contract_digest,
+            plans.execution_profile_digest, plans.rendered_content_digest,
+            plans.factual_unit_count
+        FROM knowledge_generation_page_outcomes AS outcomes
+        LEFT JOIN knowledge_generation_page_plans AS plans
+          ON plans.generation_id = outcomes.generation_id
+         AND plans.identity_id = outcomes.identity_id
+        WHERE outcomes.generation_id = ? ORDER BY outcomes.identity_id
         """,
         (generation_id,),
     ).fetchall()
@@ -754,18 +703,21 @@ def _manifest_payload_in(
             }
             for row in mappings
         ],
-        "dossiers": [
+        "pages": [
             {
                 "identity_id": str(row[0]),
                 "status": str(row[1]),
-                "plan_digest": str(row[2]),
-                "planning_operation": str(row[3]),
-                "prompt_contract_digest": str(row[4]),
-                "rendered_content_digest": str(row[5]),
-                "fact_count": int(row[6]),
-                "language": str(row[7]),
+                "claim_snapshot_digest": str(row[2]),
+                "published_generation_id": int(row[3]) if row[3] is not None else None,
+                "error_codes": json.loads(str(row[4])),
+                "plan_digest": str(row[5]) if row[5] is not None else None,
+                "planning_operation": str(row[6]) if row[6] is not None else None,
+                "prompt_contract_digest": str(row[7]) if row[7] is not None else None,
+                "execution_profile_digest": str(row[8]) if row[8] is not None else None,
+                "rendered_content_digest": str(row[9]) if row[9] is not None else None,
+                "factual_unit_count": int(row[10]) if row[10] is not None else 0,
             }
-            for row in dossiers
+            for row in pages
         ],
         "graph_inputs": [
             {
@@ -777,7 +729,7 @@ def _manifest_payload_in(
             }
             for row in graph_inputs
         ],
-        "qualification_policy_version": CORPUS_QUALIFICATION_POLICY_VERSION,
+        "integrity_policy_version": CORPUS_INTEGRITY_POLICY_VERSION,
     }
 
 

@@ -84,14 +84,14 @@ def test_compatible_addition_advances_the_published_generation(tmp_path: Path) -
             SELECT DISTINCT provenance_state FROM knowledge_generation_items
             WHERE generation_id = 2
             """
-        ).fetchall() == [("legacy_unmapped",)]
+        ).fetchall() == [("structural",)]
     materialize_current_generation(kb_dir)
     generated = next(
         path
         for path in (kb_dir / "knowledge-pages" / "generated").rglob("*.md")
         if path.name != "index.md"
     ).read_text(encoding="utf-8")
-    assert "provenance: legacy_unmapped" in generated
+    assert "provenance: structural" in generated
     assert "source_document_id:" not in generated
     assert "verified:" not in generated
 
@@ -224,9 +224,7 @@ def test_three_way_actions_update_only_the_working_draft(
     kept_count: int,
 ) -> None:
     """Every three-way action remains a reversible draft choice until explicit Publish."""
-    kb_dir = Path(
-        DesktopKnowledgeBaseRuntime().create(tmp_path / decision).knowledge_base.kb_dir
-    )
+    kb_dir = Path(DesktopKnowledgeBaseRuntime().create(tmp_path / decision).knowledge_base.kb_dir)
     pages = DesktopKnowledgePageService(kb_dir)
     published_body = "[Published baseline](published-baseline.md)"
     page = pages.save_draft(
@@ -301,10 +299,13 @@ def test_three_way_actions_update_only_the_working_draft(
             "SELECT COUNT(*) FROM source_documents WHERE document_id = ?",
             (imported.document.document_id,),
         ).fetchone() == (1,)
-        assert connection.execute(
-            "SELECT COUNT(*) FROM evidence_occurrences WHERE document_id = ?",
-            (imported.document.document_id,),
-        ).fetchone()[0] > 0
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM evidence_occurrences WHERE document_id = ?",
+                (imported.document.document_id,),
+            ).fetchone()[0]
+            > 0
+        )
     assert candidate_row is not None
     assert candidate_row[:4] == ("", None, None, None)
     assert candidate_row[4] == ("kept" if decision == "keep_draft" else "draft_updated")
@@ -346,9 +347,7 @@ def test_three_way_result_still_requires_publication_gate_and_explicit_publish(
     assert blocked.value.code == "knowledge_publication_blocked"
 
 
-@pytest.mark.parametrize(
-    "decision", ["apply_incoming", "replace_draft", "manual_merge"]
-)
+@pytest.mark.parametrize("decision", ["apply_incoming", "replace_draft", "manual_merge"])
 def test_replacing_a_source_backed_draft_discards_obsolete_source_bindings(
     tmp_path: Path, decision: str
 ) -> None:
@@ -395,9 +394,7 @@ def test_replacing_a_source_backed_draft_discards_obsolete_source_bindings(
     resolution.stage_decisions(
         (conflict.candidate_id,),
         decision,
-        manual_merge_content=(
-            "Incoming replacement fact." if decision == "manual_merge" else None
-        ),
+        manual_merge_content=("Incoming replacement fact." if decision == "manual_merge" else None),
     )
     resolution.commit_staged_decisions()
 

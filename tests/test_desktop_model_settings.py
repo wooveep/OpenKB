@@ -449,8 +449,8 @@ def test_role_gateway_routes_analysis_and_answer_to_distinct_models(tmp_path, mo
         "knowledge_analysis_batch",
         "knowledge_analysis_merge",
         "page_tree_enrichment",
-        "knowledge_graph_extraction",
-        "retrieval_plan",
+        "knowledge_relation_analysis",
+        "query_planning",
     ):
         gateway.analyze(
             DesktopModelRequest(operation, "source", "content"),
@@ -537,8 +537,8 @@ def test_diagnostic_bundle_is_explicit_and_redacts_source_model_and_credential_c
                     "schema_version": KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
                     "analysis_scope": "document",
                     "document_description": "private-model-response",
-                    "concepts": [],
-                    "entities": [],
+                    "document_summary": [],
+                    "candidates": [],
                 }
             )
         ),
@@ -1679,7 +1679,7 @@ def test_custom_answer_check_persists_exact_credential_free_evidence_across_reop
     )
 
     assert answer["retrieval_plan"]["source"] == "deterministic"
-    assert "retrieval_plan_unverified" in answer["degradations"]
+    assert "query_planning_unverified" in answer["degradations"]
     assert "answer_model_unverified" not in answer["degradations"]
     assert answer["answer_text"] == "Custom natural-language answer."
     assert [request.operation for request in provider_requests] == ["grounded_answer"]

@@ -332,9 +332,9 @@ def test_portable_wiki_uses_the_runtime_eligible_user_page_set(tmp_path: Path) -
     assert deprecated.page_id not in identities
 
 
-def test_portable_wiki_excludes_legacy_unqualified_generated_items(tmp_path: Path) -> None:
+def test_portable_wiki_excludes_unqualified_generated_items(tmp_path: Path) -> None:
     kb_dir, imported, _page_id = _knowledge_base_with_referenced_image(tmp_path)
-    _insert_legacy_generated_item(kb_dir, document_id=imported.document.document_id)
+    _insert_unqualified_generated_item(kb_dir, document_id=imported.document.document_id)
     destination = tmp_path / "exports"
     destination.mkdir()
 
@@ -343,7 +343,7 @@ def test_portable_wiki_excludes_legacy_unqualified_generated_items(tmp_path: Pat
     generated = Path(exported.path) / "generated"
     assert not generated.exists() or not tuple(generated.rglob("*.md"))
     manifest = json.loads((Path(exported.path) / "wiki-manifest.json").read_text(encoding="utf-8"))
-    assert not any(entry["identity"] == "legacy-generated" for entry in manifest["routes"])
+    assert not any(entry["identity"] == "unqualified-generated" for entry in manifest["routes"])
 
 
 def test_portable_wiki_omits_knowledge_whose_source_bindings_are_unavailable(
@@ -570,8 +570,8 @@ def _qualify_portable_wiki_fixture(kb_dir: Path, *, document_id: str) -> str:
         connection.execute(
             """
             INSERT INTO document_summary_units (
-                document_id, unit_ordinal, role, unit_text
-            ) VALUES (?, 0, 'purpose', ?)
+                document_id, unit_ordinal, label, unit_text
+            ) VALUES (?, 0, 'Overview', ?)
             """,
             (document_id, "本文说明路由与双节点部署资料。"),
         )
@@ -589,10 +589,10 @@ def _qualify_portable_wiki_fixture(kb_dir: Path, *, document_id: str) -> str:
             INSERT INTO knowledge_generation_items (
                 generation_id, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
-                provenance_state, entity_subtype, analysis_provenance_json,
-                aliases_json, tags_json, identity_id
+                provenance_state, analysis_provenance_json,
+                aliases_json, identity_labels_json, identity_id
             ) VALUES (?, 'portable-procedure', 'procedure', ?, ?, ?, ?, ?, ?,
-                'source_backed', NULL, '{}', ?, '[]', 'portable-identity')
+                'source_backed', '{}', ?, '[]', 'portable-identity')
             """,
             (
                 generation_id,
@@ -616,8 +616,8 @@ def _qualify_portable_wiki_fixture(kb_dir: Path, *, document_id: str) -> str:
         return evidence_id
 
 
-def _insert_legacy_generated_item(kb_dir: Path, *, document_id: str) -> None:
-    content = "Legacy content must stay outside portable navigation."
+def _insert_unqualified_generated_item(kb_dir: Path, *, document_id: str) -> None:
+    content = "Unqualified content must stay outside portable navigation."
     with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
         generation_id = int(
             connection.execute(
@@ -629,11 +629,11 @@ def _insert_legacy_generated_item(kb_dir: Path, *, document_id: str) -> None:
             INSERT INTO knowledge_generation_items (
                 generation_id, item_key, kind, title, normalized_title,
                 content_markdown, content_sha256, source_document_id, created_at,
-                provenance_state, entity_subtype, analysis_provenance_json,
-                aliases_json, tags_json, identity_id
-            ) VALUES (?, 'legacy-generated', 'concept', 'Legacy Generated',
-                'legacy generated', ?, ?, ?, ?, 'source_backed', NULL, '{}',
-                '[]', '[]', 'legacy-identity')
+                provenance_state, analysis_provenance_json,
+                aliases_json, identity_labels_json, identity_id
+            ) VALUES (?, 'unqualified-generated', 'concept', 'Unqualified Generated',
+                'unqualified generated', ?, ?, ?, ?, 'source_backed', '{}',
+                '[]', '[]', 'unqualified-identity')
             """,
             (
                 generation_id,

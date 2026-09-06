@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import sqlite3
-import uuid
 from pathlib import Path
 
 import pytest
@@ -58,7 +57,6 @@ def _drop_current_model_schema(connection: sqlite3.Connection) -> None:
         "knowledge_graph_results",
         "knowledge_adoption_requests",
         "knowledge_origin_references",
-        "model_capability_compatibility_audit",
         "model_operation_contract_events",
         "model_operation_retry_permits",
         "model_operation_contract_states",
@@ -205,178 +203,6 @@ def test_projection_staging_failure_preserves_published_revision_and_working_dra
     assert preserved.published_revision.content_markdown == "# Published content"
     assert preserved.working_draft is not None
     assert preserved.working_draft.content_markdown == "# Unpublished content"
-
-
-def test_v18_page_migrates_as_published_without_inventing_a_working_draft(tmp_path):
-    """Existing user content remains the current publication after schema upgrade."""
-    kb_dir = tmp_path / "desktop-kb"
-    DesktopKnowledgeBaseRuntime().create(kb_dir)
-    page_id = uuid.uuid4().hex
-    revision_id = uuid.uuid4().hex
-    now = "2026-08-19T00:00:00+00:00"
-    database_path = kb_dir / ".openkb" / "state.sqlite3"
-    with sqlite3.connect(database_path) as connection:
-        _drop_catalog_schema(connection)
-        connection.execute("DROP TABLE knowledge_generation_item_sources")
-        connection.execute("DROP TABLE knowledge_reconciliation_candidate_sources")
-        connection.execute(
-            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN entity_subtype"
-        )
-        connection.execute("DROP TABLE knowledge_page_lifecycle_events")
-        connection.execute("DROP TABLE knowledge_page_verifications")
-        connection.execute("DROP TABLE IF EXISTS knowledge_page_revision_sources")
-        connection.execute("DROP TABLE IF EXISTS knowledge_page_working_sources")
-        connection.execute("DROP TABLE IF EXISTS knowledge_page_ui_state")
-        connection.execute("DROP TABLE IF EXISTS knowledge_page_working_drafts")
-        _drop_page_tree_schema(connection)
-        connection.execute("DROP TABLE knowledge_reanalysis_merges")
-        connection.execute("DROP TABLE knowledge_reanalysis_batches")
-        connection.execute("DROP TABLE knowledge_reanalysis_jobs")
-        connection.execute("DROP TABLE knowledge_reanalysis_runs")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 31")
-        connection.execute("DROP TABLE knowledge_analysis_merges")
-        connection.execute("DROP TABLE knowledge_analysis_batches")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 30")
-        connection.execute("DROP TABLE knowledge_missing_source_resolution_records")
-        connection.execute("DROP TABLE knowledge_missing_source_candidates")
-        connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
-        connection.execute(
-            "ALTER TABLE knowledge_generation_items DROP COLUMN analysis_provenance_json"
-        )
-        connection.execute(
-            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN analysis_provenance_json"
-        )
-        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN aliases_json")
-        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN tags_json")
-        connection.execute(
-            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN aliases_json"
-        )
-        connection.execute("ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN tags_json")
-        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
-        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN entity_subtype")
-        connection.execute("ALTER TABLE knowledge_pages DROP COLUMN stale_after")
-        connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
-        connection.execute(
-            "DELETE FROM schema_migrations "
-            "WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)"
-        )
-        connection.execute(
-            """
-            INSERT INTO knowledge_pages (
-                page_id, kind, title, normalized_title, materialized_path,
-                current_revision_id, created_at, updated_at
-            ) VALUES (?, 'concept', 'Legacy Page', 'legacy page', ?, ?, ?, ?)
-            """,
-            (page_id, f"knowledge-pages/concept/{page_id}.md", revision_id, now, now),
-        )
-        connection.execute(
-            """
-            INSERT INTO knowledge_page_revisions (
-                revision_id, page_id, revision_number, title, content_markdown, created_at
-            ) VALUES (?, ?, 1, 'Legacy Page', 'Legacy published content.', ?)
-            """,
-            (revision_id, page_id, now),
-        )
-        connection.commit()
-
-    DesktopKnowledgeBaseRuntime().open(kb_dir)
-    pages = DesktopKnowledgePageService(kb_dir)
-    migrated = pages.get_page(page_id)
-
-    assert migrated.publication_state == "published"
-    assert migrated.published_revision is not None
-    assert migrated.published_revision.content_markdown == "Legacy published content."
-    assert migrated.published_revision.source_map == ()
-    assert migrated.published_revision.provenance_state == "legacy_unmapped"
-    assert migrated.verification.state == "unverified"
-    assert migrated.verification.reason == "legacy_unmapped_not_verifiable"
-    assert migrated.verification.can_verify is False
-    with pytest.raises(DesktopKnowledgePageError) as verification_error:
-        pages.verify(page_id)
-    assert verification_error.value.code == "knowledge_verification_legacy_unmapped"
-    assert migrated.working_draft is None
-    pages.materialize_current_pages()
-    projection = (kb_dir / migrated.materialized_path).read_text(encoding="utf-8")
-    assert "provenance: legacy_unmapped" in projection
-    assert "verified:" not in projection
-
-
-def test_v20_source_map_migrates_as_source_backed_without_rewriting_the_revision(tmp_path):
-    """A shipped claim map is preserved rather than mislabeled as legacy-unmapped."""
-    kb_dir = tmp_path / "desktop-kb"
-    source = tmp_path / "source.md"
-    source.write_text("# Facts\n\nOriginal mapped evidence.", encoding="utf-8")
-    DesktopKnowledgeBaseRuntime().create(kb_dir)
-    DesktopTextImportService(kb_dir).import_text(source)
-    pages = DesktopKnowledgePageService(kb_dir)
-    candidate = pages.search_sources("Original mapped evidence")[0]
-    claim = "This claim already had a valid Source Map in schema v20."
-    draft = pages.save_draft(
-        page_id=None,
-        kind="concept",
-        title="Existing source map",
-        content_markdown=claim,
-    )
-    pages.bind_source(draft.page_id, claim, candidate.evidence_id)
-    before = pages.publish(draft.page_id)
-    assert before.published_revision is not None
-    before_sources = before.published_revision.source_map
-
-    database_path = kb_dir / ".openkb" / "state.sqlite3"
-    with sqlite3.connect(database_path) as connection:
-        _drop_catalog_schema(connection)
-        connection.execute("DROP TABLE knowledge_generation_item_sources")
-        connection.execute("DROP TABLE knowledge_reconciliation_candidate_sources")
-        connection.execute(
-            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN entity_subtype"
-        )
-        connection.execute("DROP TABLE knowledge_page_lifecycle_events")
-        connection.execute("DROP TABLE knowledge_page_verifications")
-        connection.execute("ALTER TABLE knowledge_page_revisions DROP COLUMN provenance_state")
-        connection.execute(
-            "ALTER TABLE knowledge_generation_items DROP COLUMN analysis_provenance_json"
-        )
-        connection.execute(
-            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN analysis_provenance_json"
-        )
-        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN aliases_json")
-        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN tags_json")
-        connection.execute(
-            "ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN aliases_json"
-        )
-        connection.execute("ALTER TABLE knowledge_reconciliation_candidates DROP COLUMN tags_json")
-        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN provenance_state")
-        connection.execute("ALTER TABLE knowledge_generation_items DROP COLUMN entity_subtype")
-        connection.execute("ALTER TABLE knowledge_pages DROP COLUMN stale_after")
-        connection.execute("ALTER TABLE knowledge_pages DROP COLUMN lifecycle_state")
-        _drop_page_tree_schema(connection)
-        connection.execute("DROP TABLE knowledge_reanalysis_merges")
-        connection.execute("DROP TABLE knowledge_reanalysis_batches")
-        connection.execute("DROP TABLE knowledge_reanalysis_jobs")
-        connection.execute("DROP TABLE knowledge_reanalysis_runs")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 31")
-        connection.execute("DROP TABLE knowledge_analysis_merges")
-        connection.execute("DROP TABLE knowledge_analysis_batches")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 30")
-        connection.execute("DROP TABLE knowledge_missing_source_resolution_records")
-        connection.execute("DROP TABLE knowledge_missing_source_candidates")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 29")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 28")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 27")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 26")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 21")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 22")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 23")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 25")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 24")
-        connection.commit()
-
-    DesktopKnowledgeBaseRuntime().open(kb_dir)
-    migrated = DesktopKnowledgePageService(kb_dir).get_page(draft.page_id)
-
-    assert migrated.published_revision is not None
-    assert migrated.published_revision.provenance_state == "source_backed"
-    assert migrated.published_revision.source_map == before_sources
 
 
 def test_later_document_import_does_not_overwrite_a_submitted_user_revision(tmp_path):

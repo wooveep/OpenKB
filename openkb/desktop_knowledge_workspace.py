@@ -46,11 +46,7 @@ class DesktopKnowledgeWorkspaceItem:
             "current": self.current,
         }
         if self.authority == "generated":
-            if (
-                self.generation_id is None
-                or self.item_key is None
-                or self.provenance_state is None
-            ):
+            if self.generation_id is None or self.item_key is None or self.provenance_state is None:
                 raise ValueError("knowledge_workspace_generated_summary_invalid")
             return {
                 **common,
@@ -58,11 +54,7 @@ class DesktopKnowledgeWorkspaceItem:
                 "item_key": self.item_key,
                 "provenance_state": self.provenance_state,
             }
-        if (
-            self.page_id is None
-            or self.publication_state is None
-            or self.lifecycle_state is None
-        ):
+        if self.page_id is None or self.publication_state is None or self.lifecycle_state is None:
             raise ValueError("knowledge_workspace_user_summary_invalid")
         return {
             **common,
@@ -203,7 +195,7 @@ class DesktopKnowledgeWorkspaceService:
                 row = connection.execute(
                     """
                     SELECT items.kind, items.title, items.content_markdown,
-                        items.entity_subtype, items.aliases_json, items.tags_json,
+                        items.aliases_json, items.identity_labels_json,
                         items.created_at, items.provenance_state,
                         items.analysis_provenance_json,
                         state.current_generation_id = items.generation_id
@@ -226,14 +218,13 @@ class DesktopKnowledgeWorkspaceService:
             "kind": str(row[0]),
             "title": str(row[1]),
             "content_markdown": str(row[2]),
-            "entity_subtype": str(row[3]) if row[3] is not None else None,
-            "aliases": list(decode_knowledge_labels(row[4])),
-            "tags": list(decode_knowledge_labels(row[5])),
-            "created_at": str(row[6]),
-            "provenance_state": str(row[7]),
-            "analysis_provenance": _json_object(row[8]),
+            "aliases": list(decode_knowledge_labels(row[3])),
+            "identity_labels": list(decode_knowledge_labels(row[4])),
+            "created_at": str(row[5]),
+            "provenance_state": str(row[6]),
+            "analysis_provenance": _json_object(row[7]),
             "source_map": [source.as_dict() for source in sources],
-            "current": bool(row[9]),
+            "current": bool(row[8]),
             "editable": False,
         }
 
@@ -270,7 +261,7 @@ def _generated_summaries_in(
                 OR instr(lower(title), ?) > 0
                 OR instr(lower(content_markdown), ?) > 0
                 OR instr(lower(aliases_json), ?) > 0
-                OR instr(lower(tags_json), ?) > 0
+                OR instr(lower(identity_labels_json), ?) > 0
             )
         ORDER BY kind, title COLLATE NOCASE, item_key
         """,

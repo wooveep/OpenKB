@@ -20,18 +20,6 @@ MODEL_OPERATION_STATE_MIGRATION_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS model_operation_contract_states_status_idx
         ON model_operation_contract_states(status, updated_at)
     """,
-    """
-    CREATE TABLE IF NOT EXISTS model_capability_compatibility_audit (
-        legacy_profile_identity TEXT PRIMARY KEY,
-        shared_profile_identity TEXT,
-        decision TEXT NOT NULL CHECK(decision IN (
-            'carried_verified', 'restored_graph_local', 'left_unverified',
-            'invalid_legacy_profile'
-        )),
-        evidence_json TEXT NOT NULL,
-        migrated_at TEXT NOT NULL
-    )
-    """,
 )
 
 MODEL_OPERATION_RETRY_MIGRATION_STATEMENTS: tuple[str, ...] = (

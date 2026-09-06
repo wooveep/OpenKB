@@ -425,11 +425,11 @@ def test_check_and_recover_verifies_replacement_before_discarding_model_state(
             scope = "batch" if request.operation == "knowledge_analysis_batch" else "document"
             return json.dumps(
                 {
-                    "schema_version": "openkb.knowledge-analysis.v1",
+                    "schema_version": "openkb.knowledge-analysis.v2",
                     "analysis_scope": scope,
                     "document_description": "Recovered analysis.",
-                    "concepts": [],
-                    "entities": [],
+                    "document_summary": [],
+                    "candidates": [],
                 }
             )
 
