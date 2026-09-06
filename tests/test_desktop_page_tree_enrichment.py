@@ -8,33 +8,34 @@ import sqlite3
 import threading
 import time
 
-from openkb import desktop_engine_page_tree_enrichment as enrichment_engine
-from openkb import desktop_model_transport
-from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
-from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
-from openkb.desktop_model_gateway import (
+from openkb.engine import page_tree_enrichment as enrichment_engine
+from openkb.engine.protocol import DesktopRequest
+from openkb.engine.server import DesktopEngineServer
+from openkb.importing.service import DesktopTextImportService
+from openkb.knowledge.analysis.service import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.models import transport as desktop_model_transport
+from openkb.models.capability_store import DesktopModelCapabilityStore
+from openkb.models.gateway import (
     DesktopModelGateway,
     DesktopModelRequest,
     DesktopModelResult,
 )
-from openkb.desktop_model_operation_state import (
+from openkb.models.operation_state import (
     DesktopModelOperationContractStore,
     authorize_model_operation_retry_in,
 )
-from openkb.desktop_model_settings import (
+from openkb.models.prompt_contracts import prompt_contract_for
+from openkb.models.settings import (
     read_desktop_model_settings,
     save_desktop_model_settings,
 )
-from openkb.desktop_model_terminal import DesktopTerminalModelEvent
-from openkb.desktop_model_usage import DesktopModelUsageStore
-from openkb.desktop_page_tree_enrichment import DesktopPageTreeEnrichmentService
-from openkb.desktop_page_tree_rebuild_state import queue_page_tree_rebuild_in
-from openkb.desktop_page_tree_store import load_current_page_tree_in
-from openkb.desktop_prompt_contracts import prompt_contract_for
-from openkb.desktop_structured_output import structured_output_repair_contract_digest
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.models.structured_output import structured_output_repair_contract_digest
+from openkb.models.terminal import DesktopTerminalModelEvent
+from openkb.models.usage import DesktopModelUsageStore
+from openkb.page_tree.enrichment import DesktopPageTreeEnrichmentService
+from openkb.page_tree.rebuild_state import queue_page_tree_rebuild_in
+from openkb.page_tree.store import load_current_page_tree_in
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def _gateway(provider: str, model: str, summary: str) -> DesktopModelGateway:
@@ -395,7 +396,7 @@ def test_page_tree_retry_does_not_publish_scope_until_both_contracts_are_prepare
         return authorize_model_operation_retry_in(connection, retry_scope=retry_scope, **kwargs)
 
     monkeypatch.setattr(
-        "openkb.desktop_model_result_failure._authorize_model_operation_retry_in",
+        "openkb.models.result_failure._authorize_model_operation_retry_in",
         observe_authorization,
     )
 

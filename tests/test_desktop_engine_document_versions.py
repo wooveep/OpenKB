@@ -6,14 +6,15 @@ import io
 
 import pytest
 
-from openkb.desktop_engine import DesktopEngineServer, DesktopRequest, DesktopRequestError
-from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.engine.protocol import DesktopRequest, DesktopRequestError
+from openkb.engine.server import DesktopEngineServer
+from openkb.importing.runner import DesktopTextImportService
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def test_engine_exposes_catalog_confirmation_and_deterministic_diffs(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "knowledge"
     workspace = DesktopKnowledgeBaseRuntime()

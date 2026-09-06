@@ -10,15 +10,15 @@ from pathlib import Path
 import pytest
 import yaml
 
-import openkb.desktop_knowledge_export as knowledge_export_module
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_knowledge_export import (
+import openkb.knowledge.export.bundle as knowledge_export_module
+from openkb.importing.service import DesktopTextImportService
+from openkb.knowledge.export.bundle import (
     DesktopKnowledgeExportError,
     DesktopKnowledgeExportService,
 )
-from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
-from openkb.desktop_portable_wiki_validation import validate_portable_wiki
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+from openkb.knowledge.export.portable_wiki_validation import validate_portable_wiki
+from openkb.knowledge.pages.service import DesktopKnowledgePageService
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
 def test_knowledge_projection_export_contains_okf_and_manifest_without_raw_assets(

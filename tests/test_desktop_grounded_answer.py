@@ -8,29 +8,29 @@ from pathlib import Path
 
 import pytest
 
-from openkb.desktop_answer_budget import answer_output_reserve_for_context
-from openkb.desktop_answer_types import (
+from openkb.answers.budget import answer_output_reserve_for_context
+from openkb.answers.grounded import (
+    DesktopGroundedAnswerService,
+    _answer_prompt,
+    generate_grounded_answer,
+)
+from openkb.answers.types import (
     DesktopEvidencePack,
     DesktopEvidenceRef,
     DesktopKnowledgeGuidance,
     DesktopRetrievalPlan,
 )
-from openkb.desktop_grounded_answer import (
-    DesktopGroundedAnswerService,
-    _answer_prompt,
-    generate_grounded_answer,
-)
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_model_gateway import (
+from openkb.importing.service import DesktopTextImportService
+from openkb.models.gateway import (
     DesktopModelGateway,
     DesktopModelOutputObservations,
     DesktopModelProviderResponse,
     DesktopModelResult,
 )
-from openkb.desktop_model_roles import DesktopRoleModelGateway
-from openkb.desktop_model_settings import DesktopModelSettings
-from openkb.desktop_retrieval import _source_image_matches_evidence
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.models.roles import DesktopRoleModelGateway
+from openkb.models.settings import DesktopModelSettings
+from openkb.retrieval.service import _source_image_matches_evidence
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def _query_plan_response(
@@ -100,7 +100,7 @@ def test_answer_prompt_exposes_guidance_structure_without_guidance_facts() -> No
 
 
 def test_citation_guard_removes_uncited_list_claims_without_semantic_classification() -> None:
-    from openkb.desktop_grounded_answer import _citation_guarded_answer
+    from openkb.answers.grounded import _citation_guarded_answer
 
     answer = """# Install cluster
 

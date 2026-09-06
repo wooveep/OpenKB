@@ -8,33 +8,21 @@ from dataclasses import replace
 
 import pytest
 
-from openkb.desktop_answer_types import (
+from openkb.answers.grounded import prepare_grounded_evidence_pack
+from openkb.answers.types import (
     DesktopEvidencePack,
     DesktopEvidenceRef,
     DesktopKnowledgeGuidance,
     DesktopRetrievalPlan,
 )
-from openkb.desktop_catalog_store import rebuild_pending_catalog
-from openkb.desktop_graph_feature_flags import local_graph_default_enabled
-from openkb.desktop_grounded_answer import prepare_grounded_evidence_pack
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_knowledge_generations import (
-    KnowledgeGenerationChange,
-    current_generation_id_in,
-    knowledge_content_sha256,
-    publish_generation_changes_in,
-)
-from openkb.desktop_model_gateway import DesktopModelCancelledError, DesktopModelGateway
-from openkb.desktop_navigator_evaluation_gate import navigator_evaluation_gate
-from openkb.desktop_page_tree_selection import PageTreeSelectionResult
-from openkb.desktop_retrieval import DesktopEvidenceRetriever
-from openkb.desktop_retrieval_evaluation import (
+from openkb.evaluation.navigator_gate import navigator_evaluation_gate
+from openkb.evaluation.retrieval import (
     DesktopRetrievalEvaluationSuite,
     DesktopRetrievalEvaluator,
     _case_result,
     _page_tree_gate,
 )
-from openkb.desktop_retrieval_evaluation_types import (
+from openkb.evaluation.retrieval_types import (
     EVALUATION_CATEGORIES,
     DesktopEvaluationAnswer,
     DesktopEvaluationEvidenceSelector,
@@ -45,7 +33,19 @@ from openkb.desktop_retrieval_evaluation_types import (
     DesktopRetrievalEvaluationMetrics,
     evaluation_corpus_identity,
 )
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+from openkb.importing.service import DesktopTextImportService
+from openkb.knowledge.graph.feature_flags import local_graph_default_enabled
+from openkb.knowledge.pages.generations import (
+    KnowledgeGenerationChange,
+    current_generation_id_in,
+    knowledge_content_sha256,
+    publish_generation_changes_in,
+)
+from openkb.models.gateway import DesktopModelCancelledError, DesktopModelGateway
+from openkb.page_tree.selection import PageTreeSelectionResult
+from openkb.retrieval.catalog_store import rebuild_pending_catalog
+from openkb.retrieval.service import DesktopEvidenceRetriever
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
 def test_evidence_recall_at_six_ignores_routed_answer_context_beyond_six() -> None:
@@ -471,10 +471,10 @@ def test_fixed_suite_compares_all_vectorless_variants_with_unknown_graph_semanti
 ):
     """A snapshot suite reports every metric without inventing unavailable graph meaning."""
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     monkeypatch.setattr(
-        "openkb.desktop_catalog_store.start_catalog_rebuilds", lambda *_args, **_kwargs: None
+        "openkb.retrieval.catalog_store.start_catalog_rebuilds", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "desktop-kb"
     DesktopKnowledgeBaseRuntime().create(kb_dir)
@@ -824,7 +824,7 @@ def test_fixed_suite_compares_all_vectorless_variants_with_unknown_graph_semanti
         evaluator.require_navigator_promotion_eligible(report, suite)
     with monkeypatch.context() as scoped:
         scoped.setattr(
-            "openkb.desktop_retrieval.select_page_tree_evidence",
+            "openkb.retrieval.service.select_page_tree_evidence",
             lambda *_args, **_kwargs: PageTreeSelectionResult(
                 trigger_reasons=("long_document",),
                 degradation_reasons=("page_tree_selection_failed",),

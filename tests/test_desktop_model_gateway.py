@@ -6,10 +6,10 @@ import threading
 
 import pytest
 
-from openkb import desktop_model_transport
 from openkb.config import LlmCredentialBundle
-from openkb.desktop_import_types import DesktopRecoveryOverride
-from openkb.desktop_model_gateway import (
+from openkb.importing.types import DesktopRecoveryOverride
+from openkb.models import transport as desktop_model_transport
+from openkb.models.gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
     DesktopModelGateway,
@@ -17,11 +17,11 @@ from openkb.desktop_model_gateway import (
     DesktopModelTransportError,
     classify_model_error,
 )
-from openkb.desktop_model_terminal import (
+from openkb.models.terminal import (
     MODEL_CONNECT_TIMEOUT_SECONDS,
     DesktopTerminalModelGateway,
 )
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 class HttpFailure(RuntimeError):
@@ -38,17 +38,6 @@ def test_gateway_factory_has_no_response_timeout_constructor() -> None:
         DesktopModelGateway(
             lambda _request, _connect_timeout: "complete",
             initial_timeout_seconds=20,
-        )
-
-
-@pytest.mark.parametrize("timeout", (0.0, -1.0, float("nan"), float("inf")))
-def test_request_scoped_response_timeout_must_be_finite_and_positive(timeout: float) -> None:
-    with pytest.raises(ValueError, match="timeout must be finite and positive"):
-        DesktopModelRequest(
-            "query_planning",
-            "Question",
-            "{}",
-            response_timeout_seconds=timeout,
         )
 
 

@@ -10,23 +10,24 @@ from datetime import datetime, timezone
 
 import pytest
 
-from openkb import desktop_model_transport
-from openkb.desktop_engine import DesktopEngineServer, DesktopRequestError
-from openkb.desktop_engine_imports import run_import
-from openkb.desktop_import import DesktopImportError, DesktopTextImportService
-from openkb.desktop_import_types import DesktopRecoveryOverride
-from openkb.desktop_legacy_model_recovery import (
+from openkb.engine.imports import run_import
+from openkb.engine.protocol import DesktopRequestError
+from openkb.engine.server import DesktopEngineServer
+from openkb.importing.service import DesktopImportError, DesktopTextImportService
+from openkb.importing.types import DesktopRecoveryOverride
+from openkb.models import transport as desktop_model_transport
+from openkb.models.capability_store import DesktopModelCapabilityStore
+from openkb.models.execution_profile import analysis_execution_profile_for_settings
+from openkb.models.gateway import DesktopModelCancelledError
+from openkb.models.legacy_recovery import (
     CONTINUE_COMPATIBLE,
     RESTART_CURRENT_PLAN,
     DesktopLegacyModelRecoveryService,
 )
-from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
-from openkb.desktop_model_execution_profile import analysis_execution_profile_for_settings
-from openkb.desktop_model_gateway import DesktopModelCancelledError
-from openkb.desktop_model_recovery import DesktopModelRecoveryService
-from openkb.desktop_model_settings import save_desktop_model_settings
-from openkb.desktop_prompt_contracts import prompt_contract_for
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.models.prompt_contracts import prompt_contract_for
+from openkb.models.recovery import DesktopModelRecoveryService
+from openkb.models.settings import save_desktop_model_settings
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def _legacy_deadline_job(tmp_path, *, digest: str | None = None):
@@ -330,14 +331,14 @@ def test_check_and_recover_verifies_replacement_before_discarding_model_state(
         desktop_model_transport, "DesktopLiteLLMTransport", FailingCapabilityTransport
     )
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     monkeypatch.setattr(
-        "openkb.desktop_engine_imports.page_tree_enrichment_engine.start_page_tree_enrichments",
+        "openkb.engine.imports.page_tree_enrichment_engine.start_page_tree_enrichments",
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        "openkb.desktop_engine_imports.knowledge_graph_engine.start_knowledge_graph_extractions",
+        "openkb.engine.imports.knowledge_graph_engine.start_knowledge_graph_extractions",
         lambda *_args, **_kwargs: None,
     )
     server = DesktopEngineServer(io.BytesIO(), io.BytesIO())
@@ -350,7 +351,7 @@ def test_check_and_recover_verifies_replacement_before_discarding_model_state(
     assert recovery_gateway is not None
     recovery_profile = recovery_gateway.execution_profile_for_operation("knowledge_analysis")
 
-    with caplog.at_level(logging.WARNING, logger="openkb.desktop_model_failure_logging"):
+    with caplog.at_level(logging.WARNING, logger="openkb.diagnostics.model_failures"):
         with pytest.raises(DesktopRequestError, match="schema-valid structured output"):
             run_import(
                 server,

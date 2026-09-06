@@ -10,34 +10,31 @@ from threading import Event
 
 import pytest
 
-from openkb import desktop_engine_model_settings, desktop_model_transport
 from openkb.config import DEFAULT_API_BASE_URL, DEFAULT_CONFIG, save_config
-from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
-from openkb.desktop_engine import (
-    DesktopEngineServer,
-    DesktopRequest,
-    DesktopRequestError,
-    FrameReader,
-)
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
-from openkb.desktop_model_capability_check import answer_capability_check_request
-from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
-from openkb.desktop_model_execution_profile import (
+from openkb.diagnostics.bundle import DesktopDiagnosticBundleService
+from openkb.engine import model_settings as desktop_engine_model_settings
+from openkb.engine.protocol import DesktopRequest, DesktopRequestError, FrameReader
+from openkb.engine.server import DesktopEngineServer
+from openkb.importing.service import DesktopTextImportService
+from openkb.knowledge.analysis.service import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.models import transport as desktop_model_transport
+from openkb.models.capability_check import answer_capability_check_request
+from openkb.models.capability_store import DesktopModelCapabilityStore
+from openkb.models.execution_profile import (
     ANSWER_CAPABILITY_SYSTEM_PROMPT,
     ANSWER_CAPABILITY_USER_PROMPT,
     DesktopModelCapacityError,
     analysis_execution_profile_for_settings,
     answer_capability_profile_for_settings,
 )
-from openkb.desktop_model_gateway import (
+from openkb.models.gateway import (
     DesktopModelCancelledError,
     DesktopModelGateway,
     DesktopModelRequest,
     DesktopModelResult,
 )
-from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
-from openkb.desktop_model_settings import (
+from openkb.models.operation_state import DesktopModelOperationContractStore
+from openkb.models.settings import (
     DEFAULT_MAX_CONCURRENT_MODEL_CALLS,
     DesktopModelSettings,
     DesktopModelSettingsError,
@@ -46,8 +43,8 @@ from openkb.desktop_model_settings import (
     save_desktop_model_settings,
     validate_desktop_model_settings,
 )
-from openkb.desktop_model_terminal import DesktopTerminalModelEvent
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.models.terminal import DesktopTerminalModelEvent
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def _create_desktop_kb(kb_dir):

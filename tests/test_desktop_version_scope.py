@@ -6,20 +6,20 @@ import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
-from openkb.desktop_document_version_catalog import (
+from openkb.documents.version_catalog import (
     DocumentLineageDecision,
     DocumentVersionMemberDecision,
 )
-from openkb.desktop_document_versions import DesktopDocumentVersionService
-from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_scoped_evidence import ScopedEvidenceView
-from openkb.desktop_version_scope import resolve_version_scope
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+from openkb.documents.version_scope import resolve_version_scope
+from openkb.documents.versions import DesktopDocumentVersionService
+from openkb.importing.runner import DesktopTextImportService
+from openkb.retrieval.scoped_evidence import ScopedEvidenceView
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
 def _confirmed_pair(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "knowledge"
     DesktopKnowledgeBaseRuntime().create(kb_dir)

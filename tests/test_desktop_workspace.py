@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from openkb import desktop_workspace, desktop_workspace_backup
-from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
-from openkb.desktop_workspace import (
+from openkb.models.result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
+from openkb.workspace import backup as desktop_workspace_backup
+from openkb.workspace import runtime as desktop_workspace
+from openkb.workspace.runtime import (
     DesktopKnowledgeBaseNotFoundError,
     DesktopKnowledgeBaseRuntime,
     DesktopKnowledgeBaseStateError,

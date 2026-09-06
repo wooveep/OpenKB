@@ -6,14 +6,14 @@ import json
 import sqlite3
 import threading
 
-from openkb import desktop_page_tree as page_tree_runtime
-from openkb import desktop_page_tree_store as page_tree_store
-from openkb import desktop_workspace
-from openkb.desktop_import_artifacts import DocumentIRBlock, SourceImage, build_evidence
-from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_knowledge_analysis_batches import plan_knowledge_analysis_batches
-from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.importing.artifacts import DocumentIRBlock, SourceImage, build_evidence
+from openkb.importing.runner import DesktopTextImportService
+from openkb.knowledge.analysis.batches import plan_knowledge_analysis_batches
+from openkb.models.result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
+from openkb.page_tree import store as page_tree_store
+from openkb.page_tree import tree as page_tree_runtime
+from openkb.workspace import runtime as desktop_workspace
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 LATEST_SCHEMA_VERSION = desktop_workspace._MIGRATIONS[-1][0]
 

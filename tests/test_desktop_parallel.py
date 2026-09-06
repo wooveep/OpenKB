@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from openkb.desktop_parallel import parallel_map_ordered
+from openkb.shared.parallel import parallel_map_ordered
 
 
 def test_parallel_map_stops_new_dispatch_after_a_worker_fails() -> None:

@@ -2,7 +2,8 @@
 
 from pathlib import Path
 
-from openkb import desktop_engine, desktop_engine_entrypoint
+from openkb.engine import entrypoint as desktop_engine_entrypoint
+from openkb.engine import server as desktop_engine
 
 
 def test_portable_engine_freezes_a_canonical_import_wrapper() -> None:
@@ -10,5 +11,5 @@ def test_portable_engine_freezes_a_canonical_import_wrapper() -> None:
     package_script = (
         Path(__file__).parents[1] / "desktop" / "scripts" / "New-PortablePackage.ps1"
     ).read_text(encoding="utf-8")
-    assert 'openkb\\desktop_engine_entrypoint.py"' in package_script
-    assert 'openkb\\desktop_engine.py"' not in package_script
+    assert 'openkb\\engine\\entrypoint.py"' in package_script
+    assert 'openkb\\engine\\server.py"' not in package_script

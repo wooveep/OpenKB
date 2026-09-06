@@ -8,9 +8,9 @@ import sqlite3
 import zipfile
 from pathlib import Path
 
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_source_integrity import audit_source_integrity_in
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+from openkb.documents.source_integrity import audit_source_integrity_in
+from openkb.importing.service import DesktopTextImportService
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
 def test_markdown_structure_loss_is_reported_without_source_content(tmp_path: Path) -> None:

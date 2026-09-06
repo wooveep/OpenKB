@@ -12,6 +12,12 @@ promote it into a lint (see `tests/test_file_size.py` for the pattern).
 ## Reuse
 - **Prefer shared utilities over hand-rolled helpers** so invariants stay
   centralized. Check `openkb/` for an existing helper before writing a new one.
+- **Place code with its owning domain.** Follow `docs/architecture.md`; shared
+  primitives depend only on other primitives, and Engine request validation
+  stays independent of server assembly (`tests/test_package_architecture.py`).
+- **Reuse connection and time policies.** State connections use
+  `openkb/storage/sqlite.py`; durable UTC timestamps use `openkb/shared/clock.py`.
+  The owning service still controls locks, transactions, and connection closure.
 
 ## I/O and state
 - **All Desktop KB mutations go through `openkb/locks.py` and the owning

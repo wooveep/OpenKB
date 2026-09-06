@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+requires = ["hatchling==1.32.0", "hatch-vcs==0.5.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -48,7 +48,7 @@ Homepage = "https://github.com/wooveep/OpenKB"
 Issues = "https://github.com/wooveep/OpenKB/issues"
 
 [project.scripts]
-openkb-desktop-engine = "openkb.desktop_engine:main"
+openkb-desktop-engine = "openkb.engine.server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

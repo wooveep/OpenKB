@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import json
 
-from openkb.desktop_knowledge_page import (
+from openkb.knowledge.pages.page import (
     KnowledgePageClaimSnapshot,
     knowledge_page_claim_snapshot_digest,
     render_knowledge_page,
 )
-from openkb.desktop_knowledge_page_planner import run_knowledge_page_planning
-from openkb.desktop_knowledge_page_planning import parse_knowledge_page_plan
-from openkb.desktop_model_gateway import DesktopModelResult
-from openkb.desktop_model_roles import model_lane_for_operation, model_role_for_operation
-from openkb.desktop_prompt_contracts import prompt_contract_for
-from openkb.desktop_query_planning import parse_query_planning_result
-from openkb.desktop_semantic_structure_contracts import normalize_dynamic_semantic_text
+from openkb.knowledge.pages.planner import run_knowledge_page_planning
+from openkb.knowledge.pages.planning import parse_knowledge_page_plan
+from openkb.models.gateway import DesktopModelResult
+from openkb.models.prompt_contracts import prompt_contract_for
+from openkb.models.roles import model_lane_for_operation, model_role_for_operation
+from openkb.models.semantic_structure_contracts import normalize_dynamic_semantic_text
+from openkb.retrieval.query_planning import parse_query_planning_result
 
 
 def test_semantic_planning_operations_are_provider_neutral_analysis_contracts() -> None:

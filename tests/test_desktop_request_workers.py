@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from openkb.desktop_request_workers import DesktopRequestWorkers
+from openkb.engine.request_workers import DesktopRequestWorkers
 
 
 def test_request_workers_bound_active_threads_and_drain_queued_work() -> None:

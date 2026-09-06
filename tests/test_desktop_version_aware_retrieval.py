@@ -6,21 +6,21 @@ from pathlib import Path
 
 import pytest
 
-from openkb.desktop_answer_types import DesktopAnswerError
-from openkb.desktop_document_version_catalog import (
+from openkb.answers.types import DesktopAnswerError
+from openkb.documents.version_catalog import (
     DocumentLineageDecision,
     DocumentVersionMemberDecision,
 )
-from openkb.desktop_document_versions import DesktopDocumentVersionService
-from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_retrieval import DesktopEvidenceRetriever
-from openkb.desktop_version_scope import RetrievalRequest, VersionFilter
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.documents.version_scope import RetrievalRequest, VersionFilter
+from openkb.documents.versions import DesktopDocumentVersionService
+from openkb.importing.runner import DesktopTextImportService
+from openkb.retrieval.service import DesktopEvidenceRetriever
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def _versioned_guide(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "knowledge"
     DesktopKnowledgeBaseRuntime().create(kb_dir)
@@ -98,7 +98,7 @@ def test_unavailable_exact_scope_fails_closed_before_retrieval_planning(
     def unexpected_planning(*_args, **_kwargs):
         raise AssertionError("retrieval planning must not run for an unavailable Version Scope")
 
-    monkeypatch.setattr("openkb.desktop_retrieval.build_query_plan", unexpected_planning)
+    monkeypatch.setattr("openkb.retrieval.service.build_query_plan", unexpected_planning)
 
     with pytest.raises(DesktopAnswerError) as caught:
         DesktopEvidenceRetriever(kb_dir).retrieve(

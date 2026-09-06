@@ -7,22 +7,22 @@ import json
 import pytest
 from litellm.utils import get_optional_params
 
-from openkb import desktop_model_transport
 from openkb.config import LlmCredentialBundle
-from openkb.desktop_model_execution_profile import analysis_execution_profile_for_settings
-from openkb.desktop_model_gateway import (
+from openkb.models import transport as desktop_model_transport
+from openkb.models.execution_profile import analysis_execution_profile_for_settings
+from openkb.models.gateway import (
     DesktopModelCallError,
     DesktopModelRequest,
     DesktopModelResult,
 )
-from openkb.desktop_model_provider_adapter import (
+from openkb.models.prompt_contracts import prompt_contract_for
+from openkb.models.provider_adapter import (
     model_protocol_for,
     named_provider_adapter_for,
 )
-from openkb.desktop_model_roles import DesktopRoleModelGateway
-from openkb.desktop_model_settings import DesktopModelSettings, DesktopModelSettingsError
-from openkb.desktop_model_terminal import DesktopTerminalModelGateway
-from openkb.desktop_prompt_contracts import prompt_contract_for
+from openkb.models.roles import DesktopRoleModelGateway
+from openkb.models.settings import DesktopModelSettings, DesktopModelSettingsError
+from openkb.models.terminal import DesktopTerminalModelGateway
 
 
 def test_deepseek_resolves_role_reasoning_and_structured_protocol_explicitly() -> None:

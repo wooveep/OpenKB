@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from openkb.desktop_answer_types import DesktopEvidencePack, DesktopEvidenceRef
-from openkb.desktop_navigation_budget import (
+from openkb.answers.types import DesktopEvidencePack, DesktopEvidenceRef
+from openkb.retrieval.navigation.budget import (
     NavigationEvidenceEnvelope,
     navigation_evidence_envelope,
 )
-from openkb.desktop_navigation_evidence import allocate_evidence
-from openkb.desktop_navigation_session import _bounded_initial_pack
-from openkb.desktop_retrieval_plan import deterministic_plan
+from openkb.retrieval.navigation.evidence import allocate_evidence
+from openkb.retrieval.navigation.session import _bounded_initial_pack
+from openkb.retrieval.plan import deterministic_plan
 
 
 class _Gateway:

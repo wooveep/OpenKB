@@ -5,19 +5,19 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-from openkb.desktop_adaptive_navigation import initial_navigation_objective
-from openkb.desktop_answer_types import DesktopEvidenceRef, DesktopRetrievalPlan
-from openkb.desktop_knowledge_navigation_windows import phase_diverse_source_window
-from openkb.desktop_navigation_evidence import allocate_evidence
+from openkb.answers.types import DesktopEvidenceRef, DesktopRetrievalPlan
+from openkb.retrieval.navigation.adaptive import initial_navigation_objective
+from openkb.retrieval.navigation.evidence import allocate_evidence
+from openkb.retrieval.navigation.knowledge_windows import phase_diverse_source_window
 
 _PRODUCTION_POLICY_FILES = (
-    "desktop_adaptive_navigation.py",
-    "desktop_knowledge_navigation.py",
-    "desktop_knowledge_navigation_routes.py",
-    "desktop_knowledge_navigation_windows.py",
-    "desktop_navigation_evidence.py",
-    "desktop_navigation_ranking.py",
-    "desktop_prompt_contracts.py",
+    "retrieval/navigation/adaptive.py",
+    "retrieval/navigation/knowledge.py",
+    "retrieval/navigation/knowledge_routes.py",
+    "retrieval/navigation/knowledge_windows.py",
+    "retrieval/navigation/evidence.py",
+    "retrieval/navigation/ranking.py",
+    "models/prompt_contracts.py",
 )
 _FIXTURE_VOCABULARY = (
     "ocloudservicetool",

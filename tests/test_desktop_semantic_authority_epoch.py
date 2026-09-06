@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from openkb.desktop_workspace import (
+from openkb.workspace.runtime import (
     DESKTOP_SCHEMA_EPOCH,
     DesktopKnowledgeBaseRuntime,
     ObsoleteDesktopKnowledgeBaseEpochError,
@@ -67,7 +67,7 @@ def test_obsolete_epoch_is_rejected_before_any_database_mutation(
         raise AssertionError("obsolete databases must not enter migration")
 
     monkeypatch.setattr(
-        "openkb.desktop_workspace.migrate_existing_database",
+        "openkb.workspace.runtime.migrate_existing_database",
         unexpected_migration,
     )
 

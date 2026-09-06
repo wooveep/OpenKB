@@ -7,21 +7,21 @@ from pathlib import Path
 
 import pytest
 
-from openkb.desktop_import_artifacts import DesktopImportError
-from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_knowledge_generations import (
+from openkb.importing.artifacts import DesktopImportError
+from openkb.importing.runner import DesktopTextImportService
+from openkb.knowledge.pages.generations import (
     KnowledgeGenerationSource,
     knowledge_content_sha256,
 )
-from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
-from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
-from openkb.desktop_knowledge_reconciliation_changes import IncomingKnowledgeChange
-from openkb.desktop_knowledge_reconciliation_resolution import (
+from openkb.knowledge.pages.service import DesktopKnowledgePageService
+from openkb.knowledge.pages.sources import stable_source_id
+from openkb.knowledge.reconciliation.changes import IncomingKnowledgeChange
+from openkb.knowledge.reconciliation.resolution import (
     DesktopKnowledgeReconciliationResolutionService,
 )
-from openkb.desktop_knowledge_sources import stable_source_id
-from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+from openkb.knowledge.reconciliation.service import DesktopKnowledgeReconciliationService
+from openkb.models.result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
 def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:

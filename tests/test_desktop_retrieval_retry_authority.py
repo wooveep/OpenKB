@@ -5,19 +5,21 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from openkb import desktop_model_transport, desktop_page_tree_selection, desktop_retrieval_planning
-from openkb.desktop_grounded_answer import DesktopGroundedAnswerService
-from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
-from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
-from openkb.desktop_model_result_failure import authorize_model_operation_retry
-from openkb.desktop_model_settings import save_desktop_model_settings
-from openkb.desktop_page_tree_selection import select_page_tree_evidence
-from openkb.desktop_prompt_contracts import prompt_contract_for
-from openkb.desktop_retrieval import DesktopEvidenceRetriever
-from openkb.desktop_retrieval_planning import build_query_plan
-from openkb.desktop_structured_output import structured_output_repair_contract_digest
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+from openkb.answers.grounded import DesktopGroundedAnswerService
+from openkb.importing.runner import DesktopTextImportService
+from openkb.models import transport as desktop_model_transport
+from openkb.models.capability_store import DesktopModelCapabilityStore
+from openkb.models.operation_state import DesktopModelOperationContractStore
+from openkb.models.prompt_contracts import prompt_contract_for
+from openkb.models.result_failure import authorize_model_operation_retry
+from openkb.models.settings import save_desktop_model_settings
+from openkb.models.structured_output import structured_output_repair_contract_digest
+from openkb.page_tree import selection as desktop_page_tree_selection
+from openkb.page_tree.selection import select_page_tree_evidence
+from openkb.retrieval import planning as desktop_retrieval_planning
+from openkb.retrieval.planning import build_query_plan
+from openkb.retrieval.service import DesktopEvidenceRetriever
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
 def _knowledge_base(tmp_path):

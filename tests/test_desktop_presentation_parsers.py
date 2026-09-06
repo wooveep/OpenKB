@@ -14,10 +14,10 @@ from pptx.oxml.ns import qn
 from pptx.oxml.xmlchemy import OxmlElement
 from pptx.util import Inches
 
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_import_artifacts import DesktopImportError
-from openkb.desktop_raw_assets import DesktopRawAssetService
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.documents.raw_assets import DesktopRawAssetService
+from openkb.importing.artifacts import DesktopImportError
+from openkb.importing.service import DesktopTextImportService
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def test_pptx_import_retains_slide_order_shapes_notes_tables_and_source_images(tmp_path):

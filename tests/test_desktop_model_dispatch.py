@@ -8,19 +8,19 @@ from typing import Any, cast
 
 import pytest
 
-from openkb.desktop_model_dispatch import (
+from openkb.models.dispatch import (
     _ConcurrentDesktopModelTransport,
     _DesktopModelConcurrencyGate,
     _DesktopModelRateLimiter,
     _estimated_request_tokens,
 )
-from openkb.desktop_model_gateway import (
+from openkb.models.gateway import (
     DesktopModelCancelledError,
     DesktopModelProviderResponse,
     DesktopModelRequest,
     DesktopProviderTokenUsage,
 )
-from openkb.desktop_model_terminal import DesktopTerminalModelGateway
+from openkb.models.terminal import DesktopTerminalModelGateway
 
 
 def _gateway(provider, limiter, *, maximum: int = 2):

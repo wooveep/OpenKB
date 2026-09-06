@@ -7,10 +7,10 @@ import sqlite3
 
 import pytest
 
-import openkb.desktop_raw_assets as desktop_raw_assets
-from openkb.desktop_import import DesktopImportError, DesktopTextImportService
-from openkb.desktop_raw_assets import DesktopRawAssetService
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+import openkb.documents.raw_assets as desktop_raw_assets
+from openkb.documents.raw_assets import DesktopRawAssetService
+from openkb.importing.service import DesktopImportError, DesktopTextImportService
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def test_raw_reader_returns_verified_original_and_persists_its_lifecycle(tmp_path):

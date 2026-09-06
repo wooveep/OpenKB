@@ -187,9 +187,16 @@ def _parse_matrix(value: object) -> tuple[tuple[EvaluationCase, ...], tuple[Eval
         except KeyError as error:
             raise SemanticQualityError("A metamorphic pair references an unknown case.") from error
         relationship = _text(pair.get("relationship"), f"pair[{index}].relationship")
-        if relationship != "structurally_equivalent_translation":
+        if relationship not in {
+            "structurally_equivalent_translation",
+            "structurally_equivalent_domain_substitution",
+            "equivalent_evidence_reorganization",
+        }:
             raise SemanticQualityError("Unsupported metamorphic relationship.")
-        if {left.language, right.language} != {"en", "zh"}:
+        if relationship == "structurally_equivalent_translation" and {
+            left.language,
+            right.language,
+        } != {"en", "zh"}:
             raise SemanticQualityError("Translation pairs must contain English and Chinese cases.")
         pairs.append(
             EvaluationPair(
@@ -201,6 +208,14 @@ def _parse_matrix(value: object) -> tuple[tuple[EvaluationCase, ...], tuple[Eval
         )
     if len({pair.pair_id for pair in pairs}) != len(pairs):
         raise SemanticQualityError("Metamorphic pair IDs must be unique.")
+    if {pair.relationship for pair in pairs} != {
+        "structurally_equivalent_translation",
+        "structurally_equivalent_domain_substitution",
+        "equivalent_evidence_reorganization",
+    }:
+        raise SemanticQualityError(
+            "The matrix must cover translation, domain substitution, and evidence reorganization."
+        )
     return cases, tuple(pairs)
 
 

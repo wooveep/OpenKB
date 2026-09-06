@@ -20,16 +20,28 @@
     {
       "id": "evidence_respect",
       "prompt": "Does the structure stay within the supplied evidence and claim identities without inventing factual content?"
+    },
+    {
+      "id": "candidate_and_relationship_quality",
+      "prompt": "In the full pipeline outputs, are admitted identities, claims, and graph relationships supported by the original excerpts, with meaningful candidates retained and uncertain relationships left unresolved?"
+    },
+    {
+      "id": "cross_document_consistency",
+      "prompt": "Do rendered pages and review decisions preserve source scope and applicability across documents, retaining disagreements instead of silently combining incompatible claims?"
+    },
+    {
+      "id": "grounded_answer_quality",
+      "prompt": "Does the full pipeline answer address the question accurately, with citations supporting its claims and omissions or uncertainty stated when the evidence is insufficient?"
     }
   ],
   "pair_dimensions": [
     {
       "id": "structural_equivalence",
-      "prompt": "Do the translated cases receive semantically equivalent coverage and organization despite natural language differences?"
+      "prompt": "Does coverage preserve the declared relationship under translation, domain substitution, or evidence reorganization without imposing a fixed domain template?"
     },
     {
       "id": "language_naturalness",
-      "prompt": "Is each member expressed naturally in its own language without copying headings from the other language?"
+      "prompt": "Is each member expressed naturally in its own language and domain, without copying irrelevant headings from its pair?"
     }
   ],
   "decision_rule": "Every dimension must pass for every suite and every declared pair; aggregate averages cannot mask a failed suite."

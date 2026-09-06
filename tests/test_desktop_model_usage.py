@@ -8,19 +8,19 @@ import zipfile
 
 import pytest
 
-from openkb import desktop_model_transport
-from openkb.desktop_diagnostic_bundle import DesktopDiagnosticBundleService
-from openkb.desktop_model_gateway import (
+from openkb.diagnostics.bundle import DesktopDiagnosticBundleService
+from openkb.models import transport as desktop_model_transport
+from openkb.models.gateway import (
     DesktopModelCallError,
     DesktopModelOutputObservations,
     DesktopModelProviderResponse,
     DesktopModelRequest,
     DesktopProviderTokenUsage,
 )
-from openkb.desktop_model_settings import save_desktop_model_settings
-from openkb.desktop_model_terminal import DesktopTerminalModelEvent
-from openkb.desktop_model_usage import DesktopModelUsageStore
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.models.settings import save_desktop_model_settings
+from openkb.models.terminal import DesktopTerminalModelEvent
+from openkb.models.usage import DesktopModelUsageStore
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def _create_kb(tmp_path):

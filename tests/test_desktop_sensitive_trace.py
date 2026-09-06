@@ -12,28 +12,28 @@ from pathlib import Path
 
 import pytest
 
-import openkb.desktop_sensitive_trace as sensitive_trace_runtime
-from openkb.desktop_engine_logging import log_engine_stopped
-from openkb.desktop_logging import (
+import openkb.diagnostics.sensitive_trace as sensitive_trace_runtime
+from openkb.diagnostics.engine import log_engine_stopped
+from openkb.diagnostics.logging import (
     configure_desktop_engine_logging,
     flush_desktop_engine_logging,
     shutdown_desktop_engine_logging_for_tests,
 )
-from openkb.desktop_logging_settings import DiagnosticLoggingSettings
-from openkb.desktop_model_gateway import (
+from openkb.diagnostics.sensitive_trace import (
+    MAX_EVENT_METADATA_BYTES,
+    MAX_PAYLOAD_BYTES,
+    SensitiveTraceCapture,
+    configure_sensitive_trace,
+    reset_sensitive_trace_for_tests,
+)
+from openkb.diagnostics.settings import DiagnosticLoggingSettings
+from openkb.models.gateway import (
     DesktopModelCallError,
     DesktopModelGateway,
     DesktopModelOutputObservations,
     DesktopModelProviderResponse,
     DesktopModelRequest,
     DesktopModelTransportError,
-)
-from openkb.desktop_sensitive_trace import (
-    MAX_EVENT_METADATA_BYTES,
-    MAX_PAYLOAD_BYTES,
-    SensitiveTraceCapture,
-    configure_sensitive_trace,
-    reset_sensitive_trace_for_tests,
 )
 
 

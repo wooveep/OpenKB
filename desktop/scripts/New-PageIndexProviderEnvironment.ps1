@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $lockFile = Join-Path $repoRoot "requirements-pageindex-experimental.lock"
-$worker = Join-Path $repoRoot "openkb/desktop_pageindex_worker.py"
+$worker = Join-Path $repoRoot "openkb/page_tree/pageindex/worker.py"
 $runtimeDir = [System.IO.Path]::GetFullPath($Destination)
 
 uv venv $runtimeDir --python $PythonVersion

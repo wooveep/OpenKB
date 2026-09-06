@@ -6,21 +6,21 @@ import json
 import sqlite3
 from pathlib import Path
 
-from openkb.desktop_candidate_registry import publish_candidate_registry_generation_in
-from openkb.desktop_corpus_synthesis_generation import (
+from openkb.importing.runner import DesktopTextImportService
+from openkb.knowledge.corpus.candidate_registry import publish_candidate_registry_generation_in
+from openkb.knowledge.corpus.synthesis_generation import (
     activate_qualified_corpus_generation_in,
     corpus_generation_manifest_in,
     create_pending_corpus_manifest_in,
     qualify_corpus_manifest_in,
 )
-from openkb.desktop_corpus_synthesis_tasks import claim_corpus_synthesis_task_in
-from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+from openkb.knowledge.corpus.synthesis_tasks import claim_corpus_synthesis_task_in
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
 def _import_document_without_background_graph(tmp_path: Path, monkeypatch) -> tuple[Path, str]:
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "notes.md"

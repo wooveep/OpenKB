@@ -9,7 +9,7 @@ not evaluation variants and cannot be enabled by this gate.
 Run the report from the repository with a populated Desktop knowledge base:
 
 ```bash
-uv run python -m openkb.desktop_retrieval_evaluation <kb-dir> <suite.json> \
+uv run python -m openkb.evaluation.retrieval <kb-dir> <suite.json> \
   --repetitions 3 --output <report.json> --promote-local-graph
 ```
 
@@ -110,7 +110,7 @@ After the required discovery channels have passed their own gates and are enable
 run the same frozen suite as the Navigator release gate:
 
 ```bash
-uv run python -m openkb.desktop_retrieval_evaluation <kb-dir> <suite.json> \
+uv run python -m openkb.evaluation.retrieval <kb-dir> <suite.json> \
   --repetitions 3 --output <navigator-report.json> \
   --validate-navigator-promotion
 ```
@@ -124,46 +124,44 @@ degradation, and keeps the pinned knowledge snapshot stable.
 Python callers may enforce the same stale-report check with
 `DesktopRetrievalEvaluator.require_navigator_promotion_eligible(report, suite)`.
 
-## Fixed real-corpus release attestation
+## Current semantic release evidence
 
-Corpus qualification also fails closed unless
-`openkb/benchmarks/real-corpus-attestation.json` validates. The aggregate-only
-version 2 attestation is bound to the three-document corpus digest, the
-non-secret model profile digest, every prompt contract used by import,
-navigation, and the grounded answer, the current Python/Rust/TypeScript
-implementation digest, and the implementation commit. A companion embedded
-implementation manifest keeps that check available inside the frozen Engine,
-where repository source trees do not exist. Changing bound code or a contract
-invalidates the report instead of silently reusing older quality evidence.
+[ADR 0083](adr/0083-derive-domain-semantics-under-code-owned-evidence-constraints.md)
+supersedes the fixed IT corpus score and its embedded runtime attestation. Runtime
+qualification checks evidence and snapshot integrity; it does not claim to prove
+semantic support. The earlier OCloudware numbers are historical measurements and
+are not release evidence for the current implementation.
 
-The fixed OCloudware suite asks three equivalent dual-node hyperconverged
-deployment questions three times each. Review scores thirteen required facts per
-answer, including node roles, system-disk and swap handling, management HA,
-storage, network safety, and failover validation. The shipped nine-run result is
-115/117 answer points (98.3%), with two source documents and forty bounded
-EvidenceRefs in every answer, no degradation run, no unsupported material claim,
-and successful retrieval replay after restart. The attestation stores only
-aggregate scores and opaque digests; raw private documents, answers, credentials,
-and model traces remain outside the repository.
+The repository-owned `evaluation/semantic_quality/` profile, matrix, and rubric
+cover ten cases across multiple domains. Every case runs three times. Metamorphic
+pairs cover Chinese/English translation, domain substitution, and evidence
+reorganization. Candidate-release runs execute both focused query/page planning
+and the production import → model candidate admission → relation extraction →
+page synthesis → retrieval → grounded answer → citation → restart-readback path.
+The full pipeline imports curated Markdown excerpts into fresh KBs; it never
+injects the prewritten page claims from the focused planner fixture. This checks
+the pipeline, while packaged Windows acceptance separately checks original DOCX
+inputs and the distributed parser runtime.
 
-The release gate requires at least 85% completeness, 95% correctness and citation
-precision, zero unsupported claims and degradation runs, passing structural
-corpus metrics, replay success, and a passing automated regression suite. It
-also records the fixed original-agent commit and model profile and rejects a
-current result that loses more than ten completeness points, correctness,
-citation precision, or degradation behavior against that baseline.
+```sh
+uv run python -m evaluation.semantic_quality run --candidate-release
+```
 
-Windows acceptance binds the exact `windows-portable-x64` candidate through two
-independently calculated normalized inventories: hashes and byte counts read
-from the package payload, and the same entries read from `release-manifest.json`.
-The inventories exclude only `release-manifest.json`, `openkb.local.json`, and
-the attestation JSON itself to avoid a circular hash. They must agree before the
-digest is recorded. The Windows record also requires a passing packaged smoke
-test, at least three questions without degradation, cancellation returning
-`answer_cancelled`, a completed regeneration, preserved Answer Versions, and a
-successful read after restart. Re-run the fixed suite and Windows acceptance
-whenever the corpus, model profile, implementation, candidate payload, or a
-bound prompt contract changes.
+Only this developer command reads `LLM_API_KEY` from the ignored repository-root
+`.env`. Raw outputs and temporary evaluation KBs stay under ignored `.semantic-eval/`.
+The report binds every production Python, Rust, and frontend source tree, dependency
+locks, packaging inputs, profile, matrix, rubric, and prompt contracts. Adding,
+removing, or editing a production module invalidates the implementation digest.
+
+A passed deterministic run remains `pending_human_review`. Human sign-off requires
+every rubric dimension for every suite and pair, an exact Windows package digest,
+and a matching `openkb.windows-semantic-smoke.v2` report. Required smoke checks are
+installation, original-document import, candidate admission, graph, query planning,
+page planning, grounded answers, version comparison, citations, restart recovery,
+provider-failure recovery, semantic-epoch rejection, and absence of secret leaks.
+Missing or failed checks block sign-off. The two OCloudView DOCX inputs remain part
+of Windows acceptance. Synthetic test clients are regression fixtures and do not
+constitute live-model or human acceptance.
 
 ## Experimental official PageIndex provider
 
@@ -192,7 +190,7 @@ The adapter never invokes PageIndex Chat, Agents, embeddings, or a vector store.
 Run the same fixed suite against the experimental provider explicitly:
 
 ```powershell
-uv run python -m openkb.desktop_retrieval_evaluation <kb-dir> <suite.json> `
+uv run python -m openkb.evaluation.retrieval <kb-dir> <suite.json> `
   --experimental-pageindex-python `
   "$env:LOCALAPPDATA\OpenKB\pageindex-provider-0.2.10\Scripts\python.exe" `
   --repetitions 3 --output <pageindex-report.json>
@@ -202,7 +200,7 @@ To evaluate the exact worker shipped in a candidate Portable Package, use the
 worker flag instead of the Python flag:
 
 ```powershell
-uv run python -m openkb.desktop_retrieval_evaluation <kb-dir> <suite.json> `
+uv run python -m openkb.evaluation.retrieval <kb-dir> <suite.json> `
   --experimental-pageindex-worker `
   "<portable-package>\runtime\pageindex\OpenKBPageIndex.exe" `
   --rebuild-official-pageindex --repetitions 3 `

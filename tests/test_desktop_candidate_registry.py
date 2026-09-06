@@ -5,17 +5,22 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from openkb.desktop_candidate_registry import DesktopKnowledgeCandidateRegistry
-from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_knowledge_analysis import (
+import pytest
+
+from openkb.importing.runner import DesktopTextImportService
+from openkb.knowledge.analysis.candidate_pipeline import DesktopKnowledgeCandidatePipeline
+from openkb.knowledge.analysis.reuse import analysis_evidence_for_document_in
+from openkb.knowledge.analysis.service import (
     KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
     parse_knowledge_analysis,
 )
-from openkb.desktop_knowledge_analysis_reuse import analysis_evidence_for_document_in
-from openkb.desktop_knowledge_candidate_pipeline import DesktopKnowledgeCandidatePipeline
-from openkb.desktop_model_gateway import DesktopModelGateway
-from openkb.desktop_semantic_graph_service import DesktopSemanticGraphService
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+from openkb.knowledge.corpus.candidate_registry import (
+    DesktopKnowledgeCandidateRegistry,
+    publish_candidate_registry_generation_in,
+)
+from openkb.knowledge.graph.semantic_graph_service import DesktopSemanticGraphService
+from openkb.models.gateway import DesktopModelGateway
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
 def _analysis(*, candidates: list[dict[str, object]] | None = None):
@@ -32,9 +37,39 @@ def _analysis(*, candidates: list[dict[str, object]] | None = None):
     )
 
 
+def test_registry_rejects_invalid_persisted_applicability_without_rewriting_history(
+    tmp_path, monkeypatch
+):
+    from test_desktop_corpus_synthesis_pipeline import _candidate_fixture
+
+    kb, document_id, *_ = _candidate_fixture(tmp_path, monkeypatch)
+    registry = DesktopKnowledgeCandidateRegistry(kb)
+    before = registry.inspect(document_id)
+    invalid = json.dumps(
+        [{"dimension": "version", "value": "1", "source_evidence_ids": ["foreign"]}]
+    )
+    with sqlite3.connect(desktop_state_database_path(kb)) as db:
+        db.execute(
+            "UPDATE knowledge_document_candidate_claims SET applicability_json = ?", (invalid,)
+        )
+        with pytest.raises(ValueError, match="subset"):
+            publish_candidate_registry_generation_in(
+                db,
+                document_id=document_id,
+                analysis_provenance_json="{}",
+                now="2026-09-06T00:00:00Z",
+            )
+    assert registry.inspect(document_id) == before
+    with sqlite3.connect(desktop_state_database_path(kb)) as db:
+        db.execute(
+            "UPDATE knowledge_candidate_generation_claims SET applicability_json = ?", (invalid,)
+        )
+    assert registry.inspect(document_id).status == "dependency_unavailable"
+
+
 def _import_without_graph(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "notes.md"
@@ -173,7 +208,7 @@ def test_d1_reuse_publishes_a_distinct_candidate_generation_without_model_call(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "knowledge"
     first_source = tmp_path / "first.md"
@@ -209,7 +244,13 @@ def test_d1_reuse_publishes_a_distinct_candidate_generation_without_model_call(
                         "claims": [
                             {
                                 "text": "A reusable stable fact defines the concept.",
-                                "applicability": [],
+                                "applicability": [
+                                    {
+                                        "dimension": "Version",
+                                        "value": "1",
+                                        "source_evidence_ids": [evidence_id],
+                                    }
+                                ],
                                 "source_evidence_ids": [evidence_id],
                             }
                         ],
@@ -233,3 +274,30 @@ def test_d1_reuse_publishes_a_distinct_candidate_generation_without_model_call(
     assert first_outcome.generation is not None
     assert second_outcome.generation is not None
     assert first_outcome.generation.generation_id != second_outcome.generation.generation_id
+
+    with sqlite3.connect(desktop_state_database_path(kb_dir)) as connection:
+        for outcome in (first_outcome, second_outcome):
+            generation_id = outcome.generation.generation_id
+            scope = json.loads(
+                connection.execute(
+                    "SELECT applicability_json FROM knowledge_candidate_generation_claims "
+                    "WHERE candidate_generation_id = ?",
+                    (generation_id,),
+                ).fetchone()[0]
+            )
+            sources = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT evidence_id FROM knowledge_candidate_generation_claim_sources "
+                    "WHERE candidate_generation_id = ?",
+                    (generation_id,),
+                )
+            }
+            assert set(scope[0]["source_evidence_ids"]) == sources
+            assert sources <= {
+                row[0]
+                for row in connection.execute(
+                    "SELECT evidence_id FROM evidence_occurrences WHERE document_id = ?",
+                    (outcome.generation.document_id,),
+                )
+            }

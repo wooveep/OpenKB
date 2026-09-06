@@ -2,29 +2,34 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
+import threading
 from dataclasses import replace
 from pathlib import Path
 
-from openkb.desktop_corpus_knowledge_pipeline import CorpusKnowledgeSynthesisPipeline
-from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_knowledge_analysis import (
+from openkb.engine.server import DesktopEngineServer
+from openkb.importing.runner import DesktopTextImportService
+from openkb.knowledge.analysis.candidate_pipeline import DesktopKnowledgeCandidatePipeline
+from openkb.knowledge.analysis.reuse import analysis_evidence_for_document_in
+from openkb.knowledge.analysis.service import (
     DesktopKnowledgeAnalysis,
     KnowledgeAnalysisCandidate,
     KnowledgeAnalysisClaim,
     KnowledgeClaimApplicability,
 )
-from openkb.desktop_knowledge_analysis_reuse import analysis_evidence_for_document_in
-from openkb.desktop_knowledge_candidate_pipeline import DesktopKnowledgeCandidatePipeline
-from openkb.desktop_model_gateway import DesktopModelGateway
-from openkb.desktop_prompt_contracts import prompt_contract_for
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+from openkb.knowledge.corpus.knowledge_pipeline import CorpusKnowledgeSynthesisPipeline
+from openkb.knowledge.corpus.work_queue import CorpusWorkQueue, enqueue_corpus_work_in
+from openkb.locks import kb_ingest_lock
+from openkb.models.gateway import DesktopModelGateway
+from openkb.models.prompt_contracts import prompt_contract_for
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
 def _candidate_fixture(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "alpha.md"
@@ -134,6 +139,92 @@ def _gateway(transport, *, model: str = "planner-v1") -> DesktopModelGateway:
         provider_name="scripted",
         model_name=model,
     )
+
+
+def test_page_plans_reuse_identical_inputs_but_rebind_generation_ids(tmp_path, monkeypatch):
+    kb, document_id, *_ = _candidate_fixture(tmp_path, monkeypatch)
+    requests = []
+
+    def transport(request, _timeout):
+        requests.append(request)
+        return _page_response(request)
+
+    pipeline = CorpusKnowledgeSynthesisPipeline(kb)
+    first = pipeline.run_generation(gateway=_gateway(transport), preferred_language="en")
+    second = pipeline.run_generation(
+        gateway=_gateway(transport),
+        preferred_language="en",
+        affected_document_ids=(document_id,),
+        force_generation=True,
+    )
+    assert first.status == second.status == "active"
+    assert first.generation_id != second.generation_id
+    assert len(requests) == 1
+    assert second.pages[0].plan.generation_id == second.generation_id
+    assert first.pages[0].plan.placed_claim_ids != second.pages[0].plan.placed_claim_ids
+    pipeline.run_generation(
+        gateway=_gateway(transport, model="planner-v2"),
+        preferred_language="en",
+        force_generation=True,
+    )
+    assert len(requests) == 2
+
+
+def test_corpus_worker_generates_pages_without_running_optional_graph(tmp_path, monkeypatch):
+    kb, document_id, *_ = _candidate_fixture(tmp_path, monkeypatch)
+    with kb_ingest_lock(kb / ".openkb"), sqlite3.connect(desktop_state_database_path(kb)) as db:
+        enqueue_corpus_work_in(db, document_id)
+    runtime = DesktopKnowledgeBaseRuntime()
+    runtime.open(kb)
+    server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=runtime)
+    called = threading.Event()
+
+    def transport(request, _timeout):
+        assert request.operation == "knowledge_page_planning"
+        called.set()
+        return _page_response(request)
+
+    server._corpus_synthesis_workers.start(kb, _gateway(transport))
+    assert called.wait(10), "page synthesis must not depend on optional graph completion"
+    with server._workers_lock:
+        workers = tuple(server._workers)
+    for worker in workers:
+        worker.join(10)
+        assert not worker.is_alive()
+    assert CorpusWorkQueue(kb).pending() == {}
+    with sqlite3.connect(desktop_state_database_path(kb)) as db:
+        assert db.execute("SELECT COUNT(*) FROM knowledge_generation_page_plans").fetchone()[0] == 1
+
+
+def test_corpus_completion_does_not_consume_a_newer_queued_revision(tmp_path, monkeypatch):
+    kb, document_id, *_ = _candidate_fixture(tmp_path, monkeypatch)
+    queue = CorpusWorkQueue(kb)
+    with kb_ingest_lock(kb / ".openkb"), sqlite3.connect(desktop_state_database_path(kb)) as db:
+        enqueue_corpus_work_in(db, document_id)
+    first = queue.pending()
+    with kb_ingest_lock(kb / ".openkb"), sqlite3.connect(desktop_state_database_path(kb)) as db:
+        enqueue_corpus_work_in(db, document_id)
+    queue.finish(first)
+    assert queue.pending()[document_id] > first[document_id]
+
+
+def test_retired_gateway_finishes_active_result_but_cannot_start_repair(tmp_path, monkeypatch):
+    kb, *_ = _candidate_fixture(tmp_path, monkeypatch)
+    allowed = True
+    calls = []
+
+    def transport(request, _timeout):
+        nonlocal allowed
+        calls.append(request.operation)
+        allowed = False  # Settings changed while the provider was already processing this request.
+        return "{}"
+
+    outcome = CorpusKnowledgeSynthesisPipeline(kb).run_generation(
+        gateway=_gateway(transport),
+        can_dispatch=lambda: allowed,
+    )
+    assert calls == ["knowledge_page_planning"]
+    assert outcome.status == "cancelled"
 
 
 def test_corpus_pipeline_persists_a_dynamic_page_before_activation(
@@ -401,7 +492,7 @@ def test_page_dispatch_consumes_the_supplied_retry_scope(
         dispatch_scopes.append(retry_scope)
 
     monkeypatch.setattr(
-        "openkb.desktop_knowledge_page_model_planner.require_model_operation_dispatch",
+        "openkb.knowledge.pages.model_planner.require_model_operation_dispatch",
         record_dispatch,
     )
     outcome = CorpusKnowledgeSynthesisPipeline(kb_dir).run_generation(

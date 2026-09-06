@@ -3,14 +3,68 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
-from openkb.desktop_answer_types import DesktopEvidenceRef
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_model_gateway import DesktopModelGateway
-from openkb.desktop_retrieval import DesktopEvidenceRetriever
-from openkb.desktop_retrieval_plan import deterministic_plan
-from openkb.desktop_retrieval_planning import build_query_plan
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+import pytest
+
+from openkb.answers.types import DesktopEvidenceRef
+from openkb.importing.service import DesktopTextImportService
+from openkb.models.gateway import DesktopModelGateway
+from openkb.retrieval.plan import deterministic_plan
+from openkb.retrieval.planning import build_query_plan
+from openkb.retrieval.service import DesktopEvidenceRetriever
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
+
+
+@pytest.mark.parametrize("valid_semantics", (True, False))
+def test_dispatch_budget_preserves_inflight_result_and_prevents_the_next_call(
+    monkeypatch, valid_semantics
+) -> None:
+    now = [0.0]
+    monkeypatch.setattr(
+        "openkb.models.dispatch_budget.time", SimpleNamespace(monotonic=lambda: now[0])
+    )
+    calls = []
+
+    def respond(request, _timeout):
+        calls.append(request.operation)
+        now[0] = 200.0
+        return json.dumps(
+            {
+                "retrieval_plan": {"terms": ["institutional reform"]},
+                "question_facet_plan": {
+                    "goal": "Explain the reform",
+                    "facets": [
+                        {
+                            "label": "Changes",
+                            "description": "What changed",
+                            "importance": "required",
+                        }
+                    ]
+                    if valid_semantics
+                    else [],
+                },
+                "initial_answer_coverage": [
+                    {"facet_ordinal": 0, "state": "covered", "evidence_ids": ["evidence-1"]}
+                ]
+                if valid_semantics
+                else [],
+            }
+        )
+
+    gateway = DesktopModelGateway(respond)
+    result = build_query_plan(
+        "What changed?", gateway, seed_evidence=(_evidence(),), dispatch_deadline=120.0
+    )
+    assert calls == ["query_planning"]
+    assert "institutional reform" in result.plan.terms
+    assert result.semantic_structure_state == ("known" if valid_semantics else "unknown")
+    assert not any("cancelled" in value for value in result.degradations)
+    if not valid_semantics:
+        assert result.degradations == ("query_planning_budget_exhausted",)
+    later = build_query_plan("Another question", gateway, dispatch_deadline=120.0)
+    assert later.degradations == ("query_planning_budget_exhausted",)
+    assert calls == ["query_planning"]
 
 
 def _evidence(evidence_id: str = "evidence-1") -> DesktopEvidenceRef:

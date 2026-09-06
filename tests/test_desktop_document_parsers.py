@@ -7,9 +7,9 @@ import json
 import sqlite3
 import zipfile
 
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_raw_assets import DesktopRawAssetService
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.documents.raw_assets import DesktopRawAssetService
+from openkb.importing.service import DesktopTextImportService
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def test_markdown_import_retains_structured_ir_and_local_source_image(tmp_path):

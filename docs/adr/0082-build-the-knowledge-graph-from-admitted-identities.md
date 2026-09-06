@@ -6,7 +6,7 @@ status: accepted
 
 The complete pipeline, state machine, migration policy, and acceptance matrix
 are specified in the
-[Knowledge Identity Graph pipeline design](../desgin/2026-09-04-openkb-knowledge-identity-graph-pipeline-design.md).
+[Knowledge Identity Graph pipeline design](../design/2026-09-04-openkb-knowledge-identity-graph-pipeline-design.md).
 
 OpenKB builds its semantic graph only after Knowledge Analysis and Knowledge
 Candidate Admission. Document PageTree remains the structural projection of a

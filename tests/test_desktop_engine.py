@@ -13,24 +13,28 @@ from pathlib import Path
 
 import pytest
 
-from openkb import desktop_workspace as desktop_workspace_module
-from openkb.desktop_engine import (
-    DesktopEngineServer,
+from openkb.diagnostics.engine import EngineRequestDiagnostics
+from openkb.diagnostics.logging import TRACE_LEVEL
+from openkb.engine.protocol import (
     DesktopProtocolError,
     DesktopRequest,
     DesktopRequestError,
     FrameReader,
     encode_frame,
 )
-from openkb.desktop_engine_logging import EngineRequestDiagnostics
-from openkb.desktop_import import DesktopImportControl, DesktopImportError, DesktopTextImportService
-from openkb.desktop_import_store import DesktopImportStore
-from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
-from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
-from openkb.desktop_logging import TRACE_LEVEL
-from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelResult
-from openkb.desktop_model_terminal import DesktopTerminalModelEvent
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.engine.server import DesktopEngineServer
+from openkb.importing.service import (
+    DesktopImportControl,
+    DesktopImportError,
+    DesktopTextImportService,
+)
+from openkb.importing.store import DesktopImportStore
+from openkb.knowledge.analysis.service import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.knowledge.pages.service import DesktopKnowledgePageService
+from openkb.models.gateway import DesktopModelGateway, DesktopModelResult
+from openkb.models.terminal import DesktopTerminalModelEvent
+from openkb.workspace import runtime as desktop_workspace_module
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def _empty_knowledge_analysis() -> str:
@@ -153,7 +157,7 @@ def test_import_job_polling_uses_one_deduplicated_trace_without_filling_info(cap
     server = DesktopEngineServer(io.BytesIO(), io.BytesIO())
     server._handshake_complete = True
 
-    with caplog.at_level(TRACE_LEVEL, logger="openkb.desktop_engine_logging"):
+    with caplog.at_level(TRACE_LEVEL, logger="openkb.diagnostics.engine"):
         server._run_request(
             DesktopRequest(
                 request_id="poll",
@@ -177,7 +181,7 @@ def test_engine_boundary_references_failure_owner_through_domain_wrappers(caplog
         try:
             raise ValueError("capability check failed") from cause
         except ValueError as wrapped:
-            with caplog.at_level(TRACE_LEVEL, logger="openkb.desktop_engine_logging"):
+            with caplog.at_level(TRACE_LEVEL, logger="openkb.diagnostics.engine"):
                 EngineRequestDiagnostics.begin("request-1", "workbench.check_model").typed_failure(
                     wrapped
                 )

@@ -7,6 +7,7 @@ execute. Optimize changes for agent legibility.
 
 ## Read next
 - `docs/golden-principles.md` — mechanical rules to follow (enforced where possible).
+- `docs/architecture.md` — read before placing modules, changing shared code, or moving entry points.
 - `docs/internal/superpowers/{specs,plans}/` — design history & plans *(maintainer-local, not in git)*.
 - `README.md` — user-facing Desktop overview and packaging notes.
 
@@ -16,17 +17,17 @@ execute. Optimize changes for agent legibility.
 - Test: `pytest`
 - Lint/format/types: `ruff check .` · `ruff format .` · `mypy openkb`
 
-## Module map (openkb/)
-- `desktop_engine.py` — private stdio Engine and request dispatch.
-- `desktop_workspace.py` — Desktop KB lifecycle and SQLite schema activation.
-- `desktop_import_*.py` — staged import, parsing, deduplication, recovery, and quarantine.
-- `desktop_*_parsers.py` — format-specific DocumentIR parsers and media extraction.
-- `desktop_retrieval.py`, `desktop_grounded_answer.py` — evidence retrieval and grounded answers.
-- `desktop_knowledge_*.py` — graph extraction, knowledge pages, reconciliation, and materialization.
-- `desktop_model_*.py` — model gateway, settings, transport, and retry ledger.
-- `desktop_raw_assets.py` — original-document reader and source-image access.
-- `config.py` — KB-local, non-secret model configuration.
-- `locks.py` — atomic writes and KB-local file locking.
+## Module map
+- `openkb/engine/` — private stdio protocol, request dispatch, and executable entry point.
+- `openkb/workspace/` — KB lifecycle, paths, migrations, and backups.
+- `openkb/importing/`, `openkb/parsers/`, `openkb/documents/` — import jobs, DocumentIR, and originals.
+- `openkb/retrieval/`, `openkb/answers/`, `openkb/page_tree/` — retrieval, answers, and document trees.
+- `openkb/knowledge/` — analysis, corpus synthesis, graph, pages, reconciliation, and reanalysis.
+- `openkb/models/`, `openkb/diagnostics/` — model execution and diagnostics.
+- `openkb/storage/`, `openkb/shared/` — connection policy and domain-independent primitives.
+- `openkb/config.py`, `openkb/locks.py` — KB configuration and atomic, locked writes.
+- `frontend/src/desktop/{app,bridge,features,shared}/` — workbench assembly, adapters, and feature UI.
+- `desktop/src-tauri/src/{commands,engine,runtime,diagnostics}/` — native Shell responsibilities.
 
 ## Hard invariants
 - Deps are pinned **exactly** (supply-chain caution). Vet before bumping.

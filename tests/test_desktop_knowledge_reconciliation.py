@@ -7,17 +7,17 @@ from pathlib import Path
 
 import pytest
 
-import openkb.desktop_knowledge_reconciliation_resolution as reconciliation_resolution
-from openkb.desktop_import_artifacts import DesktopImportError
-from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_knowledge_generations import materialize_current_generation
-from openkb.desktop_knowledge_pages import DesktopKnowledgePageError, DesktopKnowledgePageService
-from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
-from openkb.desktop_knowledge_reconciliation_resolution import (
+import openkb.knowledge.reconciliation.resolution as reconciliation_resolution
+from openkb.importing.artifacts import DesktopImportError
+from openkb.importing.runner import DesktopTextImportService
+from openkb.knowledge.pages.generations import materialize_current_generation
+from openkb.knowledge.pages.service import DesktopKnowledgePageError, DesktopKnowledgePageService
+from openkb.knowledge.reconciliation.resolution import (
     DesktopKnowledgeReconciliationResolutionService,
 )
-from openkb.desktop_retrieval import DesktopEvidenceRetriever
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+from openkb.knowledge.reconciliation.service import DesktopKnowledgeReconciliationService
+from openkb.retrieval.service import DesktopEvidenceRetriever
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
 def test_incompatible_import_stays_in_review_without_advancing_generation(tmp_path: Path) -> None:

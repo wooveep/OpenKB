@@ -7,13 +7,13 @@ import json
 import pytest
 from jsonschema import validate as validate_json_schema
 
-from openkb.desktop_model_gateway import DesktopModelRequest, DesktopModelResult
-from openkb.desktop_prompt_contracts import (
+from openkb.models.gateway import DesktopModelRequest, DesktopModelResult
+from openkb.models.prompt_contracts import (
     canonical_prompt_contract_snapshot,
     prompt_contract_for,
     prompt_contract_operations,
 )
-from openkb.desktop_structured_output import (
+from openkb.models.structured_output import (
     DesktopStructuredOutputInvalidError,
     normalize_structured_output,
     run_structured_output,

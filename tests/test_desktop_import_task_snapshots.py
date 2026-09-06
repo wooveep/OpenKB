@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_import_task_snapshots import DesktopImportTaskSnapshots
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_dir
+from openkb.importing.service import DesktopTextImportService
+from openkb.importing.task_snapshots import DesktopImportTaskSnapshots
 from openkb.locks import kb_ingest_lock
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_dir
 
 
 def test_concurrent_snapshot_reads_share_one_projection(tmp_path: Path) -> None:

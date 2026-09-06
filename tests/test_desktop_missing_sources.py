@@ -8,20 +8,20 @@ from pathlib import Path
 
 import pytest
 
-from openkb.desktop_import import DesktopImportError, DesktopTextImportService
-from openkb.desktop_knowledge_analysis import (
-    KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
-    KnowledgeAnalysisMissingClaim,
-)
-from openkb.desktop_knowledge_analysis_reuse import analysis_evidence_for_document_in
-from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
-from openkb.desktop_knowledge_reconciliation import DesktopKnowledgeReconciliationService
-from openkb.desktop_missing_sources import (
+from openkb.documents.missing_sources import (
     DesktopMissingSourceService,
     record_missing_source_candidates_in,
 )
-from openkb.desktop_model_gateway import DesktopModelGateway
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.importing.service import DesktopImportError, DesktopTextImportService
+from openkb.knowledge.analysis.reuse import analysis_evidence_for_document_in
+from openkb.knowledge.analysis.service import (
+    KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+    KnowledgeAnalysisMissingClaim,
+)
+from openkb.knowledge.pages.service import DesktopKnowledgePageService
+from openkb.knowledge.reconciliation.service import DesktopKnowledgeReconciliationService
+from openkb.models.gateway import DesktopModelGateway
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def _analysis_response(request_content: str) -> str:

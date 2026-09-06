@@ -7,16 +7,20 @@ import threading
 
 import pytest
 
-from openkb.desktop_grounded_answer import DesktopGroundedAnswerService
-from openkb.desktop_import import DesktopImportControl, DesktopImportError, DesktopTextImportService
-from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
-from openkb.desktop_model_gateway import DesktopModelRequest
-from openkb.desktop_model_terminal import DesktopTerminalModelGateway
-from openkb.desktop_model_transport import (
+from openkb.answers.grounded import DesktopGroundedAnswerService
+from openkb.importing.service import (
+    DesktopImportControl,
+    DesktopImportError,
+    DesktopTextImportService,
+)
+from openkb.knowledge.analysis.service import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.models.gateway import DesktopModelRequest
+from openkb.models.terminal import DesktopTerminalModelGateway
+from openkb.models.transport import (
     _ConcurrentDesktopModelTransport,
     _DesktopModelConcurrencyGate,
 )
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 class _Clock:

@@ -8,17 +8,17 @@ from pathlib import Path
 
 import pytest
 
-import openkb.desktop_knowledge_lifecycle as knowledge_lifecycle_module
-import openkb.desktop_knowledge_pages as knowledge_pages_module
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_knowledge_pages import (
+import openkb.knowledge.pages.lifecycle as knowledge_lifecycle_module
+import openkb.knowledge.pages.service as knowledge_pages_module
+from openkb.importing.service import DesktopTextImportService
+from openkb.knowledge.pages.service import (
     DesktopKnowledgePageError,
     DesktopKnowledgePageService,
 )
-from openkb.desktop_knowledge_source_retrieval import knowledge_source_rows_in
-from openkb.desktop_model_result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
-from openkb.desktop_retrieval import DesktopEvidenceRetriever
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.knowledge.pages.source_retrieval import knowledge_source_rows_in
+from openkb.models.result_migrations import MODEL_RESULT_OBSERVATION_COLUMNS
+from openkb.retrieval.service import DesktopEvidenceRetriever
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def _drop_page_tree_schema(connection: sqlite3.Connection) -> None:

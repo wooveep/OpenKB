@@ -9,10 +9,10 @@ from dataclasses import replace
 
 import pytest
 
-from openkb import desktop_model_transport
 from openkb.config import LlmCredentialBundle
-from openkb.desktop_model_active_streams import DesktopActiveModelStreams
-from openkb.desktop_model_gateway import (
+from openkb.models import transport as desktop_model_transport
+from openkb.models.active_streams import DesktopActiveModelStreams
+from openkb.models.gateway import (
     DesktopModelCallError,
     DesktopModelCancelledError,
     DesktopModelProviderResponse,
@@ -22,18 +22,18 @@ from openkb.desktop_model_gateway import (
     DesktopProviderTokenUsage,
     reject_model_result,
 )
-from openkb.desktop_model_result_failure import invalidate_structured_model_result
-from openkb.desktop_model_settings import DesktopModelSettings
-from openkb.desktop_model_terminal import (
+from openkb.models.result_failure import invalidate_structured_model_result
+from openkb.models.settings import DesktopModelSettings
+from openkb.models.structured_output import (
+    DesktopStructuredOutputInvalidError,
+    run_structured_output,
+)
+from openkb.models.terminal import (
     MAX_TERMINAL_MODEL_ATTEMPTS,
     MODEL_CONNECT_TIMEOUT_SECONDS,
     DesktopTerminalModelEvent,
     DesktopTerminalModelGateway,
     TerminalModelCallStatus,
-)
-from openkb.desktop_structured_output import (
-    DesktopStructuredOutputInvalidError,
-    run_structured_output,
 )
 
 
@@ -386,39 +386,6 @@ def test_terminal_gateway_user_cancel_ends_an_active_provider_wait() -> None:
     assert isinstance(errors[0], DesktopModelCancelledError)
     assert [event.status for event in events][-1] == "cancelled"
     assert "completed" not in [event.status for event in events]
-
-
-def test_terminal_gateway_enforces_a_request_scoped_response_deadline() -> None:
-    provider_started = threading.Event()
-    release_provider = threading.Event()
-    provider_closed = threading.Event()
-
-    class BlockingProvider:
-        def __call__(self, _request, _connect_timeout_seconds):
-            provider_started.set()
-            release_provider.wait()
-            return "late"
-
-        def cancel_active_stream(self, _request):
-            provider_closed.set()
-            release_provider.set()
-            return True
-
-    request = DesktopModelRequest(
-        "query_planning",
-        "Question",
-        "How should Alpha be deployed?",
-        response_timeout_seconds=0.05,
-    )
-
-    with pytest.raises(DesktopModelCancelledError):
-        DesktopTerminalModelGateway(BlockingProvider()).analyze_once(
-            request,
-            on_event=lambda _event: None,
-        )
-
-    assert provider_started.is_set()
-    assert provider_closed.is_set()
 
 
 def test_cancelled_terminal_attempt_releases_its_concurrency_slot_immediately() -> None:

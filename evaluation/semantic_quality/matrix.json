@@ -34,17 +34,23 @@
         "claims": [
           {
             "text": "Each Orion node requires 8 GB of free memory before deployment begins.",
-            "evidence_ids": ["orion-1"],
+            "evidence_ids": [
+              "orion-1"
+            ],
             "applicability": []
           },
           {
             "text": "Deploy the controller before joining either worker node.",
-            "evidence_ids": ["orion-2"],
+            "evidence_ids": [
+              "orion-2"
+            ],
             "applicability": []
           },
           {
             "text": "The deployment is healthy when all three nodes report Ready for five minutes.",
-            "evidence_ids": ["orion-3"],
+            "evidence_ids": [
+              "orion-3"
+            ],
             "applicability": []
           }
         ]
@@ -82,17 +88,23 @@
         "claims": [
           {
             "text": "Earth’s rotation axis is tilted about 23.5 degrees relative to its orbital plane.",
-            "evidence_ids": ["season-en-1"],
+            "evidence_ids": [
+              "season-en-1"
+            ],
             "applicability": []
           },
           {
             "text": "As Earth orbits the Sun, each hemisphere alternately receives more direct sunlight and longer days.",
-            "evidence_ids": ["season-en-2"],
+            "evidence_ids": [
+              "season-en-2"
+            ],
             "applicability": []
           },
           {
             "text": "Seasonal temperature changes are not caused primarily by Earth’s changing distance from the Sun.",
-            "evidence_ids": ["season-en-3"],
+            "evidence_ids": [
+              "season-en-3"
+            ],
             "applicability": []
           }
         ]
@@ -130,17 +142,23 @@
         "claims": [
           {
             "text": "地球自转轴相对于公转轨道平面倾斜约 23.5 度。",
-            "evidence_ids": ["season-zh-1"],
+            "evidence_ids": [
+              "season-zh-1"
+            ],
             "applicability": []
           },
           {
             "text": "地球绕太阳公转时，两个半球交替获得更直射的阳光和更长的白昼。",
-            "evidence_ids": ["season-zh-2"],
+            "evidence_ids": [
+              "season-zh-2"
+            ],
             "applicability": []
           },
           {
             "text": "季节性温度变化的首要原因不是地球与太阳距离的变化。",
-            "evidence_ids": ["season-zh-3"],
+            "evidence_ids": [
+              "season-zh-3"
+            ],
             "applicability": []
           }
         ]
@@ -178,17 +196,23 @@
         "claims": [
           {
             "text": "Marie Curie developed methods for isolating radioactive isotopes and discovered polonium and radium with Pierre Curie.",
-            "evidence_ids": ["curie-1"],
+            "evidence_ids": [
+              "curie-1"
+            ],
             "applicability": []
           },
           {
             "text": "She became the first person to receive Nobel Prizes in two different scientific fields.",
-            "evidence_ids": ["curie-2"],
+            "evidence_ids": [
+              "curie-2"
+            ],
             "applicability": []
           },
           {
             "text": "Restrictions on women’s university education in Poland led her to continue her studies in Paris.",
-            "evidence_ids": ["curie-3"],
+            "evidence_ids": [
+              "curie-3"
+            ],
             "applicability": []
           }
         ]
@@ -226,17 +250,23 @@
         "claims": [
           {
             "text": "The essay argues that sustained creative work depends on material independence and private space.",
-            "evidence_ids": ["essay-1"],
+            "evidence_ids": [
+              "essay-1"
+            ],
             "applicability": []
           },
           {
             "text": "The room recurs both as a literal workplace and as an image of intellectual freedom.",
-            "evidence_ids": ["essay-2"],
+            "evidence_ids": [
+              "essay-2"
+            ],
             "applicability": []
           },
           {
             "text": "The narrator combines historical examples with an intentionally hypothetical story.",
-            "evidence_ids": ["essay-3"],
+            "evidence_ids": [
+              "essay-3"
+            ],
             "applicability": []
           }
         ]
@@ -274,17 +304,23 @@
         "claims": [
           {
             "text": "Let the refrigerated starter warm at room temperature for one hour.",
-            "evidence_ids": ["starter-1"],
+            "evidence_ids": [
+              "starter-1"
+            ],
             "applicability": []
           },
           {
             "text": "Keep 20 grams of starter and mix it with 40 grams each of water and flour.",
-            "evidence_ids": ["starter-2"],
+            "evidence_ids": [
+              "starter-2"
+            ],
             "applicability": []
           },
           {
             "text": "Use the starter after it doubles in volume and shows bubbles throughout.",
-            "evidence_ids": ["starter-3"],
+            "evidence_ids": [
+              "starter-3"
+            ],
             "applicability": []
           }
         ]
@@ -322,17 +358,23 @@
         "claims": [
           {
             "text": "A flat monthly fee is simple to administer but does not change when a household uses more water.",
-            "evidence_ids": ["water-1"],
+            "evidence_ids": [
+              "water-1"
+            ],
             "applicability": []
           },
           {
             "text": "A tiered tariff raises the unit price after consumption crosses specified thresholds.",
-            "evidence_ids": ["water-2"],
+            "evidence_ids": [
+              "water-2"
+            ],
             "applicability": []
           },
           {
             "text": "Tier design can protect a low-cost basic allowance, while large essential-use households may still face higher bills.",
-            "evidence_ids": ["water-3"],
+            "evidence_ids": [
+              "water-3"
+            ],
             "applicability": []
           }
         ]
@@ -376,31 +418,159 @@
         "claims": [
           {
             "text": "V10.2 更新 samba-proxy 与 spice-vdagent，并新增 Linux 虚拟机内断开云电脑工具。",
-            "evidence_ids": ["ocloudview-v102-1"],
+            "evidence_ids": [
+              "ocloudview-v102-1"
+            ],
             "applicability": [
-              {"dimension": "version", "value": "V10.2"}
+              {
+                "dimension": "version",
+                "value": "V10.2"
+              }
             ]
           },
           {
             "text": "V10.2 补充了强制改密解除和 admin 账号锁定解除的运维说明。",
-            "evidence_ids": ["ocloudview-v102-2"],
+            "evidence_ids": [
+              "ocloudview-v102-2"
+            ],
             "applicability": [
-              {"dimension": "version", "value": "V10.2"}
+              {
+                "dimension": "version",
+                "value": "V10.2"
+              }
             ]
           },
           {
             "text": "V10.3 更新 Linux 虚拟机 vmtools、安全代理模块和短信认证部署说明。",
-            "evidence_ids": ["ocloudview-v103-1"],
+            "evidence_ids": [
+              "ocloudview-v103-1"
+            ],
             "applicability": [
-              {"dimension": "version", "value": "V10.3"}
+              {
+                "dimension": "version",
+                "value": "V10.3"
+              }
             ]
           },
           {
             "text": "V10.3 新增 Ceph 分布式存储场景部署章节。",
-            "evidence_ids": ["ocloudview-v103-2"],
+            "evidence_ids": [
+              "ocloudview-v103-2"
+            ],
             "applicability": [
-              {"dimension": "version", "value": "V10.3"}
+              {
+                "dimension": "version",
+                "value": "V10.3"
+              }
             ]
+          }
+        ]
+      }
+    },
+    {
+      "suite_id": "cultivation_procedure_en",
+      "case_id": "lyra_cultivation",
+      "domain": "cultivation",
+      "language": "en",
+      "question": "How should the fictional Lyra cultivation program be started, and how is success checked?",
+      "evidence": [
+        {
+          "evidence_id": "lyra-1",
+          "document_name": "lyra-program.md",
+          "section": "Resources",
+          "excerpt": "Each Lyra growth chamber requires 8 litres of water before cultivation begins."
+        },
+        {
+          "evidence_id": "lyra-2",
+          "document_name": "lyra-program.md",
+          "section": "Sequence",
+          "excerpt": "Start the nursery chamber before placing plants in either cultivation chamber."
+        },
+        {
+          "evidence_id": "lyra-3",
+          "document_name": "lyra-program.md",
+          "section": "Observation",
+          "excerpt": "The program is ready when plants in all three chambers remain upright for five days."
+        }
+      ],
+      "page": {
+        "identity_id": "lyra-cultivation-procedure",
+        "title": "Lyra cultivation",
+        "claims": [
+          {
+            "text": "Each Lyra growth chamber requires 8 litres of water before cultivation begins.",
+            "evidence_ids": [
+              "lyra-1"
+            ],
+            "applicability": []
+          },
+          {
+            "text": "Start the nursery chamber before placing plants in either cultivation chamber.",
+            "evidence_ids": [
+              "lyra-2"
+            ],
+            "applicability": []
+          },
+          {
+            "text": "The program is ready when plants in all three chambers remain upright for five days.",
+            "evidence_ids": [
+              "lyra-3"
+            ],
+            "applicability": []
+          }
+        ]
+      }
+    },
+    {
+      "suite_id": "technical_operations_reorganized_en",
+      "case_id": "orion_reorganized",
+      "domain": "technical_operations",
+      "language": "en",
+      "question": "How should Orion be deployed safely, and how do we know it succeeded?",
+      "evidence": [
+        {
+          "evidence_id": "orion-3",
+          "document_name": "orion-runbook.md",
+          "section": "Program notes",
+          "excerpt": "The deployment is healthy when all three nodes report Ready for five minutes."
+        },
+        {
+          "evidence_id": "orion-2",
+          "document_name": "orion-runbook.md",
+          "section": "Program notes",
+          "excerpt": "Deploy the controller before joining either worker node."
+        },
+        {
+          "evidence_id": "orion-1",
+          "document_name": "orion-runbook.md",
+          "section": "Program notes",
+          "excerpt": "Each Orion node requires 8 GB of free memory before deployment begins."
+        }
+      ],
+      "page": {
+        "identity_id": "orion-deployment-procedure",
+        "title": "Orion deployment",
+        "claims": [
+          {
+            "text": "The deployment is healthy when all three nodes report Ready for five minutes.",
+            "evidence_ids": [
+              "orion-3"
+            ],
+            "applicability": []
+          },
+          {
+            "text": "Deploy the controller before joining either worker node.",
+            "evidence_ids": [
+              "orion-2"
+            ],
+            "applicability": []
+          },
+          {
+            "text": "Each Orion node requires 8 GB of free memory before deployment begins.",
+            "evidence_ids": [
+              "orion-1"
+            ],
+            "applicability": []
           }
         ]
       }
@@ -412,6 +582,18 @@
       "left_case_id": "seasons_en",
       "right_case_id": "seasons_zh",
       "relationship": "structurally_equivalent_translation"
+    },
+    {
+      "pair_id": "orion_lyra_domain_substitution",
+      "left_case_id": "orion_deployment",
+      "right_case_id": "lyra_cultivation",
+      "relationship": "structurally_equivalent_domain_substitution"
+    },
+    {
+      "pair_id": "orion_evidence_reorganization",
+      "left_case_id": "orion_deployment",
+      "right_case_id": "orion_reorganized",
+      "relationship": "equivalent_evidence_reorganization"
     }
   ]
 }

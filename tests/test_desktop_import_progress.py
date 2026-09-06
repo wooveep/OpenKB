@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_model_gateway import DesktopModelRequest
-from openkb.desktop_model_terminal import DesktopTerminalModelEvent
-from openkb.desktop_model_usage import DesktopModelUsageStore
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.importing.service import DesktopTextImportService
+from openkb.models.gateway import DesktopModelRequest
+from openkb.models.terminal import DesktopTerminalModelEvent
+from openkb.models.usage import DesktopModelUsageStore
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def test_import_task_exposes_distinct_durable_pipeline_steps(tmp_path):

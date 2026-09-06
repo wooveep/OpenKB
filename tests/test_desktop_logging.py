@@ -9,17 +9,17 @@ from pathlib import Path
 
 import pytest
 
-from openkb.desktop_failure_context import failure_kind_for_code
-from openkb.desktop_import_logging import ImportStageDiagnostics
-from openkb.desktop_log_handler import DiagnosticJsonFormatter
-from openkb.desktop_logging import (
+from openkb.diagnostics.failure_context import failure_kind_for_code
+from openkb.diagnostics.handler import DiagnosticJsonFormatter
+from openkb.diagnostics.imports import ImportStageDiagnostics
+from openkb.diagnostics.logging import (
     TRACE_LEVEL,
     configure_desktop_engine_logging,
     flush_desktop_engine_logging,
     log_event,
     shutdown_desktop_engine_logging_for_tests,
 )
-from openkb.desktop_logging_settings import (
+from openkb.diagnostics.settings import (
     DiagnosticLoggingSettings,
     component_for_logger,
     settings_from_environment,
@@ -81,12 +81,12 @@ def test_failure_codes_preserve_actionable_failure_kinds(
 @pytest.mark.parametrize(
     "logger_name",
     [
-        "openkb.desktop_document_parsers",
-        "openkb.desktop_legacy_office_parsers",
-        "openkb.desktop_parser_runtime",
-        "openkb.desktop_pdf_parsers",
-        "openkb.desktop_presentation_parsers",
-        "openkb.desktop_spreadsheet_parsers",
+        "openkb.parsers.document",
+        "openkb.parsers.legacy_office",
+        "openkb.parsers.runtime",
+        "openkb.parsers.pdf",
+        "openkb.parsers.presentation",
+        "openkb.parsers.spreadsheet",
     ],
 )
 def test_parser_modules_share_the_parser_component(logger_name: str) -> None:
@@ -96,11 +96,11 @@ def test_parser_modules_share_the_parser_component(logger_name: str) -> None:
 @pytest.mark.parametrize(
     ("logger_name", "component"),
     [
-        ("openkb.desktop_engine_page_tree_enrichment", "page_tree"),
-        ("openkb.desktop_engine_knowledge_graph", "knowledge"),
-        ("openkb.desktop_engine_knowledge_reanalysis", "knowledge"),
-        ("openkb.desktop_missing_sources", "projection"),
-        ("openkb.desktop_okf_projection", "projection"),
+        ("openkb.engine.page_tree_enrichment", "page_tree"),
+        ("openkb.engine.knowledge_graph", "knowledge"),
+        ("openkb.engine.knowledge_reanalysis", "knowledge"),
+        ("openkb.documents.missing_sources", "projection"),
+        ("openkb.knowledge.pages.okf_projection", "projection"),
     ],
 )
 def test_background_workers_use_their_domain_component(logger_name: str, component: str) -> None:
@@ -313,7 +313,7 @@ def test_configure_migrates_plaintext_log_before_writing_json(tmp_path: Path) ->
     path = configure_desktop_engine_logging(settings)
     assert path == old_path
     log_event(
-        logging.getLogger("openkb.desktop_engine"),
+        logging.getLogger("openkb.engine.server"),
         logging.WARNING,
         "logging_ready",
         "Structured logging is ready.",
@@ -432,7 +432,7 @@ def test_deduplication_ignores_unique_poll_request_ids(tmp_path: Path) -> None:
     )
     path = configure_desktop_engine_logging(settings)
     assert path is not None
-    logger = logging.getLogger("openkb.desktop_engine_logging")
+    logger = logging.getLogger("openkb.diagnostics.engine")
 
     for request_id in ("poll-1", "poll-2"):
         log_event(

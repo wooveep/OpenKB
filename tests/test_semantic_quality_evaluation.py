@@ -18,8 +18,8 @@ from evaluation.semantic_quality.runner import (
     run_live_evaluation,
     sign_human_attestation,
 )
-from openkb.desktop_model_gateway import DesktopModelRequest
-from openkb.desktop_prompt_contracts import prompt_contract_for
+from openkb.models.gateway import DesktopModelRequest
+from openkb.models.prompt_contracts import prompt_contract_for
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,10 +39,11 @@ def test_candidate_profile_and_matrix_are_cross_domain_and_repeated() -> None:
         timeout_seconds=120.0,
     )
     assert len({case.domain for case in definition.cases}) >= 5
-    assert all(
-        pair.relationship == "structurally_equivalent_translation"
-        for pair in definition.metamorphic_pairs
-    )
+    assert {pair.relationship for pair in definition.metamorphic_pairs} == {
+        "structurally_equivalent_translation",
+        "structurally_equivalent_domain_substitution",
+        "equivalent_evidence_reorganization",
+    }
     assert any(
         {pair.left.language, pair.right.language} == {"en", "zh"}
         for pair in definition.metamorphic_pairs
@@ -209,7 +210,48 @@ class ValidSemanticClient:
 
     def complete(self, request: DesktopModelRequest) -> str:
         self.requests.append(request)
+        if request.operation == "grounded_answer":
+            return "An evidence-backed test answer [1]."
         payload = json.loads(request.content)
+        if request.operation in {
+            "knowledge_analysis",
+            "knowledge_fact_harvest",
+            "knowledge_analysis_batch",
+        }:
+            from openkb.knowledge.analysis.synthesis_prompts import knowledge_output_example
+
+            response = knowledge_output_example(payload.get("analysis_scope", "document"))
+            response["document_description"] = "A document used by the integration test."
+            response["candidates"] = [
+                {
+                    "kind": "entity",
+                    "title": payload["document_name"],
+                    "aliases": [],
+                    "identity_labels": [],
+                    "admission": "admit",
+                    "claims": [
+                        {
+                            "text": item["text"],
+                            "source_evidence_ids": [item["evidence_id"]],
+                            "applicability": [],
+                        }
+                        for item in payload["evidence"]
+                    ],
+                }
+            ]
+            return json.dumps(response)
+        if request.operation == "knowledge_relation_analysis":
+            return json.dumps({"relations": []})
+        if request.operation == "knowledge_claim_review":
+            return json.dumps(
+                {
+                    "review_id": payload["review_id"],
+                    "verdict": "compatible",
+                    "evidence_ids": [item["evidence_id"] for item in payload["evidence"]],
+                }
+            )
+        if request.operation in {"page_tree_selection", "knowledge_navigation_step"}:
+            return json.dumps(prompt_contract_for(request.operation).output_example)
         if request.operation == "query_planning":
             evidence_ids = [item["evidence_id"] for item in payload["seed_observations"]]
             chinese = any("\u4e00" <= character <= "\u9fff" for character in payload["question"])
@@ -268,27 +310,44 @@ def test_live_run_executes_every_case_three_times_and_stays_pending(tmp_path: Pa
     assert result.status == "pending_human_review"
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["status"] == "pending_human_review"
-    assert report["case_count"] == 8
+    assert report["case_count"] == 10
     assert report["repetitions"] == 3
-    assert report["logical_operation_count"] == 48
-    assert report["physical_call_count"] == 48
-    assert report["valid_operation_count"] == 48
+    assert report["logical_operation_count"] == 90
+    assert report["physical_call_count"] == len(client.requests)
+    assert report["valid_operation_count"] == 90
     assert all(suite["deterministic_status"] == "passed" for suite in report["suites"])
-    assert len(client.requests) == 48
+    assert all(suite["failure_kinds"] == [] for suite in report["suites"])
+    assert len(client.requests) > 90
     assert all(request.model_name == "deepseek-v4-flash" for request in client.requests)
     assert all(request.provider_adapter == "deepseek" for request in client.requests)
     assert all(request.provider_adapter_version == "deepseek.v2" for request in client.requests)
-    assert all(request.structured_output_mode == "json_object" for request in client.requests)
+    assert all(
+        request.structured_output_mode == ("json_object" if request.response_schema else None)
+        for request in client.requests
+    )
     assert all(request.reasoning_effort == "off" for request in client.requests)
 
     output_lines = result.outputs_path.read_text(encoding="utf-8").splitlines()
-    assert len(output_lines) == 48
+    assert len(output_lines) == 90
     assert all(json.loads(line)["valid"] is True for line in output_lines)
+    full_runs = [
+        json.loads(line)
+        for line in output_lines
+        if json.loads(line)["operation"] == "full_pipeline"
+    ]
+    assert len(full_runs) == 30
+    assert all(
+        run["validated_result"]["rendered_pages"]
+        and all(page["content_markdown"] for page in run["validated_result"]["rendered_pages"])
+        for run in full_runs
+    )
     pending = json.loads(result.pending_attestation_path.read_text(encoding="utf-8"))
     assert pending["status"] == "pending_human_review"
     assert "output_digest" in pending["bindings"]
     assert "outputs" not in pending
     for artifact in result.run_dir.iterdir():
+        if artifact.is_dir():
+            continue
         assert "evaluation-only-secret" not in artifact.read_text(encoding="utf-8")
 
 
@@ -343,7 +402,7 @@ def test_invalid_model_structures_fail_deterministically_and_cannot_be_signed(
     assert result is not None
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert result.status == "deterministic_failed"
-    assert report["physical_call_count"] == 96
+    assert report["physical_call_count"] >= 120
     assert report["valid_operation_count"] == 0
     review_path = tmp_path / "invalid-review.json"
     _write_passing_human_review(review_path, "test-invalid-run")
@@ -440,7 +499,7 @@ def _write_windows_release_evidence(
     smoke_path.write_text(
         json.dumps(
             {
-                "schema_version": "openkb.windows-semantic-smoke.v1",
+                "schema_version": "openkb.windows-semantic-smoke.v2",
                 "run_id": report["run_id"],
                 "platform": "windows",
                 "status": "passed",
@@ -458,6 +517,13 @@ def _write_windows_release_evidence(
                     "knowledge_page_planning": "passed",
                     "version_comparison": "passed",
                     "citation_postconditions": "passed",
+                    "candidate_admission": "passed",
+                    "knowledge_graph": "passed",
+                    "grounded_answer": "passed",
+                    "restart_recovery": "passed",
+                    "provider_failure_recovery": "passed",
+                    "semantic_epoch_rejection": "passed",
+                    "privacy_no_secret_leak": "passed",
                 },
             },
             ensure_ascii=False,

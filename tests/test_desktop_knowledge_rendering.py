@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from openkb.desktop_knowledge_rendering import (
+from openkb.knowledge.pages.rendering import (
     RenderedKnowledgeClaim,
     render_generated_knowledge,
 )

@@ -281,44 +281,44 @@
         "draftSaving": "Saving Working Draft…",
         "draftSaved": "Working Draft saved locally. Published knowledge is unchanged.",
         "publishedStatus": "Published revision {{revision}}. There are no unpublished changes.",
-      "provenance": {
-        "source_backed": "Source-backed knowledge",
-        "structural": "Structural navigation",
-        "unsourced": "Unsourced note — browse only",
-        "invalid": "Source mapping needs attention"
-      },
-      "sourceAvailability": {
-        "available": "Available",
-        "unavailable": "Unavailable"
-      },
-      "verification": {
-        "state": {
-          "unverified": "Unverified",
-          "human_reviewed": "Human reviewed"
+        "provenance": {
+          "source_backed": "Source-backed knowledge",
+          "structural": "Structural navigation",
+          "unsourced": "Unsourced note — browse only",
+          "invalid": "Source mapping needs attention"
         },
-        "reason": {
-          "publish_required": "Publish this page before verification.",
-          "working_draft_not_verifiable": "The Working Draft cannot be verified. Publish it first; the current publication keeps its own review history.",
-          "not_verified": "This published revision has not been reviewed by a person.",
-          "revision_changed": "This is a new published revision and needs a new human review.",
-          "publication_gate_blocked": "Verification is unavailable until every factual claim resolves to Available Knowledge.",
-          "deprecated_not_verifiable": "Restore this deprecated page before verification.",
-          "lifecycle_changed": "The lifecycle changed after the last review. Verify this stable revision again."
+        "sourceAvailability": {
+          "available": "Available",
+          "unavailable": "Unavailable"
         },
-        "reviewedByLocal": "Local user · {{time}}",
-        "verify": "Verify revision"
-      },
-      "saveDraft": "Save draft",
-      "publish": "Publish",
-      "saveBeforePublish": "Save a Working Draft before publishing.",
-      "sourceBinding": "Source binding",
-      "selectClaim": "Select one factual claim in the Markdown editor, then choose its original evidence.",
-      "selectedClaim": "Selected claim: {{claim}}",
-      "selectClaimFirst": "Select one factual claim in the Markdown editor first.",
-      "saveBeforeBinding": "Save a Working Draft before binding a source.",
-      "sourceSearchPlaceholder": "Search document or section",
-      "searchSources": "Search",
-      "sourceSearchEmpty": "Search Available Knowledge to bind original evidence."
+        "verification": {
+          "state": {
+            "unverified": "Unverified",
+            "human_reviewed": "Human reviewed"
+          },
+          "reason": {
+            "publish_required": "Publish this page before verification.",
+            "working_draft_not_verifiable": "The Working Draft cannot be verified. Publish it first; the current publication keeps its own review history.",
+            "not_verified": "This published revision has not been reviewed by a person.",
+            "revision_changed": "This is a new published revision and needs a new human review.",
+            "publication_gate_blocked": "Verification is unavailable until every factual claim resolves to Available Knowledge.",
+            "deprecated_not_verifiable": "Restore this deprecated page before verification.",
+            "lifecycle_changed": "The lifecycle changed after the last review. Verify this stable revision again."
+          },
+          "reviewedByLocal": "Local user · {{time}}",
+          "verify": "Verify revision"
+        },
+        "saveDraft": "Save draft",
+        "publish": "Publish",
+        "saveBeforePublish": "Save a Working Draft before publishing.",
+        "sourceBinding": "Source binding",
+        "selectClaim": "Select one factual claim in the Markdown editor, then choose its original evidence.",
+        "selectedClaim": "Selected claim: {{claim}}",
+        "selectClaimFirst": "Select one factual claim in the Markdown editor first.",
+        "saveBeforeBinding": "Save a Working Draft before binding a source.",
+        "sourceSearchPlaceholder": "Search document or section",
+        "searchSources": "Search",
+        "sourceSearchEmpty": "Search Available Knowledge to bind original evidence."
       },
       "modelSettings": {
         "title": "Model defaults",
@@ -354,9 +354,24 @@
         "inheritDefaultModel": "Inherit default model",
         "autoCapability": "Use detected capacity",
         "roles": {
-          "default": { "name": "Default", "model": "Default model", "context": "Default context capacity", "reasoning": "Default reasoning" },
-          "analysis": { "name": "Analysis", "model": "Analysis model (optional)", "context": "Analysis context capacity", "reasoning": "Analysis reasoning" },
-          "answer": { "name": "Answer", "model": "Answer model (optional)", "context": "Answer context capacity", "reasoning": "Answer reasoning" }
+          "default": {
+            "name": "Default",
+            "model": "Default model",
+            "context": "Default context capacity",
+            "reasoning": "Default reasoning"
+          },
+          "analysis": {
+            "name": "Analysis",
+            "model": "Analysis model (optional)",
+            "context": "Analysis context capacity",
+            "reasoning": "Analysis reasoning"
+          },
+          "answer": {
+            "name": "Answer",
+            "model": "Answer model (optional)",
+            "context": "Answer context capacity",
+            "reasoning": "Answer reasoning"
+          }
         },
         "reasoning": {
           "provider": "Use provider behavior",
@@ -670,7 +685,15 @@
       "answerViewAllSourceImages": "View all {{count}} images",
       "answerShowFewerSourceImages": "Show fewer images",
       "answerSources": "Source evidence",
-      "answerCitationLocation": "Original position · {{location}}"
+      "answerCitationLocation": "Original position · {{location}}",
+      "recoveryParser": "Document parsing",
+      "recoveryParserModes": {
+        "keep": "Reuse verified parsing",
+        "auto": "Parse again — automatic",
+        "fast": "Parse again — fast",
+        "enhanced": "Parse again — enhanced"
+      },
+      "recoveryReparseNotice": "Reparsing rebuilds the document structure, evidence, page tree, and model analysis from the saved original. This choice applies only to this import."
     },
     "overview": {
       "title": "Overview",
@@ -706,7 +729,10 @@
         "loadingItem": "Loading knowledge details…",
         "empty": "No generated or user-owned knowledge matches. You can still create a Working Draft on the right.",
         "createOrSelect": "Select knowledge or create a user-owned Working Draft.",
-        "authority": { "generated": "Generated snapshot", "user": "User page" },
+        "authority": {
+          "generated": "Generated snapshot",
+          "user": "User page"
+        },
         "generatedSnapshot": "Generated knowledge snapshot",
         "readOnly": "This immutable generated snapshot is read-only. Adopting it creates a new user-owned Working Draft without rewriting the snapshot.",
         "adopt": "Adopt as Working Draft",
@@ -1031,6 +1057,30 @@
         "today": "Today",
         "week": "Last 7 days",
         "older": "Older"
+      }
+    },
+    "semanticReview": {
+      "title": "Semantic review",
+      "description": "Compare the claims with their source excerpts. Decisions apply to this evidence snapshot; accepted changes regenerate affected pages.",
+      "empty": "No pending semantic reviews.",
+      "evidence": "View source excerpts",
+      "resolved": "{{authority}} decision: {{decision}}",
+      "authorities": {
+        "human": "Human",
+        "model": "Model"
+      },
+      "reasons": {
+        "claim_relationship_review": "Cross-document claims need a compatibility decision.",
+        "semantic_identity_confirmation_required": "These names may refer to the same identity.",
+        "multiple_identity_matches": "More than one existing identity matches these candidates."
+      },
+      "choices": {
+        "compatible": "Accept claims together",
+        "same_identity": "Confirm same identity",
+        "keep_separate": "Keep identities separate",
+        "keep_current": "Keep current pages",
+        "conflicting": "Conflicting",
+        "unresolved": "Unresolved"
       }
     }
   }

@@ -10,23 +10,23 @@ from pathlib import Path
 import pytest
 import yaml
 
-import openkb.desktop_okf_projection as okf_projection_module
-from openkb import desktop_engine_workspace_activation as workspace_activation_engine
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_knowledge_generations import (
+import openkb.knowledge.pages.okf_projection as okf_projection_module
+from openkb.engine import workspace_activation as workspace_activation_engine
+from openkb.importing.service import DesktopTextImportService
+from openkb.knowledge.pages.generations import (
     KnowledgeGenerationChange,
     current_generation_id_in,
     knowledge_content_sha256,
     publish_generation_changes_in,
 )
-from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
-from openkb.desktop_okf_compatibility import lint_okf_projection, resolve_okf_link
-from openkb.desktop_okf_projection import (
+from openkb.knowledge.pages.okf_compatibility import lint_okf_projection, resolve_okf_link
+from openkb.knowledge.pages.okf_projection import (
     activate_okf_projection,
     canonical_okf_type,
     materialize_okf_projection,
 )
-from openkb.desktop_workspace import (
+from openkb.knowledge.pages.service import DesktopKnowledgePageService
+from openkb.workspace.runtime import (
     DesktopKnowledgeBaseRuntime,
     desktop_state_database_path,
 )

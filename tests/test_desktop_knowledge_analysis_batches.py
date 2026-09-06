@@ -9,37 +9,37 @@ from pathlib import Path
 
 import pytest
 
-from openkb.desktop_import import DesktopImportError, DesktopTextImportService
-from openkb.desktop_import_artifacts import DocumentIRBlock
-from openkb.desktop_import_types import DesktopRecoveryOverride
-from openkb.desktop_knowledge_analysis import (
+from openkb.importing.artifacts import DocumentIRBlock
+from openkb.importing.service import DesktopImportError, DesktopTextImportService
+from openkb.importing.types import DesktopRecoveryOverride
+from openkb.knowledge.analysis.batch_planning import knowledge_analysis_batch_prompt
+from openkb.knowledge.analysis.batch_store import KnowledgeAnalysisBatch
+from openkb.knowledge.analysis.batches import (
+    _run_hierarchical_description_merge,
+    knowledge_analysis_merge_prompt,
+    plan_knowledge_analysis_batches,
+)
+from openkb.knowledge.analysis.merge import parse_merged_description
+from openkb.knowledge.analysis.plan import (
+    KnowledgeAnalysisPlan,
+    hierarchical_merge_topology,
+)
+from openkb.knowledge.analysis.service import (
     KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
     DesktopKnowledgeAnalysis,
     knowledge_analysis_prompt,
     parse_knowledge_analysis,
 )
-from openkb.desktop_knowledge_analysis_batch_planning import knowledge_analysis_batch_prompt
-from openkb.desktop_knowledge_analysis_batch_store import KnowledgeAnalysisBatch
-from openkb.desktop_knowledge_analysis_batches import (
-    _run_hierarchical_description_merge,
-    knowledge_analysis_merge_prompt,
-    plan_knowledge_analysis_batches,
-)
-from openkb.desktop_knowledge_analysis_merge import parse_merged_description
-from openkb.desktop_knowledge_analysis_plan import (
-    KnowledgeAnalysisPlan,
-    hierarchical_merge_topology,
-)
-from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
-from openkb.desktop_model_gateway import (
+from openkb.models.capabilities import DesktopModelCapabilityProfile
+from openkb.models.gateway import (
     DesktopModelGateway,
     DesktopModelOutputObservations,
     DesktopModelProviderResponse,
     DesktopModelResult,
     DesktopModelTransportError,
 )
-from openkb.desktop_prompt_contracts import prompt_contract_for
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.models.prompt_contracts import prompt_contract_for
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 class FakeClock:

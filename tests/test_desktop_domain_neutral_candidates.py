@@ -6,16 +6,16 @@ import json
 import sqlite3
 from pathlib import Path
 
-from openkb.desktop_candidate_registry import DesktopKnowledgeCandidateRegistry
-from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_knowledge_analysis import (
+from openkb.importing.runner import DesktopTextImportService
+from openkb.knowledge.analysis.candidate_pipeline import DesktopKnowledgeCandidatePipeline
+from openkb.knowledge.analysis.merge import deterministic_merge_knowledge
+from openkb.knowledge.analysis.reuse import analysis_evidence_for_document_in
+from openkb.knowledge.analysis.service import (
     KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
     parse_knowledge_analysis,
 )
-from openkb.desktop_knowledge_analysis_merge import deterministic_merge_knowledge
-from openkb.desktop_knowledge_analysis_reuse import analysis_evidence_for_document_in
-from openkb.desktop_knowledge_candidate_pipeline import DesktopKnowledgeCandidatePipeline
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+from openkb.knowledge.corpus.candidate_registry import DesktopKnowledgeCandidateRegistry
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
 def test_knowledge_analysis_accepts_role_free_claims_and_dynamic_summary_units() -> None:
@@ -120,7 +120,7 @@ def test_candidate_pipeline_does_not_assign_semantics_from_url_or_path_shape(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "source.md"

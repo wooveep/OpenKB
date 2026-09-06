@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import sqlite3
 
-from openkb.desktop_conversations import DesktopConversationService
-from openkb.desktop_document_version_catalog import (
+from openkb.answers.conversations import DesktopConversationService
+from openkb.documents.version_catalog import (
     DocumentLineageDecision,
     DocumentVersionMemberDecision,
 )
-from openkb.desktop_document_versions import DesktopDocumentVersionService
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_version_scope import VersionFilter
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.documents.version_scope import VersionFilter
+from openkb.documents.versions import DesktopDocumentVersionService
+from openkb.importing.service import DesktopTextImportService
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def test_conversation_persists_messages_versions_draft_and_selected_evidence(tmp_path, monkeypatch):
@@ -84,7 +84,7 @@ def test_conversation_inherits_the_pinned_lineage_and_accepts_an_exact_ui_filter
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "desktop-kb"
     DesktopKnowledgeBaseRuntime().create(kb_dir)

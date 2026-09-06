@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from openkb.desktop_knowledge_titles import (
+from openkb.knowledge.pages.titles import (
     controlled_latin_title_key,
     normalize_knowledge_title,
 )

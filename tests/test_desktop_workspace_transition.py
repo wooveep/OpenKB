@@ -10,14 +10,15 @@ from contextlib import contextmanager
 
 import pytest
 
-from openkb import desktop_engine_workspace_activation as workspace_activation_engine
-from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
-from openkb.desktop_import import DesktopImportControl, DesktopImportError
-from openkb.desktop_import_store import DesktopImportStore
-from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
-from openkb.desktop_model_gateway import DesktopModelGateway
-from openkb.desktop_workspace import DesktopKnowledgeBaseError, DesktopKnowledgeBaseRuntime
-from openkb.desktop_workspace_transition import DesktopWorkspaceTransitionCoordinator
+from openkb.engine import workspace_activation as workspace_activation_engine
+from openkb.engine.protocol import DesktopRequest
+from openkb.engine.server import DesktopEngineServer
+from openkb.importing.service import DesktopImportControl, DesktopImportError
+from openkb.importing.store import DesktopImportStore
+from openkb.knowledge.analysis.service import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.models.gateway import DesktopModelGateway
+from openkb.workspace.runtime import DesktopKnowledgeBaseError, DesktopKnowledgeBaseRuntime
+from openkb.workspace.transition import DesktopWorkspaceTransitionCoordinator
 
 
 def _empty_knowledge_analysis() -> str:

@@ -9,35 +9,35 @@ from dataclasses import replace
 
 import pytest
 
-from openkb import desktop_model_transport
-from openkb.desktop_import import DesktopImportError, DesktopTextImportService
-from openkb.desktop_import_types import DesktopRecoveryOverride
-from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
-from openkb.desktop_knowledge_graph import DesktopKnowledgeGraphService
-from openkb.desktop_model_analysis_gate import DesktopAnalysisCapabilityGate
-from openkb.desktop_model_capability_check import capability_check_request
-from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
-from openkb.desktop_model_execution_profile import build_analysis_execution_profile
-from openkb.desktop_model_gateway import (
+from openkb.importing.service import DesktopImportError, DesktopTextImportService
+from openkb.importing.types import DesktopRecoveryOverride
+from openkb.knowledge.analysis.service import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.knowledge.graph.service import DesktopKnowledgeGraphService
+from openkb.models import transport as desktop_model_transport
+from openkb.models.analysis_gate import DesktopAnalysisCapabilityGate
+from openkb.models.capability_check import capability_check_request
+from openkb.models.capability_store import DesktopModelCapabilityStore
+from openkb.models.execution_profile import build_analysis_execution_profile
+from openkb.models.gateway import (
     DesktopModelOutputObservations,
     DesktopModelProviderResponse,
     DesktopModelTransportError,
     DesktopProviderTokenUsage,
 )
-from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
-from openkb.desktop_model_result_failure import (
+from openkb.models.operation_state import DesktopModelOperationContractStore
+from openkb.models.prompt_contracts import prompt_contract_for
+from openkb.models.result_failure import (
     authorize_model_operation_retry,
     model_operation_dispatch_allowed,
     model_operation_dispatch_possible,
 )
-from openkb.desktop_model_settings import (
+from openkb.models.settings import (
     save_desktop_model_settings,
     validate_desktop_model_settings,
 )
-from openkb.desktop_model_usage import DesktopModelUsageStore
-from openkb.desktop_prompt_contracts import prompt_contract_for
-from openkb.desktop_retrieval_planning import build_query_plan
-from openkb.desktop_workspace import (
+from openkb.models.usage import DesktopModelUsageStore
+from openkb.retrieval.planning import build_query_plan
+from openkb.workspace.runtime import (
     DesktopKnowledgeBaseRuntime,
     desktop_state_database_path,
 )
@@ -909,7 +909,7 @@ def test_graph_failure_does_not_corroborate_shared_protocol_across_operations(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "corroboration.md"
@@ -967,7 +967,7 @@ def test_graph_repair_failure_does_not_join_cross_pipeline_corroboration(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction",
+        "openkb.importing.runner.start_graph_extraction",
         lambda *_args, **_kwargs: None,
     )
     kb_dir = tmp_path / "knowledge"

@@ -22,21 +22,21 @@ from evaluation.semantic_quality.definition import (
     SemanticQualityError,
     load_evaluation_definition,
 )
-from openkb.desktop_canonical_json import canonical_json, canonical_json_digest
-from openkb.desktop_knowledge_page import (
+from openkb.knowledge.pages.page import (
     KnowledgePageClaimSnapshot,
     knowledge_page_claim_id,
 )
-from openkb.desktop_knowledge_page_planner import run_knowledge_page_planning
-from openkb.desktop_model_contract_renderer import render_provider_visible_contract
-from openkb.desktop_model_gateway import DesktopModelRequest, DesktopModelResult
-from openkb.desktop_model_provider_adapter import named_provider_adapter_for
-from openkb.desktop_prompt_contracts import prompt_contract_for
-from openkb.desktop_query_planning import QueryPlanningResult, parse_query_planning_result
-from openkb.desktop_structured_output import (
+from openkb.knowledge.pages.planner import run_knowledge_page_planning
+from openkb.models.contract_renderer import render_provider_visible_contract
+from openkb.models.gateway import DesktopModelRequest, DesktopModelResult
+from openkb.models.prompt_contracts import prompt_contract_for, prompt_contract_operations
+from openkb.models.provider_adapter import named_provider_adapter_for
+from openkb.models.structured_output import (
     run_structured_output,
     structured_output_repair_contract_digest,
 )
+from openkb.retrieval.query_planning import QueryPlanningResult, parse_query_planning_result
+from openkb.shared.canonical_json import canonical_json, canonical_json_digest
 
 
 class EvaluationModelClient(Protocol):
@@ -88,7 +88,8 @@ class OpenAIChatCompletionClient:
             )
         if request.provider_adapter_version != adapter.version:
             raise SemanticQualityError("Evaluation request adapter version is not pinned.")
-        if request.structured_output_mode != profile.structured_output_mode:
+        expected_mode = profile.structured_output_mode if request.response_schema else None
+        if request.structured_output_mode != expected_mode:
             raise SemanticQualityError("Evaluation request Structured Output Mode is not pinned.")
         if request.reasoning_effort != "off" or profile.thinking != "disabled":
             raise SemanticQualityError("Evaluation request must disable provider thinking.")
@@ -256,6 +257,18 @@ def run_live_evaluation(
                     client=client,
                 )
             )
+            if candidate_release:
+                from evaluation.semantic_quality.pipeline import execute_full_pipeline
+
+                records.append(
+                    execute_full_pipeline(
+                        case,
+                        repetition=repetition,
+                        profile=definition.profile,
+                        client=client,
+                        output_dir=run_dir / "pipeline" / case.case_id / str(repetition),
+                    )
+                )
 
     outputs_path = run_dir / "outputs.jsonl"
     output_bytes = "".join(canonical_json(record) + "\n" for record in records).encode("utf-8")
@@ -282,6 +295,7 @@ def run_live_evaluation(
         "run_id": run_id,
         "created_at": created_at,
         "candidate_release": candidate_release,
+        "full_pipeline_required": candidate_release,
         "status": status,
         "case_count": len(definition.cases),
         "repetitions": definition.profile.repetitions,
@@ -493,7 +507,6 @@ def _evaluation_invoker(
             provider_adapter=adapter.identity,
             provider_adapter_version=adapter.version,
             structured_output_mode=profile.structured_output_mode,
-            response_timeout_seconds=profile.timeout_seconds,
         )
         attempt: dict[str, object] = {"operation": pinned.operation, "output": None}
         attempts.append(attempt)
@@ -604,12 +617,13 @@ def _evaluation_bindings(
         "output_digest": output_digest,
         "implementation_digest": _implementation_digest(repository_root),
         "prompt_contract_digests": {
-            "query_planning": prompt_contract_for("query_planning").digest,
-            "query_planning_repair": structured_output_repair_contract_digest("query_planning"),
-            "knowledge_page_planning": prompt_contract_for("knowledge_page_planning").digest,
-            "knowledge_page_planning_repair": structured_output_repair_contract_digest(
-                "knowledge_page_planning"
-            ),
+            operation: prompt_contract_for(operation).digest
+            for operation in prompt_contract_operations()
+        },
+        "repair_contract_digests": {
+            operation: structured_output_repair_contract_digest(operation)
+            for operation in prompt_contract_operations()
+            if prompt_contract_for(operation).structured
         },
         "profile": {
             "provider": definition.profile.provider,
@@ -623,30 +637,9 @@ def _evaluation_bindings(
 
 
 def _implementation_digest(repository_root: Path) -> str:
-    relative_paths = (
-        "evaluation/semantic_quality/attestation.py",
-        "evaluation/semantic_quality/definition.py",
-        "evaluation/semantic_quality/runner.py",
-        "openkb/desktop_canonical_json.py",
-        "openkb/desktop_knowledge_page.py",
-        "openkb/desktop_knowledge_page_planner.py",
-        "openkb/desktop_knowledge_page_planning.py",
-        "openkb/desktop_model_contract_renderer.py",
-        "openkb/desktop_model_provider_adapter.py",
-        "openkb/desktop_prompt_contracts.py",
-        "openkb/desktop_query_planning.py",
-        "openkb/desktop_semantic_structure_contracts.py",
-        "openkb/desktop_structured_output.py",
-    )
-    file_digests: dict[str, str] = {}
-    try:
-        for relative_path in relative_paths:
-            file_digests[relative_path] = hashlib.sha256(
-                (repository_root / relative_path).read_bytes()
-            ).hexdigest()
-    except OSError as error:
-        raise SemanticQualityError("Cannot bind the semantic evaluation implementation.") from error
-    return canonical_json_digest(file_digests)
+    from evaluation.semantic_quality.implementation import implementation_digest
+
+    return implementation_digest(repository_root)
 
 
 def _write_json(path: Path, value: object) -> None:

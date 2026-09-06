@@ -5,12 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from openkb.desktop_knowledge_relationships import (
-    generation_relationship_issues_in,
-    generation_relationships_in,
-    rebuild_generation_relationships_in,
-)
-from openkb.desktop_semantic_graph import (
+from openkb.knowledge.graph.semantic_graph import (
     SemanticGraphCandidate,
     SemanticGraphClaim,
     SemanticGraphDocument,
@@ -18,7 +13,12 @@ from openkb.desktop_semantic_graph import (
     merge_semantic_relation_interpretations,
     plan_semantic_relation_batches,
 )
-from openkb.desktop_semantic_graph_contract import semantic_relation_output_schema
+from openkb.knowledge.graph.semantic_graph_contract import semantic_relation_output_schema
+from openkb.knowledge.pages.relationships import (
+    generation_relationship_issues_in,
+    generation_relationships_in,
+    rebuild_generation_relationships_in,
+)
 
 
 def _claim(

@@ -10,24 +10,24 @@ from types import SimpleNamespace
 
 import pytest
 
-from openkb import desktop_engine_knowledge_reanalysis as reanalysis_engine
-from openkb import desktop_knowledge_reanalysis as reanalysis_service
-from openkb.desktop_import import DesktopImportError, DesktopTextImportService
-from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
-from openkb.desktop_knowledge_analysis_batch_store import DesktopKnowledgeAnalysisBatchStore
-from openkb.desktop_knowledge_analysis_requests import (
+from openkb.engine import knowledge_reanalysis as reanalysis_engine
+from openkb.importing.service import DesktopImportError, DesktopTextImportService
+from openkb.knowledge.analysis.batch_store import DesktopKnowledgeAnalysisBatchStore
+from openkb.knowledge.analysis.requests import (
     CURRENT_KNOWLEDGE_ANALYSIS_PIPELINE_OPERATIONS,
 )
-from openkb.desktop_knowledge_reanalysis import (
+from openkb.knowledge.analysis.service import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.knowledge.reanalysis import service as reanalysis_service
+from openkb.knowledge.reanalysis.service import (
     DesktopKnowledgeReanalysisService,
     recover_interrupted_knowledge_reanalysis,
 )
-from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
-from openkb.desktop_model_execution_profile import analysis_execution_profile_for_settings
-from openkb.desktop_model_gateway import DesktopModelGateway, DesktopModelTransportError
-from openkb.desktop_model_roles import DesktopRoleModelGateway
-from openkb.desktop_model_settings import DesktopModelSettings
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.models.capability_store import DesktopModelCapabilityStore
+from openkb.models.execution_profile import analysis_execution_profile_for_settings
+from openkb.models.gateway import DesktopModelGateway, DesktopModelTransportError
+from openkb.models.roles import DesktopRoleModelGateway
+from openkb.models.settings import DesktopModelSettings
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def test_reanalysis_gates_every_current_analysis_pipeline_operation() -> None:
@@ -189,7 +189,7 @@ def test_corpus_reanalysis_publishes_candidates_then_plans_pages_outside_write_l
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir, document_id = _imported_document(tmp_path)
     database_path = kb_dir / ".openkb" / "state.sqlite3"
@@ -330,7 +330,7 @@ def test_d0_and_d1_reuse_latest_reanalysis_with_available_occurrence_fallback(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir, canonical_document_id = _imported_document(tmp_path)
     service = DesktopKnowledgeReanalysisService(kb_dir)
@@ -469,7 +469,7 @@ def test_reanalysis_batches_preserve_duplicate_evidence_occurrences(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "repeated-sections.md"
@@ -519,7 +519,7 @@ def test_reanalysis_retry_reuses_completed_long_document_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "long.md"
@@ -577,7 +577,7 @@ def test_reanalysis_retry_reuses_completed_long_document_batch(
         )
     assert service.overview()["documents"][0]["state"] == "current"
     monkeypatch.setattr(
-        "openkb.desktop_knowledge_reanalysis.KNOWLEDGE_ANALYSIS_BATCH_PIPELINE_DIGEST",
+        "openkb.knowledge.reanalysis.service.KNOWLEDGE_ANALYSIS_BATCH_PIPELINE_DIGEST",
         "changed-batch-pipeline-digest",
     )
     assert service.overview()["documents"][0]["state"] == "analysis_outdated"

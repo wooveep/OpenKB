@@ -7,11 +7,11 @@ import sqlite3
 
 import pytest
 
-import openkb.desktop_legacy_office_parsers as legacy_office
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_import_artifacts import DesktopImportError
-from openkb.desktop_raw_assets import DesktopRawAssetService
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+import openkb.parsers.legacy_office as legacy_office
+from openkb.documents.raw_assets import DesktopRawAssetService
+from openkb.importing.artifacts import DesktopImportError
+from openkb.importing.service import DesktopTextImportService
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 @pytest.mark.parametrize(("suffix", "source_format"), ((".doc", "doc"), (".ppt", "ppt")))

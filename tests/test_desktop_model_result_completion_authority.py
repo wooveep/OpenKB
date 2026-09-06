@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from openkb.desktop_model_gateway import DesktopModelResult
-from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
-from openkb.desktop_model_result_failure import (
+from openkb.models.gateway import DesktopModelResult
+from openkb.models.operation_state import DesktopModelOperationContractStore
+from openkb.models.result_failure import (
     DesktopModelOperationCompletionAuthority,
     mark_model_result_operation_ready,
 )
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def test_ordinary_completion_authority_preserves_a_concurrent_suspension(

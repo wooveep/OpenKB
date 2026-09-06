@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from openkb.desktop_import_sources import inspect_import_sources
+from openkb.importing.sources import inspect_import_sources
 
 
 def test_source_inspection_expands_directories_deduplicates_and_sorts(tmp_path):

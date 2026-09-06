@@ -15,9 +15,11 @@ uses its package-local Tika helper only on loopback and only while it is needed.
 1. Extract the platform package and launch the OpenKB application.
 2. Create a new knowledge-base folder or open an existing Desktop knowledge
    base.
-3. Configure a model and its environment-variable credential reference in
-   **Settings**. The secret remains in the environment or the KB-local `.env`
-   file; it is never stored in the workbench database or sent to the UI.
+3. Configure the model and enter its API key in **Settings**. Desktop keeps the
+   configuration in the knowledge base’s `.openkb/config.yaml`; saved keys are
+   masked when settings are read back. Desktop does not resolve keys from `.env`
+   or environment variables. The ignored repository-root `.env` is used only by
+   developer live-evaluation commands.
 4. Import PDF, Markdown, TXT, DOC/DOCX, XLS/XLSX, and PPT/PPTX files.
 5. Ask questions from the **Ask** workspace. Answers show their cited document
    sections and relevant source images.
@@ -35,10 +37,17 @@ procedures, source pages, and a checksum manifest. OpenKB previews and validates
 the snapshot before publishing it; the SQLite knowledge base remains the source
 of truth.
 
-Imports are staged and resumable. A model-analysis timeout retries with a
-longer request timeout; configuration, authentication, and format errors are
-isolated immediately. Failed documents remain unavailable to question answering
-until they are manually resumed from the failed-documents view.
+Imports are staged and resumable. Provider connection failures may retry within
+the bounded connection policy. An established model request waits for an explicit
+terminal result or cancellation; retrieval budgets are checked between operations.
+Failed documents remain unavailable until manually recovered. The failed-documents
+view can reuse verified parsing or explicitly reparse in automatic, fast, or enhanced
+mode; reparsing rebuilds all downstream checkpoints from the saved original.
+
+Page synthesis runs independently of optional graph extraction and coalesces
+queued document changes. Identical evidence and model contracts can reuse validated
+page plans. Cross-document claim comparisons and ambiguous identity matches appear
+in **Review** with source excerpts; decisions are tied to the displayed snapshot.
 
 The knowledge base keeps the original imported bytes under `raw/`, its
 authoritative state in `.openkb/state.sqlite3`, and generated knowledge pages
@@ -136,3 +145,6 @@ final Windows black-box pass.
 
 See [the retrieval evaluation guide](docs/desktop-retrieval-evaluation.md) for
 the local-graph quality gate and its required evaluation corpus.
+
+For source placement and shared-module rules, see [the code architecture map](docs/architecture.md).
+The frontend builds into `frontend/dist/`; the Python package contains Engine code and data.

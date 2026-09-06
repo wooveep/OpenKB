@@ -6,13 +6,13 @@ import json
 
 import pytest
 
-from openkb.desktop_knowledge_analysis import parse_knowledge_analysis
-from openkb.desktop_model_gateway import (
+from openkb.knowledge.analysis.service import parse_knowledge_analysis
+from openkb.models.gateway import (
     DesktopModelOutputObservations,
     DesktopModelRequest,
     DesktopModelResult,
 )
-from openkb.desktop_structured_output import (
+from openkb.models.structured_output import (
     DesktopStructuredOutputInvalidError,
     run_structured_output,
     structured_output_repair_contract_digest,

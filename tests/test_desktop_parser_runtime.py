@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from openkb.desktop_import_artifacts import DesktopImportError, DocumentIRBlock
+from openkb.importing.artifacts import DesktopImportError, DocumentIRBlock
 
 
 def _block(
@@ -31,7 +31,7 @@ def _block(
 
 
 def test_parser_readiness_inspection_never_initializes_heavy_runtimes(monkeypatch) -> None:
-    from openkb import desktop_parser_runtime as runtime
+    from openkb.parsers import runtime as runtime
 
     initialized: list[str] = []
     monkeypatch.setattr(runtime, "_legacy_resources_available", lambda: True)
@@ -53,7 +53,7 @@ def test_parser_readiness_inspection_never_initializes_heavy_runtimes(monkeypatc
 
 
 def test_legacy_parser_warmup_transitions_and_reuses_one_runtime(monkeypatch, tmp_path) -> None:
-    from openkb import desktop_parser_runtime as runtime
+    from openkb.parsers import runtime as runtime
 
     runtime.reset_parser_runtime_for_tests()
     source = tmp_path / "legacy.doc"
@@ -100,7 +100,7 @@ def test_legacy_parser_warmup_transitions_and_reuses_one_runtime(monkeypatch, tm
     ),
 )
 def test_document_ir_usability_gate_rejects_before_model_work(blocks, code) -> None:
-    from openkb.desktop_document_usability import require_usable_document_ir
+    from openkb.documents.usability import require_usable_document_ir
 
     with pytest.raises(DesktopImportError) as captured:
         require_usable_document_ir(blocks)
@@ -110,7 +110,7 @@ def test_document_ir_usability_gate_rejects_before_model_work(blocks, code) -> N
 
 
 def test_document_ir_usability_gate_accepts_short_located_content() -> None:
-    from openkb.desktop_document_usability import assess_document_ir, require_usable_document_ir
+    from openkb.documents.usability import assess_document_ir, require_usable_document_ir
 
     blocks = (_block("有效内容"),)
 
@@ -123,11 +123,11 @@ def test_document_ir_usability_gate_accepts_short_located_content() -> None:
 
 
 def test_import_usability_gate_runs_before_evidence_or_model_calls(monkeypatch, tmp_path) -> None:
-    from openkb import desktop_import_runner
-    from openkb.desktop_import import DesktopTextImportService
-    from openkb.desktop_import_artifacts import ParsedDocument
-    from openkb.desktop_model_gateway import DesktopModelGateway
-    from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+    from openkb.importing import runner as desktop_import_runner
+    from openkb.importing.artifacts import ParsedDocument
+    from openkb.importing.service import DesktopTextImportService
+    from openkb.models.gateway import DesktopModelGateway
+    from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
     kb_dir = tmp_path / "knowledge"
     source = tmp_path / "broken.docx"
@@ -155,8 +155,9 @@ def test_import_usability_gate_runs_before_evidence_or_model_calls(monkeypatch, 
 
 
 def test_engine_health_reports_parser_readiness(monkeypatch) -> None:
-    from openkb import desktop_parser_runtime as runtime
-    from openkb.desktop_engine import DesktopEngineServer, DesktopRequest
+    from openkb.engine.protocol import DesktopRequest
+    from openkb.engine.server import DesktopEngineServer
+    from openkb.parsers import runtime as runtime
 
     monkeypatch.setattr(runtime, "_legacy_resources_available", lambda: True)
     monkeypatch.setattr(runtime, "_ocr_resources_available", lambda: True)
@@ -176,9 +177,9 @@ def test_engine_health_reports_parser_readiness(monkeypatch) -> None:
 def test_modern_office_auto_mode_uses_enhanced_recovery_only_when_direct_ir_is_insufficient(
     monkeypatch, tmp_path
 ) -> None:
-    from openkb import desktop_document_parsers as parsers
-    from openkb import desktop_office_ocr
-    from openkb.desktop_import_artifacts import ParsedDocument
+    from openkb.importing.artifacts import ParsedDocument
+    from openkb.parsers import document as parsers
+    from openkb.parsers import office_ocr as desktop_office_ocr
 
     source = tmp_path / "image-heavy.docx"
     direct = ParsedDocument((_block("短文"),), ())

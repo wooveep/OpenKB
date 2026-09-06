@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from openkb.desktop_document_version_diff import (
+from openkb.documents.version_diff import (
     VersionDiffBlock,
     _blocks_in,
     match_version_blocks,

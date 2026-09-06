@@ -4,16 +4,13 @@ import io
 
 import pytest
 
-from openkb.desktop_conversations import DesktopConversationService
-from openkb.desktop_engine import (
-    DesktopEngineServer,
-    DesktopRequest,
-    DesktopRequestError,
-)
-from openkb.desktop_global_search import search_desktop_knowledge_base
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_knowledge_pages import DesktopKnowledgePageService
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.answers.conversations import DesktopConversationService
+from openkb.engine.protocol import DesktopRequest, DesktopRequestError
+from openkb.engine.server import DesktopEngineServer
+from openkb.importing.service import DesktopTextImportService
+from openkb.knowledge.pages.service import DesktopKnowledgePageService
+from openkb.retrieval.global_search import search_desktop_knowledge_base
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 @pytest.mark.parametrize(
@@ -33,7 +30,7 @@ def test_engine_bridge_rejects_malformed_global_search_before_search(tmp_path, m
     server = DesktopEngineServer(io.BytesIO(), io.BytesIO(), workspace=workspace)
     server._handshake_complete = True
     monkeypatch.setattr(
-        "openkb.desktop_engine_search.search_desktop_knowledge_base",
+        "openkb.engine.search.search_desktop_knowledge_base",
         lambda *_args: (_ for _ in ()).throw(AssertionError("search opened")),
     )
 

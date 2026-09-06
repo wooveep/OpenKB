@@ -281,44 +281,44 @@
         "draftSaving": "正在保存工作草稿…",
         "draftSaved": "工作草稿已保存在本地，已发布知识保持不变。",
         "publishedStatus": "已发布修订 {{revision}}，当前没有未发布更改。",
-      "provenance": {
-        "source_backed": "有来源知识",
-        "structural": "结构与导航",
-        "unsourced": "无来源笔记（仅浏览）",
-        "invalid": "来源映射需要处理"
-      },
-      "sourceAvailability": {
-        "available": "可用",
-        "unavailable": "不可用"
-      },
-      "verification": {
-        "state": {
-          "unverified": "未验证",
-          "human_reviewed": "已人工审核"
+        "provenance": {
+          "source_backed": "有来源知识",
+          "structural": "结构与导航",
+          "unsourced": "无来源笔记（仅浏览）",
+          "invalid": "来源映射需要处理"
         },
-        "reason": {
-          "publish_required": "发布知识页后才能进行验证。",
-          "working_draft_not_verifiable": "工作草稿不能被验证。请先发布；当前已发布修订仍保留自己的审核记录。",
-          "not_verified": "当前已发布修订尚未经过人工审核。",
-          "revision_changed": "这是新的已发布修订，需要重新人工验证。",
-          "publication_gate_blocked": "所有事实声明都解析到可用知识后才能验证。",
-          "deprecated_not_verifiable": "请先恢复此已弃用页面，再进行验证。",
-          "lifecycle_changed": "上次审核后生命周期发生变化；请重新验证当前稳定修订。"
+        "sourceAvailability": {
+          "available": "可用",
+          "unavailable": "不可用"
         },
-        "reviewedByLocal": "本地用户 · {{time}}",
-        "verify": "验证修订"
-      },
-      "saveDraft": "保存草稿",
-      "publish": "发布",
-      "saveBeforePublish": "请先保存工作草稿，再进行发布。",
-      "sourceBinding": "来源绑定",
-      "selectClaim": "请先在 Markdown 编辑器中选择一条事实声明，再选择对应原文证据。",
-      "selectedClaim": "已选择声明：{{claim}}",
-      "selectClaimFirst": "请先在 Markdown 编辑器中选择一条事实声明。",
-      "saveBeforeBinding": "绑定来源前请先保存工作草稿。",
-      "sourceSearchPlaceholder": "搜索文档或章节",
-      "searchSources": "搜索",
-      "sourceSearchEmpty": "搜索可用知识，以绑定原文证据。"
+        "verification": {
+          "state": {
+            "unverified": "未验证",
+            "human_reviewed": "已人工审核"
+          },
+          "reason": {
+            "publish_required": "发布知识页后才能进行验证。",
+            "working_draft_not_verifiable": "工作草稿不能被验证。请先发布；当前已发布修订仍保留自己的审核记录。",
+            "not_verified": "当前已发布修订尚未经过人工审核。",
+            "revision_changed": "这是新的已发布修订，需要重新人工验证。",
+            "publication_gate_blocked": "所有事实声明都解析到可用知识后才能验证。",
+            "deprecated_not_verifiable": "请先恢复此已弃用页面，再进行验证。",
+            "lifecycle_changed": "上次审核后生命周期发生变化；请重新验证当前稳定修订。"
+          },
+          "reviewedByLocal": "本地用户 · {{time}}",
+          "verify": "验证修订"
+        },
+        "saveDraft": "保存草稿",
+        "publish": "发布",
+        "saveBeforePublish": "请先保存工作草稿，再进行发布。",
+        "sourceBinding": "来源绑定",
+        "selectClaim": "请先在 Markdown 编辑器中选择一条事实声明，再选择对应原文证据。",
+        "selectedClaim": "已选择声明：{{claim}}",
+        "selectClaimFirst": "请先在 Markdown 编辑器中选择一条事实声明。",
+        "saveBeforeBinding": "绑定来源前请先保存工作草稿。",
+        "sourceSearchPlaceholder": "搜索文档或章节",
+        "searchSources": "搜索",
+        "sourceSearchEmpty": "搜索可用知识，以绑定原文证据。"
       },
       "modelSettings": {
         "title": "模型默认设置",
@@ -354,9 +354,24 @@
         "inheritDefaultModel": "继承默认模型",
         "autoCapability": "使用检测到的容量",
         "roles": {
-          "default": { "name": "默认", "model": "默认模型", "context": "默认上下文容量", "reasoning": "默认推理强度" },
-          "analysis": { "name": "分析", "model": "分析模型（可选）", "context": "分析上下文容量", "reasoning": "分析推理强度" },
-          "answer": { "name": "问答", "model": "问答模型（可选）", "context": "问答上下文容量", "reasoning": "问答推理强度" }
+          "default": {
+            "name": "默认",
+            "model": "默认模型",
+            "context": "默认上下文容量",
+            "reasoning": "默认推理强度"
+          },
+          "analysis": {
+            "name": "分析",
+            "model": "分析模型（可选）",
+            "context": "分析上下文容量",
+            "reasoning": "分析推理强度"
+          },
+          "answer": {
+            "name": "问答",
+            "model": "问答模型（可选）",
+            "context": "问答上下文容量",
+            "reasoning": "问答推理强度"
+          }
         },
         "reasoning": {
           "provider": "沿用提供商行为",
@@ -670,7 +685,15 @@
       "answerViewAllSourceImages": "查看全部 {{count}} 张图片",
       "answerShowFewerSourceImages": "收起图片",
       "answerSources": "来源证据",
-      "answerCitationLocation": "原文位置 · {{location}}"
+      "answerCitationLocation": "原文位置 · {{location}}",
+      "recoveryParser": "文档解析",
+      "recoveryParserModes": {
+        "keep": "复用已验证的解析结果",
+        "auto": "重新解析：自动",
+        "fast": "重新解析：快速",
+        "enhanced": "重新解析：增强"
+      },
+      "recoveryReparseNotice": "重新解析会使用已保存的原文，重建文档结构、证据、页面树和模型分析。此选择仅影响本次导入。"
     },
     "overview": {
       "title": "总览",
@@ -706,7 +729,10 @@
         "loadingItem": "正在加载知识详情…",
         "empty": "当前没有匹配的生成知识或用户知识页。你仍可在右侧创建工作草稿。",
         "createOrSelect": "选择一项知识，或创建用户拥有的工作草稿。",
-        "authority": { "generated": "生成快照", "user": "用户知识页" },
+        "authority": {
+          "generated": "生成快照",
+          "user": "用户知识页"
+        },
         "generatedSnapshot": "生成知识快照",
         "readOnly": "此内容来自不可变的生成快照，只读显示。采用后会创建新的用户工作草稿，不会改写原快照。",
         "adopt": "采用为工作草稿",
@@ -1031,6 +1057,30 @@
         "today": "今天",
         "week": "最近 7 天",
         "older": "更早"
+      }
+    },
+    "semanticReview": {
+      "title": "语义审核",
+      "description": "对照原文片段检查这些声明。决定仅适用于当前证据快照，接受后会重新生成相关页面。",
+      "empty": "没有待处理的语义审核。",
+      "evidence": "查看原文证据",
+      "resolved": "{{authority}}决定：{{decision}}",
+      "authorities": {
+        "human": "人工",
+        "model": "模型"
+      },
+      "reasons": {
+        "claim_relationship_review": "跨文档声明需要确认是否可以并列。",
+        "semantic_identity_confirmation_required": "这些名称可能指向同一身份。",
+        "multiple_identity_matches": "这些候选匹配了多个已有身份。"
+      },
+      "choices": {
+        "compatible": "接受声明并列",
+        "same_identity": "确认为同一身份",
+        "keep_separate": "保留为独立身份",
+        "keep_current": "保留当前页面",
+        "conflicting": "存在冲突",
+        "unresolved": "尚不确定"
       }
     }
   }

@@ -9,43 +9,43 @@ from dataclasses import replace
 
 import pytest
 
-from openkb import desktop_model_transport
-from openkb.desktop_import import DesktopImportError, DesktopTextImportService
-from openkb.desktop_import_artifacts import DocumentIRBlock
-from openkb.desktop_import_types import DesktopRecoveryOverride
-from openkb.desktop_knowledge_analysis import (
-    KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
-    parse_knowledge_analysis,
-)
-from openkb.desktop_knowledge_analysis_batch_planning import knowledge_analysis_merge_prompt
-from openkb.desktop_knowledge_analysis_batches import (
+from openkb.importing.artifacts import DocumentIRBlock
+from openkb.importing.service import DesktopImportError, DesktopTextImportService
+from openkb.importing.types import DesktopRecoveryOverride
+from openkb.knowledge.analysis.batch_planning import knowledge_analysis_merge_prompt
+from openkb.knowledge.analysis.batches import (
     deterministic_merge_knowledge,
     estimate_knowledge_analysis_batch_tokens,
     plan_knowledge_analysis_batches,
 )
-from openkb.desktop_knowledge_analysis_plan import (
+from openkb.knowledge.analysis.plan import (
     KnowledgeAnalysisPlan,
     build_knowledge_analysis_plan,
     estimate_model_tokens,
     hierarchical_merge_topology,
     knowledge_analysis_input_budget,
 )
-from openkb.desktop_knowledge_analysis_requests import request_pinned_to_plan
-from openkb.desktop_model_capabilities import DesktopModelCapabilityProfile
-from openkb.desktop_model_capability_store import DesktopModelCapabilityStore
-from openkb.desktop_model_execution_profile import (
+from openkb.knowledge.analysis.requests import request_pinned_to_plan
+from openkb.knowledge.analysis.service import (
+    KNOWLEDGE_ANALYSIS_SCHEMA_VERSION,
+    parse_knowledge_analysis,
+)
+from openkb.models import transport as desktop_model_transport
+from openkb.models.capabilities import DesktopModelCapabilityProfile
+from openkb.models.capability_store import DesktopModelCapabilityStore
+from openkb.models.execution_profile import (
     DesktopModelCapacityError,
     analysis_prompt_contract_bundle,
     build_analysis_execution_profile,
 )
-from openkb.desktop_model_gateway import (
+from openkb.models.gateway import (
     DesktopModelGateway,
     DesktopModelRequest,
     DesktopModelTransportError,
 )
-from openkb.desktop_model_settings import save_desktop_model_settings
-from openkb.desktop_prompt_contracts import prompt_contract_for
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.models.prompt_contracts import prompt_contract_for
+from openkb.models.settings import save_desktop_model_settings
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def _representative_evidence(block_count: int = 662):

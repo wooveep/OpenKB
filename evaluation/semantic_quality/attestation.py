@@ -10,7 +10,7 @@ from typing import Any
 
 from evaluation.semantic_quality.definition import SemanticQualityError
 
-_WINDOWS_SMOKE_SCHEMA_VERSION = "openkb.windows-semantic-smoke.v1"
+_WINDOWS_SMOKE_SCHEMA_VERSION = "openkb.windows-semantic-smoke.v2"
 _WINDOWS_SMOKE_CORPUS = (
     "OCloudView部署手册_V10.2.docx",
     "OCloudView部署手册_V10.3.docx",
@@ -22,6 +22,13 @@ _WINDOWS_SMOKE_CHECKS = (
     "knowledge_page_planning",
     "version_comparison",
     "citation_postconditions",
+    "candidate_admission",
+    "knowledge_graph",
+    "grounded_answer",
+    "restart_recovery",
+    "provider_failure_recovery",
+    "semantic_epoch_rejection",
+    "privacy_no_secret_leak",
 )
 _MAX_WINDOWS_SMOKE_REPORT_BYTES = 128 * 1024
 
@@ -57,6 +64,29 @@ def sign_human_attestation(
         raise SemanticQualityError(
             "Human sign-off is forbidden until deterministic validation passes."
         )
+    if report.get("full_pipeline_required") is not True:
+        raise SemanticQualityError("Release sign-off requires the production pipeline evaluation.")
+    from evaluation.semantic_quality.pipeline import PIPELINE_STAGES
+
+    records = [
+        json.loads(line) for line in outputs_path.read_text(encoding="utf-8").splitlines() if line
+    ]
+    full = [row for row in records if row.get("operation") == "full_pipeline"]
+    expected_runs = {
+        (suite["case_id"], repetition)
+        for suite in report.get("suites", [])
+        for repetition in range(1, 4)
+    }
+    if (
+        len(full) != len(expected_runs)
+        or {(row.get("case_id"), row.get("repetition")) for row in full} != expected_runs
+        or any(
+            row.get("valid") is not True
+            or row.get("stages") != dict.fromkeys(PIPELINE_STAGES, True)
+            for row in full
+        )
+    ):
+        raise SemanticQualityError("Every suite must pass all production stages three times.")
     bindings = _mapping(report.get("bindings"), "report.bindings")
     if bindings.get("output_digest") != output_digest:
         raise SemanticQualityError("The raw evaluation output digest no longer matches the run.")

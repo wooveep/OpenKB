@@ -2,32 +2,22 @@
 
 //! OpenKB Desktop Shell: native window ownership and typed Engine mediation.
 
-mod desktop_diagnostic_commands;
-mod desktop_document_version_commands;
-mod desktop_knowledge_page_commands;
-mod desktop_knowledge_reanalysis_commands;
-mod desktop_logging;
-mod desktop_logging_config;
-mod desktop_missing_source_commands;
-mod desktop_model_settings_commands;
-mod desktop_runtime;
-mod engine_protocol;
-mod engine_wire;
-mod engine_wire_knowledge_export;
-mod engine_wire_knowledge_pages;
-mod external_url;
-mod process_tree;
+mod commands;
+mod diagnostics;
+mod engine;
+mod runtime;
+use commands::semantic_review::{desktop_resolve_semantic_review, desktop_semantic_reviews};
 
-use desktop_diagnostic_commands::{
+use commands::diagnostic::{
     desktop_diagnostic_status, desktop_reveal_application_log_directory,
     desktop_reveal_sensitive_trace_directory, desktop_stop_sensitive_trace,
 };
-use desktop_document_version_commands::{
+use commands::document_version::{
     desktop_confirm_document_lineage, desktop_document_version_candidates,
     desktop_document_version_catalog, desktop_document_version_diffs,
     desktop_resolve_document_version_candidate,
 };
-use desktop_knowledge_page_commands::{
+use commands::knowledge_page::{
     desktop_adopt_knowledge_item, desktop_bind_knowledge_page_source,
     desktop_deprecate_knowledge_page, desktop_export_knowledge_bundle, desktop_get_knowledge_page,
     desktop_get_knowledge_workspace_item, desktop_knowledge_pages, desktop_knowledge_workspace,
@@ -36,31 +26,24 @@ use desktop_knowledge_page_commands::{
     desktop_restore_knowledge_page, desktop_save_knowledge_page, desktop_search_knowledge_sources,
     desktop_set_knowledge_page_stale_after, desktop_verify_knowledge_page,
 };
-use desktop_knowledge_reanalysis_commands::{
+use commands::knowledge_reanalysis::{
     desktop_knowledge_reanalysis, desktop_retry_knowledge_reanalysis,
     desktop_start_knowledge_reanalysis,
 };
-use desktop_missing_source_commands::{
+use commands::missing_source::{
     desktop_bind_missing_source_candidate, desktop_dismiss_missing_source_candidates,
     desktop_missing_source_candidates,
 };
-use desktop_model_settings_commands::{
+use commands::model_settings::{
     desktop_model_settings, desktop_save_and_verify_model_settings, desktop_save_model_settings,
     desktop_test_model_connection,
 };
-use desktop_runtime::DesktopRuntimeState;
-use engine_protocol::{
-    ActiveKnowledgeBaseResult, BridgeError, BridgeEvent, BridgeHandshake, CancelResult,
-    DiagnosticBundleResult, EngineHealth, EngineSupervisor, GroundedAnswer, GroundedAnswersResult,
-    ImportControlResult, ImportJobsResult, ImportSourceInspection, KnowledgeBaseActivationResult,
-    KnowledgeGraphExtractionControlResult, KnowledgeReconciliationCommit,
-    KnowledgeReconciliationConflictsResult, KnowledgeReconciliationDecision,
-    PageTreeEnrichmentControlResult, RawDocument, RecoveryOverride, TextDocumentImportResult,
-    VersionFilter,
-};
-use process_tree::ProcessTreeJob;
-use std::{path::Path, sync::Arc};
-use tauri::{ipc::Channel, Manager, State};
+use commands::workbench::*;
+use engine::protocol::EngineSupervisor;
+use runtime::process_tree::ProcessTreeJob;
+use runtime::DesktopRuntimeState;
+use std::sync::Arc;
+use tauri::Manager;
 
 pub(crate) struct DesktopState {
     pub(crate) engine: Arc<EngineSupervisor>,
@@ -68,568 +51,10 @@ pub(crate) struct DesktopState {
     pub(crate) runtime: DesktopRuntimeState,
 }
 
-macro_rules! desktop_join_error {
-    ($operation:literal) => {
-        |error| BridgeError {
-            code: "desktop_command_failed".to_owned(),
-            message: format!("Desktop {} task stopped unexpectedly: {error}", $operation),
-        }
-    };
-}
-
-#[tauri::command]
-fn desktop_bridge_handshake(
-    state: State<'_, DesktopState>,
-) -> Result<BridgeHandshake, BridgeError> {
-    state.engine.handshake()
-}
-
-#[tauri::command]
-fn desktop_engine_health(
-    _app: tauri::AppHandle,
-    state: State<'_, DesktopState>,
-) -> Result<EngineHealth, BridgeError> {
-    state.engine.health().inspect_err(|error| {
-        desktop_logging::event(
-            desktop_logging_config::LogLevel::Warn,
-            "bridge",
-            "engine_health_check_failed",
-            "Desktop Engine health check failed.",
-            serde_json::json!({"error_code": error.code, "outcome": "failed"}),
-        );
-    })
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_create_knowledge_base(
-    app: tauri::AppHandle,
-    state: State<'_, DesktopState>,
-    kb_dir: String,
-    name: Option<String>,
-    request_id: String,
-) -> Result<KnowledgeBaseActivationResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    let activation = tauri::async_runtime::spawn_blocking(move || {
-        engine.create_knowledge_base(kb_dir, name, request_id)
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop knowledge-base creation task stopped unexpectedly: {error}"),
-    })??;
-    desktop_runtime::remember_active_knowledge_base(&app, &activation.knowledge_base.kb_dir);
-    allow_source_images(&app, &activation)?;
-    Ok(activation)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_open_knowledge_base(
-    app: tauri::AppHandle,
-    state: State<'_, DesktopState>,
-    kb_dir: String,
-    request_id: String,
-) -> Result<KnowledgeBaseActivationResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    let activation = tauri::async_runtime::spawn_blocking(move || {
-        engine.open_knowledge_base(kb_dir, request_id)
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop knowledge-base open task stopped unexpectedly: {error}"),
-    })??;
-    desktop_runtime::remember_active_knowledge_base(&app, &activation.knowledge_base.kb_dir);
-    allow_source_images(&app, &activation)?;
-    Ok(activation)
-}
-
-#[tauri::command]
-fn desktop_take_launch_intents(
-    state: State<'_, DesktopState>,
-) -> Vec<desktop_runtime::DesktopLaunchIntent> {
-    state.runtime.take_launch_intents()
-}
-
-#[tauri::command]
-async fn desktop_active_knowledge_base(
-    state: State<'_, DesktopState>,
-) -> Result<ActiveKnowledgeBaseResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.active_knowledge_base())
-        .await
-        .map_err(|error| BridgeError {
-            code: "desktop_command_failed".to_owned(),
-            message: format!("Desktop active knowledge-base task stopped unexpectedly: {error}"),
-        })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-fn desktop_reveal_knowledge_base_directory(kb_dir: String) -> Result<(), BridgeError> {
-    desktop_runtime::reveal_directory(Path::new(&kb_dir)).map_err(|message| BridgeError {
-        code: "desktop_directory_open_failed".to_owned(),
-        message,
-    })
-}
-
-#[tauri::command]
-fn desktop_quit_application(app: tauri::AppHandle) {
-    app.exit(0);
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_open_external_url(url: String) -> Result<(), BridgeError> {
-    tauri::async_runtime::spawn_blocking(move || external_url::open_in_system_browser(&url))
-        .await
-        .map_err(desktop_join_error!("external URL open"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_inspect_import_sources(
-    state: State<'_, DesktopState>,
-    source_paths: Vec<String>,
-    request_id: String,
-) -> Result<ImportSourceInspection, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.inspect_import_sources(source_paths, request_id)
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop import source inspection stopped unexpectedly: {error}"),
-    })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_import_text_document(
-    state: State<'_, DesktopState>,
-    source_path: String,
-    parser_mode: Option<String>,
-    request_id: String,
-) -> Result<TextDocumentImportResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.import_text_document(source_path, parser_mode, request_id)
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop document import task stopped unexpectedly: {error}"),
-    })?
-}
-
-#[tauri::command]
-async fn desktop_import_jobs(
-    state: State<'_, DesktopState>,
-) -> Result<ImportJobsResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.import_jobs())
-        .await
-        .map_err(|error| BridgeError {
-            code: "desktop_command_failed".to_owned(),
-            message: format!("Desktop import task lookup stopped unexpectedly: {error}"),
-        })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_ask_grounded(
-    state: State<'_, DesktopState>,
-    question: String,
-    version_filter: Option<VersionFilter>,
-    request_id: String,
-) -> Result<GroundedAnswer, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.ask_grounded(question, version_filter, request_id)
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop grounded answer task stopped unexpectedly: {error}"),
-    })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_retry_interrupted_answer(
-    state: State<'_, DesktopState>,
-    answer_id: String,
-    request_id: String,
-) -> Result<GroundedAnswer, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.retry_interrupted_answer(answer_id, request_id)
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop interrupted-answer retry task stopped unexpectedly: {error}"),
-    })?
-}
-
-#[tauri::command]
-async fn desktop_grounded_answers(
-    state: State<'_, DesktopState>,
-) -> Result<GroundedAnswersResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.grounded_answers())
-        .await
-        .map_err(|error| BridgeError {
-            code: "desktop_command_failed".to_owned(),
-            message: format!("Desktop grounded answer history stopped unexpectedly: {error}"),
-        })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_conversations(
-    state: State<'_, DesktopState>,
-    search: String,
-) -> Result<serde_json::Value, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.conversations(search))
-        .await
-        .map_err(desktop_join_error!("conversation list"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_global_search(
-    state: State<'_, DesktopState>,
-    query: String,
-) -> Result<serde_json::Value, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.global_search(query))
-        .await
-        .map_err(desktop_join_error!("global search"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_conversation(
-    state: State<'_, DesktopState>,
-    conversation_id: String,
-) -> Result<serde_json::Value, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.conversation(conversation_id))
-        .await
-        .map_err(desktop_join_error!("conversation read"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_create_conversation(
-    state: State<'_, DesktopState>,
-    title: Option<String>,
-    request_id: String,
-) -> Result<serde_json::Value, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.create_conversation(title, request_id))
-        .await
-        .map_err(desktop_join_error!("conversation creation"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_rename_conversation(
-    state: State<'_, DesktopState>,
-    conversation_id: String,
-    title: String,
-    request_id: String,
-) -> Result<serde_json::Value, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.rename_conversation(conversation_id, title, request_id)
-    })
-    .await
-    .map_err(desktop_join_error!("conversation rename"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_delete_conversation(
-    state: State<'_, DesktopState>,
-    conversation_id: String,
-    request_id: String,
-) -> Result<serde_json::Value, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.delete_conversation(conversation_id, request_id)
-    })
-    .await
-    .map_err(desktop_join_error!("conversation deletion"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_save_conversation_draft(
-    state: State<'_, DesktopState>,
-    conversation_id: String,
-    draft_text: String,
-    request_id: String,
-) -> Result<serde_json::Value, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.save_conversation_draft(conversation_id, draft_text, request_id)
-    })
-    .await
-    .map_err(desktop_join_error!("conversation draft save"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_ask_conversation(
-    state: State<'_, DesktopState>,
-    conversation_id: String,
-    question: String,
-    version_filter: Option<VersionFilter>,
-    request_id: String,
-) -> Result<serde_json::Value, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.ask_conversation(conversation_id, question, version_filter, request_id)
-    })
-    .await
-    .map_err(desktop_join_error!("conversation answer"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_regenerate_conversation_answer(
-    state: State<'_, DesktopState>,
-    conversation_id: String,
-    assistant_message_id: String,
-    request_id: String,
-) -> Result<serde_json::Value, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.regenerate_conversation_answer(conversation_id, assistant_message_id, request_id)
-    })
-    .await
-    .map_err(desktop_join_error!("conversation answer regeneration"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_select_answer_version(
-    state: State<'_, DesktopState>,
-    conversation_id: String,
-    assistant_message_id: String,
-    answer_version_id: String,
-    request_id: String,
-) -> Result<serde_json::Value, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.select_answer_version(
-            conversation_id,
-            assistant_message_id,
-            answer_version_id,
-            request_id,
-        )
-    })
-    .await
-    .map_err(desktop_join_error!("answer version selection"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_export_diagnostic_bundle(
-    state: State<'_, DesktopState>,
-    destination: String,
-    request_id: String,
-) -> Result<DiagnosticBundleResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.export_diagnostic_bundle(destination, request_id)
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop diagnostic-bundle export stopped unexpectedly: {error}"),
-    })?
-}
-
-#[tauri::command]
-async fn desktop_knowledge_reconciliation_conflicts(
-    state: State<'_, DesktopState>,
-) -> Result<KnowledgeReconciliationConflictsResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.knowledge_reconciliation_conflicts())
-        .await
-        .map_err(|error| BridgeError {
-            code: "desktop_command_failed".to_owned(),
-            message: format!(
-                "Desktop knowledge-reconciliation lookup stopped unexpectedly: {error}"
-            ),
-        })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_stage_knowledge_reconciliation_decisions(
-    state: State<'_, DesktopState>,
-    candidate_ids: Vec<String>,
-    decision: Option<KnowledgeReconciliationDecision>,
-    manual_merge_content: Option<String>,
-    request_id: String,
-) -> Result<KnowledgeReconciliationConflictsResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.stage_knowledge_reconciliation_decisions(
-            candidate_ids,
-            decision,
-            manual_merge_content,
-            request_id,
-        )
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop knowledge-reconciliation staging stopped unexpectedly: {error}"),
-    })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_commit_knowledge_reconciliation_decisions(
-    state: State<'_, DesktopState>,
-    request_id: String,
-) -> Result<KnowledgeReconciliationCommit, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.commit_knowledge_reconciliation_decisions(request_id)
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop knowledge-reconciliation commit stopped unexpectedly: {error}"),
-    })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_read_raw_document(
-    state: State<'_, DesktopState>,
-    document_id: String,
-    request_id: String,
-    page: u32,
-    focus_locator: Option<serde_json::Value>,
-) -> Result<RawDocument, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.read_raw_document(document_id, request_id, page, focus_locator)
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop original-document read stopped unexpectedly: {error}"),
-    })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-fn desktop_pause_import_job(
-    state: State<'_, DesktopState>,
-    job_id: String,
-) -> Result<ImportControlResult, BridgeError> {
-    state.engine.pause_import_job(job_id)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_resume_import_job(
-    state: State<'_, DesktopState>,
-    job_id: String,
-    request_id: String,
-) -> Result<TextDocumentImportResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.resume_import_job(job_id, request_id))
-        .await
-        .map_err(|error| BridgeError {
-            code: "desktop_command_failed".to_owned(),
-            message: format!("Desktop import resume task stopped unexpectedly: {error}"),
-        })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn desktop_recover_import_job(
-    state: State<'_, DesktopState>,
-    job_id: String,
-    recovery_override: RecoveryOverride,
-    request_id: String,
-) -> Result<TextDocumentImportResult, BridgeError> {
-    let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine.recover_import_job(job_id, recovery_override, request_id)
-    })
-    .await
-    .map_err(|error| BridgeError {
-        code: "desktop_command_failed".to_owned(),
-        message: format!("Desktop import recovery task stopped unexpectedly: {error}"),
-    })?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-fn desktop_cancel_import_job(
-    state: State<'_, DesktopState>,
-    job_id: String,
-) -> Result<ImportControlResult, BridgeError> {
-    state.engine.cancel_import_job(job_id)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-fn desktop_cancel_page_tree_enrichment(
-    state: State<'_, DesktopState>,
-    document_id: String,
-) -> Result<PageTreeEnrichmentControlResult, BridgeError> {
-    state.engine.cancel_page_tree_enrichment(document_id)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-fn desktop_retry_page_tree_enrichment(
-    state: State<'_, DesktopState>,
-    document_id: String,
-) -> Result<PageTreeEnrichmentControlResult, BridgeError> {
-    state.engine.retry_page_tree_enrichment(document_id)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-fn desktop_cancel_knowledge_graph_extraction(
-    state: State<'_, DesktopState>,
-    document_id: String,
-) -> Result<KnowledgeGraphExtractionControlResult, BridgeError> {
-    state.engine.cancel_knowledge_graph_extraction(document_id)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-fn desktop_retry_knowledge_graph_extraction(
-    state: State<'_, DesktopState>,
-    document_id: String,
-) -> Result<KnowledgeGraphExtractionControlResult, BridgeError> {
-    state.engine.retry_knowledge_graph_extraction(document_id)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-fn desktop_cancel(
-    state: State<'_, DesktopState>,
-    target_request_id: String,
-) -> Result<CancelResult, BridgeError> {
-    state.engine.cancel(target_request_id)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-fn desktop_subscribe(
-    state: State<'_, DesktopState>,
-    subscription_id: String,
-    event_channel: Channel<BridgeEvent>,
-) -> Result<(), BridgeError> {
-    state.engine.subscribe(subscription_id, event_channel)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-fn desktop_unsubscribe(state: State<'_, DesktopState>, subscription_id: String) {
-    state.engine.unsubscribe(&subscription_id);
-}
-
-fn allow_source_images(
-    app: &tauri::AppHandle,
-    activation: &KnowledgeBaseActivationResult,
-) -> Result<(), BridgeError> {
-    desktop_runtime::allow_source_image_directory(app, &activation.knowledge_base.kb_dir).map_err(
-        |message| BridgeError {
-            code: "desktop_source_image_scope_failed".to_owned(),
-            message,
-        },
-    )
-}
-
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
-            desktop_runtime::forward_launch_intent(app, args, cwd);
+            runtime::forward_launch_intent(app, args, cwd);
         }))
         .plugin(tauri_plugin_dialog::init())
         .manage(DesktopState {
@@ -638,7 +63,7 @@ fn main() {
                 .expect("Could not create the OpenKB Desktop Runtime process tree"),
             runtime: DesktopRuntimeState::default(),
         })
-        .setup(|app| Ok(desktop_runtime::initialize(app)?))
+        .setup(|app| Ok(runtime::initialize(app)?))
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -648,8 +73,8 @@ fn main() {
                 if state.runtime.should_hide_main_window() {
                     api.prevent_close();
                     if let Err(error) = window.hide() {
-                        desktop_logging::event(
-                            desktop_logging_config::LogLevel::Warn,
+                        diagnostics::logging::event(
+                            diagnostics::config::LogLevel::Warn,
                             "shell",
                             "window_hide_failed",
                             "The main window could not be hidden to the tray.",
@@ -721,6 +146,8 @@ fn main() {
             desktop_confirm_document_lineage,
             desktop_document_version_diffs,
             desktop_knowledge_reconciliation_conflicts,
+            desktop_semantic_reviews,
+            desktop_resolve_semantic_review,
             desktop_stage_knowledge_reconciliation_decisions,
             desktop_commit_knowledge_reconciliation_decisions,
             desktop_missing_source_candidates,
@@ -744,7 +171,7 @@ fn main() {
         .expect("error while building OpenKB Desktop Shell");
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
-            desktop_runtime::shutdown_engine(app_handle);
+            runtime::shutdown_engine(app_handle);
         }
     });
 }

@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import pytest
 
-from openkb.desktop_import_artifacts import DocumentIRBlock
-from openkb.desktop_knowledge_analysis import (
+from openkb.importing.artifacts import DocumentIRBlock
+from openkb.knowledge.analysis.batch_store import KnowledgeAnalysisBatch
+from openkb.knowledge.analysis.merge import merge_split_batch_analyses
+from openkb.knowledge.analysis.output_recovery import (
+    analyze_batch_with_output_limit_recovery,
+)
+from openkb.knowledge.analysis.service import (
     KNOWLEDGE_ANALYSIS_BATCH_SCOPE,
     DesktopKnowledgeAnalysis,
 )
-from openkb.desktop_knowledge_analysis_batch_store import KnowledgeAnalysisBatch
-from openkb.desktop_knowledge_analysis_merge import merge_split_batch_analyses
-from openkb.desktop_knowledge_analysis_output_recovery import (
-    analyze_batch_with_output_limit_recovery,
-)
-from openkb.desktop_model_gateway import (
+from openkb.models.gateway import (
     DesktopModelOutputObservations,
     DesktopModelResult,
 )
-from openkb.desktop_structured_output import DesktopStructuredOutputInvalidError
+from openkb.models.structured_output import DesktopStructuredOutputInvalidError
 
 
 def _batch(count: int) -> KnowledgeAnalysisBatch:

@@ -9,24 +9,24 @@ from hashlib import sha256
 
 import pytest
 
-from openkb import desktop_import_runner
-from openkb.desktop_document_versions import DesktopDocumentVersionService
-from openkb.desktop_import import (
+from openkb.documents.versions import DesktopDocumentVersionService
+from openkb.importing import runner as desktop_import_runner
+from openkb.importing.service import (
     DesktopImportControl,
     DesktopImportError,
     DesktopRecoveryOverride,
     DesktopTextImportService,
 )
-from openkb.desktop_import_store import DesktopImportStore
-from openkb.desktop_knowledge_analysis import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
-from openkb.desktop_model_gateway import (
+from openkb.importing.store import DesktopImportStore
+from openkb.knowledge.analysis.service import KNOWLEDGE_ANALYSIS_SCHEMA_VERSION
+from openkb.models.gateway import (
     DesktopModelGateway,
     DesktopModelOutputObservations,
     DesktopModelProviderResponse,
     DesktopProviderTokenUsage,
 )
-from openkb.desktop_retrieval import DesktopEvidenceRetriever
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.retrieval.service import DesktopEvidenceRetriever
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def _empty_analysis() -> str:

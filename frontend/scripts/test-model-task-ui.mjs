@@ -8,29 +8,30 @@ import i18next from "i18next"
 import { I18nextProvider, initReactI18next } from "react-i18next"
 import react from "@vitejs/plugin-react"
 import { createServer } from "vite"
+import { assertPolling } from "./test-polling.mjs"
 
 const frontendDir = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const translations = JSON.parse(
   await readFile(resolve(frontendDir, "src/locales/en/common.json"), "utf8"),
 )
 const failedDocumentsSource = await readFile(
-  resolve(frontendDir, "src/desktop/FailedDocumentsDialog.tsx"),
+  resolve(frontendDir, "src/desktop/features/documents/FailedDocumentsDialog.tsx"),
   "utf8",
 )
 const knowledgeWorkspaceSource = await readFile(
-  resolve(frontendDir, "src/desktop/DesktopKnowledgeWorkspacePanel.tsx"),
+  resolve(frontendDir, "src/desktop/features/knowledge/DesktopKnowledgeWorkspacePanel.tsx"),
   "utf8",
 )
 const knowledgePageSource = await readFile(
-  resolve(frontendDir, "src/desktop/DesktopKnowledgePagePanel.tsx"),
+  resolve(frontendDir, "src/desktop/features/knowledge/DesktopKnowledgePagePanel.tsx"),
   "utf8",
 )
 const documentVersionReviewSource = await readFile(
-  resolve(frontendDir, "src/desktop/DesktopDocumentVersionCandidatePanel.tsx"),
+  resolve(frontendDir, "src/desktop/features/review/DesktopDocumentVersionCandidatePanel.tsx"),
   "utf8",
 )
 const conversationSource = await readFile(
-  resolve(frontendDir, "src/desktop/DesktopConversationPanel.tsx"),
+  resolve(frontendDir, "src/desktop/features/answers/DesktopConversationPanel.tsx"),
   "utf8",
 )
 const mutationReloadSource = knowledgeWorkspaceSource.slice(
@@ -91,32 +92,34 @@ const vite = await createServer({
 })
 
 try {
+  const { startPolling } = await vite.ssrLoadModule("/src/desktop/shared/polling.ts")
+  await assertPolling(startPolling)
   const { DesktopImportProgress } = await vite.ssrLoadModule(
-    "/src/desktop/DesktopImportProgress.tsx",
+    "/src/desktop/features/tasks/DesktopImportProgress.tsx",
   )
   const { DesktopKnowledgeGraphExtractionTasks } = await vite.ssrLoadModule(
-    "/src/desktop/DesktopKnowledgeGraphExtractionTasks.tsx",
+    "/src/desktop/features/tasks/DesktopKnowledgeGraphExtractionTasks.tsx",
   )
   const { EffectiveModelRoleSettings } = await vite.ssrLoadModule(
-    "/src/desktop/DesktopModelSettingsPanel.tsx",
+    "/src/desktop/features/settings/DesktopModelSettingsPanel.tsx",
   )
   const { DesktopModelResultDetails } = await vite.ssrLoadModule(
-    "/src/desktop/DesktopModelResultDetails.tsx",
+    "/src/desktop/features/tasks/DesktopModelResultDetails.tsx",
   )
   const { DesktopCapabilityDegradationNotice } = await vite.ssrLoadModule(
-    "/src/desktop/DesktopCapabilityDegradationNotice.tsx",
+    "/src/desktop/shared/DesktopCapabilityDegradationNotice.tsx",
   )
   const { runDocumentImportBatch } = await vite.ssrLoadModule(
-    "/src/desktop/desktop-import-batch.ts",
+    "/src/desktop/features/documents/desktop-import-batch.ts",
   )
   const { createLatestRefresh } = await vite.ssrLoadModule(
-    "/src/desktop/latest-refresh.ts",
+    "/src/desktop/shared/latest-refresh.ts",
   )
   const { TauriKnowledgePageBridge } = await vite.ssrLoadModule(
-    "/src/desktop/tauri-knowledge-page-bridge.ts",
+    "/src/desktop/bridge/tauri/knowledge-page-bridge.ts",
   )
   const { conversation } = await vite.ssrLoadModule(
-    "/src/desktop/bridge-normalizers.ts",
+    "/src/desktop/bridge/normalizers.ts",
   )
   const semanticTrace = {
     semantic_structure_state: "known",
@@ -165,7 +168,7 @@ try {
     knowledgeWorkspaceRequestIsCurrent,
     reloadKnowledgeWorkspaceAfterUserMutation,
   } = await vite.ssrLoadModule(
-    "/src/desktop/knowledge-workspace-refresh.ts",
+    "/src/desktop/features/knowledge/knowledge-workspace-refresh.ts",
   )
   const mutationReloads = []
   await reloadKnowledgeWorkspaceAfterUserMutation(

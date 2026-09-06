@@ -11,10 +11,10 @@ import pytest
 from PIL import Image as PillowImage
 from PIL import ImageDraw, ImageFont
 
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_import_artifacts import DesktopImportError
-from openkb.desktop_raw_assets import DesktopRawAssetService
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.documents.raw_assets import DesktopRawAssetService
+from openkb.importing.artifacts import DesktopImportError
+from openkb.importing.service import DesktopTextImportService
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def test_text_pdf_uses_fast_route_and_keeps_page_table_and_source_image(tmp_path):

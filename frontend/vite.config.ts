@@ -13,7 +13,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: "../openkb/desktop-web",
+    outDir: "dist",
     emptyOutDir: true,
   },
   server: {

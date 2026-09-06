@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from openkb.desktop_answer_budget import DesktopAnswerBudget, answer_budget_for_gateway
+from openkb.answers.budget import DesktopAnswerBudget, answer_budget_for_gateway
 
 
 class _AnswerGateway:

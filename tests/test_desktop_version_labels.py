@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from openkb.desktop_version_labels import (
+from openkb.documents.version_labels import (
     compare_version_labels,
     parse_version_label,
     version_label_candidates,

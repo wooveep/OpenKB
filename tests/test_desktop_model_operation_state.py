@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import sqlite3
 
-from openkb.desktop_model_operation_migrations import (
+from openkb.models.operation_migrations import (
     MODEL_OPERATION_RETRY_MIGRATION_STATEMENTS,
     MODEL_OPERATION_RETRY_REVISION_MIGRATION_STATEMENTS,
     MODEL_OPERATION_STATE_MIGRATION_STATEMENTS,
 )
-from openkb.desktop_model_operation_state import DesktopModelOperationContractStore
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_database_path
+from openkb.models.operation_state import DesktopModelOperationContractStore
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_database_path
 
 
 def test_retry_permit_is_bound_to_the_authorized_suspension_revision(tmp_path) -> None:

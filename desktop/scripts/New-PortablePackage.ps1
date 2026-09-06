@@ -211,7 +211,7 @@ try {
             --collect-all tika `
             --add-data "$deepDocRuntime;deepdoc" `
             --add-data "$legacyOfficeRuntime;legacy-office" `
-            (Join-Path $repoRoot "openkb\desktop_engine_entrypoint.py")
+            (Join-Path $repoRoot "openkb\engine\entrypoint.py")
     }
 }
 finally {
@@ -219,7 +219,7 @@ finally {
 }
 
 $pageIndexSuite = Join-Path $desktopRoot "test-assets\pageindex-evaluation\fixed-suite.json"
-$pageIndexIdentityJson = & uv run --directory $repoRoot python -c "import json, sys; from pathlib import Path; from openkb.desktop_pageindex_acceptance import pageindex_evaluation_corpus_identity; from openkb.desktop_pageindex_adapter import PAGEINDEX_PACKAGE_VERSION, PAGEINDEX_PROVIDER_VERSION, PAGEINDEX_SOURCE_COMMIT; from openkb.desktop_retrieval_evaluation_types import DesktopRetrievalEvaluationSuite; path = Path(sys.argv[1]); suite = DesktopRetrievalEvaluationSuite.from_json(path); corpus_digest, corpus_files = pageindex_evaluation_corpus_identity(path); print(json.dumps({'packageVersion': PAGEINDEX_PACKAGE_VERSION, 'providerVersion': PAGEINDEX_PROVIDER_VERSION, 'sourceCommit': PAGEINDEX_SOURCE_COMMIT, 'suiteSnapshotId': suite.snapshot_id, 'suiteDigest': suite.digest, 'caseCount': len(suite.cases), 'corpusDigest': corpus_digest, 'corpusFiles': corpus_files}))" $pageIndexSuite
+$pageIndexIdentityJson = & uv run --directory $repoRoot python -c "import json, sys; from pathlib import Path; from openkb.evaluation.pageindex_acceptance import pageindex_evaluation_corpus_identity; from openkb.page_tree.pageindex.adapter import PAGEINDEX_PACKAGE_VERSION, PAGEINDEX_PROVIDER_VERSION, PAGEINDEX_SOURCE_COMMIT; from openkb.evaluation.retrieval_types import DesktopRetrievalEvaluationSuite; path = Path(sys.argv[1]); suite = DesktopRetrievalEvaluationSuite.from_json(path); corpus_digest, corpus_files = pageindex_evaluation_corpus_identity(path); print(json.dumps({'packageVersion': PAGEINDEX_PACKAGE_VERSION, 'providerVersion': PAGEINDEX_PROVIDER_VERSION, 'sourceCommit': PAGEINDEX_SOURCE_COMMIT, 'suiteSnapshotId': suite.snapshot_id, 'suiteDigest': suite.digest, 'caseCount': len(suite.cases), 'corpusDigest': corpus_digest, 'corpusFiles': corpus_files}))" $pageIndexSuite
 if ($LASTEXITCODE -ne 0) {
     throw "PageIndex provider identity check failed with exit code $LASTEXITCODE."
 }
@@ -248,7 +248,7 @@ Invoke-Checked "PageIndex build dependency install" {
         --requirement (Join-Path $repoRoot "requirements-pageindex-build.lock")
 }
 Invoke-Checked "PageIndex isolated runtime check" {
-    & $pageIndexPython (Join-Path $repoRoot "openkb\desktop_pageindex_worker.py") --check
+    & $pageIndexPython (Join-Path $repoRoot "openkb\page_tree\pageindex\worker.py") --check
 }
 
 Push-Location $repoRoot
@@ -268,7 +268,7 @@ try {
             --copy-metadata PyPDF2 `
             --copy-metadata python-dotenv `
             --copy-metadata PyYAML `
-            (Join-Path $repoRoot "openkb\desktop_pageindex_worker.py")
+            (Join-Path $repoRoot "openkb\page_tree\pageindex\worker.py")
     }
 }
 finally {

@@ -7,20 +7,20 @@ from pathlib import Path
 
 import pytest
 
-from openkb.desktop_document_version_catalog import (
+from openkb.documents.version_catalog import (
     DocumentLineageDecision,
     DocumentVersionMemberDecision,
     _decode_lineages,
 )
-from openkb.desktop_document_versions import DesktopDocumentVersionService
-from openkb.desktop_import_artifacts import DesktopImportError
-from openkb.desktop_import_runner import DesktopTextImportService
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
+from openkb.documents.versions import DesktopDocumentVersionService
+from openkb.importing.artifacts import DesktopImportError
+from openkb.importing.runner import DesktopTextImportService
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime
 
 
 def _versions(tmp_path: Path, monkeypatch) -> tuple[DesktopDocumentVersionService, tuple[str, ...]]:
     monkeypatch.setattr(
-        "openkb.desktop_import_runner.start_graph_extraction", lambda *_args, **_kwargs: None
+        "openkb.importing.runner.start_graph_extraction", lambda *_args, **_kwargs: None
     )
     kb_dir = tmp_path / "knowledge"
     DesktopKnowledgeBaseRuntime().create(kb_dir)

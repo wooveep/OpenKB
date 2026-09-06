@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from openkb.desktop_retrieval_trace import retrieval_trace_from_json
+from openkb.retrieval.trace import retrieval_trace_from_json
 
 
 def _known_trace() -> dict[str, object]:

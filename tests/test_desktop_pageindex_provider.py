@@ -13,32 +13,32 @@ from types import SimpleNamespace
 
 import pytest
 
-import openkb.desktop_pageindex_provider as pageindex_provider
-from openkb.desktop_import import DesktopTextImportService
-from openkb.desktop_import_artifacts import DocumentIRBlock, build_evidence
-from openkb.desktop_page_tree import DETERMINISTIC_PROVIDER_KIND
-from openkb.desktop_pageindex_acceptance import (
+import openkb.page_tree.pageindex.provider as pageindex_provider
+from openkb.evaluation.pageindex_acceptance import (
     pageindex_evaluation_corpus_identity,
     run_pageindex_package_acceptance,
     validate_pageindex_evaluation,
 )
-from openkb.desktop_pageindex_adapter import (
+from openkb.evaluation.retrieval import DesktopRetrievalEvaluator
+from openkb.evaluation.retrieval_types import DesktopRetrievalEvaluationSuite
+from openkb.importing.artifacts import DocumentIRBlock, build_evidence
+from openkb.importing.service import DesktopTextImportService
+from openkb.locks import kb_ingest_lock, kb_ingest_lock_held
+from openkb.page_tree.pageindex.adapter import (
     PAGEINDEX_PROVIDER_KIND,
     PAGEINDEX_PROVIDER_VERSION,
     PageIndexProviderError,
     _subprocess_invoker,
     build_official_pageindex_generation,
 )
-from openkb.desktop_pageindex_provider import (
+from openkb.page_tree.pageindex.provider import (
     PAGEINDEX_CACHE_SCHEMA,
     PageIndexEvaluationProvider,
     materialize_official_pageindex_provider,
 )
-from openkb.desktop_retrieval import DesktopEvidenceRetriever
-from openkb.desktop_retrieval_evaluation import DesktopRetrievalEvaluator
-from openkb.desktop_retrieval_evaluation_types import DesktopRetrievalEvaluationSuite
-from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime, desktop_state_dir
-from openkb.locks import kb_ingest_lock, kb_ingest_lock_held
+from openkb.page_tree.tree import DETERMINISTIC_PROVIDER_KIND
+from openkb.retrieval.service import DesktopEvidenceRetriever
+from openkb.workspace.runtime import DesktopKnowledgeBaseRuntime, desktop_state_dir
 
 
 def _blocks() -> tuple[DocumentIRBlock, ...]:
@@ -104,12 +104,12 @@ def test_subprocess_invoker_preserves_virtual_environment_launcher(tmp_path, mon
         return SimpleNamespace(returncode=0, stderr="")
 
     monkeypatch.setattr(Path, "resolve", lambda _self: (_ for _ in ()).throw(AssertionError))
-    monkeypatch.setattr("openkb.desktop_pageindex_adapter.subprocess.run", run)
+    monkeypatch.setattr("openkb.page_tree.pageindex.adapter.subprocess.run", run)
 
     _subprocess_invoker(launcher)(input_path, output_path, 1.0)
 
     assert captured[0][0] == os.path.abspath(launcher)
-    assert captured[0][1].endswith("desktop_pageindex_worker.py")
+    assert captured[0][1].endswith("page_tree/pageindex/worker.py")
 
 
 def test_subprocess_invoker_runs_a_frozen_worker_directly(tmp_path, monkeypatch) -> None:
@@ -124,7 +124,7 @@ def test_subprocess_invoker_runs_a_frozen_worker_directly(tmp_path, monkeypatch)
         output_path.write_text("{}", encoding="utf-8")
         return SimpleNamespace(returncode=0, stderr="")
 
-    monkeypatch.setattr("openkb.desktop_pageindex_adapter.subprocess.run", run)
+    monkeypatch.setattr("openkb.page_tree.pageindex.adapter.subprocess.run", run)
 
     _subprocess_invoker(None, worker)(input_path, output_path, 1.0)
 
