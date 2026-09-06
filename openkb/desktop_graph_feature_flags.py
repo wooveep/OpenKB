@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
-import json
 import sqlite3
 from pathlib import Path
 
+from openkb.desktop_canonical_json import canonical_json_digest
 from openkb.desktop_workspace import desktop_state_database_path, desktop_state_dir
 from openkb.locks import kb_ingest_lock
 
@@ -193,42 +193,16 @@ def knowledge_snapshot_digest_in(connection: sqlite3.Connection, kb_dir: Path) -
             connection,
             """
             SELECT current.document_id, results.status, results.capability_identity,
-                results.prompt_contract_digest, results.extraction_method,
-                results.node_count, results.edge_count
+                results.prompt_contract_digest, results.node_count, results.edge_count,
+                results.quality, results.document_version,
+                results.evidence_snapshot_digest, results.canonical_schema_version,
+                results.normalizer_version, results.verification_policy_version,
+                results.candidate_generation_id, results.candidate_generation_digest
             FROM knowledge_graph_current AS current
             JOIN knowledge_graph_results AS results ON results.result_id = current.result_id
             JOIN source_documents AS documents ON documents.document_id = current.document_id
             WHERE documents.availability = 'available'
             ORDER BY current.document_id
-            """,
-        ),
-        "graph_nodes": _rows(
-            connection,
-            """
-            SELECT nodes.node_id, nodes.evidence_id, nodes.node_type, nodes.label,
-                nodes.normalized_label, nodes.extraction_method
-            FROM current_knowledge_graph_nodes AS nodes
-            JOIN evidence_occurrences
-                ON evidence_occurrences.evidence_id = nodes.evidence_id
-            JOIN source_documents
-                ON source_documents.document_id = evidence_occurrences.document_id
-            WHERE source_documents.availability = 'available'
-            ORDER BY nodes.node_id
-            """,
-        ),
-        "graph_edges": _rows(
-            connection,
-            """
-            SELECT edges.edge_id, edges.evidence_id, edges.source_node_id,
-                edges.target_node_id, edges.edge_type, edges.support_score,
-                edges.extraction_method
-            FROM current_knowledge_graph_edges AS edges
-            JOIN evidence_occurrences
-                ON evidence_occurrences.evidence_id = edges.evidence_id
-            JOIN source_documents
-                ON source_documents.document_id = evidence_occurrences.document_id
-            WHERE source_documents.availability = 'available'
-            ORDER BY edges.edge_id
             """,
         ),
         "knowledge_generation": _rows(
@@ -269,8 +243,7 @@ def knowledge_snapshot_digest_in(connection: sqlite3.Connection, kb_dir: Path) -
             """,
         ),
     }
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return canonical_json_digest(payload)
 
 
 def _rows(connection: sqlite3.Connection, query: str) -> list[list[object]]:

@@ -161,6 +161,21 @@ class DesktopEvidenceRetriever:
             retry_scope=(operation_retry_scopes or {}).get("query_planning"),
             response_deadline=navigation_deadline,
         )
+        if planning.semantic_structure_state == "unknown":
+            return replace(
+                seed_pack,
+                degradations=tuple(
+                    dict.fromkeys((*seed_pack.degradations, *planning.degradations))
+                ),
+                retrieval_trace=_trace_with_query_planning(
+                    seed_pack.retrieval_trace,
+                    planning,
+                ),
+                retrieval_model_cost=_sum_model_cost(
+                    planning.model_cost,
+                    seed_pack.retrieval_model_cost,
+                ),
+            )
         initial_pack = self.retrieve_variant(
             normalized_question,
             variant=variant,

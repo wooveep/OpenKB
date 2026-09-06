@@ -11,10 +11,6 @@ from openkb.desktop_candidate_registry import (
     CandidateRegistryStatus,
     candidate_registry_outcome_in,
 )
-from openkb.desktop_knowledge_graph_interpretation import (
-    GraphDispositionCounts,
-    KnowledgeGraphIssue,
-)
 from openkb.desktop_knowledge_metadata import decode_knowledge_labels
 from openkb.desktop_model_execution_profile import estimate_model_tokens
 from openkb.desktop_semantic_graph_contract import (
@@ -45,6 +41,21 @@ class SemanticGraphCapacityError(ValueError):
 
 class SemanticGraphStoredDataError(ValueError):
     """Stored semantic graph input violates the persisted-data contract."""
+
+
+@dataclass(frozen=True)
+class KnowledgeGraphIssue:
+    code: str
+    path: str
+    disposition: str
+    failure_class: str
+
+
+@dataclass(frozen=True)
+class GraphDispositionCounts:
+    retained: int
+    weakened: int
+    rejected: int
 
 
 @dataclass(frozen=True)

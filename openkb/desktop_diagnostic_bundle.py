@@ -286,11 +286,13 @@ class DesktopDiagnosticBundleService:
                             connection,
                             """
                             SELECT result_id, document_id, status, capability_identity,
-                                prompt_contract_digest, extraction_method,
-                                node_count, edge_count, quality, retained_count,
+                                prompt_contract_digest, node_count, edge_count,
+                                quality, retained_count,
                                 weakened_count, rejected_count, document_version,
                                 evidence_snapshot_digest, canonical_schema_version,
-                                normalizer_version, verification_policy_version, created_at
+                                normalizer_version, verification_policy_version,
+                                candidate_generation_id, candidate_generation_digest,
+                                created_at
                             FROM knowledge_graph_results
                             ORDER BY created_at DESC, result_id
                             """,
@@ -306,31 +308,6 @@ class DesktopDiagnosticBundleService:
                             JOIN knowledge_graph_results AS results
                                 ON results.result_id = current.result_id
                             ORDER BY current.document_id
-                            """,
-                        ),
-                        "attempts": _rows(
-                            connection,
-                            """
-                            SELECT attempt_id, document_id, result_id, lifecycle, quality,
-                                capability_identity, prompt_contract_digest, extraction_method,
-                                node_count, edge_count, retained_count, weakened_count,
-                                rejected_count, failure_signature, document_version,
-                                evidence_snapshot_digest, canonical_schema_version,
-                                normalizer_version, verification_policy_version, created_at
-                            FROM knowledge_graph_attempts
-                            ORDER BY created_at DESC, attempt_id
-                            """,
-                        ),
-                        "attempt_issues": _rows(
-                            connection,
-                            """
-                            SELECT issues.attempt_id, attempts.document_id, issues.ordinal,
-                                issues.code, issues.contract_path, issues.disposition,
-                                issues.failure_class
-                            FROM knowledge_graph_attempt_issues AS issues
-                            JOIN knowledge_graph_attempts AS attempts
-                                ON attempts.attempt_id = issues.attempt_id
-                            ORDER BY attempts.created_at DESC, issues.attempt_id, issues.ordinal
                             """,
                         ),
                     },

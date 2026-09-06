@@ -21,14 +21,8 @@ LATEST_SCHEMA_VERSION = desktop_workspace._MIGRATIONS[-1][0]
 
 def _drop_post_v44_schema(connection: sqlite3.Connection) -> None:
     """Return a fixture to the schema before operation-scoped model state."""
-    connection.execute("DROP VIEW IF EXISTS current_knowledge_graph_edges")
-    connection.execute("DROP VIEW IF EXISTS current_knowledge_graph_nodes")
     for table in (
-        "knowledge_graph_attempt_issues",
-        "knowledge_graph_attempts",
         "knowledge_graph_current",
-        "knowledge_graph_result_edges",
-        "knowledge_graph_result_nodes",
         "knowledge_graph_results",
         "knowledge_adoption_requests",
         "knowledge_origin_references",
@@ -37,16 +31,6 @@ def _drop_post_v44_schema(connection: sqlite3.Connection) -> None:
         "model_operation_contract_states",
     ):
         connection.execute(f"DROP TABLE IF EXISTS {table}")
-    _drop_columns_if_present(
-        connection,
-        "knowledge_graph_nodes",
-        ("support_start", "support_end", "verification_state"),
-    )
-    _drop_columns_if_present(
-        connection,
-        "knowledge_graph_edges",
-        ("relation_label", "support_start", "support_end", "verification_state"),
-    )
     _drop_columns_if_present(
         connection,
         "knowledge_graph_extraction_tasks",
@@ -201,6 +185,28 @@ def test_create_open_and_switch_desktop_knowledge_bases_checkpoint_the_previous_
         assert connection.execute(
             "SELECT value FROM metadata WHERE key = 'knowledge_base_name'"
         ).fetchone() == ("First knowledge base",)
+        schema_objects = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+            )
+        }
+        assert {
+            "knowledge_graph_nodes",
+            "knowledge_graph_edges",
+            "knowledge_graph_attempts",
+            "knowledge_graph_attempt_issues",
+            "knowledge_generation_dossier_plans",
+            "knowledge_generation_dossier_sections",
+            "knowledge_generation_dossier_units",
+            "knowledge_generation_dossier_claim_placements",
+        }.isdisjoint(schema_objects)
+        assert {
+            "knowledge_document_relation_assertions",
+            "knowledge_generation_page_plans",
+            "knowledge_generation_page_sections",
+            "knowledge_generation_page_units",
+        } <= schema_objects
 
     second_dir = tmp_path / "second"
     second = runtime.create(second_dir)

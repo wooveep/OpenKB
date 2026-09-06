@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -46,6 +47,61 @@ def test_candidate_profile_and_matrix_are_cross_domain_and_repeated() -> None:
         {pair.left.language, pair.right.language} == {"en", "zh"}
         for pair in definition.metamorphic_pairs
     )
+    ocloudview = next(case for case in definition.cases if case.case_id == "ocloudview_v102_v103")
+    assert ocloudview.language == "zh"
+    assert {item.document_name for item in ocloudview.evidence} == {
+        "OCloudView部署手册_V10.2.docx",
+        "OCloudView部署手册_V10.3.docx",
+    }
+    assert {
+        value
+        for claim in ocloudview.page.claims
+        for dimension, value in claim.applicability
+        if dimension == "version"
+    } == {"V10.2", "V10.3"}
+
+
+def test_evaluation_definition_rejects_unknown_fields_at_every_nested_boundary(
+    tmp_path: Path,
+) -> None:
+    mutations = (
+        ("matrix.json", lambda value: value.update({"unexpected": True})),
+        ("matrix.json", lambda value: value["cases"][0].update({"unexpected": True})),
+        (
+            "matrix.json",
+            lambda value: value["cases"][0]["evidence"][0].update({"unexpected": True}),
+        ),
+        ("matrix.json", lambda value: value["cases"][0]["page"].update({"unexpected": True})),
+        (
+            "matrix.json",
+            lambda value: value["cases"][0]["page"]["claims"][0].update({"unexpected": True}),
+        ),
+        (
+            "matrix.json",
+            lambda value: value["cases"][0]["page"]["claims"][0]["applicability"].append(
+                {"dimension": "version", "value": "v1", "unexpected": True}
+            ),
+        ),
+        (
+            "matrix.json",
+            lambda value: value["metamorphic_pairs"][0].update({"unexpected": True}),
+        ),
+        ("rubric.json", lambda value: value.update({"unexpected": True})),
+        (
+            "rubric.json",
+            lambda value: value["suite_dimensions"][0].update({"unexpected": True}),
+        ),
+    )
+    for index, (filename, mutate) in enumerate(mutations):
+        repository_root = tmp_path / str(index)
+        target = repository_root / "evaluation" / "semantic_quality"
+        shutil.copytree(REPOSITORY_ROOT / "evaluation" / "semantic_quality", target)
+        path = target / filename
+        value = json.loads(path.read_text(encoding="utf-8"))
+        mutate(value)
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with pytest.raises(SemanticQualityError, match="unexpected or missing fields"):
+            load_evaluation_definition(repository_root)
 
 
 def test_repository_env_key_skips_development_but_blocks_candidate_release(
@@ -212,13 +268,13 @@ def test_live_run_executes_every_case_three_times_and_stays_pending(tmp_path: Pa
     assert result.status == "pending_human_review"
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["status"] == "pending_human_review"
-    assert report["case_count"] == 7
+    assert report["case_count"] == 8
     assert report["repetitions"] == 3
-    assert report["logical_operation_count"] == 42
-    assert report["physical_call_count"] == 42
-    assert report["valid_operation_count"] == 42
+    assert report["logical_operation_count"] == 48
+    assert report["physical_call_count"] == 48
+    assert report["valid_operation_count"] == 48
     assert all(suite["deterministic_status"] == "passed" for suite in report["suites"])
-    assert len(client.requests) == 42
+    assert len(client.requests) == 48
     assert all(request.model_name == "deepseek-v4-flash" for request in client.requests)
     assert all(request.provider_adapter == "deepseek" for request in client.requests)
     assert all(request.provider_adapter_version == "deepseek.v2" for request in client.requests)
@@ -226,7 +282,7 @@ def test_live_run_executes_every_case_three_times_and_stays_pending(tmp_path: Pa
     assert all(request.reasoning_effort == "off" for request in client.requests)
 
     output_lines = result.outputs_path.read_text(encoding="utf-8").splitlines()
-    assert len(output_lines) == 42
+    assert len(output_lines) == 48
     assert all(json.loads(line)["valid"] is True for line in output_lines)
     pending = json.loads(result.pending_attestation_path.read_text(encoding="utf-8"))
     assert pending["status"] == "pending_human_review"
@@ -287,7 +343,7 @@ def test_invalid_model_structures_fail_deterministically_and_cannot_be_signed(
     assert result is not None
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert result.status == "deterministic_failed"
-    assert report["physical_call_count"] == 84
+    assert report["physical_call_count"] == 96
     assert report["valid_operation_count"] == 0
     review_path = tmp_path / "invalid-review.json"
     _write_passing_human_review(review_path, "test-invalid-run")
@@ -313,12 +369,15 @@ def test_human_signoff_requires_every_suite_dimension_and_retains_only_digests(
     assert result is not None
     review_path = tmp_path / "passing-review.json"
     _write_passing_human_review(review_path, "test-signed-run")
+    package_path, smoke_path = _write_windows_release_evidence(result, tmp_path)
     signed_path = tmp_path / "release-attestation.json"
 
     actual_path = sign_human_attestation(
         result.run_dir,
         review_path,
         maintainer="maintainer@example.test",
+        package_artifact=package_path,
+        windows_smoke_report=smoke_path,
         output_path=signed_path,
     )
 
@@ -328,5 +387,82 @@ def test_human_signoff_requires_every_suite_dimension_and_retains_only_digests(
     assert attestation["human_review"]["maintainer"] == "maintainer@example.test"
     assert all(suite["verdict"] == "pass" for suite in attestation["human_review"]["suites"])
     assert "review_digest" in attestation["human_review"]
+    assert attestation["release_evidence"] == {
+        "package_digest": hashlib.sha256(package_path.read_bytes()).hexdigest(),
+        "windows_smoke_report_digest": hashlib.sha256(smoke_path.read_bytes()).hexdigest(),
+    }
     assert "outputs" not in attestation
     assert "evaluation-only-secret" not in signed_path.read_text(encoding="utf-8")
+
+
+def test_candidate_signoff_rejects_missing_or_mismatched_windows_release_evidence(
+    tmp_path: Path,
+) -> None:
+    result = run_live_evaluation(
+        REPOSITORY_ROOT,
+        client=ValidSemanticClient(),
+        output_root=tmp_path,
+        run_id="test-release-evidence",
+        candidate_release=True,
+    )
+    assert result is not None
+    review_path = tmp_path / "passing-review.json"
+    _write_passing_human_review(review_path, "test-release-evidence")
+    package_path, smoke_path = _write_windows_release_evidence(result, tmp_path)
+
+    with pytest.raises(SemanticQualityError, match="Windows package"):
+        sign_human_attestation(
+            result.run_dir,
+            review_path,
+            maintainer="maintainer@example.test",
+        )
+
+    package_path.write_bytes(b"changed-after-smoke")
+    with pytest.raises(SemanticQualityError, match="package digest"):
+        sign_human_attestation(
+            result.run_dir,
+            review_path,
+            maintainer="maintainer@example.test",
+            package_artifact=package_path,
+            windows_smoke_report=smoke_path,
+        )
+
+
+def _write_windows_release_evidence(
+    result: object,
+    directory: Path,
+) -> tuple[Path, Path]:
+    run_dir = result.run_dir
+    report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+    package_path = directory / "OpenKB-windows.msi"
+    package_path.write_bytes(b"packaged-windows-candidate")
+    smoke_path = directory / "windows-smoke.json"
+    smoke_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "openkb.windows-semantic-smoke.v1",
+                "run_id": report["run_id"],
+                "platform": "windows",
+                "status": "passed",
+                "package_sha256": hashlib.sha256(package_path.read_bytes()).hexdigest(),
+                "implementation_digest": report["bindings"]["implementation_digest"],
+                "matrix_digest": report["bindings"]["matrix_digest"],
+                "corpus": [
+                    "OCloudView部署手册_V10.2.docx",
+                    "OCloudView部署手册_V10.3.docx",
+                ],
+                "checks": {
+                    "package_install": "passed",
+                    "document_import": "passed",
+                    "query_planning": "passed",
+                    "knowledge_page_planning": "passed",
+                    "version_comparison": "passed",
+                    "citation_postconditions": "passed",
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return package_path, smoke_path

@@ -161,10 +161,4 @@ CANDIDATE_REGISTRY_MIGRATION_STATEMENTS: tuple[str, ...] = (
     """
     ALTER TABLE knowledge_graph_results ADD COLUMN candidate_generation_digest TEXT
     """,
-    """
-    ALTER TABLE knowledge_graph_attempts ADD COLUMN candidate_generation_id TEXT
-    """,
-    """
-    ALTER TABLE knowledge_graph_attempts ADD COLUMN candidate_generation_digest TEXT
-    """,
 )

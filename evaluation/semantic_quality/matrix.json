@@ -337,6 +337,73 @@
           }
         ]
       }
+    },
+    {
+      "suite_id": "ocloudview_version_comparison_zh",
+      "case_id": "ocloudview_v102_v103",
+      "domain": "technical_release_comparison",
+      "language": "zh",
+      "question": "OCloudView V10.2 与 V10.3 的部署手册变更重点分别是什么，升级评估时应如何区分？",
+      "evidence": [
+        {
+          "evidence_id": "ocloudview-v102-1",
+          "document_name": "OCloudView部署手册_V10.2.docx",
+          "section": "更新记录",
+          "excerpt": "V10.2 更新“11.2 samba-proxy”和“11.3 spice-vdagent”，并新增“11.8 linux虚拟机内断开云电脑工具”。"
+        },
+        {
+          "evidence_id": "ocloudview-v102-2",
+          "document_name": "OCloudView部署手册_V10.2.docx",
+          "section": "更新记录",
+          "excerpt": "V10.2 新增管理员重置用户密码后解除强制改密的方法，以及 admin 账号多次登录失败被锁定后的解除方法。"
+        },
+        {
+          "evidence_id": "ocloudview-v103-1",
+          "document_name": "OCloudView部署手册_V10.3.docx",
+          "section": "更新记录",
+          "excerpt": "V10.3 更新 linux 虚拟机 vmtools、11.7 安全代理模块和短信认证部署的说明。"
+        },
+        {
+          "evidence_id": "ocloudview-v103-2",
+          "document_name": "OCloudView部署手册_V10.3.docx",
+          "section": "更新记录",
+          "excerpt": "V10.3 新增“三十八、ceph分布式存储场景部署”。"
+        }
+      ],
+      "page": {
+        "identity_id": "ocloudview-v102-v103-evolution",
+        "title": "OCloudView V10.2 至 V10.3 版本演进",
+        "claims": [
+          {
+            "text": "V10.2 更新 samba-proxy 与 spice-vdagent，并新增 Linux 虚拟机内断开云电脑工具。",
+            "evidence_ids": ["ocloudview-v102-1"],
+            "applicability": [
+              {"dimension": "version", "value": "V10.2"}
+            ]
+          },
+          {
+            "text": "V10.2 补充了强制改密解除和 admin 账号锁定解除的运维说明。",
+            "evidence_ids": ["ocloudview-v102-2"],
+            "applicability": [
+              {"dimension": "version", "value": "V10.2"}
+            ]
+          },
+          {
+            "text": "V10.3 更新 Linux 虚拟机 vmtools、安全代理模块和短信认证部署说明。",
+            "evidence_ids": ["ocloudview-v103-1"],
+            "applicability": [
+              {"dimension": "version", "value": "V10.3"}
+            ]
+          },
+          {
+            "text": "V10.3 新增 Ceph 分布式存储场景部署章节。",
+            "evidence_ids": ["ocloudview-v103-2"],
+            "applicability": [
+              {"dimension": "version", "value": "V10.3"}
+            ]
+          }
+        ]
+      }
     }
   ],
   "metamorphic_pairs": [

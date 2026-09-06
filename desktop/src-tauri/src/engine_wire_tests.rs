@@ -1,6 +1,7 @@
 use super::{
-    BridgeEvent, EngineEvent, EngineHealthWire, GroundedAnswer, KnowledgeAnalysisPhase,
-    KnowledgeAnalysisProgress, ParserResourceState, ParserRuntimeState,
+    BridgeEvent, EngineEvent, EngineHealthWire, FacetCoverageState, GroundedAnswer,
+    KnowledgeAnalysisPhase, KnowledgeAnalysisProgress, ParserResourceState, ParserRuntimeState,
+    SemanticStructureState,
 };
 use serde_json::json;
 
@@ -177,6 +178,7 @@ fn grounded_answer_accepts_python_retrieval_trace_fields() {
                 "state": "covered",
                 "evidence_ids": ["evidence-1"]
             }],
+            "coverage_gate_state": "covered",
             "version_navigation_snapshot_id": "version-snapshot-1",
             "version_catalog_revision_id": "version-catalog-1",
             "version_catalog_digest": "catalog-digest-1",
@@ -193,16 +195,70 @@ fn grounded_answer_accepts_python_retrieval_trace_fields() {
 
     assert_eq!(answer.retrieval_trace.page_tree_generation_ids, ["tree-1"]);
     assert_eq!(answer.retrieval_trace.channels[0].candidate_count, 2);
-    assert_eq!(answer.retrieval_trace.semantic_structure_state, "known");
+    assert!(matches!(
+        answer.retrieval_trace.semantic_structure_state,
+        SemanticStructureState::Known
+    ));
     assert_eq!(
         answer.retrieval_trace.question_facets[0].facet_id,
         "relationship"
     );
-    assert_eq!(answer.retrieval_trace.facet_coverage[0].state, "covered");
+    assert!(matches!(
+        answer.retrieval_trace.facet_coverage[0].state,
+        FacetCoverageState::Covered
+    ));
     assert_eq!(answer.retrieval_trace.version_scope_mode, "comparison");
     assert_eq!(
         answer.retrieval_trace.version_scope_labels,
         ["v1.0", "v2.0"]
     );
     assert_eq!(answer.citations[0].version_label.as_deref(), Some("v2.0"));
+}
+
+#[test]
+fn grounded_answer_rejects_invalid_or_missing_semantic_trace_fields() {
+    let base = json!({
+        "answer_id": "answer-1",
+        "question": "How are Alpha and Beta related?",
+        "answer_text": "Alpha supports Beta [1].",
+        "retrieval_plan": {"query": "Alpha Beta", "terms": ["Alpha", "Beta"], "source": "model"},
+        "citations": [],
+        "source_images": [],
+        "retrieval_trace": {
+            "semantic_structure_state": "known",
+            "question_goal": "Explain the relationship",
+            "question_facets": [{
+                "facet_id": "relationship", "label": "Relationship",
+                "description": "How they relate", "importance": "required"
+            }],
+            "question_facet_plan_digest": "plan-1",
+            "query_planning_prompt_contract_digest": "prompt-1",
+            "query_planning_execution_profile_json": "{}",
+            "query_planning_execution_profile_digest": "profile-1",
+            "facet_coverage": [{
+                "facet_id": "relationship", "state": "covered", "evidence_ids": ["evidence-1"]
+            }],
+            "coverage_gate_state": "covered"
+        },
+        "degradations": [],
+        "status": "completed",
+        "interruption_code": null,
+        "interruption_reason": null,
+        "created_at": "2026-09-06T00:00:00Z"
+    });
+
+    let mut invalid_importance = base.clone();
+    invalid_importance["retrieval_trace"]["question_facets"][0]["importance"] = json!("primary");
+    assert!(serde_json::from_value::<GroundedAnswer>(invalid_importance).is_err());
+
+    let mut invalid_coverage = base.clone();
+    invalid_coverage["retrieval_trace"]["facet_coverage"][0]["state"] = json!("not_applicable");
+    assert!(serde_json::from_value::<GroundedAnswer>(invalid_coverage).is_err());
+
+    let mut missing_state = base;
+    missing_state["retrieval_trace"]
+        .as_object_mut()
+        .expect("Retrieval Trace should be an object")
+        .remove("semantic_structure_state");
+    assert!(serde_json::from_value::<GroundedAnswer>(missing_state).is_err());
 }

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from typing import cast
 
+from openkb.desktop_canonical_json import canonical_json, canonical_json_digest
 from openkb.desktop_knowledge_synthesis_prompts import (
     fact_harvest_instructions,
     knowledge_analysis_instructions,
@@ -47,7 +47,7 @@ class DesktopPromptContract:
         return json.loads(self.canonical_json())
 
     def canonical_json(self) -> str:
-        return json.dumps(
+        return canonical_json(
             {
                 "generation_parameters": self.generation_parameters,
                 "input_shape": self.input_shape,
@@ -59,15 +59,12 @@ class DesktopPromptContract:
                 "token_budget_policy": self.token_budget_policy,
                 "validation_rules": list(self.validation_rules),
                 "version": self.version,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
+            }
         )
 
     @property
     def digest(self) -> str:
-        return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+        return canonical_json_digest(self.snapshot())
 
 
 KNOWLEDGE_ANALYSIS_MAX_EVIDENCE_IDS_PER_CLAIM = 32

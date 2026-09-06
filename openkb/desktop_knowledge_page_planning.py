@@ -8,6 +8,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Literal, cast
 
+from openkb.desktop_canonical_json import canonical_json_digest
 from openkb.desktop_semantic_structure_contracts import (
     SEMANTIC_PRESENTATIONS,
     SEMANTIC_STRUCTURE_LIMITS,
@@ -151,7 +152,7 @@ def parse_knowledge_page_plan(
         "lead": _raw_unit_payload(lead) if lead is not None else None,
         "sections": [_raw_section_payload(section) for section in sections],
     }
-    digest = _digest(canonical)
+    digest = canonical_json_digest(canonical)
     return KnowledgePagePlan(
         generation_id=expected_generation_id,
         identity_id=expected_identity_id,
@@ -364,13 +365,3 @@ def _append_section_claim_ids(section: KnowledgePageSection, target: list[str]) 
         target.extend(unit.claim_ids)
     for child in section.sections:
         _append_section_claim_ids(child, target)
-
-
-def _digest(value: object) -> str:
-    serialized = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

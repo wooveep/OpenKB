@@ -10,12 +10,29 @@ from typing import Any
 
 from evaluation.semantic_quality.definition import SemanticQualityError
 
+_WINDOWS_SMOKE_SCHEMA_VERSION = "openkb.windows-semantic-smoke.v1"
+_WINDOWS_SMOKE_CORPUS = (
+    "OCloudView部署手册_V10.2.docx",
+    "OCloudView部署手册_V10.3.docx",
+)
+_WINDOWS_SMOKE_CHECKS = (
+    "package_install",
+    "document_import",
+    "query_planning",
+    "knowledge_page_planning",
+    "version_comparison",
+    "citation_postconditions",
+)
+_MAX_WINDOWS_SMOKE_REPORT_BYTES = 128 * 1024
+
 
 def sign_human_attestation(
     run_dir: Path,
     review_path: Path,
     *,
     maintainer: str,
+    package_artifact: Path | None = None,
+    windows_smoke_report: Path | None = None,
     output_path: Path | None = None,
 ) -> Path:
     """Bind an explicit per-suite human verdict to one deterministic live run."""
@@ -45,6 +62,12 @@ def sign_human_attestation(
         raise SemanticQualityError("The raw evaluation output digest no longer matches the run.")
     if pending.get("bindings") != bindings or pending.get("status") != report.get("status"):
         raise SemanticQualityError("The pending attestation does not match the evaluation report.")
+    release_evidence = _release_evidence(
+        report,
+        bindings,
+        package_artifact=package_artifact,
+        windows_smoke_report=windows_smoke_report,
+    )
     _validate_maintainer(maintainer)
     if review.get("schema_version") != "openkb.semantic-quality-human-review.v1":
         raise SemanticQualityError("The human semantic review schema is unsupported.")
@@ -96,9 +119,90 @@ def sign_human_attestation(
             "pairs": list(pairs),
         },
     }
+    attestation["release_evidence"] = release_evidence
     target = (output_path or run_dir / "attestation.signed.json").resolve()
     _write_new_json(target, attestation)
     return target
+
+
+def _release_evidence(
+    report: dict[str, Any],
+    bindings: dict[str, Any],
+    *,
+    package_artifact: Path | None,
+    windows_smoke_report: Path | None,
+) -> dict[str, str]:
+    if package_artifact is None or windows_smoke_report is None:
+        raise SemanticQualityError(
+            "Semantic quality sign-off requires a Windows package and its smoke report."
+        )
+    package_digest = _sha256_file(package_artifact, "Windows package")
+    smoke_bytes = _bounded_file_bytes(
+        windows_smoke_report,
+        "Windows smoke report",
+        maximum_bytes=_MAX_WINDOWS_SMOKE_REPORT_BYTES,
+    )
+    try:
+        smoke = _mapping(json.loads(smoke_bytes), "Windows smoke report")
+    except json.JSONDecodeError as error:
+        raise SemanticQualityError("The Windows smoke report is not valid JSON.") from error
+    expected_fields = {
+        "schema_version",
+        "run_id",
+        "platform",
+        "status",
+        "package_sha256",
+        "implementation_digest",
+        "matrix_digest",
+        "corpus",
+        "checks",
+    }
+    if set(smoke) != expected_fields:
+        raise SemanticQualityError("The Windows smoke report has unexpected or missing fields.")
+    if smoke.get("schema_version") != _WINDOWS_SMOKE_SCHEMA_VERSION:
+        raise SemanticQualityError("The Windows smoke report schema is unsupported.")
+    if smoke.get("run_id") != report.get("run_id"):
+        raise SemanticQualityError("The Windows smoke report belongs to a different run.")
+    if smoke.get("platform") != "windows" or smoke.get("status") != "passed":
+        raise SemanticQualityError("The packaged Windows smoke run did not pass.")
+    if smoke.get("package_sha256") != package_digest:
+        raise SemanticQualityError("The Windows smoke report package digest does not match.")
+    if smoke.get("implementation_digest") != bindings.get("implementation_digest"):
+        raise SemanticQualityError("The Windows smoke report implementation digest differs.")
+    if smoke.get("matrix_digest") != bindings.get("matrix_digest"):
+        raise SemanticQualityError("The Windows smoke report matrix digest differs.")
+    if smoke.get("corpus") != list(_WINDOWS_SMOKE_CORPUS):
+        raise SemanticQualityError("The Windows smoke report did not cover both OCloudView inputs.")
+    checks = _mapping(smoke.get("checks"), "Windows smoke checks")
+    if set(checks) != set(_WINDOWS_SMOKE_CHECKS) or any(
+        checks.get(check) != "passed" for check in _WINDOWS_SMOKE_CHECKS
+    ):
+        raise SemanticQualityError("Every packaged Windows smoke check must pass.")
+    return {
+        "package_digest": package_digest,
+        "windows_smoke_report_digest": hashlib.sha256(smoke_bytes).hexdigest(),
+    }
+
+
+def _sha256_file(path: Path, name: str) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.resolve().open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise SemanticQualityError(f"Cannot read the {name}.") from error
+    return digest.hexdigest()
+
+
+def _bounded_file_bytes(path: Path, name: str, *, maximum_bytes: int) -> bytes:
+    try:
+        resolved = path.resolve()
+        if resolved.stat().st_size > maximum_bytes:
+            raise SemanticQualityError(f"The {name} exceeds its size limit.")
+        return resolved.read_bytes()
+    except OSError as error:
+        raise SemanticQualityError(f"Cannot read the {name}.") from error
 
 
 def _validate_maintainer(maintainer: str) -> None:

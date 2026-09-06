@@ -47,7 +47,10 @@ mod page_tree;
 pub use page_tree::{PageTreeEnrichmentControlResult, PageTreeEnrichmentTask, PageTreeRebuildTask};
 #[path = "engine_wire_retrieval.rs"]
 mod retrieval;
-pub use retrieval::{GroundedAnswer, GroundedAnswersResult, RetrievalTrace};
+pub use retrieval::{
+    FacetCoverageState, GroundedAnswer, GroundedAnswersResult, RetrievalTrace,
+    SemanticStructureState,
+};
 #[path = "engine_wire_settings.rs"]
 mod settings;
 pub use settings::{

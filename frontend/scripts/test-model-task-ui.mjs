@@ -115,6 +115,52 @@ try {
   const { TauriKnowledgePageBridge } = await vite.ssrLoadModule(
     "/src/desktop/tauri-knowledge-page-bridge.ts",
   )
+  const { conversation } = await vite.ssrLoadModule(
+    "/src/desktop/bridge-normalizers.ts",
+  )
+  const semanticTrace = {
+    semantic_structure_state: "known",
+    question_goal: "Compare the versions",
+    question_facets: [{
+      facet_id: "changes",
+      label: "Changes",
+      description: "Version-specific changes",
+      importance: "required",
+    }],
+    question_facet_plan_digest: "facet-plan-digest",
+    query_planning_prompt_contract_digest: "prompt-digest",
+    query_planning_execution_profile_json: "{}",
+    query_planning_execution_profile_digest: "profile-digest",
+    facet_coverage: [{
+      facet_id: "changes",
+      state: "covered",
+      evidence_ids: ["evidence-1"],
+    }],
+    coverage_gate_state: "covered",
+  }
+  const normalizeSemanticTrace = (retrievalTrace) => conversation({
+    messages: [{
+      role: "assistant",
+      answer_versions: [{ retrieval_trace: retrievalTrace }],
+    }],
+  }).messages[0].answerVersions[0].retrievalTrace
+  assert.equal(normalizeSemanticTrace(semanticTrace).semanticStructureState, "known")
+  assert.deepEqual(normalizeSemanticTrace(semanticTrace).questionFacets, [{
+    facetId: "changes",
+    label: "Changes",
+    description: "Version-specific changes",
+    importance: "required",
+  }])
+  const invalidSemanticTrace = structuredClone(semanticTrace)
+  invalidSemanticTrace.question_facets[0].importance = 1
+  assert.deepEqual(
+    {
+      state: normalizeSemanticTrace(invalidSemanticTrace).semanticStructureState,
+      facets: normalizeSemanticTrace(invalidSemanticTrace).questionFacets,
+      coverage: normalizeSemanticTrace(invalidSemanticTrace).facetCoverage,
+    },
+    { state: "unknown", facets: [], coverage: [] },
+  )
   const {
     knowledgeWorkspaceRequestIsCurrent,
     reloadKnowledgeWorkspaceAfterUserMutation,

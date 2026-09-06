@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import Literal, cast
 
+from openkb.desktop_canonical_json import canonical_json_digest
 from openkb.desktop_semantic_structure_contracts import (
     FACET_COVERAGE_VALUES,
     FACET_IMPORTANCE_VALUES,
@@ -184,7 +185,7 @@ def _parse_semantic_plan(
             raise ValueError(f"invalid_facet_importance:{ordinal}")
         canonical_facets.append((label, description, cast(FacetImportance, importance)))
 
-    plan_digest = _digest(
+    plan_digest = canonical_json_digest(
         {
             "question": question,
             "conversation_context_digest": conversation_context_digest,
@@ -252,13 +253,3 @@ def _parse_coverage(
 
 def _facet_id(plan_digest: str, ordinal: int) -> str:
     return "facet-" + hashlib.sha256(f"{plan_digest}\x1f{ordinal}".encode()).hexdigest()
-
-
-def _digest(value: object) -> str:
-    serialized = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

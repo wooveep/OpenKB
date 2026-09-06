@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 
+from openkb.desktop_canonical_json import canonical_json_digest
 from openkb.desktop_knowledge_page_planning import (
     KnowledgePagePlan,
     KnowledgePagePlanValidationError,
@@ -65,7 +65,7 @@ def knowledge_page_claim_id(
         "text": " ".join(text.split()).casefold(),
         "applicability": [list(item) for item in applicability],
     }
-    return "claim-" + _digest(payload)
+    return "claim-" + canonical_json_digest(payload)
 
 
 def knowledge_page_claim_snapshot_digest(
@@ -86,7 +86,7 @@ def knowledge_page_claim_snapshot_digest(
         }
         for claim in claims
     ]
-    return _digest(payload)
+    return canonical_json_digest(payload)
 
 
 def render_knowledge_page(
@@ -245,14 +245,3 @@ def _escape_markdown(value: str) -> str:
     for marker in ("*", "_", "[", "]", "<", ">", "|"):
         escaped = escaped.replace(marker, f"\\{marker}")
     return escaped
-
-
-def _digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()

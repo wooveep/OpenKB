@@ -161,9 +161,7 @@ def retrieval_trace_from_json(value: str) -> DesktopRetrievalTrace:
         return DesktopRetrievalTrace()
     if not isinstance(payload, dict):
         return DesktopRetrievalTrace()
-    state = payload.get("semantic_structure_state")
-    if state not in {"known", "unknown"}:
-        state = "unknown"
+    state, goal, facets, plan_digest, coverage, coverage_gate = _semantic_fields(payload)
     return DesktopRetrievalTrace(
         catalog_generation_ids=_strings(payload.get("catalog_generation_ids")),
         page_tree_generation_ids=_strings(payload.get("page_tree_generation_ids")),
@@ -180,9 +178,9 @@ def retrieval_trace_from_json(value: str) -> DesktopRetrievalTrace:
         link_hop_count=_non_negative_int(payload.get("link_hop_count")),
         page_tree_supplement_count=_non_negative_int(payload.get("page_tree_supplement_count")),
         semantic_structure_state=state,
-        question_goal=_string(payload.get("question_goal")),
-        question_facets=_question_facets(payload.get("question_facets")),
-        question_facet_plan_digest=_string(payload.get("question_facet_plan_digest")),
+        question_goal=goal,
+        question_facets=facets,
+        question_facet_plan_digest=plan_digest,
         query_planning_prompt_contract_digest=_string(
             payload.get("query_planning_prompt_contract_digest")
         ),
@@ -192,8 +190,8 @@ def retrieval_trace_from_json(value: str) -> DesktopRetrievalTrace:
         query_planning_execution_profile_digest=_string(
             payload.get("query_planning_execution_profile_digest")
         ),
-        facet_coverage=_facet_coverage(payload.get("facet_coverage")),
-        coverage_gate_state=_string(payload.get("coverage_gate_state")) or "unknown",
+        facet_coverage=coverage,
+        coverage_gate_state=coverage_gate,
         navigation_round_count=_non_negative_int(payload.get("navigation_round_count")),
         navigation_action_kinds=_strings(payload.get("navigation_action_kinds")),
         navigation_stop_reason=_string(payload.get("navigation_stop_reason")),
@@ -241,10 +239,62 @@ def _channels(value: object) -> tuple[DesktopRetrievalChannelTrace, ...]:
     return tuple(channels)
 
 
-def _question_facets(value: object) -> tuple[DesktopQuestionFacetTrace, ...]:
-    if not isinstance(value, list):
-        return ()
+def _semantic_fields(
+    payload: dict[object, object],
+) -> tuple[
+    str,
+    str,
+    tuple[DesktopQuestionFacetTrace, ...],
+    str,
+    tuple[DesktopFacetCoverageTrace, ...],
+    str,
+]:
+    unknown: tuple[
+        str,
+        str,
+        tuple[DesktopQuestionFacetTrace, ...],
+        str,
+        tuple[DesktopFacetCoverageTrace, ...],
+        str,
+    ] = ("unknown", "", (), "", (), "unknown")
+    if payload.get("semantic_structure_state") != "known":
+        return unknown
+    required_strings = (
+        "question_goal",
+        "question_facet_plan_digest",
+        "query_planning_prompt_contract_digest",
+        "query_planning_execution_profile_json",
+        "query_planning_execution_profile_digest",
+        "coverage_gate_state",
+    )
+    if any(not _non_empty_string(payload.get(field)) for field in required_strings):
+        return unknown
+    facets = _strict_question_facets(payload.get("question_facets"))
+    if facets is None:
+        return unknown
+    coverage = _strict_facet_coverage(
+        payload.get("facet_coverage"),
+        frozenset(facet.facet_id for facet in facets),
+    )
+    if coverage is None or len(coverage) != len(facets):
+        return unknown
+    return (
+        "known",
+        str(payload["question_goal"]),
+        facets,
+        str(payload["question_facet_plan_digest"]),
+        coverage,
+        str(payload["coverage_gate_state"]),
+    )
+
+
+def _strict_question_facets(
+    value: object,
+) -> tuple[DesktopQuestionFacetTrace, ...] | None:
+    if not isinstance(value, list) or not value:
+        return None
     result: list[DesktopQuestionFacetTrace] = []
+    seen: set[str] = set()
     for item in value:
         if not isinstance(item, dict) or set(item) != {
             "facet_id",
@@ -252,37 +302,54 @@ def _question_facets(value: object) -> tuple[DesktopQuestionFacetTrace, ...]:
             "description",
             "importance",
         }:
-            continue
-        if not all(isinstance(item[field], str) and item[field] for field in item):
-            continue
+            return None
+        if not all(_non_empty_string(item[field]) for field in item):
+            return None
         if item["importance"] not in {"required", "supporting"}:
-            continue
+            return None
+        facet_id = str(item["facet_id"])
+        if facet_id in seen:
+            return None
+        seen.add(facet_id)
         result.append(DesktopQuestionFacetTrace(**item))
     return tuple(result)
 
 
-def _facet_coverage(value: object) -> tuple[DesktopFacetCoverageTrace, ...]:
-    if not isinstance(value, list):
-        return ()
+def _strict_facet_coverage(
+    value: object,
+    facet_ids: frozenset[str],
+) -> tuple[DesktopFacetCoverageTrace, ...] | None:
+    if not isinstance(value, list) or len(value) != len(facet_ids):
+        return None
     result: list[DesktopFacetCoverageTrace] = []
     seen: set[str] = set()
     for item in value:
         if not isinstance(item, dict) or set(item) != {"facet_id", "state", "evidence_ids"}:
-            continue
+            return None
         facet_id = item.get("facet_id")
         state = item.get("state")
         if (
-            not isinstance(facet_id, str)
-            or not facet_id
+            not _non_empty_string(facet_id)
+            or facet_id not in facet_ids
             or facet_id in seen
             or state not in {"covered", "partial", "missing"}
         ):
-            continue
+            return None
+        evidence_ids = _strict_strings(item.get("evidence_ids"))
+        if evidence_ids is None:
+            return None
+        if (state == "missing" and evidence_ids) or (state != "missing" and not evidence_ids):
+            return None
         seen.add(facet_id)
-        result.append(
-            DesktopFacetCoverageTrace(facet_id, str(state), _strings(item.get("evidence_ids")))
-        )
+        result.append(DesktopFacetCoverageTrace(facet_id, str(state), evidence_ids))
     return tuple(result)
+
+
+def _strict_strings(value: object) -> tuple[str, ...] | None:
+    if not isinstance(value, list) or not all(_non_empty_string(item) for item in value):
+        return None
+    result = tuple(str(item) for item in value)
+    return result if len(set(result)) == len(result) else None
 
 
 def _strings(value: object) -> tuple[str, ...]:
@@ -293,6 +360,10 @@ def _strings(value: object) -> tuple[str, ...]:
 
 def _string(value: object) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _non_empty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _non_negative_int(value: object) -> int:

@@ -49,27 +49,49 @@ pub struct RetrievalChannelTrace {
     pub degradation_reasons: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionFacetTrace {
     #[serde(alias = "facet_id")]
     pub facet_id: String,
     pub label: String,
     pub description: String,
-    pub importance: String,
+    pub importance: FacetImportance,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FacetImportance {
+    Required,
+    Supporting,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FacetCoverageTrace {
     #[serde(alias = "facet_id")]
     pub facet_id: String,
-    pub state: String,
+    pub state: FacetCoverageState,
     #[serde(default, alias = "evidence_ids")]
     pub evidence_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FacetCoverageState {
+    Covered,
+    Partial,
+    Missing,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticStructureState {
+    Known,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetrievalTrace {
     #[serde(default, alias = "catalog_generation_ids")]
@@ -100,23 +122,23 @@ pub struct RetrievalTrace {
     pub link_hop_count: u64,
     #[serde(default, alias = "page_tree_supplement_count")]
     pub page_tree_supplement_count: u64,
-    #[serde(default, alias = "semantic_structure_state")]
-    pub semantic_structure_state: String,
-    #[serde(default, alias = "question_goal")]
+    #[serde(alias = "semantic_structure_state")]
+    pub semantic_structure_state: SemanticStructureState,
+    #[serde(alias = "question_goal")]
     pub question_goal: String,
-    #[serde(default, alias = "question_facets")]
+    #[serde(alias = "question_facets")]
     pub question_facets: Vec<QuestionFacetTrace>,
-    #[serde(default, alias = "question_facet_plan_digest")]
+    #[serde(alias = "question_facet_plan_digest")]
     pub question_facet_plan_digest: String,
-    #[serde(default, alias = "query_planning_prompt_contract_digest")]
+    #[serde(alias = "query_planning_prompt_contract_digest")]
     pub query_planning_prompt_contract_digest: String,
-    #[serde(default, alias = "query_planning_execution_profile_json")]
+    #[serde(alias = "query_planning_execution_profile_json")]
     pub query_planning_execution_profile_json: String,
-    #[serde(default, alias = "query_planning_execution_profile_digest")]
+    #[serde(alias = "query_planning_execution_profile_digest")]
     pub query_planning_execution_profile_digest: String,
-    #[serde(default, alias = "facet_coverage")]
+    #[serde(alias = "facet_coverage")]
     pub facet_coverage: Vec<FacetCoverageTrace>,
-    #[serde(default, alias = "coverage_gate_state")]
+    #[serde(alias = "coverage_gate_state")]
     pub coverage_gate_state: String,
     #[serde(default, alias = "navigation_round_count")]
     pub navigation_round_count: u64,
@@ -171,7 +193,7 @@ pub struct GroundedAnswer {
     pub citations: Vec<EvidenceRef>,
     #[serde(default, alias = "source_images")]
     pub source_images: Vec<AnswerSourceImage>,
-    #[serde(default, alias = "retrieval_trace")]
+    #[serde(alias = "retrieval_trace")]
     pub retrieval_trace: RetrievalTrace,
     #[serde(default)]
     pub degradations: Vec<String>,

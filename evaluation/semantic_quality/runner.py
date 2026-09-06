@@ -22,6 +22,7 @@ from evaluation.semantic_quality.definition import (
     SemanticQualityError,
     load_evaluation_definition,
 )
+from openkb.desktop_canonical_json import canonical_json, canonical_json_digest
 from openkb.desktop_knowledge_page import (
     KnowledgePageClaimSnapshot,
     knowledge_page_claim_id,
@@ -171,6 +172,8 @@ def main(argv: list[str] | None = None) -> int:
     sign_parser.add_argument("run_dir", type=Path)
     sign_parser.add_argument("review", type=Path)
     sign_parser.add_argument("--maintainer", required=True)
+    sign_parser.add_argument("--package-artifact", type=Path)
+    sign_parser.add_argument("--windows-smoke-report", type=Path)
     sign_parser.add_argument("--output", type=Path)
     arguments = parser.parse_args(argv)
     try:
@@ -193,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
             arguments.run_dir,
             arguments.review,
             maintainer=arguments.maintainer,
+            package_artifact=arguments.package_artifact,
+            windows_smoke_report=arguments.windows_smoke_report,
             output_path=arguments.output,
         )
         attestation = _artifact_mapping(signed_path, "signed semantic attestation")
@@ -253,17 +258,18 @@ def run_live_evaluation(
             )
 
     outputs_path = run_dir / "outputs.jsonl"
-    output_bytes = "".join(
-        json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-        for record in records
-    ).encode("utf-8")
+    output_bytes = "".join(canonical_json(record) + "\n" for record in records).encode("utf-8")
     try:
         outputs_path.write_bytes(output_bytes)
     except OSError as error:
         raise SemanticQualityError("Cannot write semantic evaluation outputs.") from error
     output_digest = hashlib.sha256(output_bytes).hexdigest()
-    valid_count = sum(record["valid"] is True for record in records)
-    physical_calls = sum(len(record["attempts"]) for record in records)
+    valid_count = sum(1 for record in records if record["valid"] is True)
+    physical_calls = sum(
+        len(attempts)
+        for record in records
+        if isinstance((attempts := record.get("attempts")), list)
+    )
     status = "pending_human_review" if valid_count == len(records) else "deterministic_failed"
     bindings = _evaluation_bindings(
         repository_root,
@@ -360,7 +366,7 @@ def _execute_query_planning(
         value = parse_query_planning_result(
             content,
             question=case.question,
-            conversation_context_digest=_canonical_digest([]),
+            conversation_context_digest=canonical_json_digest([]),
             seed_evidence_ids=frozenset(item.evidence_id for item in case.evidence),
         )
         if value.retrieval_plan is None or value.semantic_structure_state != "known":
@@ -621,6 +627,7 @@ def _implementation_digest(repository_root: Path) -> str:
         "evaluation/semantic_quality/attestation.py",
         "evaluation/semantic_quality/definition.py",
         "evaluation/semantic_quality/runner.py",
+        "openkb/desktop_canonical_json.py",
         "openkb/desktop_knowledge_page.py",
         "openkb/desktop_knowledge_page_planner.py",
         "openkb/desktop_knowledge_page_planning.py",
@@ -639,7 +646,7 @@ def _implementation_digest(repository_root: Path) -> str:
             ).hexdigest()
     except OSError as error:
         raise SemanticQualityError("Cannot bind the semantic evaluation implementation.") from error
-    return _canonical_digest(file_digests)
+    return canonical_json_digest(file_digests)
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -674,17 +681,6 @@ def _validate_run_id(run_id: str) -> None:
         or any(not (character.isalnum() or character in "-_.") for character in run_id)
     ):
         raise SemanticQualityError("The semantic evaluation run ID is not a safe path segment.")
-
-
-def _canonical_digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 def _object_value(value: object, field: str) -> object:

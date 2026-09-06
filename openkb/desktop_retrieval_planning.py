@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from openkb.desktop_answer_types import (
     DesktopRetrievalModelCost,
     DesktopRetrievalPlan,
 )
+from openkb.desktop_canonical_json import canonical_json, canonical_json_digest
 from openkb.desktop_model_deadlines import request_with_response_deadline
 from openkb.desktop_model_execution_profile import DesktopModelCapacityError
 from openkb.desktop_model_gateway import (
@@ -119,7 +119,7 @@ def build_query_plan(
         (user[:_MAX_CONTEXT_CHARACTERS], assistant[:_MAX_CONTEXT_CHARACTERS])
         for user, assistant in conversation_context[-_MAX_CONTEXT_TURNS:]
     )
-    context_digest = _digest(bounded_context)
+    context_digest = canonical_json_digest(bounded_context)
     bounded_evidence = seed_evidence[:_MAX_SEED_EVIDENCE]
     source_material = json.dumps(
         {
@@ -300,10 +300,4 @@ def _execution_profile(gateway: DesktopModelGateway | None) -> tuple[str, str]:
                 "provider": gateway.provider_name,
                 "model": gateway.model_name,
             }
-    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return serialized, hashlib.sha256(serialized.encode()).hexdigest()
-
-
-def _digest(value: object) -> str:
-    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode()).hexdigest()
+    return canonical_json(value), canonical_json_digest(value)

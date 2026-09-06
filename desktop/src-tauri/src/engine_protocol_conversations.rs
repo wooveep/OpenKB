@@ -72,7 +72,6 @@ struct AnswerVersion {
     retrieval_plan: RetrievalPlan,
     citations: Vec<EvidenceRef>,
     source_images: Vec<SourceImage>,
-    #[serde(default)]
     retrieval_trace: RetrievalTrace,
     degradations: Vec<String>,
     status: AnswerStatus,

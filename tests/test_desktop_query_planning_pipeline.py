@@ -5,8 +5,12 @@ from __future__ import annotations
 import json
 
 from openkb.desktop_answer_types import DesktopEvidenceRef
+from openkb.desktop_import import DesktopTextImportService
 from openkb.desktop_model_gateway import DesktopModelGateway
+from openkb.desktop_retrieval import DesktopEvidenceRetriever
+from openkb.desktop_retrieval_plan import deterministic_plan
 from openkb.desktop_retrieval_planning import build_query_plan
+from openkb.desktop_workspace import DesktopKnowledgeBaseRuntime
 
 
 def _evidence(evidence_id: str = "evidence-1") -> DesktopEvidenceRef:
@@ -109,3 +113,42 @@ def test_no_model_returns_baseline_terms_and_explicit_unknown_semantics() -> Non
     assert result.facet_plan is None
     assert result.coverage == ()
     assert result.degradations == ("query_planning_unavailable",)
+
+
+def test_unknown_semantic_structure_returns_the_seed_pack_without_more_model_calls(
+    tmp_path,
+) -> None:
+    kb_dir = tmp_path / "desktop-kb"
+    source = tmp_path / "source.md"
+    source.write_text(
+        "# Evidence\n\nRadiogenic decay contributes interior heat.\n", encoding="utf-8"
+    )
+    DesktopKnowledgeBaseRuntime().create(kb_dir)
+    DesktopTextImportService(kb_dir).import_text(source)
+    operations: list[str] = []
+
+    def respond(request, _timeout_seconds):
+        operations.append(request.operation)
+        if request.operation not in {"query_planning", "structured_output_repair"}:
+            raise AssertionError(f"Unexpected post-fallback operation: {request.operation}")
+        return json.dumps(
+            {
+                "retrieval_plan": {"terms": ["invented expansion"]},
+                "question_facet_plan": {"goal": "Explain heat", "facets": []},
+                "initial_answer_coverage": [],
+            }
+        )
+
+    retriever = DesktopEvidenceRetriever(kb_dir, model_gateway=DesktopModelGateway(respond))
+    seed = retriever.retrieve_variant(
+        "Why is the interior warm?",
+        variant="baseline",
+        retrieval_plan=deterministic_plan("Why is the interior warm?"),
+    )
+    result = retriever.retrieve("Why is the interior warm?")
+
+    assert operations == ["query_planning", "structured_output_repair"]
+    assert result.retrieval_plan == seed.retrieval_plan
+    assert result.evidence == seed.evidence
+    assert result.retrieval_trace.semantic_structure_state == "unknown"
+    assert result.retrieval_trace.navigation_round_count == 0

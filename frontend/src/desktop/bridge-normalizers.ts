@@ -180,6 +180,7 @@ function retrievalTrace(payload: unknown): DesktopConversation["messages"][numbe
   const strings = (item: unknown) => Array.isArray(item)
     ? item.filter((entry): entry is string => typeof entry === "string")
     : []
+  const semantic = semanticTrace(value)
   return {
     catalogGenerationIds: strings(value.catalog_generation_ids),
     pageTreeGenerationIds: strings(value.page_tree_generation_ids),
@@ -203,33 +204,14 @@ function retrievalTrace(payload: unknown): DesktopConversation["messages"][numbe
     sourceWindowCount: numberValue(value.source_window_count),
     linkHopCount: numberValue(value.link_hop_count),
     pageTreeSupplementCount: numberValue(value.page_tree_supplement_count),
-    semanticStructureState: value.semantic_structure_state === "known" ? "known" : "unknown",
-    questionGoal: stringValue(value, "question_goal"),
-    questionFacets: (Array.isArray(value.question_facets) ? value.question_facets : []).flatMap((item) => {
-      const facet = record(item)
-      const importance = stringValue(facet, "importance")
-      if (!facet.facet_id || !facet.label || !facet.description || !["required", "supporting"].includes(importance)) return []
-      return [{
-        facetId: stringValue(facet, "facet_id"),
-        label: stringValue(facet, "label"),
-        description: stringValue(facet, "description"),
-        importance: importance as "required" | "supporting",
-      }]
-    }),
-    questionFacetPlanDigest: stringValue(value, "question_facet_plan_digest"),
+    semanticStructureState: semantic.state,
+    questionGoal: semantic.goal,
+    questionFacets: semantic.facets,
+    questionFacetPlanDigest: semantic.planDigest,
     queryPlanningPromptContractDigest: stringValue(value, "query_planning_prompt_contract_digest"),
     queryPlanningExecutionProfileJson: stringValue(value, "query_planning_execution_profile_json"),
     queryPlanningExecutionProfileDigest: stringValue(value, "query_planning_execution_profile_digest"),
-    facetCoverage: (Array.isArray(value.facet_coverage) ? value.facet_coverage : []).flatMap((item) => {
-      const coverage = record(item)
-      const state = stringValue(coverage, "state")
-      if (!coverage.facet_id || !["covered", "partial", "missing"].includes(state)) return []
-      return [{
-        facetId: stringValue(coverage, "facet_id"),
-        state: state as "covered" | "partial" | "missing",
-        evidenceIds: strings(coverage.evidence_ids),
-      }]
-    }),
+    facetCoverage: semantic.coverage,
     coverageGateState: stringValue(value, "coverage_gate_state"),
     navigationRoundCount: numberValue(value.navigation_round_count),
     navigationActionKinds: strings(value.navigation_action_kinds),
@@ -251,6 +233,94 @@ function retrievalTrace(payload: unknown): DesktopConversation["messages"][numbe
     versionScopeSelectionReason: stringValue(value, "version_scope_selection_reason"),
     versionScopeDegradationReason: stringValue(value, "version_scope_degradation_reason"),
   }
+}
+
+type RetrievalSemanticTrace = Pick<
+  DesktopConversation["messages"][number]["answerVersions"][number]["retrievalTrace"],
+  "questionFacets" | "facetCoverage"
+>
+
+function semanticTrace(value: Record<string, unknown>): {
+  state: "known" | "unknown"
+  goal: string
+  facets: RetrievalSemanticTrace["questionFacets"]
+  planDigest: string
+  coverage: RetrievalSemanticTrace["facetCoverage"]
+} {
+  const unknown = {
+    state: "unknown" as const,
+    goal: "",
+    facets: [],
+    planDigest: "",
+    coverage: [],
+  }
+  if (value.semantic_structure_state !== "known") return unknown
+  if (
+    !nonEmptyString(value.question_goal)
+    || !nonEmptyString(value.question_facet_plan_digest)
+    || !nonEmptyString(value.query_planning_prompt_contract_digest)
+    || !nonEmptyString(value.query_planning_execution_profile_json)
+    || !nonEmptyString(value.query_planning_execution_profile_digest)
+    || !nonEmptyString(value.coverage_gate_state)
+  ) {
+    return unknown
+  }
+  if (!Array.isArray(value.question_facets) || !Array.isArray(value.facet_coverage)) {
+    return unknown
+  }
+
+  const facets: RetrievalSemanticTrace["questionFacets"] = []
+  const facetIds = new Set<string>()
+  for (const item of value.question_facets) {
+    if (!isRecord(item)) return unknown
+    if (
+      !nonEmptyString(item.facet_id)
+      || !nonEmptyString(item.label)
+      || !nonEmptyString(item.description)
+      || (item.importance !== "required" && item.importance !== "supporting")
+      || facetIds.has(item.facet_id)
+    ) return unknown
+    facetIds.add(item.facet_id)
+    facets.push({
+      facetId: item.facet_id,
+      label: item.label,
+      description: item.description,
+      importance: item.importance,
+    })
+  }
+  if (!facets.length || value.facet_coverage.length !== facets.length) return unknown
+
+  const coverage: RetrievalSemanticTrace["facetCoverage"] = []
+  const coveredFacetIds = new Set<string>()
+  for (const item of value.facet_coverage) {
+    if (!isRecord(item)) return unknown
+    const evidenceIds = strictNonEmptyStrings(item.evidence_ids)
+    if (
+      !nonEmptyString(item.facet_id)
+      || !facetIds.has(item.facet_id)
+      || coveredFacetIds.has(item.facet_id)
+      || (item.state !== "covered" && item.state !== "partial" && item.state !== "missing")
+      || evidenceIds === null
+      || (item.state !== "missing" && !evidenceIds.length)
+      || (item.state === "missing" && evidenceIds.length > 0)
+    ) return unknown
+    coveredFacetIds.add(item.facet_id)
+    coverage.push({ facetId: item.facet_id, state: item.state, evidenceIds })
+  }
+  if (coveredFacetIds.size !== facetIds.size) return unknown
+  return {
+    state: "known",
+    goal: value.question_goal,
+    facets,
+    planDigest: value.question_facet_plan_digest,
+    coverage,
+  }
+}
+
+function strictNonEmptyStrings(value: unknown): string[] | null {
+  if (!Array.isArray(value) || !value.every(nonEmptyString)) return null
+  const unique = new Set(value)
+  return unique.size === value.length ? [...unique] : null
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

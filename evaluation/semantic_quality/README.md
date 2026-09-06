@@ -68,16 +68,48 @@ cannot mask a failure. Write the verdict manually in a separate JSON file:
 
 The real file must contain exactly one entry for every suite and pair listed in the run report.
 Each verdict is either `pass` or `fail`; optional `notes` may remain in the review file. Sign it
-with an explicit maintainer identity:
+with an explicit maintainer identity. Candidate-release sign-off also requires the actual Windows
+package and a successful smoke report produced on Windows for that exact package and run:
 
 ```bash
 uv run python -m evaluation.semantic_quality sign \
   .semantic-eval/<run-id> path/to/human-review.json \
   --maintainer "name-or-release-identity" \
+  --package-artifact path/to/OpenKB-windows.msi \
+  --windows-smoke-report path/to/windows-smoke.json \
   --output evaluation/semantic_quality/attestations/<run-id>.json
 ```
 
 Signing verifies the raw-output digest and the pending report, then records only digests, the
 non-secret pinned profile, deterministic counts, per-dimension human verdicts, maintainer identity,
-and decision time. A run with any deterministic failure cannot be signed. A human `fail` produces
-a signed failed attestation, never a passing aggregate.
+decision time, and the package and Windows smoke report digests. The smoke report must use schema
+`openkb.windows-semantic-smoke.v1`, bind the run, matrix, implementation, and package SHA-256, cover
+both OCloudView V10.2/V10.3 documents, and pass package installation, import, query/page planning,
+version comparison, and citation checks. A run with any deterministic failure cannot be signed. A
+human `fail` produces a signed failed attestation, never a passing aggregate.
+
+The report shape is closed:
+
+```json
+{
+  "schema_version": "openkb.windows-semantic-smoke.v1",
+  "run_id": "<run-id>",
+  "platform": "windows",
+  "status": "passed",
+  "package_sha256": "<sha256-of-package>",
+  "implementation_digest": "<report binding>",
+  "matrix_digest": "<report binding>",
+  "corpus": [
+    "OCloudView部署手册_V10.2.docx",
+    "OCloudView部署手册_V10.3.docx"
+  ],
+  "checks": {
+    "package_install": "passed",
+    "document_import": "passed",
+    "query_planning": "passed",
+    "knowledge_page_planning": "passed",
+    "version_comparison": "passed",
+    "citation_postconditions": "passed"
+  }
+}
+```
